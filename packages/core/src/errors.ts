@@ -21,6 +21,8 @@ export type AgentisErrorCode =
   | 'WORKFLOW_GRAPH_INVALID'
   | 'WORKFLOW_RUN_NOT_FOUND'
   | 'WORKFLOW_RUN_INVALID_STATE'
+  | 'GRAPH_REVISION_CONFLICT'
+  | 'GRAPH_PATCH_INVALID'
   // Adapters
   | 'ADAPTER_UNAVAILABLE'
   | 'ADAPTER_TIMEOUT'
@@ -113,9 +115,11 @@ function defaultStatusFor(code: AgentisErrorCode): number {
       return 404;
     case 'RESOURCE_CONFLICT':
     case 'WORKFLOW_RUN_INVALID_STATE':
+    case 'GRAPH_REVISION_CONFLICT':
       return 409;
     case 'VALIDATION_FAILED':
     case 'WORKFLOW_GRAPH_INVALID':
+    case 'GRAPH_PATCH_INVALID':
     case 'WEBHOOK_SIGNATURE_INVALID':
     case 'WEBHOOK_REPLAY_DETECTED':
     case 'WEBHOOK_TIMESTAMP_OUT_OF_TOLERANCE':

@@ -1,6 +1,6 @@
 {
   "name": "@agentis-ai/cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agentis — proactive ambient agent dashboard. Run `npx @agentis-ai/cli up` to start.",
   "license": "Apache-2.0",
   "author": "Robson Prado <robsonpradodev>",

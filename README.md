@@ -5,9 +5,11 @@ and an inbox.** Agentis runs on your laptop or your server with zero external
 dependencies. It speaks to OpenClaw fleets, Claude Code sessions, and any
 HTTP-shaped agent through the same NormalizedTask contract.
 
-> Status: V1 vertical slice. The architectural spine is complete and
-> typechecks cleanly across the workspace. See [DECISIONS.md](docs/DECISIONS.md)
-> for the full design ledger, including what is intentionally deferred.
+> Status: **V1 — pre-release (0.1.x).** Spec 1.4.0 implementation is complete
+> and typechecks cleanly across the workspace. The CLI is published as
+> [`@agentis-ai/cli`](https://www.npmjs.com/package/@agentis-ai/cli). 1.0.0
+> ships after the full test pass. See [DECISIONS.md](docs/DECISIONS.md) for
+> the design ledger.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fnexseed%2Fagentis)
 
@@ -31,15 +33,27 @@ password **once** to the console.
 
 ### As an operator (npm)
 
+Install once, run anywhere:
+
 ```bash
-npx agentis@latest up
+npm install -g @agentis-ai/cli
+agentis up
 ```
 
-(Once published.) Today, from a clone:
+Then open <http://127.0.0.1:3737>. The first boot prints the operator
+username and password **once** — copy them now.
+
+Or try without installing:
+
+```bash
+npx @agentis-ai/cli up
+```
+
+From a clone:
 
 ```bash
 pnpm install
-pnpm --filter @agentis/cli agentis up
+pnpm --filter @agentis-ai/cli start up
 ```
 
 The first boot:
@@ -118,23 +132,27 @@ not `eval`, not `expr-eval`. See D07.
 - ✅ Auth: bcrypt passwords, RS256 JWTs (access + refresh, with `kind`
   claim), credential vault with AES-256-GCM.
 - ✅ Workflow engine: ready queue, waiting buffer, snapshots, ledger,
-  realtime, eight node kinds.
-- ✅ Skill runtime: `builtin` (echo + http_fetch).
-- ✅ Approval inbox + activity feed + dashboard fleet overview.
+  realtime, eight node kinds, live graph patches, partial replay.
+- ✅ Skill runtime: `builtin` (echo + http_fetch), `node_isolate`
+  (vm sandbox), `docker_sandbox` (opt-in).
+- ✅ Adapters: OpenClaw, Claude Code, HTTP — normalised through
+  `AdapterManager` + `CircuitBreaker`.
+- ✅ Trigger runtime: manual, cron, webhook, persistent listener.
+- ✅ Subflows, conversation continuity, channel bridge
+  (Discord + webhook + HTTP).
+- ✅ Approval inbox, activity feed, dashboard fleet overview, command
+  palette (Cmd/Ctrl-K), conversations dock, onboarding strip.
 - ✅ React Flow canvas with the design-locked node card styling.
+- ✅ Static-serve dashboard from the backend in production builds (D21).
+- ✅ Skill registry: scan, install, hash + permission gating (D18).
 
-## What's deferred (explicitly)
+## Roadmap (post-V1)
 
 Tracked in [DECISIONS.md](docs/DECISIONS.md):
 
-- D12 `node_worker` + `docker_sandbox` skill runtimes
-- D13 Concrete adapters (OpenClaw / Claude Code / HTTP)
-- D14 `TriggerRuntime` (cron, webhook, persistent listeners)
-- D15 Subflow execution
-- D16 Partial replay
-- D17 Conversation continuity
-- D18 Hub integration (separate codebase)
-- D21 Static-serve dashboard from the backend in production builds
+- Distributed run sharding for horizontally-scaled deployments
+- AgentisHub: external skill + workflow registry product (separate codebase)
+- Optional managed control plane
 
 ## Security posture
 

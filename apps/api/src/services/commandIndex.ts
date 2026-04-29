@@ -7,10 +7,10 @@
  * COMMAND_PALETTE_RESULT_LIMIT.
  */
 
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { CONSTANTS } from '@agentis/core';
+import { AgentisError, CONSTANTS } from '@agentis/core';
 
 export interface CommandHit {
   type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'skill' | 'conversation';
@@ -21,8 +21,98 @@ export interface CommandHit {
   score: number;
 }
 
+export type CommandTargetType = CommandHit['type'];
+
+export interface CommandExecuteRequest {
+  type: CommandTargetType;
+  id: string;
+}
+
+export interface CommandExecuteResult {
+  type: CommandTargetType;
+  id: string;
+  href: string;
+}
+
 export class CommandIndex {
   constructor(private readonly db: AgentisSqliteDb) {}
+
+  /**
+   * Resolve a command-palette selection to a navigation target. Verifies the
+   * entity belongs to `workspaceId` (V1-SPEC §11 "POST /command/execute"),
+   * then returns the same `href` that `search()` would have emitted. Throws
+   * RESOURCE_NOT_FOUND when the entity is missing or out of scope.
+   */
+  execute(workspaceId: string, req: CommandExecuteRequest): CommandExecuteResult {
+    const { type, id } = req;
+    switch (type) {
+      case 'workflow': {
+        const row = this.db
+          .select()
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, workspaceId)))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Workflow ${id} not found`);
+        return { type, id, href: `/workflows/${id}` };
+      }
+      case 'agent': {
+        const row = this.db
+          .select()
+          .from(schema.agents)
+          .where(and(eq(schema.agents.id, id), eq(schema.agents.workspaceId, workspaceId)))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Agent ${id} not found`);
+        return { type, id, href: `/agents/${id}` };
+      }
+      case 'gateway': {
+        const row = this.db
+          .select()
+          .from(schema.openclawGateways)
+          .where(and(
+            eq(schema.openclawGateways.id, id),
+            eq(schema.openclawGateways.workspaceId, workspaceId),
+          ))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Gateway ${id} not found`);
+        return { type, id, href: `/gateways/${id}` };
+      }
+      case 'run': {
+        const row = this.db
+          .select()
+          .from(schema.workflowRuns)
+          .where(and(eq(schema.workflowRuns.id, id), eq(schema.workflowRuns.workspaceId, workspaceId)))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Run ${id} not found`);
+        return { type, id, href: `/runs/${id}` };
+      }
+      case 'approval': {
+        const row = this.db
+          .select()
+          .from(schema.approvalRequests)
+          .where(and(
+            eq(schema.approvalRequests.id, id),
+            eq(schema.approvalRequests.workspaceId, workspaceId),
+          ))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Approval ${id} not found`);
+        return { type, id, href: `/approvals?focus=${id}` };
+      }
+      case 'skill': {
+        const row = this.db
+          .select()
+          .from(schema.skills)
+          .where(and(eq(schema.skills.id, id), eq(schema.skills.workspaceId, workspaceId)))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Skill ${id} not found`);
+        return { type, id, href: `/skills?focus=${id}` };
+      }
+      case 'conversation': {
+        return { type, id, href: `/activity?conversation=${id}` };
+      }
+      default:
+        throw new AgentisError('VALIDATION_FAILED', `Unsupported command target type: ${String(type)}`);
+    }
+  }
 
   search(workspaceId: string, query: string): CommandHit[] {
     const q = query.trim().toLowerCase();

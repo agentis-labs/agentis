@@ -10,12 +10,16 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 import type { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 
 let ctx: TestContext;
-let engine: { startRun: ReturnType<typeof vi.fn>; cancelRun: ReturnType<typeof vi.fn> };
+let engine: { startRun: ReturnType<typeof vi.fn>; cancelRun: ReturnType<typeof vi.fn>; applyGraphPatch: ReturnType<typeof vi.fn> };
 let ledger: LedgerService;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  engine = { startRun: vi.fn().mockResolvedValue(undefined), cancelRun: vi.fn().mockResolvedValue(undefined) };
+  engine = {
+    startRun: vi.fn().mockResolvedValue(undefined),
+    cancelRun: vi.fn().mockResolvedValue(undefined),
+    applyGraphPatch: vi.fn().mockResolvedValue({ newRevision: 2 }),
+  };
   ledger = new LedgerService(ctx.db, ctx.bus);
 });
 
@@ -120,5 +124,63 @@ describe('GET /v1/runs/:id/ledger', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { events: unknown[] };
     expect(Array.isArray(body.events)).toBe(true);
+  });
+});
+
+describe('POST /v1/runs/:id/graph-patches', () => {
+  function basePatch(overrides: Record<string, unknown> = {}) {
+    return {
+      patchId: randomUUID(),
+      reason: 'planner_replan',
+      baseGraphRevision: 1,
+      addNodes: [],
+      updateNodes: [],
+      removeNodeIds: [],
+      addEdges: [],
+      removeEdgeIds: [],
+      ...overrides,
+    };
+  }
+
+  it('forwards a valid patch to engine.applyGraphPatch', async () => {
+    const { runId } = seedRun();
+    const body = basePatch();
+    const res = await app().request(`/v1/runs/${runId}/graph-patches`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { runId: string; newRevision: number; patchId: string };
+    expect(json).toMatchObject({ runId, newRevision: 2, patchId: body.patchId });
+    expect(engine.applyGraphPatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 422 on schema-invalid body', async () => {
+    const { runId } = seedRun();
+    const res = await app().request(`/v1/runs/${runId}/graph-patches`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ reason: 'planner_replan' }),
+    });
+    expect(res.status).toBe(422);
+  });
+
+  it('returns 404 for unknown run', async () => {
+    const res = await app().request(`/v1/runs/${randomUUID()}/graph-patches`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify(basePatch()),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects unauthenticated requests', async () => {
+    const { runId } = seedRun();
+    const res = await app().request(`/v1/runs/${runId}/graph-patches`, {
+      method: 'POST',
+      body: JSON.stringify(basePatch()),
+    });
+    expect(res.status).toBe(401);
   });
 });

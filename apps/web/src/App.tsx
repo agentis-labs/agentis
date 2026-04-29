@@ -20,6 +20,7 @@ import { WorkspacesPage } from './pages/WorkspacesPage';
 import { CommandPalette } from './components/CommandPalette';
 import { AmbientSelector, GatewayHealthPill } from './components/TopBarPills';
 import { LiveStrip } from './components/LiveStrip';
+import { OnboardingStrip } from './components/OnboardingStrip';
 import { ConversationDock } from './components/ConversationDock';
 import { tokens, workspace as wsStore, api, logout } from './lib/api';
 
@@ -146,6 +147,7 @@ function Shell({
           </button>
         </div>
       </header>
+      <OnboardingStrip />
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-14 shrink-0 flex-col items-center gap-1 border-r border-line bg-surface py-3">
           {NAV.map((n) => (

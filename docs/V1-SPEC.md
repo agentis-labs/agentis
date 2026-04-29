@@ -4,9 +4,10 @@
 >
 > The full platform vision and post-V1 roadmap live in [PLATFORM-VISION.md](./PLATFORM-VISION.md).
 
-**Spec Version:** 1.3.0  
-**Date:** April 27, 2026  
+**Spec Version:** 1.4.0  
+**Date:** April 29, 2026  
 **Build target:** Shippable in weeks by a serious team, without lowering the architecture bar.  
+**Status:** Implementation complete through Batch 8 (D38) + Skill Registry rename (D40) + first public CLI release (`@agentis-ai/cli@0.1.1`). See [DECISIONS.md](./DECISIONS.md) D31–D40 for the slice-by-slice trail and [TODO.md](./TODO.md) for the remaining backlog (Batch 7 package extraction is the only deferred item).  
 **Thesis:** Agentis V1 is the proactive ambient dashboard OpenClaw deserves — a dark canvas-first harness OS where your agent fleet comes alive: workspaces, ambients, multi-gateway control, agent presence, visual workflow execution, approval inboxes, global activity, run history, command search, and a Skill registry community ecosystem for sharing and installing agent packages. Where other dashboards give you boards and logs, Agentis gives you the place agent work should have always happened.
 
 ---
@@ -26,6 +27,31 @@
 11. **OpenClaw is the primary first-class adapter.** Every canvas feature, every presence event, and every workflow primitive must work perfectly with OpenClaw agents before any other adapter is considered. The OpenClaw WebSocket Gateway is not one integration among many — it is the reason Agentis exists.
 12. **The dashboard experience is part of the core product, not decoration.** Fleet overview, agent fleet, gateways, activity, approvals, run history, command palette, workspaces, and the workflow canvas are V1 product surfaces with explicit data, API, realtime, and release-gate requirements.
 13. **Agentis must feel like the native place to operate agents.** Do not copy Mission Control's board model, n8n's generic automation framing, or observability-only dashboards. Agentis combines live operations, workflow harnessing, and ambient agent presence into one operating surface.
+
+---
+
+## Implementation Status (as of Spec 1.4.0)
+
+The spec is implemented through Batch 8. The full per-slice trail lives in [DECISIONS.md](./DECISIONS.md); the table below is the at-a-glance index.
+
+| Slice | Decision | What landed |
+|---|---|---|
+| Test-mode hardening | D31 | `/v1/_test/reset` gated on `NODE_ENV !== 'production'` AND `AGENTIS_TEST_MODE=true`; `agentis.test_mode.refused` log on conflict. |
+| Security hardening (Batch 1) | D32 | Unauth allow-list SSoT, helmet-equivalent headers, login rate limiter, JWT `kid` + JWKS, `CredentialVault.rotateAll`. |
+| Route unit tests (Batch 2) | D33 | 14 new files / +81 tests covering every `/v1/*` resource. |
+| Engine + service tests (Batch 3) | D34 | Engine fan-out fix (`inflightDispatches` counter), partial-replay matrix, trigger runtime, registry client install pipeline. |
+| Channel Bridge (Batch 4) | D35 | `channel_connections` + `channel_deliveries` tables, Telegram inbound/outbound, Discord outbound only, `/v1/channels/*` + `/v1/webhooks/channel/:id`. |
+| Web component pyramid (Batch 5) | D36 | `AgentsPage` (V1-SPEC §3.3 name) + 9 RTL component tests. |
+| UI E2E matrix (Batch 6) | D37 | 9 new Playwright UI specs (login, canvas-build/run, approvals, terminal, activity, ledger, registry-install, palette). 315/32 total. |
+| Operational polish (Batch 8) | D38 | Audit-log middleware → `activity_events`; backup/restore CLI (directory format, `manifest.json` v1, live `Database.backup()`); optional OpenTelemetry hooks (dynamic-imported SDK, `engine.tick` + `adapter.dispatch` spans). |
+| Skill Registry rename + UI fold-in | D40 | Marketplace/Catalog/Hub-as-a-page vocabulary fully eradicated. Registry is now a drawer inside `SkillsPage`, mounted at `/v1/skills/registry`, mirroring builderz-labs/mission-control. Tables `installed_registry_artifacts` + `registry_entry_id` columns. |
+| Public CLI release | D40+ | `@agentis-ai/cli@0.1.1` published to npm: tsup-bundled CLI + bundled web SPA in one tarball (228 kB). Native deps (`better-sqlite3`, `hono`, `socket.io`, etc.) declared as published `dependencies` so npm installs them on the user's machine. `agentis up` is the production install path; `npx @agentis-ai/cli up` is the try-it-once path. |
+
+**Deferred (intentionally still open):**
+
+- **Batch 7 — Package Extraction (V1-SPEC §3.3):** spec is satisfied by the shim re-exports today. Real extraction (`packages/adapters/`, `packages/skills/`) only runs when a second consumer (CLI v2, hosted runtime) needs the modules. See [TODO.md](./TODO.md) Batch 7.
+- **Postgres standard mode (D26 / D38 carry-over):** the engine and every route are still synchronous on `better-sqlite3`. Promotion needs a dialect-agnostic helper layer plus ~65 test files migrated; sqlite remains V1's golden path.
+- **README + DEPLOYMENT.md operational docs:** Batch 8 shipped the runtime polish; the long-form docs are still on the backlog.
 
 ---
 
@@ -106,7 +132,7 @@ V1 must feel like the dashboard you always wished OpenClaw had: a fleet cockpit 
 9. Skill registry Bridge: browse, install, fork, publish, sync, and co-create Skill registry artifacts.
 10. Living Canvas with Presence: design-locked dark canvas with 20Hz agent presence overlays, FLIP animations, and typewriter progress streams.
 11. Local Auth: username/password, JWT RS256, local secrets encryption.
-12. One-Step Local Start: `npx agentis@latest up` — no Docker, no Postgres, no Redis required. Starts in embedded mode (SQLite + in-process event bus) in under 30 seconds on a cold machine.
+12. One-Step Local Start: `npm install -g @agentis-ai/cli && agentis up` (or `npx @agentis-ai/cli up` to try without installing) — no Docker, no Postgres, no Redis required. Starts in embedded mode (SQLite + in-process event bus) in under 30 seconds on a cold machine. Public npm package since D40.
 13. OpenClaw Native Integration: Gateway WebSocket adapter, real-time agent event consumption, device token auth, persistent listener triggers.
 14. Fleet Overview: the first operating cockpit after login, with live fleet status, active runs, gateway health, pending approvals, recent activity, and quick-launch actions.
 15. Agent Fleet + Agent Detail: all agents across gateways with online/busy/offline/error states, heartbeat, model, capabilities, current task, terminal stream, and workflow assignments.
@@ -118,6 +144,7 @@ V1 must feel like the dashboard you always wished OpenClaw had: a fleet cockpit 
 21. Workspaces + Ambients: V1 supports multiple named operating contexts with scoped agents, workflows, credentials, gateways, activity, and default ambient selection.
 22. Terminal Pane: OpenClaw `session.message` and `session.tool` event stream with agent RPC input for direct intervention.
 23. Conversation Panel + Session Continuity: Agentis mirrors existing OpenClaw sessions, approvals, and direct operator messages into one per-agent thread. Threads are persisted, searchable, linked to running workflows, and let the operator continue existing agent work from Agentis without rebuilding context or switching to a separate communication surface.
+24. Channel Bridge: Telegram (inbound webhook + outbound) and Discord (outbound only) connectors. Bot tokens encrypted in `CredentialVault`; inbound mirrored as `system` author into the agent conversation thread; webhook ingress with constant-time secret verification + delivery-id idempotency. Slack/WhatsApp deferred to V2 (see Out of V1). Shipped in D35.
 
 **Out of V1:**
 
@@ -128,7 +155,7 @@ V1 must feel like the dashboard you always wished OpenClaw had: a fleet cockpit 
 | Firecracker microVM isolation | V3 | V1 ships a Docker sandbox tier for Skill registry-installed skills (see §9.2). Firecracker is promoted when hosted/metered execution of fully untrusted third-party code requires hypervisor-level guarantees that Docker cannot provide. |
 | ELO routing | V2 | V1 stores capability tags and run outcomes; ELO needs history before signal matters. |
 | Full 3-tier Memory OS | V2 | V1 has Scratchpad + Ledger. Semantic/episodic memory follows once workflows generate enough data. |
-| External channel bridges and advanced notification rules | V2 | V1 integrates existing OpenClaw sessions and approvals directly inside Agentis. Telegram/Discord/Slack/WhatsApp routing and conditional notification rules follow once the core session and approval event taxonomy stabilizes. |
+| Slack / WhatsApp channel bridges + advanced notification rules | V2 | V1 ships the Telegram (inbound + outbound) and Discord (outbound only) bridge in D35. Slack/WhatsApp routing and conditional notification rules follow once the core session and approval event taxonomy stabilizes. |
 | Multi-user workspace membership | V2 | V1 supports multiple local workspaces for one authenticated operator. Team membership, roles, and collaboration follow after the single-user operator loop is excellent. |
 
 ### 0.4 What Agentis V1 Is NOT
@@ -189,7 +216,7 @@ The n8n mental model is a quality reference, not the product identity. Agentis i
 
 Agentis V1 has no license, tier, or product-level concurrency limits for self-hosted users.
 
-The app may ship **local-development defaults** so `npx agentis@latest up` works on a laptop. These defaults are not product gates. Operators can set parallelism to any value their infrastructure supports.
+The app may ship **local-development defaults** so `agentis up` (or `npx @agentis-ai/cli up` without an install) works on a laptop. These defaults are not product gates. Operators can set parallelism to any value their infrastructure supports.
 
 ```bash
 # Examples
@@ -227,7 +254,7 @@ embedded dependencies (no Docker, no Postgres, no Redis)
   File-based encrypted session store (\.agentis/sessions.db)
 ```
 
-Embedded mode is the default for `npx agentis@latest up`. It starts in under 30 seconds on a cold machine. No Docker. No separate service. No config file required before first run. SQLite with WAL mode handles all workloads a single self-hosted operator will encounter; there is no practical ceiling for the V1 use case.
+Embedded mode is the default for `agentis up`. It starts in under 30 seconds on a cold machine. No Docker. No separate service. No config file required before first run. SQLite with WAL mode handles all workloads a single self-hosted operator will encounter; there is no practical ceiling for the V1 use case.
 
 #### Standard mode (opt-in — set `AGENTIS_MODE=standard`)
 
@@ -252,7 +279,17 @@ Standard mode is recommended when an operator needs: horizontal worker scaling, 
 The primary install path is:
 
 ```bash
-npx agentis@latest up
+# One-time install
+npm install -g @agentis-ai/cli
+
+# Every time after, including after reboot:
+agentis up
+```
+
+Or try without installing:
+
+```bash
+npx @agentis-ai/cli up
 ```
 
 This command must:
@@ -271,7 +308,7 @@ First-login experience: the dashboard opens directly to Fleet Overview. A contex
 Standard mode (PostgreSQL + Redis) start path:
 
 ```bash
-AGENTIS_DATABASE_URL=postgres://... AGENTIS_REDIS_URL=redis://... npx agentis@latest up
+AGENTIS_DATABASE_URL=postgres://... AGENTIS_REDIS_URL=redis://... agentis up
 ```
 
 Or via Docker Compose for managed local dependencies:
@@ -704,7 +741,7 @@ export const hubConnections = pgTable('registry_connections_removed', {
   id: uuid('id').primaryKey().defaultRandom(),
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  hubUserId: text('hub_user_id').notNull(),
+  userId: text('user_id').notNull(),
   accessTokenEncrypted: text('access_token_encrypted').notNull(),
   refreshTokenEncrypted: text('refresh_token_encrypted'),
   connectedAt: timestamp('connected_at', { withTimezone: true }).notNull().defaultNow(),
@@ -1074,7 +1111,7 @@ export interface RegistryEntry {
   summary: string;
   version: string;
   author: {
-    hubUserId: string;
+    userId: string;
     username: string;
     displayName: string;
   };
@@ -1099,23 +1136,32 @@ export interface RegistryArtifact {
 }
 ```
 
-### 8.3 Skill registry Actions
+### 8.3 Skill Registry Actions
+
+The registry is plumbing inside the Skills surface, not a separate destination. There is no `/marketplace` or `/hub` page or nav entry. Operators open the **Install from registry** drawer from `SkillsPage`; the drawer hits the routes below. This mirrors the builderz-labs/mission-control architecture choice locked in by D40.
 
 ```text
-GET  /v1/hub/registry
-GET  /v1/hub/registry/:entryId
-POST /v1/hub/connect/start
-POST /v1/hub/connect/callback
-POST /v1/hub/install/:entryId
-POST /v1/hub/fork/:entryId
-POST /v1/hub/publish/workflow/:workflowId
-POST /v1/hub/publish/skill/:skillId
-POST /v1/hub/publish/package/:packageId
-POST /v1/hub/sync
-POST /v1/hub/contributions/:contributionId/apply
+GET  /v1/skills/registry/status                         # { configured, registryUrl? }
+GET  /v1/skills/registry                                # search/list
+GET  /v1/skills/registry/:slug                          # entry detail
+POST /v1/skills/registry/install/:slug                  # body: { permissionsAcknowledged: true }
+POST /v1/skills/registry/connect/start                  # publish/contribute flows
+POST /v1/skills/registry/connect/callback
+POST /v1/skills/registry/fork/:slug
+POST /v1/skills/registry/publish/workflow/:workflowId
+POST /v1/skills/registry/publish/skill/:skillId
+POST /v1/skills/registry/publish/package/:packageId
+POST /v1/skills/registry/sync
+POST /v1/skills/registry/contributions/:contributionId/apply
 ```
 
-All install and contribution flows verify SHA-256 before applying local changes. Skill registry unavailability must not stop existing local workflows from running.
+Registry endpoint configured via `AGENTIS_SKILL_REGISTRY_URL` (anonymous read-only). Unconfigured → all routes except `/status` return `SKILL_REGISTRY_UNAVAILABLE` (503).
+
+**Install pipeline (D40):** `permissionsAcknowledged: true` required → fetch artifact bytes → mandatory SHA-256 verify (`SKILL_REGISTRY_HASH_MISMATCH` 422) → `registryScanner` security gate (`SKILL_REGISTRY_SCAN_BLOCKED` 422 on cloud keys / GitHub PAT / OpenAI/Anthropic/Google/Slack tokens / PEM private keys / JWTs) → insert `installed_registry_artifacts` + emit `skill_registry.installed` activity event with `actorType: 'user'`. Prompt-injection markers are warn-severity only and returned as `scanWarnings` in the install response.
+
+**Vocabulary lock:** Marketplace / Catalog / Hub-as-a-page framing is forbidden vocabulary across product, code, docs, and UI. The user-facing noun is **Skill Registry**; the back-end client class is `RegistryClient`. Pre-launch posture: nothing in the codebase implies a future commercial marketplace exists.
+
+All install and contribution flows verify SHA-256 before applying local changes. Registry unavailability must not stop existing local workflows from running.
 
 ### 8.4 Co-Creation Model
 
@@ -1766,7 +1812,7 @@ The continuity rule is simple: Agentis must never require the operator to abando
 
 Required before V1 release:
 
-1. One-command start: `npx agentis@latest up` works on a clean machine with Docker installed.
+1. One-command start: `npm i -g @agentis-ai/cli && agentis up` (or `npx @agentis-ai/cli up`) works on a clean machine with Node.js ≥ 20.10.0; no Docker required for embedded mode.
 2. Workspace seed test: first startup creates `Personal` workspace and `Local OpenClaw` ambient; switching workspace/ambient scopes visible data.
 3. Fleet Overview visual test: Playwright screenshot confirms live cockpit layout at desktop and mobile widths: fleet pulse, constellation preview, active runs, gateway rail, approvals, recent activity.
 4. Canvas visual test: Playwright screenshot matches [docs/design-inspirations/image.png](design-inspirations/image.png) layout contract at desktop width.
@@ -1794,7 +1840,7 @@ Ask this before implementation is accepted:
 | Question | Required Answer |
 |---|---|
 | Is this the best architecture for open-source users? | Yes: embedded mode requires only Node.js — SQLite + in-process event bus, zero external dependencies. Standard mode (PostgreSQL + Redis) is opt-in for production scale. |
-| Can users start in one step with no Docker? | Yes: `npx agentis@latest up` starts in embedded mode in under 30 seconds on a clean machine. |
+| Can users start in one step with no Docker? | Yes: `agentis up` (after `npm i -g @agentis-ai/cli`) or `npx @agentis-ai/cli up` starts in embedded mode in under 30 seconds on a clean machine. |
 | Can operators continue existing OpenClaw sessions inside Agentis? | Yes: Agentis mirrors Gateway sessions, preserves session context, and lets the operator continue the same thread from Conversations or Terminal Pane. |
 | Is there a conversational interface in the dashboard? | Yes: Conversation Panel in the left rail with mirrored per-agent threads, typing indicators, unread badges, approval inline cards, and canvas jump links. |
 | Is Agentis the most capable OpenClaw dashboard? | Yes: living canvas, presence overlays, workflow execution, Skill registry ecosystem, conversation continuity, and deep Gateway integration — no existing dashboard comes close. |

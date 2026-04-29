@@ -38,6 +38,8 @@ import {
   type MergeNodeConfig,
   type CheckpointNodeConfig,
   type ScratchpadNodeConfig,
+  type WorkflowEdge,
+  type WorkflowGraphPatch,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -51,6 +53,7 @@ import type { SkillRuntime } from '../services/skillRuntime.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
 import { evalCondition } from './SafeConditionParser.js';
+import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
 
 export interface EngineDeps {
@@ -166,6 +169,118 @@ export class WorkflowEngine {
     if (!ctx) return;
     await this.#failNode(ctx, args.nodeId, args.error);
     void this.#tick(ctx);
+  }
+
+  /**
+   * Apply a dynamic graph patch to a live run (V1-SPEC §6.6).
+   *
+   * Used by the planner/replan flow, in-canvas user edits, and hub package
+   * updates that need to splice nodes into a running workflow. Validates
+   * cycles + node references on the merged graph, increments the run's
+   * `graphRevision`, persists the merged graph back to the workflow row,
+   * mutates the live `RunningContext.graph` so subsequent ticks see the
+   * change, and emits `workflow.graph_patched` on the run room.
+   */
+  async applyGraphPatch(args: {
+    runId: string;
+    patch: WorkflowGraphPatch;
+  }): Promise<{ newRevision: number }> {
+    const { runId, patch } = args;
+    const ctx = this.#runs.get(runId);
+    const run = await this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId))
+      .get();
+    if (!run) {
+      throw new AgentisError('WORKFLOW_RUN_NOT_FOUND', `Run ${runId} not found`);
+    }
+    const currentState = run.runState as unknown as WorkflowRunState;
+    const currentRevision = ctx?.state.graphRevision ?? currentState.graphRevision;
+    if (patch.baseGraphRevision !== currentRevision) {
+      throw new AgentisError(
+        'GRAPH_REVISION_CONFLICT',
+        `Patch baseGraphRevision ${patch.baseGraphRevision} does not match current ${currentRevision}`,
+        { details: { current: currentRevision, base: patch.baseGraphRevision } },
+      );
+    }
+
+    const baseGraph = ctx?.graph ?? this.#loadWorkflowGraph(run.workflowId);
+    let merged: WorkflowGraph;
+    try {
+      merged = mergeGraphPatch(baseGraph, patch);
+    } catch (err) {
+      throw new AgentisError('GRAPH_PATCH_INVALID', (err as Error).message);
+    }
+    try {
+      validateWorkflowGraph(merged);
+    } catch (err) {
+      // Re-throw as GRAPH_PATCH_INVALID so callers can distinguish cycles
+      // discovered at patch-apply time from at-rest WORKFLOW_GRAPH_INVALID.
+      const msg = err instanceof AgentisError ? err.message : (err as Error).message;
+      throw new AgentisError('GRAPH_PATCH_INVALID', msg);
+    }
+
+    const newRevision = currentRevision + 1;
+
+    await this.deps.db
+      .update(schema.workflows)
+      .set({ graph: merged as unknown as object, updatedAt: new Date().toISOString() })
+      .where(eq(schema.workflows.id, run.workflowId));
+
+    if (ctx) {
+      ctx.graph = merged;
+      ctx.state.graphRevision = newRevision;
+      await this.#persistRun(ctx);
+    } else {
+      const nextState: WorkflowRunState = { ...currentState, graphRevision: newRevision };
+      await this.deps.db
+        .update(schema.workflowRuns)
+        .set({
+          runState: nextState as unknown as object,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.workflowRuns.id, runId));
+    }
+
+    this.deps.bus.publish(REALTIME_ROOMS.run(runId), REALTIME_EVENTS.WORKFLOW_GRAPH_PATCHED, {
+      runId,
+      patchId: patch.patchId,
+      reason: patch.reason,
+      newRevision,
+    });
+
+    this.deps.activity.record({
+      workspaceId: run.workspaceId,
+      ambientId: run.ambientId,
+      userId: run.userId,
+      eventType: 'workflow.graph_patched',
+      actorType: 'system',
+      actorId: 'engine',
+      entityType: 'workflow_run',
+      entityId: runId,
+      summary: `Graph patched (${patch.reason}) → revision ${newRevision}`,
+      metadata: {
+        patchId: patch.patchId,
+        addNodes: patch.addNodes.length,
+        updateNodes: patch.updateNodes.length,
+        removeNodes: patch.removeNodeIds.length,
+      },
+    });
+
+    return { newRevision };
+  }
+
+  #loadWorkflowGraph(workflowId: string): WorkflowGraph {
+    const wf = this.deps.db
+      .select()
+      .from(schema.workflows)
+      .where(eq(schema.workflows.id, workflowId))
+      .get();
+    if (!wf) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', `Workflow ${workflowId} not found`);
+    }
+    return wf.graph as unknown as WorkflowGraph;
   }
 
   // ────────────────────────────────────────────────────────────
@@ -687,6 +802,63 @@ function resolveParallelism(): number {
   }
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 8;
+}
+
+function mergeGraphPatch(base: WorkflowGraph, patch: WorkflowGraphPatch): WorkflowGraph {
+  const removeIds = new Set(patch.removeNodeIds);
+  const updateById = new Map<string, WorkflowNode>(
+    patch.updateNodes.map((n) => [n.id, n] as const),
+  );
+  const removeEdgeIds = new Set(patch.removeEdgeIds);
+
+  // Reject add/update collisions early so the resulting graph stays unique.
+  const baseNodeIds = new Set(base.nodes.map((n) => n.id));
+  for (const n of patch.addNodes) {
+    if (baseNodeIds.has(n.id) && !removeIds.has(n.id)) {
+      throw new Error(`Cannot add node ${n.id}: already exists`);
+    }
+  }
+  for (const n of patch.updateNodes) {
+    if (!baseNodeIds.has(n.id)) {
+      throw new Error(`Cannot update node ${n.id}: not in base graph`);
+    }
+  }
+  for (const id of patch.removeNodeIds) {
+    if (!baseNodeIds.has(id)) {
+      throw new Error(`Cannot remove node ${id}: not in base graph`);
+    }
+  }
+
+  const nextNodes: WorkflowNode[] = [];
+  for (const n of base.nodes) {
+    if (removeIds.has(n.id)) continue;
+    nextNodes.push(updateById.get(n.id) ?? n);
+  }
+  for (const n of patch.addNodes) nextNodes.push(n);
+
+  const surviving = new Set(nextNodes.map((n) => n.id));
+  const baseEdgeIds = new Set(base.edges.map((e) => e.id));
+  for (const id of patch.removeEdgeIds) {
+    if (!baseEdgeIds.has(id)) {
+      throw new Error(`Cannot remove edge ${id}: not in base graph`);
+    }
+  }
+  for (const e of patch.addEdges) {
+    if (baseEdgeIds.has(e.id)) {
+      throw new Error(`Cannot add edge ${e.id}: already exists`);
+    }
+  }
+
+  const nextEdges: WorkflowEdge[] = [];
+  for (const e of base.edges) {
+    if (removeEdgeIds.has(e.id)) continue;
+    // Drop edges whose endpoints were removed by the patch.
+    if (!surviving.has(e.source) || !surviving.has(e.target)) continue;
+    nextEdges.push(e);
+  }
+  for (const e of patch.addEdges) nextEdges.push(e);
+
+  return { ...base, nodes: nextNodes, edges: nextEdges };
 }
 
 function mapInputs(

@@ -139,3 +139,14 @@ export const replayFromNodeSchema = z.object({
   preserveCompletedUpstream: z.boolean().default(true),
   inputsOverride: z.record(z.string(), z.unknown()).optional(),
 });
+
+export const workflowGraphPatchSchema = z.object({
+  patchId: z.string().min(1),
+  reason: z.enum(['planner_replan', 'user_edit', 'hub_package_update']),
+  baseGraphRevision: z.number().int().nonnegative(),
+  addNodes: z.array(workflowNodeSchema).default([]),
+  updateNodes: z.array(workflowNodeSchema).default([]),
+  removeNodeIds: z.array(z.string().min(1)).default([]),
+  addEdges: z.array(workflowEdgeSchema).default([]),
+  removeEdgeIds: z.array(z.string().min(1)).default([]),
+});

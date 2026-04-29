@@ -4,7 +4,7 @@
 
 import { Hono } from 'hono';
 import { and, eq } from 'drizzle-orm';
-import { AgentisError } from '@agentis/core';
+import { AgentisError, schemas } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -60,6 +60,16 @@ export function buildRunRoutes(deps: {
     const limit = c.req.query('limit') ? Number(c.req.query('limit')) : undefined;
     const events = await deps.ledger.listForRun({ runId: id, afterSequence: after, limit });
     return c.json({ events });
+  });
+
+  // V1-SPEC §6.6 — apply a graph patch to a (possibly live) run.
+  app.post('/:id/graph-patches', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadRun(deps.db, ws.workspaceId, id);
+    const patch = schemas.workflowGraphPatchSchema.parse(await c.req.json());
+    const result = await deps.engine.applyGraphPatch({ runId: id, patch });
+    return c.json({ runId: id, patchId: patch.patchId, ...result });
   });
 
   return app;
