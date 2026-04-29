@@ -1,0 +1,35 @@
+{
+  "name": "agentis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentis - the proactive ambient dashboard OpenClaw should have had from day one.",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/*\" build && pnpm --filter @agentis/web build && pnpm --filter @agentis/api build",
+    "dev": "pnpm --filter @agentis/api dev",
+    "dev:web": "pnpm --filter @agentis/web dev",
+    "dev:full": "concurrently -n api,web -c blue,magenta \"pnpm --filter @agentis/api dev\" \"pnpm --filter @agentis/web dev\"",
+    "agentis:up": "pnpm --filter @agentis/cli start -- up",
+    "doctor": "tsx scripts/agentis-doctor.ts",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css,html}\"",
+    "db:generate": "pnpm --filter @agentis/db generate",
+    "db:migrate": "pnpm --filter @agentis/db migrate"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^20.14.10",
+    "concurrently": "^9.0.1",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

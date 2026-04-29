@@ -1,0 +1,949 @@
+﻿[1A[2K[2m[WebServer] [22m
+[2m[WebServer] [22m> @agentis/api@0.1.0 dev:once C:\Users\antar\OneDrive\Documentos\nexseed\agentis\apps\api
+[2m[WebServer] [22m> tsx src/index.ts
+[2m[WebServer] [22m
+
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:02.343Z] INFO[0m agentis.bootstrap.start {"mode":"auto"}
+
+[1A[2K[2m[WebServer] [22m[33m[2026-04-28T18:18:02.423Z] WARN[0m agentis.test_mode.enabled {"reset":"/v1/_test/reset","seedPassword":"<custom>"}
+
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:02.438Z] INFO[0m realtime.attached
+
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:02.440Z] INFO[0m agentis.listening {"url":"http://127.0.0.1:3737"}
+
+[1A[2K[2m[WebServer] [22m
+[2m[WebServer] [22mAgentis is live at http://127.0.0.1:3737
+[2m[WebServer] [22m
+
+[1A[2K[2m[WebServer] [22m
+[2m[WebServer] [22m> @agentis/web@0.1.0 dev C:\Users\antar\OneDrive\Documentos\nexseed\agentis\apps\web
+[2m[WebServer] [22m> vite
+[2m[WebServer] [22m
+
+[1A[2K[2m[WebServer] [22m
+[2m[WebServer] [22m  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m1103[22m[2m[0m ms[22m
+[2m[WebServer] [22m
+
+[1A[2K[2m[WebServer] [22m  [32mÔ×£[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m5173[22m/[39m
+
+
+Running 268 tests using 1 worker
+
+[1A[2K[1/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:18:7 ÔÇ║ /v1/agents ÔÇ║ list is empty for a freshly seeded workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:19.308Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[2/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:26:7 ÔÇ║ /v1/agents ÔÇ║ list requires authentication
+[1A[2K[3/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:31:7 ÔÇ║ /v1/agents ÔÇ║ list requires the x-agentis-workspace header
+[1A[2K[4/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:36:7 ÔÇ║ /v1/agents ÔÇ║ list response is JSON
+[1A[2K[5/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:41:7 ÔÇ║ /v1/agents ÔÇ║ get :id returns 404 for an unknown id
+[1A[2K[6/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:48:7 ÔÇ║ /v1/agents ÔÇ║ get :id requires authentication
+[1A[2K[7/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:53:7 ÔÇ║ /v1/agents ÔÇ║ create rejects an empty body
+[1A[2K[8/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:59:7 ÔÇ║ /v1/agents ÔÇ║ create rejects an unknown adapterType
+[1A[2K[9/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:67:7 ÔÇ║ /v1/agents ÔÇ║ create rejects missing name
+[1A[2K[10/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:75:7 ÔÇ║ /v1/agents ÔÇ║ create rejects missing adapterType
+[1A[2K[11/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:83:7 ÔÇ║ /v1/agents ÔÇ║ create requires authentication
+[1A[2K[12/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:88:7 ÔÇ║ /v1/agents ÔÇ║ patch on unknown id returns 404
+[1A[2K[13/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:96:7 ÔÇ║ /v1/agents ÔÇ║ delete on unknown id returns 404
+[1A[2K[14/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:101:7 ÔÇ║ /v1/agents ÔÇ║ terminal/send on unknown agent returns 404
+[1A[2K[15/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:109:7 ÔÇ║ /v1/agents ÔÇ║ cancel-task on unknown agent returns 404
+[1A[2K[16/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:116:7 ÔÇ║ /v1/agents ÔÇ║ GET /v1/agents/:id/terminal returns 404 for unknown agent
+[1A[2K[17/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:121:7 ÔÇ║ /v1/agents ÔÇ║ terminal/send rejects an empty body
+[1A[2K[18/268] [chromium] ÔÇ║ e2e\api\agents.spec.ts:129:7 ÔÇ║ /v1/agents ÔÇ║ list does not leak any agents from another workspace seed
+[1A[2K[19/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:14:7 ÔÇ║ /v1/ambients ÔÇ║ list returns the seeded local ambient
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:25.485Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[20/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:22:7 ÔÇ║ /v1/ambients ÔÇ║ list requires authentication
+[1A[2K[21/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:27:7 ÔÇ║ /v1/ambients ÔÇ║ list requires the x-agentis-workspace header
+[1A[2K[22/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:32:7 ÔÇ║ /v1/ambients ÔÇ║ list with a foreign workspace id is rejected
+[1A[2K[23/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:39:7 ÔÇ║ /v1/ambients ÔÇ║ list reflects newly created ambients
+[1A[2K[24/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:49:7 ÔÇ║ /v1/ambients ÔÇ║ ambient list entries carry the expected shape
+[1A[2K[25/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:58:7 ÔÇ║ /v1/ambients ÔÇ║ ambient list does not leak secret-shaped fields
+[1A[2K[26/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:64:7 ÔÇ║ /v1/ambients ÔÇ║ ambient kinds are bounded by the schema enum
+[1A[2K[27/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:72:7 ÔÇ║ /v1/ambients ÔÇ║ list response is JSON content-type
+[1A[2K[28/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:77:7 ÔÇ║ /v1/ambients ÔÇ║ list response status is exactly 200
+[1A[2K[29/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:82:7 ÔÇ║ /v1/ambients ÔÇ║ list is consistent across two consecutive calls
+[1A[2K[30/268] [chromium] ÔÇ║ e2e\api\ambients.spec.ts:88:7 ÔÇ║ /v1/ambients ÔÇ║ ambient ids are uuids
+[1A[2K[31/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:16:7 ÔÇ║ /v1/auth ÔÇ║ login returns user + access + refresh tokens
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:30.000Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[32/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:26:7 ÔÇ║ /v1/auth ÔÇ║ login is case-sensitive on username
+[1A[2K[33/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:31:7 ÔÇ║ /v1/auth ÔÇ║ login with wrong password returns 401 with AUTH_INVALID_CREDENTIALS
+[1A[2K[34/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:39:7 ÔÇ║ /v1/auth ÔÇ║ login with empty body returns 4xx with VALIDATION_FAILED
+[1A[2K[35/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:47:7 ÔÇ║ /v1/auth ÔÇ║ login with missing password is rejected
+[1A[2K[36/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:52:7 ÔÇ║ /v1/auth ÔÇ║ login with missing username is rejected
+[1A[2K[37/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:57:7 ÔÇ║ /v1/auth ÔÇ║ login with non-string types is rejected
+[1A[2K[38/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:62:7 ÔÇ║ /v1/auth ÔÇ║ login with unknown user returns invalid credentials, not user-enumeration
+[1A[2K[39/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:69:7 ÔÇ║ /v1/auth ÔÇ║ login with malformed JSON body returns 4xx
+[1A[2K[40/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:77:7 ÔÇ║ /v1/auth ÔÇ║ me returns the operator profile when authorized
+[1A[2K[41/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:88:7 ÔÇ║ /v1/auth ÔÇ║ me without an Authorization header is rejected
+[1A[2K[42/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:95:7 ÔÇ║ /v1/auth ÔÇ║ me with an empty Authorization header is rejected
+[1A[2K[43/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:100:7 ÔÇ║ /v1/auth ÔÇ║ me with a Bearer prefix but empty token is rejected
+[1A[2K[44/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:105:7 ÔÇ║ /v1/auth ÔÇ║ me with garbage Bearer token is rejected
+[1A[2K[45/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:110:7 ÔÇ║ /v1/auth ÔÇ║ me with a non-Bearer scheme is rejected
+[1A[2K[46/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:118:7 ÔÇ║ /v1/auth ÔÇ║ refresh returns a new access + refresh token pair
+[1A[2K[47/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:128:7 ÔÇ║ /v1/auth ÔÇ║ refreshed access token works on /me
+[1A[2K[48/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:135:7 ÔÇ║ /v1/auth ÔÇ║ refresh with an invalid token returns 401
+[1A[2K[49/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:142:7 ÔÇ║ /v1/auth ÔÇ║ refresh with a missing token is rejected
+[1A[2K[50/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:147:7 ÔÇ║ /v1/auth ÔÇ║ access token cannot be used as a refresh token
+[1A[2K[51/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:153:7 ÔÇ║ /v1/auth ÔÇ║ two consecutive logins both return valid tokens
+[1A[2K[52/268] [chromium] ÔÇ║ e2e\api\auth.spec.ts:163:7 ÔÇ║ /v1/auth ÔÇ║ login response never echoes the password back
+[1A[2K[53/268] [chromium] ÔÇ║ e2e\api\command.spec.ts:14:7 ÔÇ║ /v1/command/search ÔÇ║ returns hits array for a basic query
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:46.075Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[54/268] [chromium] ÔÇ║ e2e\api\command.spec.ts:21:7 ÔÇ║ /v1/command/search ÔÇ║ returns hits array for an empty query
+[1A[2K[55/268] [chromium] ÔÇ║ e2e\api\command.spec.ts:28:7 ÔÇ║ /v1/command/search ÔÇ║ requires authentication
+[1A[2K[56/268] [chromium] ÔÇ║ e2e\api\command.spec.ts:33:7 ÔÇ║ /v1/command/search ÔÇ║ requires the workspace header
+[1A[2K[57/268] [chromium] ÔÇ║ e2e\api\command.spec.ts:38:7 ÔÇ║ /v1/command/search ÔÇ║ returns JSON
+[1A[2K[58/268] [chromium] ÔÇ║ e2e\api\command.spec.ts:43:7 ÔÇ║ /v1/command/search ÔÇ║ handles a long query string without crashing
+[1A[2K[59/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:16:7 ÔÇ║ /v1/conversations ÔÇ║ list returns the conversations array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:49.448Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[60/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:23:7 ÔÇ║ /v1/conversations ÔÇ║ list requires authentication
+[1A[2K[61/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:28:7 ÔÇ║ /v1/conversations ÔÇ║ list requires the workspace header
+[1A[2K[62/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:33:7 ÔÇ║ /v1/conversations ÔÇ║ list response is JSON
+[1A[2K[63/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:38:7 ÔÇ║ /v1/conversations ÔÇ║ get :agentId returns 404 for unknown agent
+[1A[2K[64/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:43:7 ÔÇ║ /v1/conversations ÔÇ║ send :agentId returns 404 for unknown agent
+[1A[2K[65/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:51:7 ÔÇ║ /v1/conversations ÔÇ║ send rejects an empty body
+[1A[2K[66/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:59:7 ÔÇ║ /v1/conversations ÔÇ║ continue :agentId/:sessionId returns 404 for unknown agent
+[1A[2K[67/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:64:7 ÔÇ║ /v1/conversations ÔÇ║ read :agentId returns 404 for unknown agent
+[1A[2K[68/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:71:7 ÔÇ║ /v1/agents/:agentId/terminal ÔÇ║ GET on unknown agent returns 404
+[1A[2K[69/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:76:7 ÔÇ║ /v1/agents/:agentId/terminal ÔÇ║ GET requires authentication
+[1A[2K[70/268] [chromium] ÔÇ║ e2e\api\conversations.spec.ts:81:7 ÔÇ║ /v1/agents/:agentId/terminal ÔÇ║ GET respects the limit query parameter cap
+[1A[2K[71/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:17:7 ÔÇ║ /v1/credentials ÔÇ║ list is empty for a freshly seeded workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:53.723Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[72/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:24:7 ÔÇ║ /v1/credentials ÔÇ║ list requires authentication
+[1A[2K[73/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:29:7 ÔÇ║ /v1/credentials ÔÇ║ list requires the workspace header
+[1A[2K[74/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:34:7 ÔÇ║ /v1/credentials ÔÇ║ create returns 201 with id + name
+[1A[2K[75/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:45:7 ÔÇ║ /v1/credentials ÔÇ║ create rejects an empty body
+[1A[2K[76/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:50:7 ÔÇ║ /v1/credentials ÔÇ║ create rejects a missing value
+[1A[2K[77/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:58:7 ÔÇ║ /v1/credentials ÔÇ║ create rejects a missing name
+[1A[2K[78/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:66:7 ÔÇ║ /v1/credentials ÔÇ║ list never echoes the plaintext value
+[1A[2K[79/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:77:7 ÔÇ║ /v1/credentials ÔÇ║ patch on unknown id returns 404
+[1A[2K[80/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:85:7 ÔÇ║ /v1/credentials ÔÇ║ delete on unknown id returns 404
+[1A[2K[81/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:90:7 ÔÇ║ /v1/credentials ÔÇ║ patch updates the name
+[1A[2K[82/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:102:7 ÔÇ║ /v1/credentials ÔÇ║ delete removes the credential
+[1A[2K[83/268] [chromium] ÔÇ║ e2e\api\credentials.spec.ts:113:7 ÔÇ║ /v1/credentials ÔÇ║ list entries do NOT contain a "value" field
+[1A[2K[84/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:14:7 ÔÇ║ /v1/activity ÔÇ║ list returns the events array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:18:56.746Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[85/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:21:7 ÔÇ║ /v1/activity ÔÇ║ list requires authentication
+[1A[2K[86/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:26:7 ÔÇ║ /v1/activity ÔÇ║ list requires the workspace header
+[1A[2K[87/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:31:7 ÔÇ║ /v1/activity ÔÇ║ list with limit=1 returns at most one event
+[1A[2K[88/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:38:7 ÔÇ║ /v1/activity ÔÇ║ list rejects out-of-range limit
+[1A[2K  1) [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:38:7 ÔÇ║ /v1/activity ÔÇ║ list rejects out-of-range limit ÔöÇÔöÇ
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: >= [32m400[39m
+    Received:    [31m200[39m
+
+      38 |   test('list rejects out-of-range limit', async ({ request }) => {
+      39 |     const res = await request.get('/v1/activity?limit=99999', { headers: ctx.headers });
+    > 40 |     expect(res.status()).toBeGreaterThanOrEqual(400);
+         |                          ^
+      41 |   });
+      42 |
+      43 |   test('list response is JSON', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\dashboard.spec.ts:40:26
+
+    Error Context: test-results\api-dashboard--v1-activity-list-rejects-out-of-range-limit-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-dashboard--v1-activity-list-rejects-out-of-range-limit-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-dashboard--v1-activity-list-rejects-out-of-range-limit-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[89/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:43:7 ÔÇ║ /v1/activity ÔÇ║ list response is JSON
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:08.506Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[90/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:50:7 ÔÇ║ /v1/approvals ÔÇ║ list with default filter returns the approvals array
+[1A[2K[91/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:57:7 ÔÇ║ /v1/approvals ÔÇ║ list requires authentication
+[1A[2K[92/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:62:7 ÔÇ║ /v1/approvals ÔÇ║ list requires the workspace header
+[1A[2K[93/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:67:7 ÔÇ║ /v1/approvals ÔÇ║ list with status=pending returns the array
+[1A[2K[94/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:72:7 ÔÇ║ /v1/approvals ÔÇ║ list with status=all returns the array
+[1A[2K[95/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:77:7 ÔÇ║ /v1/approvals ÔÇ║ resolve on unknown id returns 404
+[1A[2K[96/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:85:7 ÔÇ║ /v1/approvals ÔÇ║ resolve rejects an invalid decision
+[1A[2K[97/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:93:7 ÔÇ║ /v1/approvals ÔÇ║ resolve rejects an empty body
+[1A[2K[98/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:103:7 ÔÇ║ /v1/dashboard ÔÇ║ fleet-overview returns the documented shape
+[1A[2K[99/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:116:7 ÔÇ║ /v1/dashboard ÔÇ║ fleet-overview includes operator profile
+[1A[2K[100/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:122:7 ÔÇ║ /v1/dashboard ÔÇ║ fleet-overview requires authentication
+[1A[2K[101/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:127:7 ÔÇ║ /v1/dashboard ÔÇ║ fleet-overview requires the workspace header
+[1A[2K[102/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:132:7 ÔÇ║ /v1/dashboard ÔÇ║ fleet-overview response is JSON
+[1A[2K[103/268] [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:137:7 ÔÇ║ /v1/dashboard ÔÇ║ fleet-overview reports recent runs as an array
+[1A[2K[104/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:23:7 ÔÇ║ Error envelope contract ÔÇ║ 401 from /v1/agents has error.code
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:12.834Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[105/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:29:7 ÔÇ║ Error envelope contract ÔÇ║ 401 from /v1/workflows has error.code
+[1A[2K[106/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:35:7 ÔÇ║ Error envelope contract ÔÇ║ 401 from /v1/runs has error.code
+[1A[2K[107/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:41:7 ÔÇ║ Error envelope contract ÔÇ║ 404 from /v1/agents/:id has error.code
+[1A[2K[108/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:47:7 ÔÇ║ Error envelope contract ÔÇ║ 404 from /v1/workflows/:id has error.code
+[1A[2K[109/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:53:7 ÔÇ║ Error envelope contract ÔÇ║ 404 from /v1/runs/:id has error.code
+[1A[2K[110/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:59:7 ÔÇ║ Error envelope contract ÔÇ║ 422/400 from POST /v1/auth/login with empty body has error.code
+[1A[2K[111/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:65:7 ÔÇ║ Error envelope contract ÔÇ║ 422/400 from POST /v1/workspaces with empty body has error.code
+[1A[2K[112/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:71:7 ÔÇ║ Error envelope contract ÔÇ║ Bearer with garbage token returns 401
+[1A[2K[113/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:76:7 ÔÇ║ Error envelope contract ÔÇ║ Empty Authorization header returns 401
+[1A[2K[114/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:81:7 ÔÇ║ Error envelope contract ÔÇ║ error.code is UPPER_SNAKE_CASE
+[1A[2K[115/268] [chromium] ÔÇ║ e2e\api\error-shape.spec.ts:87:7 ÔÇ║ Error envelope contract ÔÇ║ error response is JSON
+[1A[2K[116/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:16:7 ÔÇ║ /v1/gateways ÔÇ║ list returns the gateways array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:17.339Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[117/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:23:7 ÔÇ║ /v1/gateways ÔÇ║ list requires authentication
+[1A[2K[118/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:28:7 ÔÇ║ /v1/gateways ÔÇ║ list requires the workspace header
+[1A[2K[119/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:33:7 ÔÇ║ /v1/gateways ÔÇ║ get :id on unknown id returns 404
+[1A[2K[120/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:38:7 ÔÇ║ /v1/gateways ÔÇ║ pair rejects an empty body
+[1A[2K[121/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:43:7 ÔÇ║ /v1/gateways ÔÇ║ pair rejects a missing url
+[1A[2K[122/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:51:7 ÔÇ║ /v1/gateways ÔÇ║ pair rejects a missing token
+[1A[2K[123/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:59:7 ÔÇ║ /v1/gateways ÔÇ║ pair rejects a non-https url
+[1A[2K[124/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:67:7 ÔÇ║ /v1/gateways ÔÇ║ patch :id on unknown id returns 404
+[1A[2K[125/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:72:7 ÔÇ║ /v1/gateways ÔÇ║ sync :id on unknown id returns 404
+[1A[2K[126/268] [chromium] ÔÇ║ e2e\api\gateways.spec.ts:77:7 ÔÇ║ /v1/gateways ÔÇ║ delete :id on unknown id returns 404
+[1A[2K[127/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:17:7 ÔÇ║ /v1/hub ÔÇ║ status returns configured + breaker
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:20.086Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[128/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:25:7 ÔÇ║ /v1/hub ÔÇ║ status reports configured=false when AGENTIS_HUB_URL is unset
+[1A[2K[129/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:31:7 ÔÇ║ /v1/hub ÔÇ║ status requires authentication
+[1A[2K[130/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:36:7 ÔÇ║ /v1/hub ÔÇ║ catalog returns HUB_UNAVAILABLE when unconfigured
+[1A[2K[131/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:43:7 ÔÇ║ /v1/hub ÔÇ║ catalog/:id returns 4xx when unconfigured
+[1A[2K[132/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:48:7 ÔÇ║ /v1/hub ÔÇ║ connect/start returns 4xx when unconfigured
+[1A[2K[133/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:56:7 ÔÇ║ /v1/hub ÔÇ║ connect/start rejects an invalid redirectUri
+[1A[2K[134/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:64:7 ÔÇ║ /v1/hub ÔÇ║ install/:entryId requires authentication
+[1A[2K[135/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:69:7 ÔÇ║ /v1/hub ÔÇ║ install/:entryId rejects without permissionsAcknowledged
+[1A[2K[136/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:74:7 ÔÇ║ /v1/hub ÔÇ║ publish/workflow/:id returns 404 when workflow unknown
+[1A[2K[137/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:82:7 ÔÇ║ /v1/hub ÔÇ║ publish/skill/:id rejects builtin publish
+[1A[2K[138/268] [chromium] ÔÇ║ e2e\api\hub.spec.ts:96:7 ÔÇ║ /v1/hub ÔÇ║ sync returns 4xx or empty updates when unconfigured
+[1A[2K[139/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:7:7 ÔÇ║ OpenAPI document ÔÇ║ GET /v1/openapi.json is reachable without auth
+[1A[2K[140/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:12:7 ÔÇ║ OpenAPI document ÔÇ║ OpenAPI version starts with 3.
+[1A[2K[141/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:17:7 ÔÇ║ OpenAPI document ÔÇ║ OpenAPI document carries the Agentis title
+[1A[2K[142/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:23:7 ÔÇ║ OpenAPI document ÔÇ║ OpenAPI document defines paths
+[1A[2K[143/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:29:7 ÔÇ║ OpenAPI document ÔÇ║ OpenAPI document declares the /v1/auth/login endpoint
+[1A[2K[144/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:34:7 ÔÇ║ OpenAPI document ÔÇ║ OpenAPI document declares the /v1/workspaces endpoint
+[1A[2K[145/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:39:7 ÔÇ║ OpenAPI document ÔÇ║ OpenAPI document declares a security scheme
+[1A[2K[146/268] [chromium] ÔÇ║ e2e\api\openapi.spec.ts:44:7 ÔÇ║ OpenAPI document ÔÇ║ GET /v1/docs serves the Scalar UI HTML
+[1A[2K[147/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:14:7 ÔÇ║ /v1/packages ÔÇ║ list returns the packages array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:23.355Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[148/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:21:7 ÔÇ║ /v1/packages ÔÇ║ list requires authentication
+[1A[2K[149/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:26:7 ÔÇ║ /v1/packages ÔÇ║ list requires the workspace header
+[1A[2K[150/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:31:7 ÔÇ║ /v1/packages ÔÇ║ list is JSON
+[1A[2K[151/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:36:7 ÔÇ║ /v1/packages ÔÇ║ get :id on unknown id returns 404
+[1A[2K[152/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:41:7 ÔÇ║ /v1/packages ÔÇ║ install-local rejects an empty body
+[1A[2K[153/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:46:7 ÔÇ║ /v1/packages ÔÇ║ install-local rejects without permissionsAcknowledged
+[1A[2K[154/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:54:7 ÔÇ║ /v1/packages ÔÇ║ install-local rejects an invalid manifest
+[1A[2K[155/268] [chromium] ÔÇ║ e2e\api\packages.spec.ts:62:7 ÔÇ║ /v1/packages ÔÇ║ delete :id on unknown id returns 404
+[1A[2K[156/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:16:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay-from-node returns 404 for unknown run
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:26.009Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[157/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:24:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay-failed-branch returns 404 for unknown run
+[1A[2K[158/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:32:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay-with-edited-node returns 404 for unknown run
+[1A[2K[159/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:40:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay-from-checkpoint returns 404 for unknown run
+[1A[2K[160/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:48:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay rejects an unknown mode
+[1A[2K[161/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:56:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay rejects an empty body
+[1A[2K[162/268] [chromium] ÔÇ║ e2e\api\replay.spec.ts:61:7 ÔÇ║ /v1/runs/:id/replay ÔÇ║ replay requires authentication
+[1A[2K[163/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:20:7 ÔÇ║ /v1/runs ÔÇ║ list returns the runs array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:28.736Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[164/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:27:7 ÔÇ║ /v1/runs ÔÇ║ list requires authentication
+[1A[2K[165/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:32:7 ÔÇ║ /v1/runs ÔÇ║ list requires the workspace header
+[1A[2K[166/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:37:7 ÔÇ║ /v1/runs ÔÇ║ list rejects an out-of-range limit
+[1A[2K  2) [chromium] ÔÇ║ e2e\api\runs.spec.ts:37:7 ÔÇ║ /v1/runs ÔÇ║ list rejects an out-of-range limit ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: >= [32m400[39m
+    Received:    [31m200[39m
+
+      37 |   test('list rejects an out-of-range limit', async ({ request }) => {
+      38 |     const res = await request.get('/v1/runs?limit=99999', { headers: ctx.headers });
+    > 39 |     expect(res.status()).toBeGreaterThanOrEqual(400);
+         |                          ^
+      40 |   });
+      41 |
+      42 |   test('list with limit=1 returns at most 1 run', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\runs.spec.ts:39:26
+
+    Error Context: test-results\api-runs--v1-runs-list-rejects-an-out-of-range-limit-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-runs--v1-runs-list-rejects-an-out-of-range-limit-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-runs--v1-runs-list-rejects-an-out-of-range-limit-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[167/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:42:7 ÔÇ║ /v1/runs ÔÇ║ list with limit=1 returns at most 1 run
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:19:48.137Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[168/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:49:7 ÔÇ║ /v1/runs ÔÇ║ get :id returns 404 for unknown run
+[1A[2K[169/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:56:7 ÔÇ║ /v1/runs ÔÇ║ cancel on unknown run returns 404
+[1A[2K[170/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:61:7 ÔÇ║ /v1/runs ÔÇ║ ledger on unknown run returns 404
+[1A[2K[171/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:66:7 ÔÇ║ /v1/runs ÔÇ║ scratchpad on unknown run returns 404
+[1A[2K[172/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:71:7 ÔÇ║ /v1/runs ÔÇ║ replay on unknown run returns 404
+[1A[2K[173/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:79:7 ÔÇ║ /v1/runs ÔÇ║ replay rejects an unknown mode
+[1A[2K[174/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:87:7 ÔÇ║ /v1/runs ÔÇ║ triggering a workflow run shows up in list
+[1A[2K  3) [chromium] ÔÇ║ e2e\api\runs.spec.ts:87:7 ÔÇ║ /v1/runs ÔÇ║ triggering a workflow run shows up in list 
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      90 |       data: { title: 'RunsList', summary: '', graph: trivialGraph(), settings: {} },
+      91 |     })).json();
+    > 92 |     const run = await (await request.post(`/v1/workflows/${wf.workflow.id}/run`, { headers: ctx.headers, data: {} })).json();
+         |                                                                        ^
+      93 |     const list = await (await request.get('/v1/runs', { headers: ctx.headers })).json();
+      94 |     expect(list.runs.find((r: any) => r.id === run.runId)).toBeTruthy();
+      95 |   });
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\runs.spec.ts:92:72
+
+    Error Context: test-results\api-runs--v1-runs-triggering-a-workflow-run-shows-up-in-list-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-runs--v1-runs-triggering-a-workflow-run-shows-up-in-list-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-runs--v1-runs-triggering-a-workflow-run-shows-up-in-list-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[175/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:97:7 ÔÇ║ /v1/runs ÔÇ║ triggered run is fetchable via get :id
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:20:10.393Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  4) [chromium] ÔÇ║ e2e\api\runs.spec.ts:97:7 ÔÇ║ /v1/runs ÔÇ║ triggered run is fetchable via get :id ÔöÇÔöÇÔöÇÔöÇ
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      100 |       data: { title: 'RunsGet', summary: '', graph: trivialGraph(), settings: {} },
+      101 |     })).json();
+    > 102 |     const run = await (await request.post(`/v1/workflows/${wf.workflow.id}/run`, { headers: ctx.headers, data: {} })).json();
+          |                                                                        ^
+      103 |     const res = await request.get(`/v1/runs/${run.runId}`, { headers: ctx.headers });
+      104 |     expect(res.ok()).toBeTruthy();
+      105 |     const body = await res.json();
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\runs.spec.ts:102:72
+
+    Error Context: test-results\api-runs--v1-runs-triggered-run-is-fetchable-via-get-id-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-runs--v1-runs-triggered-run-is-fetchable-via-get-id-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-runs--v1-runs-triggered-run-is-fetchable-via-get-id-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[176/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:110:7 ÔÇ║ /v1/runs ÔÇ║ ledger of a triggered run returns an events array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:20:32.688Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  5) [chromium] ÔÇ║ e2e\api\runs.spec.ts:110:7 ÔÇ║ /v1/runs ÔÇ║ ledger of a triggered run returns an events array 
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      113 |       data: { title: 'RunsLedger', summary: '', graph: trivialGraph(), settings: {} },
+      114 |     })).json();
+    > 115 |     const run = await (await request.post(`/v1/workflows/${wf.workflow.id}/run`, { headers: ctx.headers, data: {} })).json();
+          |                                                                        ^
+      116 |     const res = await request.get(`/v1/runs/${run.runId}/ledger`, { headers: ctx.headers });
+      117 |     expect(res.ok()).toBeTruthy();
+      118 |     const body = await res.json();
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\runs.spec.ts:115:72
+
+    Error Context: test-results\api-runs--v1-runs-ledger-o-f7bf0-run-returns-an-events-array-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-runs--v1-runs-ledger-o-f7bf0-run-returns-an-events-array-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-runs--v1-runs-ledger-o-f7bf0-run-returns-an-events-array-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[177/268] [chromium] ÔÇ║ e2e\api\runs.spec.ts:122:7 ÔÇ║ /v1/runs ÔÇ║ scratchpad of a triggered run returns an object
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:20:56.676Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  6) [chromium] ÔÇ║ e2e\api\runs.spec.ts:122:7 ÔÇ║ /v1/runs ÔÇ║ scratchpad of a triggered run returns an object 
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      125 |       data: { title: 'RunsScratch', summary: '', graph: trivialGraph(), settings: {} },
+      126 |     })).json();
+    > 127 |     const run = await (await request.post(`/v1/workflows/${wf.workflow.id}/run`, { headers: ctx.headers, data: {} })).json();
+          |                                                                        ^
+      128 |     const res = await request.get(`/v1/runs/${run.runId}/scratchpad`, { headers: ctx.headers });
+      129 |     expect(res.ok()).toBeTruthy();
+      130 |     const body = await res.json();
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\runs.spec.ts:127:72
+
+    Error Context: test-results\api-runs--v1-runs-scratchp-17f90-gered-run-returns-an-object-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-runs--v1-runs-scratchp-17f90-gered-run-returns-an-object-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-runs--v1-runs-scratchp-17f90-gered-run-returns-an-object-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[178/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:14:7 ÔÇ║ /v1/skills ÔÇ║ list contains the seeded builtin skills (echo + http_fetch)
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:21:24.697Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[179/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:24:7 ÔÇ║ /v1/skills ÔÇ║ list requires authentication
+[1A[2K[180/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:29:7 ÔÇ║ /v1/skills ÔÇ║ list requires the x-agentis-workspace header
+[1A[2K[181/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:34:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects builtin runtime
+[1A[2K[182/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:49:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects an empty body
+[1A[2K[183/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:54:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects a missing manifest
+[1A[2K[184/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:59:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects an invalid runtime enum value
+[1A[2K[185/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:73:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects negative timeoutMs
+[1A[2K[186/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:87:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects a slug with capitals
+[1A[2K  7) [chromium] ÔÇ║ e2e\api\skills.spec.ts:87:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects a slug with capitals 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: >= [32m400[39m
+    Received:    [31m201[39m
+
+       96 |       },
+       97 |     });
+    >  98 |     expect(res.status()).toBeGreaterThanOrEqual(400);
+          |                          ^
+       99 |   });
+      100 |
+      101 |   test('skill list entries carry id + slug + runtime', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\skills.spec.ts:98:26
+
+    Error Context: test-results\api-skills--v1-skills-inst-3df62-ejects-a-slug-with-capitals-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-skills--v1-skills-inst-3df62-ejects-a-slug-with-capitals-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-skills--v1-skills-inst-3df62-ejects-a-slug-with-capitals-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[187/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:101:7 ÔÇ║ /v1/skills ÔÇ║ skill list entries carry id + slug + runtime
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:21:54.789Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[188/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:111:7 ÔÇ║ /v1/skills ÔÇ║ list response is JSON
+[1A[2K[189/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:116:7 ÔÇ║ /v1/skills ÔÇ║ seeded builtin skills include http_fetch
+[1A[2K[190/268] [chromium] ÔÇ║ e2e\api\skills.spec.ts:123:7 ÔÇ║ /v1/skills ÔÇ║ builtin skills report runtime=builtin
+[1A[2K[191/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:14:7 ÔÇ║ /v1/tasks ÔÇ║ list returns a tasks array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:22:02.970Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[192/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:21:7 ÔÇ║ /v1/tasks ÔÇ║ list requires authentication
+[1A[2K[193/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:26:7 ÔÇ║ /v1/tasks ÔÇ║ list requires the workspace header
+[1A[2K[194/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:31:7 ÔÇ║ /v1/tasks ÔÇ║ list with limit=1 returns at most one task
+[1A[2K[195/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:38:7 ÔÇ║ /v1/tasks ÔÇ║ list rejects out-of-range limit
+[1A[2K  8) [chromium] ÔÇ║ e2e\api\tasks.spec.ts:38:7 ÔÇ║ /v1/tasks ÔÇ║ list rejects out-of-range limit ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: >= [32m400[39m
+    Received:    [31m200[39m
+
+      38 |   test('list rejects out-of-range limit', async ({ request }) => {
+      39 |     const res = await request.get('/v1/tasks?limit=99999', { headers: ctx.headers });
+    > 40 |     expect(res.status()).toBeGreaterThanOrEqual(400);
+         |                          ^
+      41 |   });
+      42 |
+      43 |   test('list filtered by an unknown agentId returns []', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\tasks.spec.ts:40:26
+
+    Error Context: test-results\api-tasks--v1-tasks-list-rejects-out-of-range-limit-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-tasks--v1-tasks-list-rejects-out-of-range-limit-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-tasks--v1-tasks-list-rejects-out-of-range-limit-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[196/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:43:7 ÔÇ║ /v1/tasks ÔÇ║ list filtered by an unknown agentId returns []
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:22:17.138Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[197/268] [chromium] ÔÇ║ e2e\api\tasks.spec.ts:50:7 ÔÇ║ /v1/tasks ÔÇ║ list response is JSON
+[1A[2K[198/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:20:7 ÔÇ║ /v1/triggers ÔÇ║ list returns the triggers array
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:22:22.981Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  9) [chromium] ÔÇ║ e2e\api\triggers.spec.ts:20:7 ÔÇ║ /v1/triggers ÔÇ║ list returns the triggers array ÔöÇÔöÇÔöÇ
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      14 |     data: { title: 'TriggerTarget', summary: '', graph: trivialGraph(), settings: {} },
+      15 |   })).json();
+    > 16 |   workflowId = wf.workflow.id;
+         |                            ^
+      17 | });
+      18 |
+      19 | test.describe('/v1/triggers', () => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\triggers.spec.ts:16:28
+
+    Error Context: test-results\api-triggers--v1-triggers-list-returns-the-triggers-array-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-triggers--v1-triggers-list-returns-the-triggers-array-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-triggers--v1-triggers-list-returns-the-triggers-array-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[199/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:27:7 ÔÇ║ /v1/triggers ÔÇ║ list requires authentication
+[1A[2K[200/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:32:7 ÔÇ║ /v1/triggers ÔÇ║ list requires the workspace header
+[1A[2K[201/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:37:7 ÔÇ║ /v1/triggers ÔÇ║ create rejects an empty body
+[1A[2K[202/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:42:7 ÔÇ║ /v1/triggers ÔÇ║ create rejects an unknown trigger type
+[1A[2K[203/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:50:7 ÔÇ║ /v1/triggers ÔÇ║ create rejects a missing workflowId
+[1A[2K[204/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:58:7 ÔÇ║ /v1/triggers ÔÇ║ create a manual trigger and verify it is listed
+[1A[2K[205/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:70:7 ÔÇ║ /v1/triggers ÔÇ║ create a webhook trigger returns webhookSecret + webhookUrl exactly once
+[1A[2K[206/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:81:7 ÔÇ║ /v1/triggers ÔÇ║ patch on unknown trigger id returns 404
+[1A[2K[207/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:89:7 ÔÇ║ /v1/triggers ÔÇ║ delete on unknown trigger id returns 404
+[1A[2K[208/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:94:7 ÔÇ║ /v1/triggers ÔÇ║ delete removes the trigger from the list
+[1A[2K[209/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:105:7 ÔÇ║ /v1/webhooks ÔÇ║ POST trigger returns 4xx without signature headers
+[1A[2K[210/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:110:7 ÔÇ║ /v1/webhooks ÔÇ║ POST trigger returns 4xx for unknown trigger id
+[1A[2K[211/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:122:7 ÔÇ║ /v1/webhooks ÔÇ║ POST trigger with a stale timestamp is rejected
+[1A[2K[212/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:134:7 ÔÇ║ /v1/webhooks ÔÇ║ POST trigger with junk signature is rejected
+[1A[2K[213/268] [chromium] ÔÇ║ e2e\api\triggers.spec.ts:146:7 ÔÇ║ /v1/webhooks ÔÇ║ POST trigger does not require auth header (public ingress)
+[1A[2K[214/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:14:7 ÔÇ║ /v1/workflows ÔÇ║ list is empty for a freshly seeded workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:22:47.876Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[215/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:21:7 ÔÇ║ /v1/workflows ÔÇ║ list requires authentication
+[1A[2K[216/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:26:7 ÔÇ║ /v1/workflows ÔÇ║ list requires the workspace header
+[1A[2K[217/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:31:7 ÔÇ║ /v1/workflows ÔÇ║ create returns 201 with the new workflow
+[1A[2K  10) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:31:7 ÔÇ║ /v1/workflows ÔÇ║ create returns 201 with the new workflow 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32m201[39m
+    Received: [31m422[39m
+
+      34 |       data: { title: 'WF1', summary: 'first', graph: trivialGraph(), settings: {} },
+      35 |     });
+    > 36 |     expect(res.status()).toBe(201);
+         |                          ^
+      37 |     const body = await res.json();
+      38 |     expect(body.workflow.title).toBe('WF1');
+      39 |     expect(typeof body.workflow.id).toBe('string');
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:36:26
+
+    Error Context: test-results\api-workflows--v1-workflow-77f81-s-201-with-the-new-workflow-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-77f81-s-201-with-the-new-workflow-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-77f81-s-201-with-the-new-workflow-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[218/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:42:7 ÔÇ║ /v1/workflows ÔÇ║ create rejects an empty body
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:23:14.269Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[219/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:47:7 ÔÇ║ /v1/workflows ÔÇ║ create rejects a missing title
+[1A[2K[220/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:52:7 ÔÇ║ /v1/workflows ÔÇ║ create rejects an invalid graph (no nodes)
+[1A[2K  11) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:52:7 ÔÇ║ /v1/workflows ÔÇ║ create rejects an invalid graph (no nodes) 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: >= [32m400[39m
+    Received:    [31m201[39m
+
+      55 |       data: { title: 'Bad', summary: '', graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } }, settings: {} },
+      56 |     });
+    > 57 |     expect(res.status()).toBeGreaterThanOrEqual(400);
+         |                          ^
+      58 |   });
+      59 |
+      60 |   test('create rejects a graph with the wrong shape', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:57:26
+
+    Error Context: test-results\api-workflows--v1-workflow-97dbd--an-invalid-graph-no-nodes--chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-97dbd--an-invalid-graph-no-nodes--chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-97dbd--an-invalid-graph-no-nodes--chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[221/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:60:7 ÔÇ║ /v1/workflows ÔÇ║ create rejects a graph with the wrong shape
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:23:33.631Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[222/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:68:7 ÔÇ║ /v1/workflows ÔÇ║ create requires authentication
+[1A[2K[223/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:73:7 ÔÇ║ /v1/workflows ÔÇ║ newly created workflow appears in subsequent list
+[1A[2K  12) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:73:7 ÔÇ║ /v1/workflows ÔÇ║ newly created workflow appears in subsequent list 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeTruthy[2m()[22m
+
+    Received: [31mundefined[39m
+
+      78 |     const res = await request.get('/v1/workflows', { headers: ctx.headers });
+      79 |     const body = await res.json();
+    > 80 |     expect(body.workflows.find((w: any) => w.id === created.workflow.id)).toBeTruthy();
+         |                                                                           ^
+      81 |   });
+      82 |
+      83 |   test('get :id returns the workflow', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:80:75
+
+    Error Context: test-results\api-workflows--v1-workflow-07e36--appears-in-subsequent-list-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-07e36--appears-in-subsequent-list-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-07e36--appears-in-subsequent-list-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[224/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:83:7 ÔÇ║ /v1/workflows ÔÇ║ get :id returns the workflow
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:24:00.694Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  13) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:83:7 ÔÇ║ /v1/workflows ÔÇ║ get :id returns the workflow ÔöÇÔöÇÔöÇ
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      86 |       data: { title: 'Get', summary: '', graph: trivialGraph(), settings: {} },
+      87 |     })).json();
+    > 88 |     const res = await request.get(`/v1/workflows/${created.workflow.id}`, { headers: ctx.headers });
+         |                                                                     ^
+      89 |     expect(res.ok()).toBeTruthy();
+      90 |     const body = await res.json();
+      91 |     expect(body.workflow.id).toBe(created.workflow.id);
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:88:69
+
+    Error Context: test-results\api-workflows--v1-workflows-get-id-returns-the-workflow-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflows-get-id-returns-the-workflow-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflows-get-id-returns-the-workflow-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[225/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:94:7 ÔÇ║ /v1/workflows ÔÇ║ get :id returns 404 for unknown id
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:24:24.547Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[226/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:101:7 ÔÇ║ /v1/workflows ÔÇ║ patch updates the title
+[1A[2K  14) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:101:7 ÔÇ║ /v1/workflows ÔÇ║ patch updates the title ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      104 |       data: { title: 'Old', summary: '', graph: trivialGraph(), settings: {} },
+      105 |     })).json();
+    > 106 |     const res = await request.patch(`/v1/workflows/${created.workflow.id}`, {
+          |                                                                       ^
+      107 |       headers: ctx.headers,
+      108 |       data: { title: 'New' },
+      109 |     });
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:106:71
+
+    Error Context: test-results\api-workflows--v1-workflows-patch-updates-the-title-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflows-patch-updates-the-title-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflows-patch-updates-the-title-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[227/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:115:7 ÔÇ║ /v1/workflows ÔÇ║ patch on unknown id returns 404
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:25:01.140Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[228/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:123:7 ÔÇ║ /v1/workflows ÔÇ║ patch rejects an invalid graph replacement
+[1A[2K  15) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:123:7 ÔÇ║ /v1/workflows ÔÇ║ patch rejects an invalid graph replacement 
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      126 |       data: { title: 'PatchBad', summary: '', graph: trivialGraph(), settings: {} },
+      127 |     })).json();
+    > 128 |     const res = await request.patch(`/v1/workflows/${created.workflow.id}`, {
+          |                                                                       ^
+      129 |       headers: ctx.headers,
+      130 |       data: { graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } } },
+      131 |     });
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:128:71
+
+    Error Context: test-results\api-workflows--v1-workflow-c6d48-n-invalid-graph-replacement-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-c6d48-n-invalid-graph-replacement-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-c6d48-n-invalid-graph-replacement-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[229/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:135:7 ÔÇ║ /v1/workflows ÔÇ║ post /:id/run returns 202 with a runId for a valid graph
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:25:29.582Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  16) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:135:7 ÔÇ║ /v1/workflows ÔÇ║ post /:id/run returns 202 with a runId for a valid graph 
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      138 |       data: { title: 'Runnable', summary: '', graph: trivialGraph(), settings: {} },
+      139 |     })).json();
+    > 140 |     const res = await request.post(`/v1/workflows/${created.workflow.id}/run`, { headers: ctx.headers, data: {} });
+          |                                                                      ^
+      141 |     expect([200, 202]).toContain(res.status());
+      142 |     const body = await res.json();
+      143 |     expect(typeof body.runId).toBe('string');
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:140:70
+
+    Error Context: test-results\api-workflows--v1-workflow-b4852-h-a-runId-for-a-valid-graph-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-b4852-h-a-runId-for-a-valid-graph-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-b4852-h-a-runId-for-a-valid-graph-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[230/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:146:7 ÔÇ║ /v1/workflows ÔÇ║ post /:id/run returns 404 for unknown workflow
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:26:03.414Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[231/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:154:7 ÔÇ║ /v1/workflows ÔÇ║ post /:id/run requires authentication
+[1A[2K[232/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:159:7 ÔÇ║ /v1/workflows ÔÇ║ list response is JSON
+[1A[2K[233/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:164:7 ÔÇ║ /v1/workflows ÔÇ║ workflow id is a uuid
+[1A[2K  17) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:164:7 ÔÇ║ /v1/workflows ÔÇ║ workflow id is a uuid ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      167 |       data: { title: 'IdShape', summary: '', graph: trivialGraph(), settings: {} },
+      168 |     })).json();
+    > 169 |     expect(created.workflow.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+          |                             ^
+      170 |   });
+      171 |
+      172 |   test('newly created workflow has the workspace id stamped on it', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:169:29
+
+    Error Context: test-results\api-workflows--v1-workflows-workflow-id-is-a-uuid-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflows-workflow-id-is-a-uuid-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflows-workflow-id-is-a-uuid-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[234/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:172:7 ÔÇ║ /v1/workflows ÔÇ║ newly created workflow has the workspace id stamped on it
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:26:57.244Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  18) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:172:7 ÔÇ║ /v1/workflows ÔÇ║ newly created workflow has the workspace id stamped on it 
+
+    TypeError: Cannot read properties of undefined (reading 'workspaceId')
+
+      175 |       data: { title: 'Stamped', summary: '', graph: trivialGraph(), settings: {} },
+      176 |     })).json();
+    > 177 |     expect(created.workflow.workspaceId).toBe(ctx.workspace.id);
+          |                             ^
+      178 |   });
+      179 |
+      180 |   test('patch with empty body is a no-op (200)', async ({ request }) => {
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:177:29
+
+    Error Context: test-results\api-workflows--v1-workflow-cefbb--workspace-id-stamped-on-it-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-cefbb--workspace-id-stamped-on-it-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-cefbb--workspace-id-stamped-on-it-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[235/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:180:7 ÔÇ║ /v1/workflows ÔÇ║ patch with empty body is a no-op (200)
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:27:30.866Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  19) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:180:7 ÔÇ║ /v1/workflows ÔÇ║ patch with empty body is a no-op (200) 
+
+    TypeError: Cannot read properties of undefined (reading 'id')
+
+      183 |       data: { title: 'NoopPatch', summary: '', graph: trivialGraph(), settings: {} },
+      184 |     })).json();
+    > 185 |     const res = await request.patch(`/v1/workflows/${created.workflow.id}`, { headers: ctx.headers, data: {} });
+          |                                                                       ^
+      186 |     expect([200, 400]).toContain(res.status());
+      187 |   });
+      188 |
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:185:71
+
+    Error Context: test-results\api-workflows--v1-workflow-e8655--empty-body-is-a-no-op-200--chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-e8655--empty-body-is-a-no-op-200--chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-e8655--empty-body-is-a-no-op-200--chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[236/268] [chromium] ÔÇ║ e2e\api\workflows.spec.ts:189:7 ÔÇ║ /v1/workflows ÔÇ║ list contains all created workflows
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:28:10.497Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K  20) [chromium] ÔÇ║ e2e\api\workflows.spec.ts:189:7 ÔÇ║ /v1/workflows ÔÇ║ list contains all created workflows 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: >= [32m1[39m
+    Received:    [31m0[39m
+
+      190 |     const res = await request.get('/v1/workflows', { headers: ctx.headers });
+      191 |     const body = await res.json();
+    > 192 |     expect(body.workflows.length).toBeGreaterThanOrEqual(1);
+          |                                   ^
+      193 |   });
+      194 | });
+      195 |
+        at C:\Users\antar\OneDrive\Documentos\nexseed\agentis\e2e\api\workflows.spec.ts:192:35
+
+    Error Context: test-results\api-workflows--v1-workflow-a8615-tains-all-created-workflows-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    test-results\api-workflows--v1-workflow-a8615-tains-all-created-workflows-chromium\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\api-workflows--v1-workflow-a8615-tains-all-created-workflows-chromium\trace.zip
+
+    ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+
+
+[1A[2K[237/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:8:7 ÔÇ║ /v1/workspaces ÔÇ║ list returns the seeded personal workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:28:37.674Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[238/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:17:7 ÔÇ║ /v1/workspaces ÔÇ║ list requires authentication
+[1A[2K[239/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:22:7 ÔÇ║ /v1/workspaces ÔÇ║ list with invalid Bearer token is rejected
+[1A[2K[240/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:27:7 ÔÇ║ /v1/workspaces ÔÇ║ create returns 201 with the new workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:28:48.288Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[241/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:39:7 ÔÇ║ /v1/workspaces ÔÇ║ create rejects an empty name
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:28:55.692Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[242/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:46:7 ÔÇ║ /v1/workspaces ÔÇ║ create rejects an upper-case slug
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:01.478Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[243/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:53:7 ÔÇ║ /v1/workspaces ÔÇ║ create rejects a slug with spaces
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:07.645Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[244/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:59:7 ÔÇ║ /v1/workspaces ÔÇ║ create rejects a missing body entirely
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:12.656Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[245/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:65:7 ÔÇ║ /v1/workspaces ÔÇ║ create requires authentication
+[1A[2K[246/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:70:7 ÔÇ║ /v1/workspaces ÔÇ║ get :id returns workspace + ambients
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:17.528Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[247/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:81:7 ÔÇ║ /v1/workspaces ÔÇ║ get :id returns 404 for an unknown workspace id
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:23.729Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[248/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:89:7 ÔÇ║ /v1/workspaces ÔÇ║ get :id is scoped to the authenticated user
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:31.780Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[249/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:96:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/select returns workspace summary
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:38.477Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[250/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:105:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/select returns 404 for unknown workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:43.070Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[251/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:111:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients creates a new ambient
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:46.860Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[252/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:123:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients defaults the kind to local
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:51.490Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[253/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:134:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients rejects an invalid kind
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:29:56.042Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[254/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:143:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients rejects an empty name
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:00.018Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[255/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:152:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients returns 404 for unknown workspace
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:04.384Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[256/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:161:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients/:ambientId/select records the active ambient
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:08.700Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[257/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:171:7 ÔÇ║ /v1/workspaces ÔÇ║ post /:id/ambients/:ambientId/select returns 404 for foreign ambient id
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:13.445Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[258/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:179:7 ÔÇ║ /v1/workspaces ÔÇ║ newly created workspace shows up in subsequent list
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:17.094Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[259/268] [chromium] ÔÇ║ e2e\api\workspaces.spec.ts:188:7 ÔÇ║ /v1/workspaces ÔÇ║ newly created ambient shows up in workspace get
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:19.659Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[260/268] [chromium] ÔÇ║ e2e\login.spec.ts:14:5 ÔÇ║ operator can sign in with the deterministic seed
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:23.917Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[261/268] [chromium] ÔÇ║ e2e\login.spec.ts:20:5 ÔÇ║ login form rejects an invalid password with a visible error
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:44.572Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[262/268] [chromium] ÔÇ║ e2e\login.spec.ts:30:5 ÔÇ║ login persists tokens ÔÇö reload keeps the user signed in
+[1A[2K[263/268] [chromium] ÔÇ║ e2e\login.spec.ts:36:5 ÔÇ║ the deterministic seed password is exactly test-password-1234
+[1A[2K[264/268] [chromium] ÔÇ║ e2e\reset.spec.ts:9:5 ÔÇ║ reset returns the seeded user + workspace + ambient
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:52.880Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[265/268] [chromium] ÔÇ║ e2e\reset.spec.ts:19:5 ÔÇ║ reset is idempotent ÔÇö second call still returns a populated body
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:55.083Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:57.053Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[266/268] [chromium] ÔÇ║ e2e\reset.spec.ts:29:5 ÔÇ║ after reset, login with the deterministic password works
+[1A[2K[2m[WebServer] [22m[36m[2026-04-28T18:30:59.029Z] INFO[0m seed.completed {"username":"operator"}
+
+[1A[2K[267/268] [chromium] ÔÇ║ e2e\smoke.spec.ts:6:5 ÔÇ║ API healthz responds 200 with mode payload
+[1A[2K[268/268] [chromium] ÔÇ║ e2e\smoke.spec.ts:15:5 ÔÇ║ OpenAPI document is reachable
+[1A[2K[2m[WebServer] [22mC:\Users\antar\OneDrive\Documentos\nexseed\agentis\apps\web:
+[2m[WebServer] [22m[41m[30mÔÇëERR_PNPM_RECURSIVE_RUN_FIRST_FAILÔÇë[39m[49m [31m@agentis/web@0.1.0 dev: `vite`[39m
+[2m[WebServer] [22m[31mExit status 1[39m
+
+[1A[2K  20 failed
+    [chromium] ÔÇ║ e2e\api\dashboard.spec.ts:38:7 ÔÇ║ /v1/activity ÔÇ║ list rejects out-of-range limit ÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\runs.spec.ts:37:7 ÔÇ║ /v1/runs ÔÇ║ list rejects an out-of-range limit ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\runs.spec.ts:87:7 ÔÇ║ /v1/runs ÔÇ║ triggering a workflow run shows up in list ÔöÇ
+    [chromium] ÔÇ║ e2e\api\runs.spec.ts:97:7 ÔÇ║ /v1/runs ÔÇ║ triggered run is fetchable via get :id ÔöÇÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\runs.spec.ts:110:7 ÔÇ║ /v1/runs ÔÇ║ ledger of a triggered run returns an events array 
+    [chromium] ÔÇ║ e2e\api\runs.spec.ts:122:7 ÔÇ║ /v1/runs ÔÇ║ scratchpad of a triggered run returns an object 
+    [chromium] ÔÇ║ e2e\api\skills.spec.ts:87:7 ÔÇ║ /v1/skills ÔÇ║ install-local rejects a slug with capitals 
+    [chromium] ÔÇ║ e2e\api\tasks.spec.ts:38:7 ÔÇ║ /v1/tasks ÔÇ║ list rejects out-of-range limit ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\triggers.spec.ts:20:7 ÔÇ║ /v1/triggers ÔÇ║ list returns the triggers array ÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:31:7 ÔÇ║ /v1/workflows ÔÇ║ create returns 201 with the new workflow 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:52:7 ÔÇ║ /v1/workflows ÔÇ║ create rejects an invalid graph (no nodes) 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:73:7 ÔÇ║ /v1/workflows ÔÇ║ newly created workflow appears in subsequent list 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:83:7 ÔÇ║ /v1/workflows ÔÇ║ get :id returns the workflow ÔöÇÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:101:7 ÔÇ║ /v1/workflows ÔÇ║ patch updates the title ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:123:7 ÔÇ║ /v1/workflows ÔÇ║ patch rejects an invalid graph replacement 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:135:7 ÔÇ║ /v1/workflows ÔÇ║ post /:id/run returns 202 with a runId for a valid graph 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:164:7 ÔÇ║ /v1/workflows ÔÇ║ workflow id is a uuid ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:172:7 ÔÇ║ /v1/workflows ÔÇ║ newly created workflow has the workspace id stamped on it 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:180:7 ÔÇ║ /v1/workflows ÔÇ║ patch with empty body is a no-op (200) 
+    [chromium] ÔÇ║ e2e\api\workflows.spec.ts:189:7 ÔÇ║ /v1/workflows ÔÇ║ list contains all created workflows 
+  15 did not run
+  233 passed (13.5m)

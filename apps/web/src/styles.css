@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+/* React Flow background tweaks for the dark canvas. */
+.react-flow {
+  background: var(--rf-canvas, #08090b);
+}
+.react-flow__background {
+  background-color: #08090b !important;
+}
+.react-flow__edge-path {
+  stroke: #2a2f38;
+  stroke-width: 1.5;
+}
+.react-flow__handle {
+  background: #2a2f38;
+  border: 1px solid #3a4150;
+  width: 10px;
+  height: 10px;
+}
+.react-flow__controls,
+.react-flow__minimap {
+  background: #15171c;
+  border: 1px solid #22262d;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.react-flow__attribution {
+  display: none;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #22262d; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }

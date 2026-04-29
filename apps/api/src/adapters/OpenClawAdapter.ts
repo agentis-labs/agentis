@@ -1,0 +1,286 @@
+/**
+ * OpenClawAdapter — bridge to OpenClaw Gateway over WebSocket.
+ *
+ * Inbound:
+ *   agent.heartbeat              → updates lastHeartbeatAt
+ *   session.message              → CONVERSATION_MESSAGE_RECEIVED + mirror to conversation_messages
+ *   session.tool                 → AGENT_TERMINAL_TOOL_CALL
+ *   exec.approval.requested      → ApprovalInbox.create(source='openclaw_exec')
+ *   agent.status.changed         → AGENT_STATUS event + DB update
+ *   task.completed / task.failed → engine.notifyTaskCompleted / notifyTaskFailed
+ *
+ * Outbound:
+ *   dispatchTask  → ws send {kind:'task.dispatch', task}
+ *   cancelTask    → ws send {kind:'task.cancel', taskId}
+ *   sendMessage   → ws send {kind:'session.send', sessionId?, body}
+ *
+ * The connection is wrapped in a CircuitBreaker. Three consecutive send/recv
+ * failures open the breaker for 30s; the gateway surfaces this in its
+ * health snapshot.
+ */
+
+import type {
+  AgentAdapter,
+  AdapterHealthStatus,
+  NormalizedAgentEvent,
+  NormalizedTask,
+  TriggerConfig,
+  TriggerListenerHandle,
+} from '@agentis/core';
+import type { Logger } from '../logger.js';
+import { CircuitBreaker } from './CircuitBreaker.js';
+
+interface WebSocketLike {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  on(event: 'open', cb: () => void): void;
+  on(event: 'message', cb: (data: Buffer | string) => void): void;
+  on(event: 'close', cb: () => void): void;
+  on(event: 'error', cb: (err: Error) => void): void;
+}
+
+interface WebSocketCtor {
+  new (url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }): WebSocketLike;
+  readonly OPEN: number;
+}
+
+let cachedWS: { kind: 'available'; WS: WebSocketCtor } | { kind: 'unavailable'; reason: string } | undefined;
+async function loadWs() {
+  if (cachedWS) return cachedWS;
+  try {
+    const mod = (await import('ws' as string)) as { WebSocket: WebSocketCtor; default?: WebSocketCtor };
+    const WS = (mod.WebSocket ?? mod.default) as WebSocketCtor;
+    cachedWS = { kind: 'available', WS };
+  } catch (err) {
+    cachedWS = { kind: 'unavailable', reason: (err as Error).message };
+  }
+  return cachedWS;
+}
+
+export interface OpenClawAdapterOptions {
+  agentId: string;
+  gatewayUrl: string;
+  /** Decrypted device token. NEVER persisted in plaintext. */
+  deviceToken: string;
+  /** Optional: the gateway-side session id to bind to (for mirrored conversations). */
+  defaultSessionId?: string;
+  logger: Logger;
+}
+
+export class OpenClawAdapter implements AgentAdapter {
+  readonly adapterType = 'openclaw' as const;
+  readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
+  readonly #breaker = new CircuitBreaker({ failureThreshold: 3, cooldownMs: 30_000 });
+  #ws: WebSocketLike | undefined;
+  #closed = false;
+
+  constructor(private readonly opts: OpenClawAdapterOptions) {}
+
+  async connect(): Promise<void> {
+    const loaded = await loadWs();
+    if (loaded.kind === 'unavailable') {
+      this.opts.logger.warn('openclaw.ws_unavailable', { reason: loaded.reason });
+      return;
+    }
+    const { WS } = loaded;
+    this.#ws = new WS(this.opts.gatewayUrl, undefined, {
+      headers: { authorization: `Bearer ${this.opts.deviceToken}` },
+    });
+    this.#ws.on('open', () => this.opts.logger.info('openclaw.ws_open', { agentId: this.opts.agentId }));
+    this.#ws.on('message', (raw) => this.#handleMessage(typeof raw === 'string' ? raw : raw.toString('utf8')));
+    this.#ws.on('close', () => {
+      this.opts.logger.warn('openclaw.ws_close', { agentId: this.opts.agentId });
+      if (!this.#closed) {
+          this.#emit({
+            eventType: 'agent.heartbeat',
+            agentId: this.opts.agentId,
+            connected: false,
+            timestamp: new Date().toISOString(),
+          });
+        }
+    });
+    this.#ws.on('error', (err) => {
+      this.opts.logger.error('openclaw.ws_error', { agentId: this.opts.agentId, err: err.message });
+    });
+  }
+
+  async disconnect(): Promise<void> {
+    this.#closed = true;
+    this.#ws?.close();
+  }
+
+  async healthCheck(): Promise<AdapterHealthStatus> {
+    return {
+      isHealthy: this.#ws?.readyState === 1 && this.#breaker.state() !== 'open',
+      checkedAt: new Date().toISOString(),
+      ...(this.#breaker.state() === 'open' ? { error: 'circuit_breaker_open' } : {}),
+    };
+  }
+
+  async createPersistentListener(trigger: TriggerConfig): Promise<TriggerListenerHandle> {
+    // Persistent listeners share the same WS — we simply tag inbound events
+    // with the workflowId at the AdapterManager layer. Closing the handle
+    // is a no-op because closing would terminate the agent itself.
+    return {
+      triggerId: trigger.triggerId,
+      startedAt: new Date().toISOString(),
+      close: async () => {},
+    };
+  }
+
+  onEvent(handler: (e: NormalizedAgentEvent) => void): void {
+    this.#handlers.add(handler);
+  }
+
+  async dispatchTask(task: NormalizedTask): Promise<void> {
+    await this.#breaker.exec(async () => {
+      this.#sendOrThrow({ kind: 'task.dispatch', task });
+    });
+  }
+
+  async cancelTask(taskId: string): Promise<void> {
+    try {
+      await this.#breaker.exec(async () => {
+        this.#sendOrThrow({ kind: 'task.cancel', taskId });
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
+  /** Send an operator message into a mirrored session. */
+  async sendSessionMessage(args: { sessionId?: string; body: string }): Promise<void> {
+    await this.#breaker.exec(async () => {
+      this.#sendOrThrow({
+        kind: 'session.send',
+        sessionId: args.sessionId ?? this.opts.defaultSessionId,
+        body: args.body,
+      });
+    });
+  }
+
+  breakerState() {
+    return this.#breaker.state();
+  }
+
+  // ─────────────────────────────────────────────
+
+  #sendOrThrow(payload: unknown): void {
+    if (!this.#ws || this.#ws.readyState !== 1 /* OPEN */) {
+      throw new Error('openclaw_ws_not_open');
+    }
+    this.#ws.send(JSON.stringify(payload));
+  }
+
+  #handleMessage(text: string): void {
+    let msg: { kind: string; [k: string]: unknown };
+    try {
+      msg = JSON.parse(text) as { kind: string; [k: string]: unknown };
+    } catch {
+      this.opts.logger.warn('openclaw.bad_json', { agentId: this.opts.agentId });
+      return;
+    }
+    const at = new Date().toISOString();
+    switch (msg.kind) {
+      case 'agent.heartbeat':
+        this.#emit({
+          eventType: 'agent.heartbeat',
+          agentId: this.opts.agentId,
+          connected: true,
+          timestamp: at,
+        });
+        return;
+      case 'agent.thinking':
+        this.#emit({
+          eventType: 'agent.thinking',
+          agentId: this.opts.agentId,
+          runId: String(msg.runId ?? ''),
+          workflowId: String(msg.workflowId ?? ''),
+          taskId: String(msg.taskId ?? ''),
+          text: String(msg.text ?? ''),
+          timestamp: at,
+        });
+        return;
+      case 'agent.tool_call':
+      case 'session.tool':
+        this.#emit({
+          eventType: 'agent.tool_call',
+          agentId: this.opts.agentId,
+          runId: String(msg.runId ?? ''),
+          workflowId: String(msg.workflowId ?? ''),
+          taskId: String(msg.taskId ?? ''),
+          tool: String(msg.tool ?? ''),
+          input: msg.args ?? {},
+          result: msg.result,
+          timestamp: at,
+        });
+        return;
+      case 'task.completed':
+        this.#emit({
+          eventType: 'task.completed',
+          agentId: this.opts.agentId,
+          runId: String(msg.runId ?? ''),
+          workflowId: String(msg.workflowId ?? ''),
+          taskId: String(msg.taskId ?? ''),
+          output: (msg.output as Record<string, unknown>) ?? {},
+          timestamp: at,
+        });
+        return;
+      case 'task.failed':
+        this.#emit({
+          eventType: 'task.failed',
+          agentId: this.opts.agentId,
+          runId: String(msg.runId ?? ''),
+          workflowId: String(msg.workflowId ?? ''),
+          taskId: String(msg.taskId ?? ''),
+          error: String(msg.error ?? 'agent task failed'),
+          timestamp: at,
+        });
+        return;
+      case 'session.message':
+        this.#emit({
+          eventType: 'agent.session_message',
+          agentId: this.opts.agentId,
+          sessionId: String(msg.sessionId ?? ''),
+          sessionMessageId: String(msg.id ?? ''),
+          authorType: (String(msg.authorType ?? 'agent') as 'agent' | 'operator' | 'system'),
+          body: String(msg.body ?? ''),
+          timestamp: at,
+        });
+        return;
+      case 'exec.approval.requested':
+        this.#emit({
+          eventType: 'agent.approval_requested',
+          agentId: this.opts.agentId,
+          ...(msg.runId ? { runId: String(msg.runId) } : {}),
+          ...(msg.taskId ? { taskId: String(msg.taskId) } : {}),
+          title: String(msg.title ?? 'OpenClaw exec approval'),
+          summary: String(msg.summary ?? ''),
+          command: msg.command,
+          timestamp: at,
+        });
+        return;
+      case 'agent.status.changed':
+        this.#emit({
+          eventType: 'agent.status',
+          agentId: this.opts.agentId,
+          status: (String(msg.status ?? 'offline') as 'online' | 'busy' | 'offline' | 'error'),
+          timestamp: at,
+        });
+        return;
+      default:
+        this.opts.logger.debug?.('openclaw.unhandled_kind', { kind: msg.kind });
+    }
+  }
+
+  #emit(event: NormalizedAgentEvent): void {
+    for (const h of this.#handlers) {
+      try {
+        h(event);
+      } catch (err) {
+        this.opts.logger.error('openclaw.handler_threw', { err: (err as Error).message });
+      }
+    }
+  }
+}
