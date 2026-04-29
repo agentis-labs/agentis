@@ -9,6 +9,8 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { ConnectionForm } from '../components/channels/ConnectionForm';
 import { ConnectionRow } from '../components/channels/ConnectionRow';
+import { useConfirm } from '../components/shared/ConfirmDialog';
+import { useToast } from '../components/shared/Toast';
 
 interface Connection {
   id: string;
@@ -37,6 +39,8 @@ export function SettingsChannelsPage() {
     webhookUrl: string;
   } | null>(null);
   const [tick, setTick] = useState(0);
+  const confirmDialog = useConfirm();
+  const toast = useToast();
 
   useEffect(() => {
     void api<{ connections: Connection[] }>('/v1/channels').then((r) => setConnections(r.connections));
@@ -73,17 +77,28 @@ export function SettingsChannelsPage() {
   }
 
   async function handleDelete(id: string) {
-    if (!confirm('Delete this channel connection?')) return;
-    await api(`/v1/channels/${id}`, { method: 'DELETE' });
-    setTick((t) => t + 1);
+    const ok = await confirmDialog({
+      title: 'Delete this channel connection?',
+      body: 'Inbound messages from this channel will stop being routed to the linked agent.',
+      confirmLabel: 'Delete connection',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await api(`/v1/channels/${id}`, { method: 'DELETE' });
+      toast.success('Channel connection deleted');
+      setTick((t) => t + 1);
+    } catch (e) {
+      toast.error('Could not delete connection', (e as Error).message);
+    }
   }
 
   async function handleTest(id: string) {
     try {
       await api(`/v1/channels/${id}/test`, { method: 'POST', body: JSON.stringify({}) });
-      alert('Test message sent.');
+      toast.success('Test message sent');
     } catch (e) {
-      alert(`Test failed: ${(e as Error).message}`);
+      toast.error('Test failed', (e as Error).message);
     }
   }
 
@@ -94,7 +109,7 @@ export function SettingsChannelsPage() {
       );
       setRevealed({ id, webhookSecret: r.webhookSecret, webhookUrl: r.webhookUrl });
     } catch (e) {
-      alert(`Could not fetch webhook info: ${(e as Error).message}`);
+      toast.error('Could not fetch webhook info', (e as Error).message);
     }
   }
 

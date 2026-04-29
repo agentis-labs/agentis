@@ -116,11 +116,10 @@ export async function seedIfEmpty(args: {
   }
 
   if (generatedPassword) {
-    logger.warn('seed.generated_password', {
-      username,
-      password: generatedPassword,
-      hint: 'This is the only time the operator password is printed. Save it now.',
-    });
+    // Password still exists as a fallback for server deployments or direct
+    // API access. Local CLI users are auto-logged in via the launch token
+    // (.agentis/token) — they never need to type this.
+    logger.info('seed.completed', { username, hint: 'Local CLI users are auto-logged in. For server deployments, set AGENTIS_SEED_PASSWORD before first boot.' });
   } else {
     logger.info('seed.completed', { username });
   }

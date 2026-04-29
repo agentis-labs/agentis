@@ -11,11 +11,23 @@ import { useEffect, useState } from 'react';
 import { api, workspace } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { AgentFleetTable, type AgentFleetRow } from '../components/agents/AgentFleetTable';
+import { usePageContext } from '../components/assistant/Assistant';
 
 export function AgentsPage() {
   const [agents, setAgents] = useState<AgentFleetRow[]>([]);
   const [tick, setTick] = useState(0);
   const [creating, setCreating] = useState(false);
+
+  usePageContext({
+    label: `Agents · ${agents.length} registered`,
+    placeholder: 'Ask an agent or inspect fleet status…',
+    prompts: [
+      'Which agents are offline?',
+      'Summarise recent agent activity',
+      'How do I register a new agent?',
+    ],
+    href: '/agents',
+  }, [agents.length]);
 
   useEffect(() => {
     const ws = workspace.get();
@@ -26,7 +38,7 @@ export function AgentsPage() {
   }, [tick]);
 
   useRealtime(
-    ['agent.status', 'agent.heartbeat', 'agent.task_started', 'agent.task_finished'],
+    ['agent.status.changed', 'agent.heartbeat', 'agent.created', 'agent.updated'],
     () => setTick((t) => t + 1),
   );
 

@@ -8,10 +8,11 @@ import { AgentisError, schemas, type AuthenticatedUser } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
+import type { AgentisSecrets } from '../secrets.js';
 import { requireAuth, getUser } from '../middleware/auth.js';
 import { createRateLimiter, clientIp } from '../middleware/rateLimit.js';
 
-export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService }) {
+export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; secrets: AgentisSecrets }) {
   const app = new Hono();
 
   // OWASP A07: throttle credential-stuffing. 5 attempts per minute per
@@ -78,6 +79,39 @@ export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService }
   });
 
   app.get('/me', requireAuth(deps), (c) => c.json({ user: getUser(c) }));
+
+  /**
+   * POST /v1/auth/launch — token-file auto-login for the local CLI launch flow.
+   *
+   * The CLI writes a random token to .agentis/token on boot, then opens the
+   * browser at the dashboard URL with ?token=<value>. The frontend POSTs it
+   * here; we validate it and return a normal JWT pair. No password required
+   * for local installs.
+   *
+   * Not rate-limited — the token is 32 random bytes and the route only works
+   * while the server has a launchToken (i.e. local/file-backed installs).
+   * Server deployments (env-var secrets) have no launchToken and always get 404.
+   */
+  app.post('/launch', async (c) => {
+    const launchToken = deps.secrets.launchToken;
+    if (!launchToken) {
+      throw new AgentisError('NOT_FOUND', 'Launch auth is not available on this deployment');
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { token?: unknown };
+    if (typeof body.token !== 'string' || body.token !== launchToken) {
+      throw new AgentisError('AUTH_INVALID_CREDENTIALS', 'Invalid launch token');
+    }
+    // Issue tokens for the first admin user (the operator seeded on first boot).
+    const user = deps.db.select().from(schema.users).get();
+    if (!user) throw new AgentisError('AUTH_INVALID_CREDENTIALS', 'No operator user found');
+    const tokens = await deps.auth.issueTokens(user.id, user.username);
+    return c.json({
+      user: toUser(user),
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresInSeconds: tokens.expiresInSeconds,
+    });
+  });
 
   return app;
 }

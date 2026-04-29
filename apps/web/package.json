@@ -15,6 +15,7 @@
     "@agentis/core": "workspace:*",
     "@xyflow/react": "^12.3.0",
     "clsx": "^2.1.1",
+    "lucide-react": "^1.14.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0",

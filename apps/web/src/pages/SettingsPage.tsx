@@ -5,6 +5,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import { useConfirm } from '../components/shared/ConfirmDialog';
+import { useToast } from '../components/shared/Toast';
 
 interface Credential {
   id: string;
@@ -17,6 +19,8 @@ export function SettingsPage() {
   const [creds, setCreds] = useState<Credential[]>([]);
   const [tick, setTick] = useState(0);
   const [adding, setAdding] = useState(false);
+  const confirm = useConfirm();
+  const toast = useToast();
 
   useEffect(() => {
     void api<{ credentials: Credential[] }>('/v1/credentials').then((r) => setCreds(r.credentials));
@@ -48,9 +52,20 @@ export function SettingsPage() {
               </div>
               <button
                 onClick={async () => {
-                  if (!confirm(`Delete credential "${c.name}"?`)) return;
-                  await api(`/v1/credentials/${c.id}`, { method: 'DELETE' });
-                  setTick((t) => t + 1);
+                  const ok = await confirm({
+                    title: `Delete credential “${c.name}”?`,
+                    body: 'This is irreversible. Anything that depends on this credential will fail until replaced.',
+                    confirmLabel: 'Delete',
+                    tone: 'danger',
+                  });
+                  if (!ok) return;
+                  try {
+                    await api(`/v1/credentials/${c.id}`, { method: 'DELETE' });
+                    toast.success('Credential deleted');
+                    setTick((t) => t + 1);
+                  } catch (err) {
+                    toast.error('Could not delete credential', (err as Error).message);
+                  }
                 }}
                 className="rounded-md border border-line px-2 py-0.5 text-xs hover:text-danger"
               >

@@ -16,6 +16,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { exec } from 'node:child_process';
 import { bootstrap } from '@agentis/api/bootstrap';
 import { createBackup, restoreBackup } from '@agentis/api/backup';
 
@@ -91,12 +92,24 @@ async function runUp(): Promise<void> {
   maybeBindBundledWebDist();
   const handle = await bootstrap();
   const { url } = await handle.start();
+
+  const launchToken = handle.secrets.launchToken;
+  const openUrl = launchToken ? `${url}?token=${encodeURIComponent(launchToken)}` : url;
+
   process.stdout.write(`\n  Agentis is running at ${url}\n`);
-  if (handle.seed?.generatedPassword) {
-    process.stdout.write(
-      `\n  First-boot operator credentials:\n    username: ${handle.seed.user.username}\n    password: ${handle.seed.generatedPassword}\n  Save these now — Agentis will not print them again.\n`,
-    );
+
+  // Open the browser automatically. Works on macOS, Linux, and Windows.
+  const opener =
+    process.platform === 'win32' ? `start "" "${openUrl}"` :
+    process.platform === 'darwin' ? `open "${openUrl}"` :
+    `xdg-open "${openUrl}"`;
+  exec(opener, () => { /* best-effort */ });
+
+  if (!launchToken) {
+    // Server/env-var deployment — no auto-login token. Print the URL only.
+    process.stdout.write(`  Open the dashboard at ${url} and sign in.\n`);
   }
+
   const stop = async () => {
     await handle.stop();
     process.exit(0);

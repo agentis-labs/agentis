@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, workspace } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
+import { usePageContext } from '../components/assistant/Assistant';
 
 interface RunDetail {
   run: {
@@ -28,6 +29,17 @@ export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [events, setEvents] = useState<LedgerEvent[]>([]);
+
+  usePageContext({
+    label: id ? `Run · ${id.slice(0, 8)}…` : 'Run',
+    placeholder: 'Ask why this run behaved this way…',
+    prompts: [
+      'Why did this run fail?',
+      'Summarise what happened so far',
+      'Which node took the longest?',
+    ],
+    href: id ? `/runs/${id}` : undefined,
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;

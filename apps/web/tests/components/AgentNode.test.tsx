@@ -3,11 +3,16 @@
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import { ReactFlowProvider } from '@xyflow/react';
 import { AgentNode } from '../../src/components/canvas/AgentNode';
+
+function renderNode(ui: React.ReactElement) {
+  return render(<ReactFlowProvider>{ui}</ReactFlowProvider>);
+}
 
 describe('<AgentNode />', () => {
   it('renders the label and the agent · name subtitle', () => {
-    render(
+    renderNode(
       <AgentNode
         data={{
           label: 'Plan trip',
@@ -22,17 +27,17 @@ describe('<AgentNode />', () => {
   });
 
   it('falls back to the type label when no agent name is bound', () => {
-    render(<AgentNode data={{ label: 'X', type: 'agent_task' }} />);
+    renderNode(<AgentNode data={{ label: 'X', type: 'agent_task' }} />);
     expect(screen.getByText('agent_task')).toBeInTheDocument();
   });
 
   it('paints the glyph with the agent color when one is provided', () => {
-    const { container } = render(
+    const { container } = renderNode(
       <AgentNode
         data={{ label: 'X', type: 'agent_task', agentColorHex: '#ff00aa' }}
       />,
     );
-    const glyph = container.querySelector('span[style]') as HTMLElement;
+    const glyph = container.querySelector('.rounded-node span[style]') as HTMLElement;
     expect(glyph.style.color).toBeTruthy();
     // jsdom normalises #ff00aa33 to rgba(255, 0, 170, 0.2).
     expect(glyph.style.background).toMatch(/rgba\(255,\s*0,\s*170/);

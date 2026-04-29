@@ -4,6 +4,8 @@ import {
   ReactFlow,
   Background,
   Controls,
+  Handle,
+  Position,
   type Node,
   type Edge,
 } from '@xyflow/react';
@@ -15,6 +17,7 @@ import { ContextInspector, type InspectorSelection } from '../components/canvas/
 import { RunDrawer } from '../components/canvas/RunDrawer';
 import { AgentFocusOverlayManager } from '../components/canvas/AgentFocusOverlayManager';
 import { Typewriter } from '../components/shared/Typewriter';
+import { usePageContext } from '../components/assistant/Assistant';
 
 interface WorkflowDetail {
   id: string;
@@ -63,6 +66,17 @@ export function WorkflowCanvasPage() {
   const [selection, setSelection] = useState<InspectorSelection>({ kind: null });
   const overlayHostRef = useRef<HTMLDivElement | null>(null);
   const overlayManagerRef = useRef<AgentFocusOverlayManager | null>(null);
+
+  usePageContext({
+    label: wf ? `Workflow · ${wf.title}` : 'Workflow',
+    placeholder: 'Ask about this workflow…',
+    prompts: [
+      'Explain what this workflow does',
+      'Suggest the next node to add',
+      'How do I trigger this on a schedule?',
+    ],
+    href: id ? `/workflows/${id}` : undefined,
+  }, [id, wf?.title]);
 
   useEffect(() => {
     if (!overlayHostRef.current) return;
@@ -202,10 +216,22 @@ function AgentisNode({ data }: { data: { label: string; kind: string; type: stri
   return (
     <div
       className={clsx(
-        'flex min-w-[160px] flex-col gap-1 rounded-node border bg-surface-2 px-3 py-2 shadow-card',
+        'relative flex min-w-[160px] flex-col gap-1 rounded-node border bg-surface-2 px-3 py-2 shadow-card',
         isTrigger ? 'border-accent/60 shadow-glow' : 'border-line',
       )}
     >
+      {!isTrigger && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          className="!h-2 !w-2 !border-line !bg-surface"
+        />
+      )}
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!h-2 !w-2 !border-line !bg-surface"
+      />
       <div className="flex items-center gap-2">
         <span
           className={clsx(

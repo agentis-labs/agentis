@@ -6,6 +6,8 @@ import { useEffect, useState } from 'react';
 import { api, workspace } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { GatewayDetailPanel } from '../components/GatewayDetailPanel';
+import { useConfirm } from '../components/shared/ConfirmDialog';
+import { useToast } from '../components/shared/Toast';
 
 interface Gateway {
   id: string;
@@ -21,6 +23,8 @@ export function GatewaysPage() {
   const [tick, setTick] = useState(0);
   const [pairing, setPairing] = useState(false);
   const [opened, setOpened] = useState<Gateway | null>(null);
+  const confirm = useConfirm();
+  const toast = useToast();
 
   useEffect(() => {
     const ws = workspace.get();
@@ -85,9 +89,20 @@ export function GatewaysPage() {
                 <button
                   onClick={async (e) => {
                     e.stopPropagation();
-                    if (!confirm(`Delete gateway "${g.name}"?`)) return;
-                    await api(`/v1/gateways/${g.id}`, { method: 'DELETE' });
-                    setTick((t) => t + 1);
+                    const ok = await confirm({
+                      title: `Delete gateway “${g.name}”?`,
+                      body: 'Agents registered through this gateway will lose connectivity until paired again.',
+                      confirmLabel: 'Delete gateway',
+                      tone: 'danger',
+                    });
+                    if (!ok) return;
+                    try {
+                      await api(`/v1/gateways/${g.id}`, { method: 'DELETE' });
+                      toast.success('Gateway deleted');
+                      setTick((t) => t + 1);
+                    } catch (err) {
+                      toast.error('Could not delete gateway', (err as Error).message);
+                    }
                   }}
                   className="rounded border border-line px-2 py-0.5 hover:text-danger"
                 >

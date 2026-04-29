@@ -43,7 +43,7 @@ export function AgentDetailPage() {
     void api<{ messages: Message[] }>(`/v1/conversations/${id}`).then((r) => setMessages(r.messages));
   }, [id]);
 
-  useRealtime(['conversation.message_appended', 'agent.status', 'agent.heartbeat'], (env) => {
+  useRealtime(['conversation.message.received', 'conversation.message.sent', 'agent.status.changed', 'agent.heartbeat'], (env) => {
     const payload = env.payload as { agentId?: string; message?: Message };
     if (payload.agentId === id && payload.message) {
       setMessages((m) => [...m, payload.message!]);

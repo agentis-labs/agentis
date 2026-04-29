@@ -12,7 +12,7 @@
     "build": "pnpm -r --filter \"./packages/*\" build && pnpm --filter @agentis/web build && pnpm --filter @agentis/api build",
     "dev": "pnpm --filter @agentis/api dev",
     "dev:web": "pnpm --filter @agentis/web dev",
-    "dev:full": "concurrently -n api,web -c blue,magenta \"pnpm --filter @agentis/api dev\" \"pnpm --filter @agentis/web dev\"",
+    "dev:full": "concurrently --raw --kill-others-on-fail -n api,web -c blue,magenta \"pnpm --filter @agentis/api dev\" \"pnpm --filter @agentis/web dev\"",
     "agentis:up": "pnpm --filter @agentis/cli start -- up",
     "doctor": "tsx scripts/agentis-doctor.ts",
     "lint": "pnpm -r lint",

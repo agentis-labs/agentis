@@ -19,6 +19,7 @@ import clsx from 'clsx';
 import { api, workspace } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
 import { AgentConstellation, type ConstellationAgent } from '../components/agents/AgentConstellation';
+import { usePageContext } from '../components/assistant/Assistant';
 
 interface FleetSnapshot {
   agents: { total: number; online: number };
@@ -60,6 +61,17 @@ export function FleetOverviewPage() {
   const [approvals, setApprovals] = useState<ApprovalRow[]>([]);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [tick, setTick] = useState(0);
+
+  usePageContext({
+    label: 'Fleet overview',
+    placeholder: 'Ask what needs attention…',
+    prompts: [
+      'What needs my attention right now?',
+      'Which workflows are most active?',
+      'Are any gateways degraded?',
+    ],
+    href: '/fleet',
+  });
 
   useEffect(() => {
     const ws = workspace.get();

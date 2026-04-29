@@ -215,7 +215,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.use('/v1/*', auditLog({ activity, logger }));
 
   // ── Route surface (V1) ──────────────────────────────────
-  app.route('/v1/auth', buildAuthRoutes({ db: sqlite, auth }));
+  app.route('/v1/auth', buildAuthRoutes({ db: sqlite, auth, secrets }));
   app.route('/v1/workspaces', buildWorkspaceRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/workflows', buildWorkflowRoutes({ db: sqlite, auth, engine, bus }));
   app.route('/v1/runs', buildRunRoutes({ db: sqlite, auth, engine, ledger }));

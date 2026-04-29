@@ -21,6 +21,15 @@ export interface AgentisSecrets {
   jwtPublicKeyPem: string;
   /** base64-encoded 32-byte key for AES-256-GCM. */
   credentialKeyB64: string;
+  /**
+   * Single-use auto-login token for the local CLI launch flow.
+   * Written to AGENTIS_DATA_DIR/token; the CLI opens the browser
+   * with ?token=<launchToken> and the /v1/auth/launch route exchanges
+   * it for a normal JWT session without requiring a password.
+   *
+   * Not present when secrets come from environment variables (server deploy).
+   */
+  launchToken?: string;
 }
 
 interface SecretsFile {
@@ -38,18 +47,30 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
       jwtPrivateKeyPem: env.AGENTIS_JWT_PRIVATE_KEY,
       jwtPublicKeyPem: env.AGENTIS_JWT_PUBLIC_KEY,
       credentialKeyB64: env.AGENTIS_CREDENTIAL_KEY,
+      // No launchToken in server/env-var deployments — operators use passwords.
     };
   }
 
   const path = join(env.AGENTIS_DATA_DIR, 'secrets.json');
+  const tokenPath = join(env.AGENTIS_DATA_DIR, 'token');
 
   if (existsSync(path)) {
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as SecretsFile;
+    // Read (or generate) the launch token from the token file.
+    let launchToken: string;
+    if (existsSync(tokenPath)) {
+      launchToken = readFileSync(tokenPath, 'utf8').trim();
+    } else {
+      launchToken = randomBytes(32).toString('base64url');
+      writeFileSync(tokenPath, launchToken, { encoding: 'utf8' });
+      try { chmodSync(tokenPath, 0o600); } catch { /* Windows */ }
+    }
     return {
       jwtPrivateKeyPem: parsed.jwtPrivateKeyPem,
       jwtPublicKeyPem: parsed.jwtPublicKeyPem,
       credentialKeyB64: parsed.credentialKeyB64,
+      launchToken,
     };
   }
 
@@ -61,6 +82,7 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   });
   const credentialKey = randomBytes(32).toString('base64');
+  const launchToken = randomBytes(32).toString('base64url');
 
   const file: SecretsFile = {
     jwtPrivateKeyPem: privateKey,
@@ -77,9 +99,13 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
     /* Windows */
   }
 
+  writeFileSync(tokenPath, launchToken, { encoding: 'utf8' });
+  try { chmodSync(tokenPath, 0o600); } catch { /* Windows */ }
+
   return {
     jwtPrivateKeyPem: file.jwtPrivateKeyPem,
     jwtPublicKeyPem: file.jwtPublicKeyPem,
     credentialKeyB64: file.credentialKeyB64,
+    launchToken,
   };
 }
