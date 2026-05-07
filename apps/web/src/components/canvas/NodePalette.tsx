@@ -1,14 +1,6 @@
-/**
- * Node palette — V1-SPEC §13.5.
- *
- * Left-rail draggable source for the eight canonical node types from
- * V1-SPEC §6.1. Drag onto the canvas to add a node of that type.
- *
- * Spec-required types: Trigger, Agent Task, Skill, Approval, Branch,
- * Subflow, Webhook, Wait/Timer.
- */
-
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
+import { api } from '../../lib/api';
 
 export interface PaletteNodeType {
   type: string;
@@ -18,23 +10,36 @@ export interface PaletteNodeType {
 }
 
 export const PALETTE_NODES: PaletteNodeType[] = [
-  { type: 'trigger', label: 'Trigger', glyph: '⚡', description: 'Manual, schedule, webhook' },
-  { type: 'agent_task', label: 'Agent task', glyph: '◈', description: 'Delegate to a routed agent' },
-  { type: 'skill', label: 'Skill', glyph: '✦', description: 'Run a typed deterministic skill' },
-  { type: 'approval', label: 'Approval', glyph: '✓', description: 'Pause for human gate' },
-  { type: 'branch', label: 'Branch', glyph: '⎇', description: 'Conditional fork' },
-  { type: 'subflow', label: 'Subflow', glyph: '▦', description: 'Embed another workflow' },
-  { type: 'webhook', label: 'Webhook', glyph: '↗', description: 'POST to external URL' },
-  { type: 'wait', label: 'Wait / Timer', glyph: '⏲', description: 'Delay or schedule resume' },
+  { type: 'trigger',    label: 'Trigger',      glyph: '⚡', description: 'Manual, schedule, webhook' },
+  { type: 'agent_task', label: 'Agent task',   glyph: '◈', description: 'Delegate to a routed agent' },
+  { type: 'skill',      label: 'Skill',        glyph: '✦', description: 'Run a typed deterministic skill' },
+  { type: 'approval',   label: 'Approval',     glyph: '✓', description: 'Pause for human gate' },
+  { type: 'branch',     label: 'Branch',       glyph: '⎇', description: 'Conditional fork' },
+  { type: 'subflow',    label: 'Subflow',      glyph: '▦', description: 'Embed another workflow' },
+  { type: 'webhook',    label: 'Webhook',      glyph: '↗', description: 'POST to external URL' },
+  { type: 'wait',       label: 'Wait / Timer', glyph: '⏲', description: 'Delay or schedule resume' },
 ];
+
+interface ReusableWorkflow {
+  id: string;
+  title: string;
+}
 
 export function NodePalette({
   onPick,
   className,
 }: {
-  onPick?: (type: string) => void;
+  onPick?: (type: string, data?: Record<string, unknown>) => void;
   className?: string;
 }) {
+  const [reusable, setReusable] = useState<ReusableWorkflow[]>([]);
+
+  useEffect(() => {
+    void api<{ workflows: ReusableWorkflow[] }>('/v1/workflows?isReusable=true')
+      .then((d) => setReusable(d.workflows ?? []))
+      .catch(() => {});
+  }, []);
+
   return (
     <aside
       className={clsx(
@@ -62,6 +67,35 @@ export function NodePalette({
           </span>
         </button>
       ))}
+
+      {reusable.length > 0 && (
+        <>
+          <div className="my-1 border-t border-line/60" />
+          <h3 className="px-1 pb-1 text-[10px] uppercase tracking-wider text-text-muted">Reusable</h3>
+          {reusable.map((wf) => (
+            <button
+              key={wf.id}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(
+                  'application/x-agentis-node',
+                  JSON.stringify({ type: 'subflow', workflowId: wf.id, label: wf.title }),
+                );
+                e.dataTransfer.effectAllowed = 'copy';
+              }}
+              onClick={() => onPick?.('subflow', { workflowId: wf.id, label: wf.title })}
+              className="flex items-start gap-2 rounded-md border border-transparent bg-surface-2 px-2 py-1.5 text-left hover:border-accent/40"
+              title={`Subflow: ${wf.title}`}
+            >
+              <span className="text-base leading-none">▦</span>
+              <span className="flex flex-col">
+                <span className="font-medium text-text-primary">{wf.title}</span>
+                <span className="text-[10px] text-text-muted">Subflow</span>
+              </span>
+            </button>
+          ))}
+        </>
+      )}
     </aside>
   );
 }

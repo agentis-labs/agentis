@@ -81,32 +81,32 @@ export function LiveStrip() {
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-4 border-t border-line bg-surface px-3 text-[11px] text-text-muted">
-      <Link to="/runs" className="flex items-center gap-1 hover:text-text-primary">
+      <Link to="/history?tab=runs" className="flex items-center gap-1 hover:text-text-primary">
         <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent" />
-        {snap.runs.active} active runs
+        {snap.runs.active} active {snap.runs.active === 1 ? 'run' : 'runs'}
       </Link>
       <Link
-        to="/approvals"
+        to="/home"
         className={clsx(
           'flex items-center gap-1 hover:text-text-primary',
-          snap.approvals.pending > 0 && 'text-amber-300',
+          snap.approvals.pending > 0 && 'text-warn',
         )}
       >
         <span
           className={clsx(
             'inline-block h-1.5 w-1.5 rounded-full',
-            snap.approvals.pending > 0 ? 'bg-amber-400' : 'bg-text-muted/40',
+            snap.approvals.pending > 0 ? 'bg-warn' : 'bg-text-muted/40',
           )}
         />
-        {snap.approvals.pending} pending approvals
+        {snap.approvals.pending} pending {snap.approvals.pending === 1 ? 'approval' : 'approvals'}
       </Link>
-      <Link to="/gateways" className="flex items-center gap-1 hover:text-text-primary">
+      <Link to="/settings?tab=connections" className="flex items-center gap-1 hover:text-text-primary">
         <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', gwDot)} />
-        Gateways {snap.gateways.connected}/{snap.gateways.total}
+        Connections {snap.gateways.connected}/{snap.gateways.total}
       </Link>
       <span className="ml-auto truncate" title={latest?.summary ?? ''}>
         {latest ? (
-          <Link to="/activity" className="hover:text-text-primary">
+          <Link to="/history" className="hover:text-text-primary">
             ≈ {latest.summary}
           </Link>
         ) : (

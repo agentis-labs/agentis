@@ -76,8 +76,8 @@ export function OnboardingStrip() {
   const steps: Step[] = [
     {
       key: 'gateway',
-      label: 'Connect a Gateway',
-      to: '/gateways',
+      label: 'Connect a gateway',
+      to: '/settings?tab=connections',
       done: snap.gateways.total > 0,
     },
     { key: 'agent', label: 'Register an agent', to: '/agents', done: snap.agents.total > 0 },

@@ -1,10 +1,9 @@
 /**
  * StatusBadge — shared status pill with semantic tone.
  *
- * The same pill must mean the same thing everywhere: "online" is
- * always accent, "degraded" is always warn, "failed" / "offline" is
- * always danger, "idle" / "pending" is always muted. Anything else
- * uses the neutral tone so we can spot uncategorised states later.
+ * Same pill = same meaning everywhere. Supports both legacy string-based
+ * status (auto-mapped to a tone) and the new rich semantic API with
+ * per-status pulse behavior.
  */
 
 import clsx from 'clsx';
@@ -17,11 +16,13 @@ const KNOWN: Record<string, StatusTone> = {
   ready: 'accent',
   active: 'accent',
   running: 'accent',
+  live: 'accent',
   completed: 'accent',
   connected: 'accent',
   healthy: 'accent',
   ok: 'accent',
   succeeded: 'accent',
+  success: 'accent',
 
   degraded: 'warn',
   pending: 'warn',
@@ -30,12 +31,14 @@ const KNOWN: Record<string, StatusTone> = {
   retrying: 'warn',
   warning: 'warn',
   warn: 'warn',
+  attention: 'warn',
 
   offline: 'danger',
   failed: 'danger',
   error: 'danger',
   disconnected: 'danger',
   rejected: 'danger',
+  broken: 'danger',
 
   idle: 'muted',
   draft: 'muted',
@@ -44,11 +47,17 @@ const KNOWN: Record<string, StatusTone> = {
   paused: 'muted',
 };
 
+const PULSE_STATES = new Set([
+  'running', 'live', 'active', 'pending', 'waiting', 'connecting', 'retrying',
+]);
+
 export interface StatusBadgeProps {
   status?: string | null;
   tone?: StatusTone;
   label?: ReactNode;
   dot?: boolean;
+  pulse?: boolean;
+  size?: 'sm' | 'md';
   className?: string;
 }
 
@@ -58,34 +67,68 @@ export function statusTone(status: string | null | undefined): StatusTone {
 }
 
 const TONE_CLS: Record<StatusTone, string> = {
-  accent: 'border-accent/30 bg-accent/10 text-accent',
-  warn: 'border-warn/30 bg-warn/10 text-warn',
-  danger: 'border-danger/30 bg-danger/10 text-danger',
+  accent: 'border-accent/30 bg-accent-soft text-accent',
+  warn: 'border-warn/30 bg-warn-soft text-warn',
+  danger: 'border-danger/30 bg-danger-soft text-danger',
   muted: 'border-line bg-surface-2 text-text-muted',
   neutral: 'border-line bg-surface-2 text-text-primary',
 };
 
 const DOT_CLS: Record<StatusTone, string> = {
-  accent: 'bg-accent shadow-glow',
+  accent: 'bg-accent',
   warn: 'bg-warn',
   danger: 'bg-danger',
   muted: 'bg-text-muted/50',
   neutral: 'bg-text-muted/50',
 };
 
-export function StatusBadge({ status, tone, label, dot = true, className }: StatusBadgeProps) {
+export function StatusBadge({
+  status, tone, label, dot = true, pulse, size = 'md', className,
+}: StatusBadgeProps) {
   const t = tone ?? statusTone(status);
   const text = label ?? status ?? 'unknown';
+  const shouldPulse = pulse ?? (typeof status === 'string' && PULSE_STATES.has(status.toLowerCase()));
   return (
     <span
+      role="status"
       className={clsx(
-        'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide',
+        'inline-flex items-center gap-1.5 rounded-pill border font-medium',
+        size === 'sm' ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-1 text-[11px]',
         TONE_CLS[t],
         className,
       )}
     >
-      {dot && <span className={clsx('h-1.5 w-1.5 rounded-full', DOT_CLS[t])} />}
-      {text}
+      {dot && (
+        <span
+          className={clsx(
+            'h-1.5 w-1.5 rounded-full',
+            DOT_CLS[t],
+            shouldPulse && 'animate-pulse-dot',
+            t === 'accent' && shouldPulse && 'shadow-glow',
+          )}
+        />
+      )}
+      <span className="capitalize">{text}</span>
     </span>
+  );
+}
+
+export function StatusDot({
+  status, tone, pulse, size = 8, className,
+}: {
+  status?: string | null;
+  tone?: StatusTone;
+  pulse?: boolean;
+  size?: number;
+  className?: string;
+}) {
+  const t = tone ?? statusTone(status);
+  const shouldPulse = pulse ?? (typeof status === 'string' && PULSE_STATES.has(status.toLowerCase()));
+  return (
+    <span
+      aria-label={status ?? 'status'}
+      style={{ width: size, height: size }}
+      className={clsx('inline-block rounded-full', DOT_CLS[t], shouldPulse && 'animate-pulse-dot', className)}
+    />
   );
 }

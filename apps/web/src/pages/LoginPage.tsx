@@ -37,7 +37,6 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             className="w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-            autoFocus
           />
         </label>
         <label className="mb-4 block">
@@ -46,6 +45,7 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             type="password"
+            autoFocus
             className="w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
           />
         </label>
