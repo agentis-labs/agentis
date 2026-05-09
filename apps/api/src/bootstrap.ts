@@ -341,6 +341,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     memory: memoryRuntime,
     episodes: episodicMemoryStore,
     memoryPromotion: memoryPromotion,
+    rollingBaselines: rollingBaselineStore,
   });
   const chatToolExecutor = new ChatToolExecutor(toolRegistry, logger);
   // Plane 7: MCP interop — opt-in via AGENTIS_MCP_ENABLED env var.
@@ -454,6 +455,13 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         runId: p.runId,
         message: (err as Error).message,
       });
+    }
+    // §5.6 retention policy: working memory dies with the run.
+    // Dispose in-memory scratchpad; durable rows survive for post-mortem.
+    try {
+      workingMemoryCompactor.dispose(p.runId, { durable: true });
+    } catch {
+      // Non-critical — scratchpad evicts on its own GC cycle.
     }
   });
 

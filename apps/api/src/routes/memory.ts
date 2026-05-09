@@ -222,11 +222,9 @@ export function buildMemoryRoutes(deps: MemoryRoutesDeps) {
 
   app.get('/working/:runId', (c) => {
     const runId = c.req.param('runId');
-    // Snapshot — passes through MemoryRuntime via the compactor.
-    // We need direct access to compactor.snapshot — re-derive from summary call.
-    // For now expose via the summary endpoint and provide entries via search.
+    const entries = deps.memory.snapshotWorking(runId);
     const summary = deps.memory.summarizeWorking(runId);
-    return c.json({ runId, summary });
+    return c.json({ runId, entries, summary });
   });
 
   app.get('/working/:runId/summary', (c) => {
@@ -277,8 +275,13 @@ export function buildMemoryRoutes(deps: MemoryRoutesDeps) {
     const namespace = c.req.param('namespace') as WorkingMemoryNamespace;
     const kind = c.req.param('kind') as WorkingMemoryKind;
     const key = c.req.param('key');
-    deps.memory.disposeWorking(runId, { durable: false });
-    void namespace; void kind; void key;
+    if (!NAMESPACE.includes(namespace)) {
+      throw new AgentisError('VALIDATION_FAILED', `unknown namespace '${namespace}'`);
+    }
+    if (!KIND.includes(kind)) {
+      throw new AgentisError('VALIDATION_FAILED', `unknown kind '${kind}'`);
+    }
+    deps.memory.deleteWorking(runId, namespace, kind, key);
     return c.json({ ok: true });
   });
 

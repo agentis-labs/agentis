@@ -281,6 +281,47 @@ const agentisPackageContentsSchema = z.object({
     derivedFromRuns: z.number().optional(),  // how many runs produced this baseline
   })).default([]),
 
+  // ── Memory Architecture fields (Agentis Memory OS — docs/memory/MEMORY-ARCHITECTURE.md §13.2) ──
+  // Runtime episode seeds — execution-derived lessons shipped with the app.
+  // These seed the `memory_episodes` table (Layer 3) rather than `app_memory`.
+  // Distinct from `memorySeeds` which seed typed knowledge (facts/rules/patterns).
+  runtimeEpisodeSeeds: z.array(z.object({
+    type: z.enum(['decision','failure','recovery','success_pattern','approval',
+      'evaluator_outcome','incident','artifact_outcome','distilled_lesson']),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    details: z.string().optional(),
+    outcomeStatus: z.enum(['good','bad','mixed']).optional(),
+    importance: z.number().min(0).max(1).optional(),
+    trust: z.number().min(0).max(1).optional(),
+    tags: z.array(z.string()).optional(),
+    entities: z.array(z.string()).optional(),
+  })).default([]),
+
+  // Memory policy — controls promotion and trust behaviour for this app.
+  // Absent = use platform defaults.
+  memoryPolicy: z.object({
+    minImportanceForPromotion: z.number().min(0).max(1).optional(),
+    minTrustForRetrieval: z.number().min(0).max(1).optional(),
+    requireHumanConfirmForAgentWrites: z.boolean().optional(),
+    highRiskTags: z.array(z.string()).optional(),
+    maxEpisodesPerType: z.number().int().nonnegative().optional(),
+  }).optional(),
+
+  // Retrieval policy — default retrieval parameters for buildContext() calls.
+  // Absent = use platform defaults (mode: 'normal', budgetClass: 'balanced').
+  retrievalPolicy: z.object({
+    defaultMode: z.enum(['strict', 'normal', 'exploratory']).optional(),
+    defaultBudgetClass: z.enum(['cheap', 'balanced', 'power']).optional(),
+    caps: z.object({
+      knowledge: z.number().int().nonnegative().optional(),
+      episodes: z.number().int().nonnegative().optional(),
+      evaluatorExamples: z.number().int().nonnegative().optional(),
+      baselineHints: z.number().int().nonnegative().optional(),
+    }).optional(),
+    includeWorkingSummary: z.boolean().optional(),
+  }).optional(),
+
   // ── Presentation ─────────────────────────────────────────────────────────
   entryWorkflowSlug: z.string().optional(),
   category: z.string().optional(),   // 'sales' | 'engineering' | 'ops' | 'security' | ...

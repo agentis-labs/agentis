@@ -152,6 +152,43 @@ const workflowBaselineSeedSchema = z.object({
 // Distinct from `memorySeeds` (which seed the wedge `app_memory` table —
 // typed knowledge: facts/preferences/rules). These seed `memory_episodes`,
 // the durable execution-lesson layer.
+
+// Memory policy config (docs/memory/MEMORY-ARCHITECTURE.md §13.2).
+// Controls promotion and trust behaviour for this app.
+const memoryPolicySchema = z.object({
+  /** Minimum importance score (0..1) for automatic promotion. Default 0.5. */
+  minImportanceForPromotion: z.number().min(0).max(1).optional(),
+  /** Minimum trust score (0..1) accepted for retrieval in 'normal' mode. Default 0.4. */
+  minTrustForRetrieval: z.number().min(0).max(1).optional(),
+  /**
+   * Whether agent-written episodes require human confirmation before being
+   * promoted. Default false (agent writes go through standard trust policy).
+   */
+  requireHumanConfirmForAgentWrites: z.boolean().optional(),
+  /** Tags that mark a memory as high-risk, triggering mandatory human review. */
+  highRiskTags: z.array(z.string()).optional(),
+  /** Max episodes retained per type before oldest are archived. 0 = unlimited. */
+  maxEpisodesPerType: z.number().int().nonnegative().optional(),
+}).optional();
+
+// Retrieval policy config (docs/memory/MEMORY-ARCHITECTURE.md §9, §13.2).
+// Sets the default retrieval parameters when this app calls buildContext().
+const retrievalPolicySchema = z.object({
+  /** Default injection mode. Default 'normal'. */
+  defaultMode: z.enum(['strict', 'normal', 'exploratory']).optional(),
+  /** Default token budget class. Default 'balanced'. */
+  defaultBudgetClass: z.enum(['cheap', 'balanced', 'power']).optional(),
+  /** Override caps per layer. */
+  caps: z.object({
+    knowledge: z.number().int().nonnegative().optional(),
+    episodes: z.number().int().nonnegative().optional(),
+    evaluatorExamples: z.number().int().nonnegative().optional(),
+    baselineHints: z.number().int().nonnegative().optional(),
+  }).optional(),
+  /** Whether to include working memory summary by default. Default true. */
+  includeWorkingSummary: z.boolean().optional(),
+}).optional();
+
 const runtimeEpisodeSeedSchema = z.object({
   type: z.enum([
     'decision','failure','recovery','success_pattern','approval',
@@ -185,6 +222,10 @@ const manifestSchema = z.object({
   workflowBaselines: z.array(workflowBaselineSeedSchema).default([]),
   // Memory Architecture fields (Memory OS §13.2)
   runtimeEpisodeSeeds: z.array(runtimeEpisodeSeedSchema).default([]),
+  // Memory and retrieval policy configuration (Memory OS §13.2).
+  // Both are optional — absent means "use platform defaults".
+  memoryPolicy: memoryPolicySchema,
+  retrievalPolicy: retrievalPolicySchema,
 });
 
 const installLocalSchema = z.object({

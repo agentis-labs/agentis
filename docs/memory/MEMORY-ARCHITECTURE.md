@@ -18,10 +18,11 @@
 | Promotion pipeline + audit trail | §10 | `services/memoryPromotion.ts`, `services/memoryTrust.ts`, `services/runPromotionExtractor.ts`, `memory_promotion_events` |
 | Trust policy (capped agent writes) | §11 | `services/memoryTrust.ts` (`computeTrust`, `isHighRiskMemory`) |
 | Failure handling (degraded modes) | §12 | `services/memoryRetrieval.ts` (try/catch per layer) |
-| Package format additions | §13.2 | `routes/packages.ts` (`runtimeEpisodeSeeds`) |
+| Package format additions | §13.2 | `routes/packages.ts` (`runtimeEpisodeSeeds`, `memoryPolicy`, `retrievalPolicy`) |
+| `evaluatorMemory.ts` bridge | §13.3 | `services/evaluatorMemory.ts` (evaluator→memory feedback loop) |
 | Routes | §15 | `routes/memory.ts` (mounted at `/v1/memory`) |
-| Tools (agent surface) | §15 | `services/agentisToolHandlers/memory.ts` |
-| `IMemoryRuntime` facade | §15 | `services/memoryRuntime.ts` |
+| Tools (agent surface) | §15 | `services/agentisToolHandlers/memory.ts` (7 tools incl. `agentis.memory.baselines.detect_anomalies`) |
+| `IMemoryRuntime` facade | §15 | `services/memoryRuntime.ts` (`deleteWorking`, `snapshotWorking` added) |
 
 ---
 

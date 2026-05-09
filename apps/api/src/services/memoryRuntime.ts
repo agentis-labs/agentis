@@ -21,6 +21,7 @@ import {
   type RetrievalParams,
   type RuntimeEpisode,
   type WorkflowBaselineSnapshot,
+  type WorkingMemoryEntry,
   type WorkingMemoryNamespace,
   type WorkingMemoryKind,
   type WorkingMemorySummary,
@@ -67,6 +68,10 @@ export interface IMemoryRuntime {
   // ── Layer 1: Working memory ─────────────────────────────
   readWorking<T = unknown>(runId: string, namespace: WorkingMemoryNamespace, kind: WorkingMemoryKind, key: string): T | null;
   writeWorking<T = unknown>(runId: string, namespace: WorkingMemoryNamespace, kind: WorkingMemoryKind, key: string, payload: T): void;
+  /** Delete one typed entry from both in-memory scratchpad and durable store. */
+  deleteWorking(runId: string, namespace: WorkingMemoryNamespace, kind: WorkingMemoryKind, key: string): void;
+  /** Snapshot all live working-memory entries for a run. */
+  snapshotWorking(runId: string): WorkingMemoryEntry[];
   summarizeWorking(runId: string): WorkingMemorySummary;
   compactWorking(runId: string): WorkingMemorySummary;
   disposeWorking(runId: string, opts?: { durable?: boolean }): void;
@@ -129,6 +134,14 @@ export class MemoryRuntime implements IMemoryRuntime {
 
   writeWorking<T = unknown>(runId: string, namespace: WorkingMemoryNamespace, kind: WorkingMemoryKind, key: string, payload: T): void {
     this.compactor.write<T>(runId, namespace, kind, key, payload);
+  }
+
+  deleteWorking(runId: string, namespace: WorkingMemoryNamespace, kind: WorkingMemoryKind, key: string): void {
+    this.compactor.delete(runId, namespace, kind, key);
+  }
+
+  snapshotWorking(runId: string): WorkingMemoryEntry[] {
+    return this.compactor.snapshot(runId);
   }
 
   summarizeWorking(runId: string): WorkingMemorySummary {

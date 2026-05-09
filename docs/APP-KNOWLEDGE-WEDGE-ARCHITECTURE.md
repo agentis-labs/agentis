@@ -32,7 +32,7 @@
 | §17.1 Phase 1 — make seeds canonical | ✅ | `memorySeeds`, `evaluatorExampleSeeds` shipped in manifest |
 | §17.2 Phase 2 — strengthen dataset contracts | ✅ | `wedgeRole` + `expectedImpact` + `freshnessExpectation` |
 | §17.3 Phase 3 — `appIntelligenceRuntime` | ✅ | Composed retrieval with token budget enforcement |
-| §17.4 Phase 4 — upgrade retrieval quality | ⚠ V1 lexical TF-IDF (vector retrieval reserved on `knowledge_chunks.embedding` column) |
+| §17.4 Phase 4 — upgrade retrieval quality | ✅ Hybrid lexical TF-IDF + vector retrieval via `HashingEmbeddingProvider` (512-dim feature hashing); auto/lexical/vector/hybrid modes |
 | §17.5 Phase 5 — promotion and compounding | ✅ | `IntelligencePromotion` + memory mirroring above 0.7 confidence |
 | §17.6 Phase 6 — make the wedge visible in UI | 🟦 Backend complete; UI surfaces (App Canvas, Memory layer) land with the App Canvas / Brain UX docs |
 
@@ -47,10 +47,10 @@
 
 **Routes added at `/v1/apps`** (33 endpoints across intelligence, datasets, ingestion, knowledge, memory, evaluator examples, baselines, promoted patterns).
 
-**Deferred (deliberate):**
-- Vector retrieval (the schema reserves `knowledge_chunks.embedding`; the swap is mechanical when an embedding model is wired).
-- Resumable per-item ingestion (V1 uses aggregate counters; add `dataset_import_items` if granular recovery is needed).
-- Binary file ingestion (PDF/Markdown-zip). V1 supports text payloads (CSV / JSON / JSONL / TXT). The `payload` body field accepts strings — bytes are a future add.
+**Previously deferred — now implemented:**
+- Vector retrieval — `KnowledgeStore` + `EpisodicMemoryStore` now use `HashingEmbeddingProvider` (512-dim feature hashing, zero external deps). Auto-mode activates hybrid when ≥50% candidates have embeddings.
+- Resumable per-item ingestion — `dataset_import_items` table added; `DatasetIngestion.resume()` deduplicates by SHA-256 content hash, skipping already-`completed` items.
+- Binary file ingestion — PDF (FlateDecode stream extraction + BT/ET text operators) and markdown-zip (PKZIP local header scan + `zlib.inflateRawSync`) now supported alongside CSV/JSON/JSONL/TXT.
 
 ---
 

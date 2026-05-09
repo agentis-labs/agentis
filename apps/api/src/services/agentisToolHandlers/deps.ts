@@ -23,6 +23,7 @@ import type { IntelligencePromotion } from '../intelligencePromotion.js';
 import type { MemoryRuntime } from '../memoryRuntime.js';
 import type { EpisodicMemoryStore } from '../episodicMemoryStore.js';
 import type { MemoryPromotion } from '../memoryPromotion.js';
+import type { RollingBaselineStore } from '../rollingBaselineStore.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -44,4 +45,5 @@ export interface ToolHandlerDeps {
   memory?: MemoryRuntime;
   episodes?: EpisodicMemoryStore;
   memoryPromotion?: MemoryPromotion;
+  rollingBaselines?: RollingBaselineStore;
 }

@@ -21,6 +21,7 @@
 
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
+import type { ObservedRunMetrics } from '../rollingBaselineStore.js';
 import type {
   PromotionCandidate,
   RetrievalBudgetClass,
@@ -293,6 +294,45 @@ export function registerMemoryTools(registry: AgentisToolRegistry, deps: ToolHan
         if (args.runId) params.runId = String(args.runId);
         const decision = deps.memoryPromotion.promoteCandidate(params);
         return { decision };
+      },
+    },
+
+    // ── Layer 4: baseline anomaly detection ──────────────────
+    {
+      definition: {
+        id: 'agentis.memory.baselines.detect_anomalies',
+        family: 'data',
+        description: 'Compare observed run metrics against rolling baselines and return deviation reports. Useful for the policy engine, cost compiler, and self-healing logic.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string', description: 'Workflow to check against its baseline.' },
+            appId: { type: 'string' },
+            successRate: { type: 'number', minimum: 0, maximum: 1 },
+            latencyMs: { type: 'number', minimum: 0 },
+            costMicros: { type: 'number', minimum: 0 },
+            replayCount: { type: 'number', minimum: 0 },
+            approvalCount: { type: 'number', minimum: 0 },
+            evaluatorPassRate: { type: 'number', minimum: 0, maximum: 1 },
+          },
+          required: ['workflowId', 'latencyMs', 'costMicros', 'replayCount', 'approvalCount'],
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.rollingBaselines) return { error: 'rolling_baselines_not_wired', anomalies: [] };
+        const observed: ObservedRunMetrics = {
+          workflowId: String(args.workflowId),
+          latencyMs: Number(args.latencyMs),
+          costMicros: Number(args.costMicros),
+          replayCount: Number(args.replayCount),
+          approvalCount: Number(args.approvalCount),
+        };
+        if (args.appId !== undefined) observed.appId = String(args.appId);
+        if (args.successRate !== undefined) observed.successRate = Number(args.successRate);
+        if (args.evaluatorPassRate !== undefined) observed.evaluatorPassRate = Number(args.evaluatorPassRate);
+        const anomalies = deps.rollingBaselines.detectAnomalies(ctx.workspaceId, observed);
+        return { count: anomalies.length, anomalies };
       },
     },
   ]);
