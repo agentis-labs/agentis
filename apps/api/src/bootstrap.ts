@@ -13,6 +13,8 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import { loadEnv, type AgentisEnv } from './env.js';
 import { createLogger, type Logger } from './logger.js';
 import { loadOrCreateSecrets, type AgentisSecrets } from './secrets.js';
@@ -34,6 +36,38 @@ import { TelegramChannelAdapter } from './adapters/channels/telegram.js';
 import { DiscordChannelAdapter } from './adapters/channels/discord.js';
 import { PartialReplayService } from './services/partialReplay.js';
 import { CommandIndex } from './services/commandIndex.js';
+// Agent-first runtime (AGENT-FIRST-ARCHITECTURE.md)
+import { AgentisToolRegistry } from './services/agentisToolRegistry.js';
+import { registerAllTools } from './services/agentisToolHandlers/index.js';
+import { ChatToolExecutor } from './services/chatToolExecutor.js';
+import { TurnStateStore } from './services/turnStateStore.js';
+import { MultiTurnCoordinator } from './services/multiTurnCoordinator.js';
+import { AppContractRuntime } from './services/appContractRuntime.js';
+import { EvaluatorRuntime } from './services/evaluatorRuntime.js';
+import { RuntimePolicyEngine } from './services/runtimePolicyEngine.js';
+import { WorkflowCostCompiler } from './services/workflowCostCompiler.js';
+import { WorkflowDeployments } from './services/workflowDeployments.js';
+import { McpInterop } from './services/mcpInterop.js';
+// App Knowledge Wedge — Agentis 1.1
+// (docs/APP-KNOWLEDGE-WEDGE-ARCHITECTURE.md)
+import { KnowledgeStore } from './services/knowledgeStore.js';
+import { HashingEmbeddingProvider } from './services/embeddingProvider.js';
+// Memory Architecture — Agentis Memory OS (docs/memory/MEMORY-ARCHITECTURE.md)
+import { EpisodicMemoryStore } from './services/episodicMemoryStore.js';
+import { MemoryPromotion } from './services/memoryPromotion.js';
+import { WorkingMemoryCompactor } from './services/workingMemoryCompactor.js';
+import { RollingBaselineStore } from './services/rollingBaselineStore.js';
+import { MemoryRetrieval } from './services/memoryRetrieval.js';
+import { MemoryRuntime } from './services/memoryRuntime.js';
+import { RunPromotionExtractor } from './services/runPromotionExtractor.js';
+import { buildMemoryRoutes } from './routes/memory.js';
+import { AppMemoryStore } from './services/appMemoryStore.js';
+import { EvaluatorExampleStore } from './services/evaluatorExampleStore.js';
+import { WorkflowBaselineStore } from './services/workflowBaselineStore.js';
+import { AppActivation } from './services/appActivation.js';
+import { DatasetIngestion } from './services/datasetIngestion.js';
+import { AppIntelligenceRuntime } from './services/appIntelligenceRuntime.js';
+import { IntelligencePromotion } from './services/intelligencePromotion.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
 import { AdapterManager } from './adapters/AdapterManager.js';
@@ -70,6 +104,9 @@ import { buildCommandRoutes } from './routes/command.js';
 import { buildReplayRoutes } from './routes/replay.js';
 import { buildPackageRoutes } from './routes/packages.js';
 import { buildTestHarnessRoutes } from './routes/testHarness.js';
+import { buildToolRoutes } from './routes/tools.js';
+import { buildDeploymentRoutes } from './routes/deployments.js';
+import { buildAppRoutes } from './routes/apps.js';
 import { createRealtimeServer, type RealtimeServer } from './websocket/rooms.js';
 
 export interface BootstrapResult {
@@ -130,6 +167,115 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const commandIndex = new CommandIndex(sqlite);
   const registry = new ActiveWorkflowRegistry(sqlite, logger);
 
+  // ── Agent-first runtime ─────────────────────────────────
+  // Plane 1: app contract enforcement
+  const appContractRuntime = new AppContractRuntime(sqlite, logger);
+  // Plane 3: turn state + multi-turn coordinator
+  const turnStateStore = new TurnStateStore(sqlite);
+  const multiTurnCoordinator = new MultiTurnCoordinator(turnStateStore, approvals, logger);
+  // Plane 6: evaluator + policy engine
+  const evaluatorRuntime = new EvaluatorRuntime(sqlite, logger);
+  const runtimePolicyEngine = new RuntimePolicyEngine(sqlite, appContractRuntime, approvals, logger);
+  // Plane 4: cost compiler (pure, no deps beyond core types)
+  const costCompiler = new WorkflowCostCompiler();
+  // Plane 7: deployments
+  const workflowDeployments = new WorkflowDeployments(sqlite, logger);
+
+  // ── App Knowledge Wedge (Agentis 1.1) ───────────────────
+  // docs/APP-KNOWLEDGE-WEDGE-ARCHITECTURE.md
+  // Embedding provider — ships HashingEmbeddingProvider (512-dim feature
+  // hashing, no external deps). Swap for OpenAI / Cohere / local model by
+  // implementing the EmbeddingProvider interface and injecting it here.
+  const embeddingProvider = new HashingEmbeddingProvider();
+  // Class 1+2 storage:
+  const knowledgeStore = new KnowledgeStore(sqlite, logger, embeddingProvider);
+  // Class 1 (memorySeeds) + Class 4 (promoted memory):
+  const appMemoryStore = new AppMemoryStore(sqlite, logger);
+  // Class 3:
+  const evaluatorExampleStore = new EvaluatorExampleStore(sqlite, logger);
+  // Per-workflow baselines:
+  const workflowBaselineStore = new WorkflowBaselineStore(sqlite);
+  // (AppActivation is constructed below — after the Memory OS stores so it
+  // can also seed runtime episodes from `runtimeEpisodeSeeds`.)
+  // Class 2 ingestion pipeline:
+  const datasetIngestion = new DatasetIngestion(
+    sqlite,
+    knowledgeStore,
+    appMemoryStore,
+    evaluatorExampleStore,
+    logger,
+  );
+  // Class 4 promotion engine:
+  const intelligencePromotion = new IntelligencePromotion(sqlite, appMemoryStore, logger);
+  // Composed retrieval surface:
+  const appIntelligenceRuntime = new AppIntelligenceRuntime(
+    sqlite,
+    knowledgeStore,
+    appMemoryStore,
+    evaluatorExampleStore,
+    workflowBaselineStore,
+    logger,
+  );
+
+  // ── Memory Architecture (Agentis Memory OS) ─────────────
+  // docs/memory/MEMORY-ARCHITECTURE.md
+  // Layer 3 storage:
+  const episodicMemoryStore = new EpisodicMemoryStore(sqlite, logger, embeddingProvider);
+  // Layer 4 rolling baselines:
+  const rollingBaselineStore = new RollingBaselineStore(sqlite);
+  // Layer 1 compactor — needs a workspace resolver since durable rows are
+  // workspace-scoped. We resolve via the run table.
+  const workingMemoryCompactor = new WorkingMemoryCompactor(
+    sqlite,
+    scratchpad,
+    logger,
+    (runId: string) => {
+      const row = sqlite.select({ workspaceId: schema.workflowRuns.workspaceId })
+        .from(schema.workflowRuns)
+        .where(eq(schema.workflowRuns.id, runId))
+        .get();
+      return row?.workspaceId ?? null;
+    },
+  );
+  // Promotion engine:
+  const memoryPromotion = new MemoryPromotion(sqlite, episodicMemoryStore, logger);
+  // Layer 5 composed retrieval:
+  const memoryRetrieval = new MemoryRetrieval(
+    knowledgeStore,
+    episodicMemoryStore,
+    evaluatorExampleStore,
+    workflowBaselineStore,
+    rollingBaselineStore,
+    workingMemoryCompactor,
+    logger,
+  );
+  // Unified facade — `IMemoryRuntime`:
+  const memoryRuntime = new MemoryRuntime(
+    knowledgeStore,
+    episodicMemoryStore,
+    evaluatorExampleStore,
+    workflowBaselineStore,
+    rollingBaselineStore,
+    workingMemoryCompactor,
+    memoryRetrieval,
+    memoryPromotion,
+    logger,
+  );
+  // Automatic run-completion → promotion candidate extractor.
+  const runPromotionExtractor = new RunPromotionExtractor(sqlite, memoryPromotion, logger);
+
+  // Activation orchestrator (called on package install). Now that the Memory
+  // OS stores exist, we wire the EpisodicMemoryStore so package activation
+  // also seeds `runtimeEpisodeSeeds` (Memory OS §13.2).
+  const appActivation = new AppActivation(
+    knowledgeStore,
+    appMemoryStore,
+    evaluatorExampleStore,
+    workflowBaselineStore,
+    logger,
+    episodicMemoryStore,
+  );
+
   // Channel bridge (Batch 4): Telegram inbound+outbound, Discord outbound-only.
   const channelBridge = new ChannelBridge({
     db: sqlite,
@@ -158,6 +304,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     adapters,
     subflows,
     telemetry,
+    multiTurnCoordinator,
   });
 
   // Trigger runtime needs the engine; wire after engine construction.
@@ -169,8 +316,70 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     adapters,
   });
 
+  // ── Plane 2: Agent-facing tool registry ─────────────────
+  // The registry is the single source of truth for the machine surface
+  // (chat, workflow tool execution, external MCP). Handlers are registered
+  // once at bootstrap so the catalog is stable for the process lifetime.
+  const toolRegistry = new AgentisToolRegistry({ logger });
+  registerAllTools(toolRegistry, {
+    db: sqlite,
+    logger,
+    engine,
+    ledger,
+    scratchpad,
+    approvals,
+    activity,
+    replay,
+    // Wedge stores (App Knowledge Wedge — Agentis 1.1)
+    knowledge: knowledgeStore,
+    appMemory: appMemoryStore,
+    evaluators: evaluatorExampleStore,
+    baselines: workflowBaselineStore,
+    intelligence: appIntelligenceRuntime,
+    promotion: intelligencePromotion,
+    // Memory Architecture runtime
+    memory: memoryRuntime,
+    episodes: episodicMemoryStore,
+    memoryPromotion: memoryPromotion,
+  });
+  const chatToolExecutor = new ChatToolExecutor(toolRegistry, logger);
+  // Plane 7: MCP interop — opt-in via AGENTIS_MCP_ENABLED env var.
+  const mcpInterop = new McpInterop(toolRegistry, logger, {
+    enabled: process.env.AGENTIS_MCP_ENABLED === '1' || process.env.AGENTIS_MCP_ENABLED === 'true',
+  });
+
+  logger.info('agentis.agent_first_runtime.ready', {
+    tools: toolRegistry.size(),
+    mcpEnabled: mcpInterop['options'].enabled,
+  });
+
+  logger.info('agentis.app_knowledge_wedge.ready', {
+    stores: ['knowledge_chunks', 'app_memory', 'app_evaluator_examples', 'workflow_baselines', 'app_promoted_patterns', 'dataset_imports'],
+    routes: '/v1/apps',
+  });
+
+  logger.info('agentis.memory_os.ready', {
+    layers: {
+      working: 'workingMemoryCompactor + working_memory_entries',
+      knowledge: 'knowledgeStore (hybrid lexical + vector)',
+      episodic: 'episodicMemoryStore + memory_episodes',
+      evaluatorBaselines: 'evaluatorExampleStore + rollingBaselineStore',
+      retrieval: 'memoryRetrieval + memoryRuntime (token-budgeted)',
+    },
+    routes: '/v1/memory',
+  });
+
+  // Suppress unused-symbol warnings for services that are not yet referenced
+  // by routes (they are exposed for follow-up route additions and tests).
+  void chatToolExecutor;
+  void evaluatorRuntime;
+  void runtimePolicyEngine;
+  void costCompiler;
+
   // ── Adapter event glue ──────────────────────────────────
-  // 1) Engine needs task.completed/failed for node settlement.
+  // 1) Engine needs task.completed/failed/turn for node settlement.
+  //    task.turn is the multi-turn boundary signal (Plane 3); single-shot
+  //    adapters never emit it. task.completed remains the single-shot terminal.
   adapters.onEvent((event) => {
     if (event.eventType === 'task.completed') {
       void engine.notifyTaskCompleted({
@@ -183,6 +392,16 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         runId: event.runId,
         nodeId: event.taskId,
         error: event.error,
+      });
+    } else if (event.eventType === 'task.turn') {
+      void engine.notifyTaskTurn({
+        runId: event.runId,
+        nodeId: event.taskId,
+        status: event.status,
+        output: event.output,
+        summary: event.summary,
+        costCents: event.costCents,
+        blockers: event.blockers,
       });
     }
   });
@@ -198,6 +417,44 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       nodeId: approvalId,
       output: { approved: true },
     });
+  });
+
+  // 4) Run completion → memory promotion candidate extraction (Memory OS §10).
+  //    Subscribes to bus envelopes; filters for workspace-room run.completed
+  //    and run.failed. The extractor pulls evaluator outcomes, approvals, and
+  //    failures from the run's audit tables and runs them through MemoryPromotion.
+  bus.subscribe((msg) => {
+    if (!msg.room.startsWith('workspace:')) return;
+    const event = msg.envelope.event;
+    if (event !== 'run.completed' && event !== 'run.failed') return;
+    const p = msg.envelope.payload as { runId?: string; status?: string; workflowId?: string } | null;
+    if (!p || !p.runId || !p.status || !p.workflowId) return;
+    const row = sqlite.select({ workspaceId: schema.workflowRuns.workspaceId })
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, p.runId))
+      .get();
+    if (!row) return;
+    try {
+      const summary = runPromotionExtractor.extractAndPromote({
+        workspaceId: row.workspaceId,
+        runId: p.runId,
+        workflowId: p.workflowId,
+        appId: null,
+        status: p.status,
+      });
+      if (summary.promoted + summary.merged + summary.superseded > 0) {
+        logger.info('memory.run_promotion.applied', {
+          runId: p.runId,
+          status: p.status,
+          ...summary,
+        });
+      }
+    } catch (err) {
+      logger.warn('memory.run_promotion.failed', {
+        runId: p.runId,
+        message: (err as Error).message,
+      });
+    }
   });
 
   const app = new Hono();
@@ -221,7 +478,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/runs', buildRunRoutes({ db: sqlite, auth, engine, ledger }));
   app.route('/v1/runs', buildReplayRoutes({ db: sqlite, auth, engine, replay }));
   app.route('/v1/skills', buildSkillRoutes({ db: sqlite, auth }));
-  app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth }));
+  app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, activation: appActivation }));
   app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations }));
   app.route('/v1/agents', buildTerminalRoutes({ db: sqlite, auth, conversations }));
   app.route('/v1/gateways', buildGatewayRoutes({ db: sqlite, auth, vault: credentialVault }));
@@ -238,6 +495,35 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/ambients', buildAmbientRoutes({ db: sqlite, auth }));
   app.route('/v1/runs', buildScratchpadRoutes({ db: sqlite, auth, scratchpad }));
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth }));
+  app.route('/v1/tools', buildToolRoutes({ db: sqlite, auth, toolRegistry }));
+  app.route('/v1/deployments', buildDeploymentRoutes({ db: sqlite, auth, deployments: workflowDeployments, engine }));
+  // App Knowledge Wedge surface (Agentis 1.1)
+  app.route(
+    '/v1/apps',
+    buildAppRoutes({
+      db: sqlite,
+      auth,
+      knowledge: knowledgeStore,
+      appMemory: appMemoryStore,
+      evaluators: evaluatorExampleStore,
+      baselines: workflowBaselineStore,
+      intelligence: appIntelligenceRuntime,
+      promotion: intelligencePromotion,
+      ingestion: datasetIngestion,
+    }),
+  );
+  // Memory Architecture surface (Agentis Memory OS)
+  app.route(
+    '/v1/memory',
+    buildMemoryRoutes({
+      db: sqlite,
+      auth,
+      memory: memoryRuntime,
+      promotion: memoryPromotion,
+      episodes: episodicMemoryStore,
+      rollingBaselines: rollingBaselineStore,
+    }),
+  );
 
   // ── Test harness (D29) ──────────────────────────────────
   // Mounted ONLY when AGENTIS_TEST_MODE=true AND NODE_ENV !== 'production'.
@@ -301,12 +587,19 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       } catch (err) {
         logger.error('agentis.trigger_hydrate_failed', { err: (err as Error).message });
       }
+      // Bring up MCP layer (no-op when disabled).
+      try {
+        await mcpInterop.start();
+      } catch (err) {
+        logger.warn('agentis.mcp_start_failed', { err: (err as Error).message });
+      }
       const url = `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`;
       logger.info('agentis.listening', { url });
       return { url, httpServer };
     },
     async stop() {
       logger.info('agentis.shutdown');
+      await mcpInterop.stop().catch((err) => logger.warn('agentis.mcp_stop_failed', { err: (err as Error).message }));
       channelBridge.shutdown();
       await registry.shutdown().catch((err) => logger.warn('agentis.shutdown.registry', { err: (err as Error).message }));
       for (const reg of adapters.list()) {

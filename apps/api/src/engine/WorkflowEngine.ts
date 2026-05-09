@@ -52,6 +52,7 @@ import type { ApprovalInboxService } from '../services/approvalInbox.js';
 import type { SkillRuntime } from '../services/skillRuntime.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
+import type { MultiTurnCoordinator } from '../services/multiTurnCoordinator.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
@@ -69,6 +70,8 @@ export interface EngineDeps {
   subflows?: SubflowExecutor;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
   telemetry?: Telemetry;
+  /** Optional multi-turn coordinator. When absent, all agent_task nodes run single-shot. */
+  multiTurnCoordinator?: MultiTurnCoordinator;
 }
 
 export interface StartRunArgs {
@@ -169,6 +172,69 @@ export class WorkflowEngine {
     if (!ctx) return;
     await this.#failNode(ctx, args.nodeId, args.error);
     void this.#tick(ctx);
+  }
+
+  /**
+   * Multi-turn boundary handler (AGENT-FIRST-ARCHITECTURE.md Plane 3).
+   *
+   * Called when an adapter emits `task.turn`. The coordinator decides:
+   *   - complete → mark node done, tick
+   *   - continue → leave node in RUNNING; engine waits for the next task.turn
+   *   - cap_reached / error → fail the node, tick
+   *
+   * Falls back to a direct `#completeNode` when no coordinator is wired so
+   * the engine remains standalone-testable.
+   */
+  async notifyTaskTurn(args: {
+    runId: string;
+    nodeId: string;
+    status: 'continue' | 'done' | 'blocked';
+    output: Record<string, unknown>;
+    summary?: string;
+    costCents?: number;
+    blockers?: string[];
+  }): Promise<void> {
+    const ctx = this.#runs.get(args.runId);
+    if (!ctx) return;
+
+    if (!this.deps.multiTurnCoordinator) {
+      // No coordinator — treat as a terminal single-shot completion.
+      await this.#completeNode(ctx, args.nodeId, args.output);
+      void this.#tick(ctx);
+      return;
+    }
+
+    const outcome = await this.deps.multiTurnCoordinator.advance({
+      workspaceId: ctx.workspaceId,
+      runId: ctx.runId,
+      nodeId: args.nodeId,
+      ambientId: ctx.ambientId,
+      userId: ctx.userId,
+      status: args.status,
+      payload: args.output,
+      finalOutput: args.output,
+      summary: args.summary,
+      costCents: args.costCents,
+      blockers: args.blockers,
+      // Policy is per-node when the graph carries an inline runtimePolicy field;
+      // absent = single-shot (coordinator will return 'complete' immediately).
+    });
+
+    if (outcome.kind === 'complete') {
+      await this.#completeNode(ctx, args.nodeId, outcome.finalOutput);
+      void this.#tick(ctx);
+    } else if (outcome.kind === 'cap_reached') {
+      await this.#failNode(
+        ctx,
+        args.nodeId,
+        `agent_task turn cap reached (action: ${outcome.action}, turnIndex: ${outcome.turnIndex})`,
+      );
+      void this.#tick(ctx);
+    } else if (outcome.kind === 'error') {
+      await this.#failNode(ctx, args.nodeId, outcome.reason);
+      void this.#tick(ctx);
+    }
+    // outcome.kind === 'continue' → engine stays quiet; waits for next task.turn event.
   }
 
   /**
