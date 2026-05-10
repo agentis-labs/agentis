@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS agent_packages (
   name          TEXT NOT NULL,
   version       TEXT NOT NULL,
   manifest      TEXT NOT NULL,
+  app_graph     TEXT,                                          -- App Canvas: instance system-composition graph (JSON, nullable)
   installed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 

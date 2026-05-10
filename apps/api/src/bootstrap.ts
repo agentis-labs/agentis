@@ -68,6 +68,7 @@ import { AppActivation } from './services/appActivation.js';
 import { DatasetIngestion } from './services/datasetIngestion.js';
 import { AppIntelligenceRuntime } from './services/appIntelligenceRuntime.js';
 import { IntelligencePromotion } from './services/intelligencePromotion.js';
+import { AppCanvasService } from './services/appCanvasService.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
 import { AdapterManager } from './adapters/AdapterManager.js';
@@ -207,6 +208,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   );
   // Class 4 promotion engine:
   const intelligencePromotion = new IntelligencePromotion(sqlite, appMemoryStore, logger);
+  // App Canvas service (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md):
+  const appCanvasService = new AppCanvasService(sqlite, logger);
   // Composed retrieval surface:
   const appIntelligenceRuntime = new AppIntelligenceRuntime(
     sqlite,
@@ -518,6 +521,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       intelligence: appIntelligenceRuntime,
       promotion: intelligencePromotion,
       ingestion: datasetIngestion,
+      canvas: appCanvasService,
     }),
   );
   // Memory Architecture surface (Agentis Memory OS)

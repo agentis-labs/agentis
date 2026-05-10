@@ -9,3 +9,4 @@ export * from './appIntelligence.js';
 export * from './memory.js';
 export * from './retrieval.js';
 export * from './baseline.js';
+export * from './appGraph.js';

@@ -204,6 +204,52 @@ const runtimeEpisodeSeedSchema = z.object({
   entities: z.array(z.string()).optional(),
 });
 
+// App Canvas template (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §12.3).
+// Carried with the package; copied to `appInstance.appGraph` on activation.
+const appGraphNodeTypeSchema = z.enum([
+  'app_core',
+  'entry_workflow',
+  'workflow_module',
+  'agent_group',
+  'knowledge_source',
+  'memory_surface',
+  'integration_surface',
+  'approval_surface',
+  'output_surface',
+  'scheduler',
+  'channel_surface',
+  'brain_surface',
+]);
+const appGraphEdgeTypeSchema = z.enum([
+  'activates',
+  'feeds',
+  'reads_from',
+  'writes_to',
+  'approves',
+  'publishes_to',
+  'observes',
+  'depends_on',
+]);
+const appGraphSchema = z.object({
+  version: z.literal(1),
+  nodes: z.array(z.object({
+    id: z.string().min(1),
+    type: appGraphNodeTypeSchema,
+    title: z.string().min(1),
+    position: z.object({ x: z.number(), y: z.number() }),
+    config: z.record(z.unknown()).default({}),
+    zone: z.enum(['inputs', 'core', 'outputs']).optional(),
+  })).default([]),
+  edges: z.array(z.object({
+    id: z.string().min(1),
+    source: z.string().min(1),
+    target: z.string().min(1),
+    type: appGraphEdgeTypeSchema,
+    label: z.string().optional(),
+  })).default([]),
+  viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }).default({ x: 0, y: 0, zoom: 1 }),
+});
+
 const manifestSchema = z.object({
   manifestVersion: z.literal(1),
   name: z.string().min(1),
@@ -226,6 +272,9 @@ const manifestSchema = z.object({
   // Both are optional — absent means "use platform defaults".
   memoryPolicy: memoryPolicySchema,
   retrievalPolicy: retrievalPolicySchema,
+  // App Canvas template (App Canvas §12.3).
+  // Optional — when present, copied to `agent_packages.app_graph` on install.
+  appGraphTemplate: appGraphSchema.optional(),
 });
 
 const installLocalSchema = z.object({
@@ -286,6 +335,13 @@ export function buildPackageRoutes(deps: PackageRoutesDeps) {
     }
 
     const packageId = randomUUID();
+    // App Canvas: when the manifest ships an appGraphTemplate, copy it into
+    // the instance `app_graph` column on activation (§7.1, §12.4). The
+    // instance copy is mutable; the template stays read-only inside the
+    // manifest for export/import coherence.
+    const appGraphInstance = m.appGraphTemplate
+      ? structuredClone(m.appGraphTemplate)
+      : null;
     deps.db
       .insert(schema.agentPackages)
       .values({
@@ -297,6 +353,7 @@ export function buildPackageRoutes(deps: PackageRoutesDeps) {
         name: m.name,
         version: m.version,
         manifest: m,
+        appGraph: appGraphInstance as unknown as object | null,
       })
       .run();
 

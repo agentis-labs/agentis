@@ -1,10 +1,17 @@
 # Agentis App Canvas Architecture
 ## Visual App Building On Top Of The Workflow Engine
 
-> Status: proposed architecture
+> Status: implemented (V1) — 2026-05-10
 > Date: 2026-05-09
 > Scope: app graph model, app detail IA, shared canvas infrastructure, node taxonomy, editing model, runtime mapping, phased implementation
 > Depends on: `docs/AGENTIS-APP-FORMAT.md`, `docs/THE-BRAIN-UX-ARCHITECTURE.md`, `docs/MEMORY-ARCHITECTURE.md`, current workflow canvas implementation
+>
+> Implementation status: AppGraph types, manifest template, instance persistence,
+> validation service, REST surface (`/v1/apps/:slug/canvas`), three-layer app
+> shell (Output / Canvas / Memory), drag-drop editor with 12 node types and
+> 8 edge types, drill-down to workflow editor. The Memory tab still surfaces
+> wedge data (knowledge / memory / evaluators / baselines); the dedicated
+> Brain UX from THE-BRAIN-UX-ARCHITECTURE will replace it in the next pass.
 
 ---
 

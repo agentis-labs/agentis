@@ -322,6 +322,38 @@ const agentisPackageContentsSchema = z.object({
     includeWorkingSummary: z.boolean().optional(),
   }).optional(),
 
+  // ── App Canvas template (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §12.3) ──
+  // First-class system-composition graph shipped with the package. Copied to
+  // `agent_packages.app_graph` on activation; the instance graph is editable.
+  // Distinct from workflowTemplates (execution DAGs).
+  appGraphTemplate: z.object({
+    version: z.literal(1),
+    nodes: z.array(z.object({
+      id: z.string(),
+      type: z.enum([
+        'app_core','entry_workflow','workflow_module','agent_group',
+        'knowledge_source','memory_surface','integration_surface',
+        'approval_surface','output_surface','scheduler','channel_surface',
+        'brain_surface',
+      ]),
+      title: z.string(),
+      position: z.object({ x: z.number(), y: z.number() }),
+      config: z.record(z.unknown()),
+      zone: z.enum(['inputs', 'core', 'outputs']).optional(),
+    })),
+    edges: z.array(z.object({
+      id: z.string(),
+      source: z.string(),
+      target: z.string(),
+      type: z.enum([
+        'activates','feeds','reads_from','writes_to',
+        'approves','publishes_to','observes','depends_on',
+      ]),
+      label: z.string().optional(),
+    })),
+    viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }),
+  }).optional(),
+
   // ── Presentation ─────────────────────────────────────────────────────────
   entryWorkflowSlug: z.string().optional(),
   category: z.string().optional(),   // 'sales' | 'engineering' | 'ops' | 'security' | ...

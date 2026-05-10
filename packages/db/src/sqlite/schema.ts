@@ -159,6 +159,8 @@ export const agentPackages = sqliteTable('agent_packages', {
   name: text('name').notNull(),
   version: text('version').notNull(),
   manifest: text('manifest', { mode: 'json' }).notNull(),
+  /** App Canvas: instance system-composition graph (AppGraph JSON, nullable). */
+  appGraph: text('app_graph', { mode: 'json' }),
   installedAt: text('installed_at').notNull().default(isoNow() as unknown as string),
 });
 

@@ -29,6 +29,12 @@
  *   DELETE /v1/apps/:appId/promoted-patterns/:id          → delete a promoted pattern
  *   POST   /v1/apps/:appId/promoted-patterns/:id/demote   → demote a promoted pattern
  *
+ *   App Canvas (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §14):
+ *   GET    /v1/apps/:appId/canvas                         → graph + references + validation
+ *   PATCH  /v1/apps/:appId/canvas                         → save a new graph
+ *   POST   /v1/apps/:appId/canvas/validate                → dry-run validation
+ *   POST   /v1/apps/:appId/canvas/from-package            → reset to manifest template
+ *
  * `:appId` resolves to either an `agent_packages.id` row or any opaque string
  * the operator chose when seeding workflows directly. The wedge stores key
  * off the same `app_id` concept, so we don't validate it against a registry.
@@ -36,7 +42,12 @@
 
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
-import { AgentisError, type DatasetSpec, type MemoryEpisode } from '@agentis/core';
+import {
+  AgentisError,
+  type AppGraph,
+  type DatasetSpec,
+  type MemoryEpisode,
+} from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -47,6 +58,7 @@ import type { WorkflowBaselineStore } from '../services/workflowBaselineStore.js
 import type { AppIntelligenceRuntime } from '../services/appIntelligenceRuntime.js';
 import type { IntelligencePromotion } from '../services/intelligencePromotion.js';
 import type { DatasetIngestion } from '../services/datasetIngestion.js';
+import type { AppCanvasService } from '../services/appCanvasService.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 
@@ -60,6 +72,7 @@ export interface AppsRoutesDeps {
   intelligence: AppIntelligenceRuntime;
   promotion: IntelligencePromotion;
   ingestion: DatasetIngestion;
+  canvas: AppCanvasService;
 }
 
 export function buildAppRoutes(deps: AppsRoutesDeps) {
@@ -591,6 +604,76 @@ export function buildAppRoutes(deps: AppsRoutesDeps) {
     const body = (await c.req.json().catch(() => ({}))) as { delta?: number };
     const result = deps.promotion.demote(ws.workspaceId, id, body.delta);
     return c.json({ pattern: result, dropped: result === null });
+  });
+
+  // ── App Canvas (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §14) ───────
+  app.get('/:appId/canvas', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('appId');
+    const record = deps.canvas.load(ws.workspaceId, appId);
+    return c.json({
+      app: { id: record.id, slug: record.slug, name: record.name, status: record.status },
+      graph: record.graph,
+      references: record.references,
+      validation: {
+        errors: record.validation.errors.map(({ severity: _s, ...rest }) => rest),
+        warnings: record.validation.warnings.map(({ severity: _s, ...rest }) => rest),
+      },
+    });
+  });
+
+  app.patch('/:appId/canvas', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('appId');
+    const body = (await c.req.json().catch(() => null)) as { graph?: AppGraph } | null;
+    if (!body || !body.graph || typeof body.graph !== 'object') {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        'PATCH body must include a `graph` field with an AppGraph object',
+      );
+    }
+    const record = deps.canvas.save(ws.workspaceId, appId, body.graph);
+    return c.json({
+      app: { id: record.id, slug: record.slug, name: record.name, status: record.status },
+      graph: record.graph,
+      references: record.references,
+      validation: {
+        errors: record.validation.errors.map(({ severity: _s, ...rest }) => rest),
+        warnings: record.validation.warnings.map(({ severity: _s, ...rest }) => rest),
+      },
+    });
+  });
+
+  app.post('/:appId/canvas/validate', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('appId');
+    const body = (await c.req.json().catch(() => null)) as { graph?: AppGraph } | null;
+    if (!body || !body.graph) {
+      throw new AgentisError('VALIDATION_FAILED', 'body.graph is required');
+    }
+    const result = deps.canvas.validateCandidate(ws.workspaceId, appId, body.graph);
+    return c.json({
+      references: result.references,
+      validation: {
+        errors: result.validation.errors.map(({ severity: _s, ...rest }) => rest),
+        warnings: result.validation.warnings.map(({ severity: _s, ...rest }) => rest),
+      },
+    });
+  });
+
+  app.post('/:appId/canvas/from-package', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('appId');
+    const record = deps.canvas.resetFromPackage(ws.workspaceId, appId);
+    return c.json({
+      app: { id: record.id, slug: record.slug, name: record.name, status: record.status },
+      graph: record.graph,
+      references: record.references,
+      validation: {
+        errors: record.validation.errors.map(({ severity: _s, ...rest }) => rest),
+        warnings: record.validation.warnings.map(({ severity: _s, ...rest }) => rest),
+      },
+    });
   });
 
   return app;
