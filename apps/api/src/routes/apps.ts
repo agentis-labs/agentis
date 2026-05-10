@@ -35,6 +35,9 @@
  *   POST   /v1/apps/:appId/canvas/validate                → dry-run validation
  *   POST   /v1/apps/:appId/canvas/from-package            → reset to manifest template
  *
+ *   The Brain (docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §16):
+ *   GET    /v1/apps/:appId/brain                          → composed BrainResponse
+ *
  * `:appId` resolves to either an `agent_packages.id` row or any opaque string
  * the operator chose when seeding workflows directly. The wedge stores key
  * off the same `app_id` concept, so we don't validate it against a registry.
@@ -59,6 +62,7 @@ import type { AppIntelligenceRuntime } from '../services/appIntelligenceRuntime.
 import type { IntelligencePromotion } from '../services/intelligencePromotion.js';
 import type { DatasetIngestion } from '../services/datasetIngestion.js';
 import type { AppCanvasService } from '../services/appCanvasService.js';
+import type { BrainComposer } from '../services/brainComposer.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 
@@ -73,6 +77,7 @@ export interface AppsRoutesDeps {
   promotion: IntelligencePromotion;
   ingestion: DatasetIngestion;
   canvas: AppCanvasService;
+  brain: BrainComposer;
 }
 
 export function buildAppRoutes(deps: AppsRoutesDeps) {
@@ -659,6 +664,14 @@ export function buildAppRoutes(deps: AppsRoutesDeps) {
         warnings: result.validation.warnings.map(({ severity: _s, ...rest }) => rest),
       },
     });
+  });
+
+  // ── The Brain (docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §16) ───────
+  app.get('/:appId/brain', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('appId');
+    const response = deps.brain.composeForApp(ws.workspaceId, appId);
+    return c.json(response);
   });
 
   app.post('/:appId/canvas/from-package', (c) => {

@@ -2,10 +2,11 @@
  * AppDetailPage — three-layer app shell.
  *
  * Spec: docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §5, §11.
+ *       docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §5.1, §14.
  *
  *   [Output]  → operator surface (performance, results, activity)
- *   [Canvas]  → system-composition graph (AppGraphView)
- *   [Memory]  → intelligence surface (knowledge, episodes, evaluators, baselines)
+ *   [Canvas]  → system-composition graph (AppCanvasView)
+ *   [Brain]   → intelligence surface (BrainView with Map / Flow / Ledger modes)
  *
  * Each layer is a distinct identity for the app: what it does / how it's
  * built / what it knows. The segmented shell at the top is the new core
@@ -18,7 +19,6 @@ import {
   ArrowLeft, Check, X, Eye, RotateCcw, AlertTriangle, BarChart3,
   Tag, Play, FileText, AppWindow,
   Target as OutputIcon, Workflow as CanvasIcon, Brain as MemoryIcon,
-  BookOpen, ScrollText, FlaskConical,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
@@ -30,6 +30,7 @@ import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
 import { SegmentedControl } from '../components/shared/SegmentedControl';
 import { AppCanvasView } from '../components/app-graph/AppCanvasView';
+import { BrainView } from '../components/brain/BrainView';
 
 interface AppDetail {
   id: string;
@@ -101,12 +102,12 @@ function formatDuration(ms?: number): string {
   return `${m}m ${s % 60}s`;
 }
 
-type Layer = 'output' | 'canvas' | 'memory';
+type Layer = 'output' | 'canvas' | 'brain';
 
 const LAYERS = [
   { value: 'output' as Layer, label: 'Output', icon: <OutputIcon size={14} /> },
   { value: 'canvas' as Layer, label: 'Canvas', icon: <CanvasIcon size={14} /> },
-  { value: 'memory' as Layer, label: 'Memory', icon: <MemoryIcon size={14} /> },
+  { value: 'brain'  as Layer, label: 'Brain',  icon: <MemoryIcon size={14} /> },
 ] as const;
 
 export function AppDetailPage() {
@@ -119,18 +120,15 @@ export function AppDetailPage() {
   const [layer, setLayer] = useState<Layer>(() => {
     const params = new URLSearchParams(window.location.search);
     const l = params.get('layer') as Layer | null;
-    if (l && (l === 'output' || l === 'canvas' || l === 'memory')) return l;
-    // Back-compat: legacy ?tab=performance|results|… maps onto 'output'.
+    if (l === 'output' || l === 'canvas' || l === 'brain') return l;
+    // Back-compat: previous shell labelled the third segment "memory".
+    if (l === ('memory' as Layer)) return 'brain';
     if (params.get('tab')) return 'output';
     return 'output';
   });
   const [outputTab, setOutputTab] = useState<string>(() => {
     const t = new URLSearchParams(window.location.search).get('tab');
     return t || 'performance';
-  });
-  const [memoryTab, setMemoryTab] = useState<string>(() => {
-    const t = new URLSearchParams(window.location.search).get('memTab');
-    return t || 'knowledge';
   });
 
   // Reflect layer in URL so reloads + deep-links preserve state.
@@ -236,25 +234,10 @@ export function AppDetailPage() {
         </div>
       )}
 
-      {layer === 'memory' && (
-        <>
-          <Tabs
-            param="memTab"
-            defaultValue="knowledge"
-            value={memoryTab}
-            onChange={setMemoryTab}
-            tabs={[
-              { value: 'knowledge',  label: 'Knowledge' },
-              { value: 'memory',     label: 'Memory' },
-              { value: 'evaluators', label: 'Evaluators' },
-              { value: 'baselines',  label: 'Baselines' },
-            ]}
-            className="px-6"
-          />
-          <div className="flex-1 overflow-y-auto px-6 py-5">
-            <MemoryLayer slug={app.slug} subtab={memoryTab} />
-          </div>
-        </>
+      {layer === 'brain' && (
+        <div className="flex-1 overflow-hidden">
+          <BrainView slug={app.slug} />
+        </div>
       )}
     </div>
   );
@@ -541,146 +524,6 @@ function ConfigTab({ app }: { app: AppDetail }) {
           </div>
         )}
       </section>
-    </div>
-  );
-}
-
-// ────────────────────────────────────────────────────────────
-// Memory layer — intelligence surface (App Canvas §11.3).
-// Reads from /v1/apps/:slug/{knowledge,memory,evaluator-examples,baselines}.
-// ────────────────────────────────────────────────────────────
-
-interface KnowledgeChunk { id: string; title: string; source: string; trust?: number }
-interface MemoryEntry { id: string; kind: string; title: string; content: string; trust?: number; importance?: number; tags?: string[] }
-interface EvaluatorEntry { id: string; evaluatorKey: string; verdict: string; score?: number; reason?: string }
-interface BaselineEntry { workflowId: string; sampleSize: number; successRate?: number; p50DurationMs?: number; p95DurationMs?: number; costCentsPerRun?: number }
-
-function MemoryLayer({ slug, subtab }: { slug: string; subtab: string }) {
-  if (subtab === 'knowledge') return <KnowledgeList slug={slug} />;
-  if (subtab === 'memory') return <MemoryList slug={slug} />;
-  if (subtab === 'evaluators') return <EvaluatorList slug={slug} />;
-  if (subtab === 'baselines') return <BaselineList slug={slug} />;
-  return null;
-}
-
-function KnowledgeList({ slug }: { slug: string }) {
-  const [items, setItems] = useState<KnowledgeChunk[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    void api<{ chunks: KnowledgeChunk[] }>(`/v1/apps/${slug}/knowledge?limit=100`)
-      .then((d) => setItems(d.chunks ?? []))
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [slug]);
-  if (loading) return <Skeleton height={200} />;
-  if (items.length === 0) {
-    return <EmptyState icon={<BookOpen size={48} />} title="No knowledge yet" body="Import a dataset to feed this app." />;
-  }
-  return (
-    <div className="space-y-1.5">
-      {items.map((k) => (
-        <div key={k.id} className="rounded-card border border-line bg-surface px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-[13px] font-medium text-text-primary truncate">{k.title}</div>
-            <span className="text-[10px] uppercase tracking-wider text-text-muted">{k.source}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function MemoryList({ slug }: { slug: string }) {
-  const [items, setItems] = useState<MemoryEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    void api<{ episodes: MemoryEntry[] }>(`/v1/apps/${slug}/memory?limit=100`)
-      .then((d) => setItems(d.episodes ?? []))
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [slug]);
-  if (loading) return <Skeleton height={200} />;
-  if (items.length === 0) {
-    return <EmptyState icon={<MemoryIcon size={48} />} title="No memories yet" body="Memories accumulate as the app runs and learns." />;
-  }
-  return (
-    <div className="space-y-1.5">
-      {items.map((m) => (
-        <div key={m.id} className="rounded-card border border-line bg-surface px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-medium text-text-primary">{m.title}</div>
-              <div className="mt-0.5 text-[11px] text-text-muted">
-                {m.kind}{m.trust != null ? ` · trust ${m.trust.toFixed(2)}` : ''}
-              </div>
-            </div>
-          </div>
-          <p className="mt-1 text-[12px] text-text-secondary">{m.content}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function EvaluatorList({ slug }: { slug: string }) {
-  const [items, setItems] = useState<EvaluatorEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    void api<{ examples: EvaluatorEntry[] }>(`/v1/apps/${slug}/evaluator-examples?limit=100`)
-      .then((d) => setItems(d.examples ?? []))
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [slug]);
-  if (loading) return <Skeleton height={200} />;
-  if (items.length === 0) {
-    return <EmptyState icon={<FlaskConical size={48} />} title="No evaluator examples" body="Add evaluator rubrics + examples to calibrate quality." />;
-  }
-  return (
-    <div className="space-y-1.5">
-      {items.map((e) => (
-        <div key={e.id} className="rounded-card border border-line bg-surface px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-[13px] font-medium text-text-primary">{e.evaluatorKey}</div>
-            <span className={`rounded-md px-2 py-0.5 text-[10px] uppercase tracking-wider ${e.verdict === 'pass' ? 'bg-lime-500/15 text-lime-300' : 'bg-rose-500/15 text-rose-300'}`}>
-              {e.verdict}
-              {e.score != null ? ` · ${e.score.toFixed(2)}` : ''}
-            </span>
-          </div>
-          {e.reason && <p className="mt-1 text-[12px] text-text-secondary">{e.reason}</p>}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function BaselineList({ slug }: { slug: string }) {
-  const [items, setItems] = useState<BaselineEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    void api<{ baselines: BaselineEntry[] }>(`/v1/apps/${slug}/baselines`)
-      .then((d) => setItems(d.baselines ?? []))
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [slug]);
-  if (loading) return <Skeleton height={200} />;
-  if (items.length === 0) {
-    return <EmptyState icon={<ScrollText size={48} />} title="No baselines yet" body="Baselines build up as runs complete." />;
-  }
-  return (
-    <div className="space-y-1.5">
-      {items.map((b, i) => (
-        <div key={i} className="rounded-card border border-line bg-surface px-4 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-[13px] font-mono text-text-primary truncate">{b.workflowId}</div>
-            <div className="flex gap-3 text-[11px] text-text-muted">
-              <span>{b.sampleSize} runs</span>
-              {b.successRate != null && <span>{Math.round(b.successRate * 100)}% success</span>}
-              {b.p95DurationMs != null && <span>p95 {Math.round(b.p95DurationMs / 1000)}s</span>}
-              {b.costCentsPerRun != null && <span>${(b.costCentsPerRun / 100).toFixed(2)}/run</span>}
-            </div>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

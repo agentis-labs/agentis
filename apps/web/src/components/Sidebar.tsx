@@ -15,6 +15,7 @@ import {
   Bot,
   Workflow as WorkflowIcon,
   AppWindow,
+  Brain as BrainIcon,
   Package as PackageIcon,
   Settings as SettingsIcon,
   ChevronsLeft,
@@ -41,6 +42,7 @@ const NAV: NavItem[] = [
   { to: '/agents',    label: 'Agents',    icon: Bot,         badge: 'liveAgents' },
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
   { to: '/apps',      label: 'Apps',      icon: AppWindow },
+  { to: '/brain',     label: 'Brain',     icon: BrainIcon },
   { to: '/packages',  label: 'Packages',  icon: PackageIcon },
 ];
 

@@ -1,10 +1,17 @@
 # Agentis The Brain UX Architecture
 ## Output / Canvas / Brain For Agentic Apps
 
-> Status: proposed product + frontend architecture
+> Status: implemented (V1 — Phase A) — 2026-05-10
 > Date: 2026-05-09
 > Scope: app detail IA, "The Brain" memory surface, global orchestrator brain, visual system, phased rollout, component architecture, API contracts
 > Depends on: `docs/AGENTIS-UX-V2.md`, `docs/AGENTIS-APP-FORMAT.md`, `docs/MEMORY-ARCHITECTURE.md`, current `AppDetailPage.tsx`
+>
+> Implementation status: Brain types, composer, REST surface
+> (`/v1/apps/:slug/brain`, `/v1/brain`), three view modes (Map / Flow / Ledger),
+> all 11 node types with semantic visual treatments, layered SVG stage with
+> selection/dim/zoom/pan, type-switched detail rail, search, layer + warning +
+> gap filters, Global Brain page, sidebar entry. The shell now reads
+> `[Output] [Canvas] [Brain]` (matches §5.1, §14.1).
 
 ---
 

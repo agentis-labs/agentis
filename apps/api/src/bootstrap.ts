@@ -69,6 +69,8 @@ import { DatasetIngestion } from './services/datasetIngestion.js';
 import { AppIntelligenceRuntime } from './services/appIntelligenceRuntime.js';
 import { IntelligencePromotion } from './services/intelligencePromotion.js';
 import { AppCanvasService } from './services/appCanvasService.js';
+import { BrainComposer } from './services/brainComposer.js';
+import { buildBrainRoutes } from './routes/brain.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
 import { AdapterManager } from './adapters/AdapterManager.js';
@@ -210,6 +212,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const intelligencePromotion = new IntelligencePromotion(sqlite, appMemoryStore, logger);
   // App Canvas service (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md):
   const appCanvasService = new AppCanvasService(sqlite, logger);
+  // (BrainComposer constructed below — needs episodicMemoryStore.)
   // Composed retrieval surface:
   const appIntelligenceRuntime = new AppIntelligenceRuntime(
     sqlite,
@@ -224,6 +227,18 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // docs/memory/MEMORY-ARCHITECTURE.md
   // Layer 3 storage:
   const episodicMemoryStore = new EpisodicMemoryStore(sqlite, logger, embeddingProvider);
+  // The Brain (docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §16):
+  const brainComposer = new BrainComposer(
+    sqlite,
+    knowledgeStore,
+    appMemoryStore,
+    evaluatorExampleStore,
+    workflowBaselineStore,
+    intelligencePromotion,
+    datasetIngestion,
+    episodicMemoryStore,
+    logger,
+  );
   // Layer 4 rolling baselines:
   const rollingBaselineStore = new RollingBaselineStore(sqlite);
   // Layer 1 compactor — needs a workspace resolver since durable rows are
@@ -522,8 +537,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       promotion: intelligencePromotion,
       ingestion: datasetIngestion,
       canvas: appCanvasService,
+      brain: brainComposer,
     }),
   );
+  // Global Brain (docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §12):
+  app.route('/v1/brain', buildBrainRoutes({ db: sqlite, auth, brain: brainComposer }));
   // Memory Architecture surface (Agentis Memory OS)
   app.route(
     '/v1/memory',
