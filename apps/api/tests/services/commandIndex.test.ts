@@ -82,9 +82,9 @@ describe('CommandIndex.search', () => {
     ctx2.close();
   });
 
-  it('respects COMMAND_PALETTE_RESULT_LIMIT cap', () => {
-    // Empty query returns "everything"; cap should still apply.
+  it('does not scan for empty or one-character queries', () => {
     const hits = idx.search(ctx.workspace.id, '');
-    expect(hits.length).toBeLessThanOrEqual(12);
+    expect(hits).toEqual([]);
+    expect(idx.search(ctx.workspace.id, 's')).toEqual([]);
   });
 });

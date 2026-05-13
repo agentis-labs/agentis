@@ -1,0 +1,63 @@
+{
+  "slug": "social-listening",
+  "name": "Social Listening",
+  "version": "1.0.0",
+  "description": "Monitors mentions, clusters themes, and sends alerts for priority issues.",
+  "tags": ["marketing", "social", "agentis"],
+  "contents": {
+    "kind": "agentis",
+    "agents": [
+      {
+        "name": "Social Analyst",
+        "adapterType": "hermes",
+        "capabilityTags": ["social-monitoring", "sentiment", "alerts"],
+        "config": {},
+        "instructions": "Detect meaningful mention patterns and avoid over-alerting on low-signal posts.",
+        "role": "agent"
+      }
+    ],
+    "workflows": [
+      {
+        "slug": "social-listening-main",
+        "title": "Social Listening Digest",
+        "summary": "Summarizes mentions, sentiment shifts, and alert-worthy events.",
+        "graph": {
+          "version": 1,
+          "nodes": [
+            { "id": "trigger", "type": "trigger", "title": "Mention batch", "position": { "x": 0, "y": 0 }, "config": { "kind": "trigger", "triggerType": "manual" } },
+            { "id": "listen", "type": "agent_task", "title": "Cluster and alert", "position": { "x": 240, "y": 0 }, "config": { "kind": "agent_task", "agentPackageRef": "Social Analyst", "capabilityTags": ["social-monitoring", "alerts"], "prompt": "Cluster mentions by theme, score urgency, and produce alert recommendations.", "inputKeys": [], "outputKeys": ["mentions_tracked", "alerts_sent"] } },
+            { "id": "response", "type": "response", "title": "Listening digest", "position": { "x": 520, "y": 0 }, "config": { "kind": "response", "content": "<listen>" } }
+          ],
+          "edges": [
+            { "id": "trigger-listen", "source": "trigger", "target": "listen" },
+            { "id": "listen-response", "source": "listen", "target": "response" }
+          ],
+          "viewport": { "x": 0, "y": 0, "zoom": 1 },
+          "variables": []
+        },
+        "settings": { "outputLabels": ["mentions_tracked", "alerts_sent"] }
+      }
+    ],
+    "credentialSlots": [
+      { "key": "social_oauth", "service": "social", "label": "Social platform OAuth", "required": true, "oauthFlow": true },
+      { "key": "slack_oauth", "service": "slack", "label": "Slack alerts OAuth", "required": false, "oauthFlow": true }
+    ],
+    "datasetSpecs": [
+      { "key": "brand_terms", "label": "Brand terms", "description": "Brand, product, competitor, and risk keywords to monitor.", "acceptedFormats": ["csv", "txt"], "targetStore": "knowledge", "chunkingStrategy": "per-document", "optional": false }
+    ],
+    "knowledgeSeeds": [
+      { "title": "Social alert policy", "content": "Alert only on material sentiment shifts, high-reach posts, safety issues, or competitor spikes.", "metadata": { "area": "marketing" } }
+    ],
+    "evaluatorRubrics": [
+      { "nodeKind": "agent_task", "context": "Listening output should cluster themes, score urgency, and avoid duplicate alerts.", "examples": [] }
+    ],
+    "workflowBaselines": [
+      { "workflowSlug": "social-listening-main", "p50DurationMs": 40000, "p95DurationMs": 100000, "expectedSuccessRate": 0.86, "costCentsPerRun": 12 }
+    ],
+    "entryWorkflowSlug": "social-listening-main",
+    "category": "Marketing",
+    "replaces": "Manual mention monitoring",
+    "costSavedPerMonth": "$2,500",
+    "readme": "Connect social sources, add brand terms, and run recurring mention digests."
+  }
+}

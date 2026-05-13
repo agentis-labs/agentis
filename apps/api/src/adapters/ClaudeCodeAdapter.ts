@@ -26,7 +26,12 @@ export interface ClaudeCodeAdapterOptions {
   binaryPath?: string;
   /** Working directory the CLI is spawned in. */
   cwd?: string;
+  model?: string;
   maxTurns?: number;
+  allowedTools?: string[];
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  timeoutSec?: number;
   logger: Logger;
 }
 
@@ -34,6 +39,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   readonly adapterType = 'claude_code' as const;
   readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
   readonly #inFlight = new Map<string, AbortController>();
+  #sessionId: string | undefined;
 
   constructor(private readonly opts: ClaudeCodeAdapterOptions) {}
 
@@ -59,11 +65,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       '--print',
       '--output-format=stream-json',
       `--max-turns=${this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24}`,
+      '--dangerously-skip-permissions',
+      ...(this.opts.model ? [`--model=${this.opts.model}`] : []),
+      ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
+      ...(this.#sessionId ? ['--resume', this.#sessionId] : []),
+      ...(this.opts.extraArgs ?? []),
     ];
     let child: ReturnType<typeof spawn>;
+    let terminalEventEmitted = false;
+    let timeout: NodeJS.Timeout | undefined;
     try {
       child = spawn(bin, args, {
         cwd: this.opts.cwd,
+        env: { ...process.env, ...(this.opts.env ?? {}) },
         signal: ctrl.signal,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -72,9 +86,28 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       this.#inFlight.delete(task.taskId);
       return;
     }
+
+    if (this.opts.timeoutSec && this.opts.timeoutSec > 0) {
+      timeout = setTimeout(() => ctrl.abort(), this.opts.timeoutSec * 1000);
+      timeout.unref?.();
+    }
+
     const at = () => new Date().toISOString();
+    this.#emit({
+      eventType: 'task.started',
+      agentId: this.opts.agentId,
+      taskId: task.taskId,
+      runId: task.runId,
+      workflowId: task.workflowId,
+      timestamp: at(),
+    });
+
     child.on('error', (err) => {
+      if (terminalEventEmitted) return;
+      terminalEventEmitted = true;
       this.#emitFailure(task, `claude_code_error: ${err.message}`);
+      this.#inFlight.delete(task.taskId);
+      if (timeout) clearTimeout(timeout);
     });
     child.stderr?.on('data', (d) =>
       this.opts.logger.warn('claude_code.stderr', { data: String(d).slice(0, 512) }),
@@ -92,6 +125,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         if (!line) continue;
         try {
           const ev = JSON.parse(line) as { type: string; [k: string]: unknown };
+          const sessionId = firstString(ev.session_id, ev.sessionId, objectOf(ev.session)?.id);
+          if (sessionId) this.#sessionId = sessionId;
           if (ev.type === 'assistant' || ev.type === 'thinking') {
             turns += 1;
             this.#emit({
@@ -118,13 +153,24 @@ export class ClaudeCodeAdapter implements AgentAdapter {
             lastOutput = (ev.result as Record<string, unknown>) ?? { text: ev.text };
           }
         } catch {
-          // ignore malformed lines
+          this.#emit({
+            eventType: 'task.progress',
+            agentId: this.opts.agentId,
+            runId: task.runId,
+            workflowId: task.workflowId,
+            taskId: task.taskId,
+            message: line,
+            timestamp: at(),
+          });
         }
       }
     });
 
     child.on('exit', (code) => {
       this.#inFlight.delete(task.taskId);
+      if (timeout) clearTimeout(timeout);
+      if (terminalEventEmitted) return;
+      terminalEventEmitted = true;
       if (code === 0) {
         this.#emit({
           eventType: 'task.completed',
@@ -170,4 +216,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       timestamp: new Date().toISOString(),
     });
   }
+}
+
+function objectOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return undefined;
 }

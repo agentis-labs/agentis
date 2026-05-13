@@ -37,7 +37,7 @@ export const useChatPanelStore = create<ChatPanelStore>((set) => ({
     set({ state: s });
   },
   toggle: () => set((cur) => {
-    const next: ChatPanelState = cur.state === 'hidden' ? 'floating' : 'hidden';
+    const next: ChatPanelState = cur.state === 'hidden' ? 'docked' : 'hidden';
     try { localStorage.setItem(STORAGE_KEY, next); } catch { /* ignore */ }
     return { state: next };
   }),

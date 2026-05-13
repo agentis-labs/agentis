@@ -39,16 +39,18 @@ export function ChatPanel() {
 
   // Reset chat panel on workspace change
   useEffect(() => {
-    let last = wsStore.get();
-    const interval = window.setInterval(() => {
+    let cleanup = wsStore.get() ? rtSubscribe('workspace', { workspaceId: wsStore.get()! }) : undefined;
+    function onWorkspaceChanged() {
       const cur = wsStore.get();
-      if (cur && cur !== last) {
-        last = cur;
-        resetForWorkspace();
-        rtSubscribe('workspace', { workspaceId: cur });
-      }
-    }, 1000);
-    return () => window.clearInterval(interval);
+      cleanup?.();
+      cleanup = cur ? rtSubscribe('workspace', { workspaceId: cur }) : undefined;
+      resetForWorkspace();
+    }
+    window.addEventListener('agentis:workspace-changed', onWorkspaceChanged);
+    return () => {
+      cleanup?.();
+      window.removeEventListener('agentis:workspace-changed', onWorkspaceChanged);
+    };
   }, [resetForWorkspace]);
 
   if (state === 'hidden') return null;

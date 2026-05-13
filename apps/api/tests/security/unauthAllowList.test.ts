@@ -15,6 +15,7 @@ describe('unauthenticated route allow-list', () => {
       '/.well-known/jwks.json',
       '/healthz',
       '/v1/_test/reset',
+      '/v1/auth/launch',
       '/v1/auth/login',
       '/v1/auth/refresh',
       '/v1/docs',

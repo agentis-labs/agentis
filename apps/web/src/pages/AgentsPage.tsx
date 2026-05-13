@@ -19,6 +19,7 @@ import { StatusBadge } from '../components/shared/StatusBadge';
 import { Skeleton, SkeletonCard } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
 import { AgentCreateWizard } from '../components/agents/AgentCreateWizard';
+import { REALTIME_EVENTS } from '@agentis/core';
 
 interface AgentRow {
   id: string;
@@ -27,6 +28,8 @@ interface AgentRow {
   description?: string;
   spaceId?: string | null;
   spaceName?: string;
+  adapterType?: string;
+  runtimeModel?: string | null;
   adapter?: { type?: string; model?: string };
   avatarUrl?: string | null;
   currentTask?: string;
@@ -71,7 +74,7 @@ function passesFilter(a: AgentRow, f: FilterValue): boolean {
   const status = (a.status ?? '').toLowerCase();
   if (f === 'active') return status === 'online' || status === 'active' || status === 'running';
   if (f === 'idle') return status === 'idle' || status === 'paused' || status === 'offline';
-  if (f === 'setup_needed') return !a.adapter?.type;
+  if (f === 'setup_needed') return !agentHarnessType(a);
   return true;
 }
 
@@ -107,12 +110,18 @@ export function AgentsPage() {
 
   useEffect(() => {
     const ws = wsStore.get();
-    if (ws) rtSubscribe('workspace', { workspaceId: ws });
+    const unsubscribe = ws ? rtSubscribe('workspace', { workspaceId: ws }) : undefined;
     void refresh();
+    return () => unsubscribe?.();
   }, []);
 
   useRealtime(
-    ['agent.status.changed', 'agent.heartbeat', 'agent.created', 'agent.updated'],
+    [
+      REALTIME_EVENTS.AGENT_STATUS_CHANGED,
+      REALTIME_EVENTS.AGENT_HEARTBEAT,
+      REALTIME_EVENTS.AGENT_CREATED,
+      REALTIME_EVENTS.AGENT_UPDATED,
+    ],
     () => { void refresh(); },
   );
 
@@ -255,7 +264,7 @@ export function AgentsPage() {
 function AgentGridCard({ a }: { a: AgentRow }) {
   const nav = useNavigate();
   const status = a.status ?? 'offline';
-  const adapterMissing = !a.adapter?.type;
+  const adapterMissing = !agentHarnessType(a);
   return (
     <div
       className="cursor-pointer rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2"
@@ -269,7 +278,7 @@ function AgentGridCard({ a }: { a: AgentRow }) {
             <StatusBadge status={status} size="sm" />
           </div>
           <div className="mt-0.5 truncate text-[12px] text-text-muted">
-            {a.spaceName ?? 'No space'} · {a.adapter?.type ?? 'No adapter'}
+            {a.spaceName ?? 'No space'} · {agentHarnessLabel(a)}
           </div>
           {(a.currentTask || a.description) && (
             <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">
@@ -306,7 +315,7 @@ function AgentTable({ rows, onSelect }: { rows: AgentRow[]; onSelect: (id: strin
           <tr className="border-b border-line text-[11px] font-medium uppercase tracking-wider text-text-muted">
             <th className="px-4 py-2.5 text-left">Agent</th>
             <th className="px-4 py-2.5 text-left">Status</th>
-            <th className="px-4 py-2.5 text-left">Adapter</th>
+            <th className="px-4 py-2.5 text-left">Harness</th>
             <th className="px-4 py-2.5 text-left">Last active</th>
             <th className="px-2 py-2.5"></th>
           </tr>
@@ -325,7 +334,7 @@ function AgentTable({ rows, onSelect }: { rows: AgentRow[]; onSelect: (id: strin
                 </div>
               </td>
               <td className="px-4 py-3"><StatusBadge status={a.status ?? 'offline'} size="sm" /></td>
-              <td className="px-4 py-3 text-[12px] text-text-secondary">{a.adapter?.type ?? '—'}</td>
+              <td className="px-4 py-3 text-[12px] text-text-secondary">{agentHarnessLabel(a)}</td>
               <td className="px-4 py-3 text-[12px] text-text-muted">{relativeTime(a.lastActiveAt)}</td>
               <td className="px-2 py-3">
                 <span className="text-text-muted">›</span>
@@ -336,6 +345,29 @@ function AgentTable({ rows, onSelect }: { rows: AgentRow[]; onSelect: (id: strin
       </table>
     </div>
   );
+}
+
+function agentHarnessType(agent: AgentRow) {
+  return agent.adapterType ?? agent.adapter?.type ?? '';
+}
+
+function agentHarnessLabel(agent: AgentRow) {
+  const type = agentHarnessType(agent);
+  const model = agent.runtimeModel ?? agent.adapter?.model;
+  const label = harnessLabel(type);
+  return model ? `${label} · ${model}` : label;
+}
+
+function harnessLabel(adapterType: string) {
+  switch (adapterType) {
+    case 'openclaw': return 'OpenClaw';
+    case 'hermes_agent': return 'Hermes Agent';
+    case 'claude_code': return 'Claude Code';
+    case 'codex': return 'Codex';
+    case 'cursor': return 'Cursor';
+    case 'http': return 'HTTP / Webhook';
+    default: return 'No harness';
+  }
 }
 
 function Avatar({ name, imageUrl, size = 36 }: { name: string; imageUrl?: string; size?: number }) {

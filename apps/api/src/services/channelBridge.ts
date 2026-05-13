@@ -235,7 +235,10 @@ export class ChannelBridge {
     const dup = this.deps.db
       .select()
       .from(schema.channelDeliveries)
-      .where(eq(schema.channelDeliveries.externalId, parsed.externalId))
+      .where(and(
+        eq(schema.channelDeliveries.connectionId, row.id),
+        eq(schema.channelDeliveries.externalId, parsed.externalId),
+      ))
       .get();
     if (dup) {
       const result: { accepted: boolean; idempotent: boolean; messageId?: string } = {
@@ -357,16 +360,23 @@ export class ChannelBridge {
 
   #markError(id: string, message: string) {
     const now = new Date().toISOString();
+    const row = this.deps.db
+      .select({ workspaceId: schema.channelConnections.workspaceId })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, id))
+      .get();
     this.deps.db
       .update(schema.channelConnections)
       .set({ status: 'error', lastError: message.slice(0, 500), updatedAt: now })
       .where(eq(schema.channelConnections.id, id))
       .run();
-    this.deps.bus.publish(
-      REALTIME_ROOMS.workspace(id), // best-effort; no per-connection room in V1
-      REALTIME_EVENTS.CHANNEL_CONNECTION_STATUS,
-      { connectionId: id, status: 'error', error: message },
-    );
+    if (row) {
+      this.deps.bus.publish(
+        REALTIME_ROOMS.workspace(row.workspaceId),
+        REALTIME_EVENTS.CHANNEL_CONNECTION_STATUS,
+        { connectionId: id, status: 'error', error: message },
+      );
+    }
   }
 
   #toPublic(row: typeof schema.channelConnections.$inferSelect): PublicConnection {

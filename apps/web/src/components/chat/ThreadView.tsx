@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Send, Pencil, Trash2, Copy, Plug } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { Skeleton } from '../shared/Skeleton';
-import { useRealtime } from '../../lib/realtime';
+import { rtSubscribe, useRealtime } from '../../lib/realtime';
 
 export interface ChatMessage {
   id: string;
@@ -24,43 +25,178 @@ interface ThreadViewProps {
   name: string;
 }
 
+const PAGE_SIZE = 50;
+
+type AgentMsg = {
+  id: string;
+  role?: string;
+  authorType?: string;
+  authorId?: string | null;
+  body: string;
+  createdAt: string;
+};
+
+type RoomMsg = {
+  id: string;
+  authorType: string;
+  authorId?: string | null;
+  content: Record<string, unknown>;
+  createdAt: string;
+};
+
+function normalizeAgentMessage(message: AgentMsg): ChatMessage {
+  return {
+    id: message.id,
+    authorId: message.authorId ?? '',
+    authorKind: (message.role ?? message.authorType ?? 'agent') as ChatMessage['authorKind'],
+    text: message.body,
+    createdAt: message.createdAt,
+  };
+}
+
+function normalizeRoomMessage(message: RoomMsg): ChatMessage {
+  return {
+    id: message.id,
+    authorId: message.authorId ?? '',
+    authorKind: message.authorType as ChatMessage['authorKind'],
+    text: typeof message.content?.text === 'string' ? message.content.text : '',
+    createdAt: message.createdAt,
+  };
+}
+
+function sortMessages(messages: ChatMessage[]): ChatMessage[] {
+  return [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+}
+
+function upsertMessage(messages: ChatMessage[], next: ChatMessage): ChatMessage[] {
+  let found = false;
+  const updated = messages.map((message) => {
+    if (message.id !== next.id) return message;
+    found = true;
+    return next;
+  });
+  return sortMessages(found ? updated : [...updated, next]);
+}
+
+function prependUnique(messages: ChatMessage[], older: ChatMessage[]): ChatMessage[] {
+  const seen = new Set(messages.map((message) => message.id));
+  return sortMessages([...older.filter((message) => !seen.has(message.id)), ...messages]);
+}
+
 export function ThreadView({ kind, id, name }: ThreadViewProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [agentNoAdapter, setAgentNoAdapter] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const preserveScrollRef = useRef(false);
   const toast = useToast();
   const confirm = useConfirm();
   const nav = useNavigate();
 
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
-  const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/messages` : `/v1/rooms/${id}/messages`;
+  const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send` : `/v1/rooms/${id}/messages`;
 
-  async function refresh() {
-    if (id === '__broadcast__') { setMessages([]); setLoading(false); return; }
+  async function loadPage(before?: string): Promise<ChatMessage[]> {
+    const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    if (before) query.set('before', before);
+    const path = `${endpoint}?${query.toString()}`;
+    if (kind === 'agent') {
+      const data = await api<{ messages: AgentMsg[]; agentHasAdapter?: boolean }>(path);
+      if (!before) setAgentNoAdapter(data.agentHasAdapter === false);
+      return (data.messages ?? []).map(normalizeAgentMessage);
+    }
+    const data = await api<{ messages: RoomMsg[] }>(path);
+    return (data.messages ?? []).map(normalizeRoomMessage);
+  }
+
+  async function loadInitial() {
+    if (id === '__broadcast__') { setMessages([]); setHasMore(false); setLoading(false); return; }
     setLoading(true);
     try {
-      const data = await api<{ messages: ChatMessage[]; agentHasAdapter?: boolean }>(endpoint);
-      setMessages(data.messages ?? []);
-      if (kind === 'agent') {
-        setAgentNoAdapter(data.agentHasAdapter === false);
-      }
+      const page = await loadPage();
+      setMessages(page);
+      setHasMore(page.length === PAGE_SIZE);
     } catch {
       setMessages([]);
+      setHasMore(false);
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [kind, id]);
+  async function loadOlder() {
+    if (loadingOlder || !hasMore || messages.length === 0) return;
+    preserveScrollRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const page = await loadPage(messages[0]!.createdAt);
+      setMessages((prev) => prependUnique(prev, page));
+      setHasMore(page.length === PAGE_SIZE);
+    } catch (e) {
+      toast.error('Failed to load older messages', String(e));
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
 
-  useRealtime(['conversation.message', 'room.message'], () => { void refresh(); });
+  useEffect(() => { void loadInitial(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [kind, id]);
 
   useEffect(() => {
+    if (id === '__broadcast__') return undefined;
+    return kind === 'room'
+      ? rtSubscribe('room', { roomId: id })
+      : rtSubscribe('conversation', { agentId: id });
+  }, [kind, id]);
+
+  useRealtime([
+    REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
+    REALTIME_EVENTS.CONVERSATION_MESSAGE_SENT,
+    REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+    REALTIME_EVENTS.CONVERSATION_MESSAGE_DELETED,
+    REALTIME_EVENTS.ROOM_MESSAGE_RECEIVED,
+    REALTIME_EVENTS.ROOM_MESSAGE_SENT,
+    REALTIME_EVENTS.ROOM_MESSAGE_UPDATED,
+    REALTIME_EVENTS.ROOM_MESSAGE_DELETED,
+  ], (env) => {
+    if (id === '__broadcast__') return;
+    const payload = env.payload as {
+      id?: string;
+      roomId?: string;
+      agentId?: string;
+      message?: AgentMsg | RoomMsg;
+    };
+    if (kind === 'agent') {
+      if (payload.agentId !== id) return;
+      if (env.event === REALTIME_EVENTS.CONVERSATION_MESSAGE_DELETED) {
+        setMessages((prev) => prev.filter((message) => message.id !== payload.id));
+        return;
+      }
+      if (payload.message) {
+        setMessages((prev) => upsertMessage(prev, normalizeAgentMessage(payload.message as AgentMsg)));
+      }
+      return;
+    }
+    if (payload.roomId !== id) return;
+    if (env.event === REALTIME_EVENTS.ROOM_MESSAGE_DELETED) {
+      setMessages((prev) => prev.filter((message) => message.id !== payload.id));
+      return;
+    }
+    if (payload.message) {
+      setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(payload.message as RoomMsg)));
+    }
+  });
+
+  useEffect(() => {
+    if (preserveScrollRef.current) {
+      preserveScrollRef.current = false;
+      return;
+    }
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages.length]);
 
@@ -74,10 +210,20 @@ export function ThreadView({ kind, id, name }: ThreadViewProps) {
     if (!text || sending) return;
     setSending(true);
     try {
-      await api(sendEndpoint, { method: 'POST', body: JSON.stringify({ text }) });
+      const reqBody = kind === 'agent'
+        ? JSON.stringify({ body: text })
+        : JSON.stringify({ contentType: 'text', content: { text } });
+      const res = await api<{ message?: AgentMsg | RoomMsg }>(sendEndpoint, { method: 'POST', body: reqBody });
       setDraft('');
       if (taRef.current) { taRef.current.style.height = 'auto'; }
-      void refresh();
+      if (res.message) {
+        setMessages((prev) => upsertMessage(
+          prev,
+          kind === 'agent'
+            ? normalizeAgentMessage(res.message as AgentMsg)
+            : normalizeRoomMessage(res.message as RoomMsg),
+        ));
+      }
     } catch (e) {
       toast.error('Failed to send', String(e));
     } finally {
@@ -96,7 +242,7 @@ export function ThreadView({ kind, id, name }: ThreadViewProps) {
     try {
       await api(`${endpoint}/${m.id}`, { method: 'DELETE' });
       toast.success('Message deleted');
-      void refresh();
+      setMessages((prev) => prev.filter((message) => message.id !== m.id));
     } catch (e) {
       toast.error('Failed to delete', String(e));
     }
@@ -112,9 +258,18 @@ export function ThreadView({ kind, id, name }: ThreadViewProps) {
   async function handleEditSave(m: ChatMessage, text: string) {
     if (!text.trim()) return;
     try {
-      await api(`${endpoint}/${m.id}`, { method: 'PATCH', body: JSON.stringify({ text: text.trim() }) });
+      const res = await api<{ message?: AgentMsg | RoomMsg }>(`${endpoint}/${m.id}`, { method: 'PATCH', body: JSON.stringify({ text: text.trim() }) });
       setEditingId(null);
-      void refresh();
+      if (res.message) {
+        setMessages((prev) => upsertMessage(
+          prev,
+          kind === 'agent'
+            ? normalizeAgentMessage(res.message as AgentMsg)
+            : normalizeRoomMessage(res.message as RoomMsg),
+        ));
+      } else {
+        setMessages((prev) => prev.map((message) => (message.id === m.id ? { ...message, text: text.trim() } : message)));
+      }
     } catch (e) {
       toast.error('Failed to edit message', String(e));
     }
@@ -135,6 +290,18 @@ export function ThreadView({ kind, id, name }: ThreadViewProps) {
           </div>
         ) : (
           <ul className="flex flex-col gap-2.5">
+            {hasMore && (
+              <li className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => void loadOlder()}
+                  disabled={loadingOlder}
+                  className="rounded-btn border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary disabled:opacity-60"
+                >
+                  {loadingOlder ? 'Loading...' : 'Load earlier'}
+                </button>
+              </li>
+            )}
             {messages.map((m) => (
               <MessageBubble
                 key={m.id}

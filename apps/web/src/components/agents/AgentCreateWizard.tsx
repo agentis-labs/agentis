@@ -10,10 +10,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { X, Upload, ChevronRight, ChevronLeft, Check } from 'lucide-react';
+import { X, Upload, ChevronRight, ChevronLeft } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
+import { DEFAULT_RUNTIME_CONFIG, RuntimePicker, runtimeConfigToAdapterConfig, runtimeModelFor, type AdapterType, type RuntimeConfig } from './RuntimePicker';
 
 interface Space { id: string; name: string; }
 
@@ -22,13 +23,6 @@ interface AgentCreateWizardProps {
   onClose: () => void;
   onCreated: (agent: { id: string; name: string }) => void;
 }
-
-const ADAPTERS = [
-  { type: 'openai',       title: 'OpenAI',         desc: 'GPT-4o, o3, etc.' },
-  { type: 'anthropic',    title: 'Anthropic',      desc: 'Claude Opus, Sonnet, Haiku' },
-  { type: 'openai-compat', title: 'Custom (OpenAI-compat)', desc: 'Any compatible endpoint' },
-  { type: 'gateway',      title: 'Gateway',        desc: 'Self-hosted via OpenClaw' },
-] as const;
 
 function initials(name: string): string {
   if (!name) return '?';
@@ -48,15 +42,15 @@ export function AgentCreateWizard({ open, onClose, onCreated }: AgentCreateWizar
   const [spaceId, setSpaceId] = useState<string>('');
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
-  const [adapterType, setAdapterType] = useState<string>('openai');
-  const [model, setModel] = useState('gpt-4o');
+  const [adapterType, setAdapterType] = useState<AdapterType>('openclaw');
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig>(DEFAULT_RUNTIME_CONFIG);
   const [creating, setCreating] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
     setStep(1); setName(''); setDescription(''); setSpaceId(''); setImageDataUrl(null);
-    setAdapterType('openai'); setModel('gpt-4o');
+    setAdapterType('openclaw'); setRuntimeConfig(DEFAULT_RUNTIME_CONFIG);
     void api<{ spaces: Space[] }>('/v1/spaces').then((d) => setSpaces(d.spaces ?? [])).catch(() => setSpaces([]));
   }, [open]);
 
@@ -81,14 +75,6 @@ export function AgentCreateWizard({ open, onClose, onCreated }: AgentCreateWizar
     reader.readAsDataURL(file);
   }
 
-  // Update default model when adapter changes
-  useEffect(() => {
-    if (adapterType === 'openai') setModel('gpt-4o');
-    else if (adapterType === 'anthropic') setModel('claude-sonnet-4-6');
-    else if (adapterType === 'openai-compat') setModel('');
-    else setModel('');
-  }, [adapterType]);
-
   async function handleCreate() {
     if (!name.trim()) return;
     setCreating(true);
@@ -98,9 +84,13 @@ export function AgentCreateWizard({ open, onClose, onCreated }: AgentCreateWizar
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim() || undefined,
+          role: description.trim() || undefined,
           spaceId: spaceId || undefined,
           avatarDataUrl: imageDataUrl || undefined,
-          adapter: { type: adapterType, model: model || undefined },
+          avatarGlyph: initials(name.trim()),
+          adapterType,
+          runtimeModel: runtimeModelFor(adapterType, runtimeConfig),
+          config: runtimeConfigToAdapterConfig(adapterType, runtimeConfig),
         }),
       });
       toast.success('Agent created', name.trim());
@@ -114,7 +104,7 @@ export function AgentCreateWizard({ open, onClose, onCreated }: AgentCreateWizar
 
   return (
     <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
-      <div className="animate-scale-in w-full max-w-lg rounded-modal border border-line bg-surface shadow-modal">
+      <div className="animate-scale-in w-full max-w-3xl rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <div>
             <h3 className="text-heading text-text-primary">Create an agent</h3>
@@ -210,55 +200,13 @@ export function AgentCreateWizard({ open, onClose, onCreated }: AgentCreateWizar
         )}
 
         {step === 2 && (
-          <div className="space-y-4 px-5 py-5">
-            <div>
-              <div className="mb-2 text-[12px] font-medium text-text-secondary">How should this agent think?</div>
-              <div className="grid grid-cols-2 gap-2">
-                {ADAPTERS.map((a) => {
-                  const selected = adapterType === a.type;
-                  return (
-                    <button
-                      key={a.type}
-                      type="button"
-                      onClick={() => setAdapterType(a.type)}
-                      className={clsx(
-                        'rounded-card border p-3 text-left transition-all',
-                        selected
-                          ? 'border-accent-muted bg-accent-soft'
-                          : 'border-line bg-surface-2 hover:border-line-strong hover:bg-surface-3',
-                      )}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className={clsx('text-subheading', selected ? 'text-accent' : 'text-text-primary')}>
-                          {a.title}
-                        </span>
-                        {selected && <Check size={14} className="text-accent" />}
-                      </div>
-                      <div className={clsx('mt-1 text-[11px]', selected ? 'text-accent/80' : 'text-text-muted')}>
-                        {a.desc}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-[12px] font-medium text-text-secondary">Model</label>
-              <input
-                type="text"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder={adapterType === 'gateway' ? 'e.g., my-self-hosted-model' : 'e.g., gpt-4o'}
-                className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-              />
-              <div className="text-[11px] text-text-muted">
-                {adapterType === 'openai' && 'Default: gpt-4o'}
-                {adapterType === 'anthropic' && 'Default: claude-sonnet-4-6'}
-                {adapterType === 'openai-compat' && 'Set the model name your endpoint expects.'}
-                {adapterType === 'gateway' && 'Set the model identifier registered with your gateway.'}
-              </div>
-            </div>
+          <div className="px-5 py-5">
+            <RuntimePicker
+              adapterType={adapterType}
+              runtimeConfig={runtimeConfig}
+              onAdapterChange={setAdapterType}
+              onConfigChange={setRuntimeConfig}
+            />
           </div>
         )}
 

@@ -13,6 +13,7 @@
 
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { api, ambient as ambientStore, workspace } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
 
@@ -102,12 +103,17 @@ export function GatewayHealthPill() {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const ws = workspace.get();
-    if (ws) rtSubscribe('workspace', { workspaceId: ws });
+    const unsubscribe = ws ? rtSubscribe('workspace', { workspaceId: ws }) : undefined;
     void api<{ gateways: GatewayRow[] }>('/v1/gateways')
       .then((d) => setGateways(d.gateways))
       .catch(() => {});
+    return () => unsubscribe?.();
   }, [tick]);
-  useRealtime(['gateway.connected', 'gateway.degraded', 'gateway.disconnected'], () =>
+  useRealtime([
+    REALTIME_EVENTS.GATEWAY_CONNECTED,
+    REALTIME_EVENTS.GATEWAY_DEGRADED,
+    REALTIME_EVENTS.GATEWAY_DISCONNECTED,
+  ], () =>
     setTick((t) => t + 1),
   );
 

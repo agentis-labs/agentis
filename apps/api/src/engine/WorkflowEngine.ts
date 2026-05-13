@@ -34,6 +34,7 @@ import {
   type ReadyQueueItem,
   type SkillTaskNodeConfig,
   type AgentTaskNodeConfig,
+  type KnowledgeNodeConfig,
   type RouterNodeConfig,
   type MergeNodeConfig,
   type CheckpointNodeConfig,
@@ -52,6 +53,8 @@ import type { ApprovalInboxService } from '../services/approvalInbox.js';
 import type { SkillRuntime } from '../services/skillRuntime.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
+import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
+import type { CollectiveBrainService } from '../services/collectiveBrain.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
@@ -67,6 +70,8 @@ export interface EngineDeps {
   skills: SkillRuntime;
   adapters: AdapterManager;
   subflows?: SubflowExecutor;
+  knowledgeBases?: KnowledgeBaseService;
+  collectiveBrain?: CollectiveBrainService;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
   telemetry?: Telemetry;
 }
@@ -108,6 +113,7 @@ export class WorkflowEngine {
       ambientId: args.ambientId,
       userId: args.userId,
       graph: args.graph,
+      downstreamEdges: buildDownstreamEdges(args.graph),
       state: args.initialState,
       eventsSinceSnapshot: 0,
       inflightDispatches: 0,
@@ -160,7 +166,11 @@ export class WorkflowEngine {
   }): Promise<void> {
     const ctx = this.#runs.get(args.runId);
     if (!ctx) return;
+    const node = ctx.graph.nodes.find((candidate) => candidate.id === args.nodeId) ?? null;
     await this.#completeNode(ctx, args.nodeId, args.output);
+    if (node?.config.kind === 'agent_task') {
+      this.#maybePromoteFromAgentTask(ctx, node, node.config, args.output);
+    }
     void this.#tick(ctx);
   }
 
@@ -230,6 +240,7 @@ export class WorkflowEngine {
 
     if (ctx) {
       ctx.graph = merged;
+      ctx.downstreamEdges = buildDownstreamEdges(merged);
       ctx.state.graphRevision = newRevision;
       await this.#persistRun(ctx);
     } else {
@@ -387,6 +398,11 @@ export class WorkflowEngine {
         await this.#completeNode(ctx, node.id, result);
         return;
       }
+      case 'knowledge': {
+        const result = await this.#executeKnowledgeNode(ctx, node.config, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
       case 'agent_task': {
         await this.#dispatchAgentTask(ctx, node, node.config, item.inputData);
         return; // adapter event will call notifyTaskCompleted
@@ -468,6 +484,55 @@ export class WorkflowEngine {
     return result.output;
   }
 
+  async #executeKnowledgeNode(
+    ctx: RunningContext,
+    config: KnowledgeNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.knowledgeBases) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'knowledge node present but KnowledgeBaseService not wired');
+    }
+
+    const query = resolveKnowledgeQuery(config, inputData, ctx.state.nodeStates).trim();
+    if (!query) throw new AgentisError('VALIDATION_FAILED', 'knowledge node query is empty');
+
+    const topK = Math.min(Math.max(config.topK ?? 5, 1), 20);
+    const bases = config.knowledgeBaseId
+      ? [this.deps.knowledgeBases.getKnowledgeBase(ctx.workspaceId, config.knowledgeBaseId)]
+      : this.deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId);
+    const perBaseTopK = config.knowledgeBaseId ? topK : Math.max(topK, 5);
+
+    const results = bases
+      .flatMap((base) => this.deps.knowledgeBases!.search({
+        workspaceId: ctx.workspaceId,
+        knowledgeBaseId: base.id,
+        query,
+        topK: perBaseTopK,
+      }).map((hit) => ({
+        ...hit,
+        knowledgeBaseId: base.id,
+        knowledgeBaseName: base.name,
+      })))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, topK);
+
+    return {
+      query,
+      topK,
+      retrievalMode: config.retrievalMode ?? 'contextual',
+      knowledgeBaseId: config.knowledgeBaseId ?? null,
+      resultCount: results.length,
+      results,
+      context: results.map((result, index) => ({
+        index: index + 1,
+        title: result.knowledgeBaseName,
+        content: result.content,
+        score: result.score,
+        source: result.metadata,
+      })),
+    };
+  }
+
   async #dispatchAgentTask(
     ctx: RunningContext,
     node: WorkflowNode,
@@ -500,6 +565,36 @@ export class WorkflowEngine {
       capabilityTags: config.capabilityTags,
       timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
     }, config.agentId);
+  }
+
+  #maybePromoteFromAgentTask(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: AgentTaskNodeConfig,
+    output: Record<string, unknown>,
+  ): void {
+    if (!this.deps.collectiveBrain) return;
+    const inputData = ctx.state.nodeStates[node.id]?.inputData ?? null;
+    queueMicrotask(() => {
+      try {
+        this.deps.collectiveBrain!.extractAndPromote({
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
+          runId: ctx.runId,
+          nodeId: node.id,
+          agentId: config.agentId ?? null,
+          appId: null,
+          taskInput: inputData,
+          taskOutput: output,
+        });
+      } catch (err) {
+        this.deps.logger.warn('collective_brain.agent_task_promotion.failed', {
+          runId: ctx.runId,
+          nodeId: node.id,
+          message: (err as Error).message,
+        });
+      }
+    });
   }
 
   async #executeScratchpadNode(
@@ -628,13 +723,12 @@ export class WorkflowEngine {
     this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_COMPLETED, {
       runId: ctx.runId,
       nodeId,
-      output,
+      outputPreview: compactRealtimePayload(output),
     });
     ctx.eventsSinceSnapshot += 1;
 
     // Fan out to downstream nodes.
-    for (const edge of ctx.graph.edges) {
-      if (edge.source !== nodeId) continue;
+    for (const edge of ctx.downstreamEdges.get(nodeId) ?? []) {
       // Conditional edge gating.
       if (edge.condition) {
         const scope = { output, scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId) };
@@ -779,6 +873,7 @@ interface RunningContext {
   ambientId: string | null;
   userId: string;
   graph: WorkflowGraph;
+  downstreamEdges: Map<string, WorkflowEdge[]>;
   state: WorkflowRunState;
   eventsSinceSnapshot: number;
   /**
@@ -802,6 +897,32 @@ function resolveParallelism(): number {
   }
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 8;
+}
+
+function buildDownstreamEdges(graph: WorkflowGraph): Map<string, WorkflowEdge[]> {
+  const downstream = new Map<string, WorkflowEdge[]>();
+  for (const edge of graph.edges) {
+    const edges = downstream.get(edge.source);
+    if (edges) edges.push(edge);
+    else downstream.set(edge.source, [edge]);
+  }
+  return downstream;
+}
+
+function compactRealtimePayload(value: Record<string, unknown>): Record<string, unknown> {
+  const preview: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 8)) {
+    if (entry === null || typeof entry !== 'object') {
+      preview[key] = entry;
+      continue;
+    }
+    if (Array.isArray(entry)) {
+      preview[key] = { type: 'array', count: entry.length };
+      continue;
+    }
+    preview[key] = { type: 'object', keys: Object.keys(entry).slice(0, 8) };
+  }
+  return preview;
 }
 
 function mergeGraphPatch(base: WorkflowGraph, patch: WorkflowGraphPatch): WorkflowGraph {
@@ -886,13 +1007,29 @@ function mapInputs(
 
 function lookupPath(obj: unknown, path: string): unknown {
   if (!path) return obj;
-  const parts = path.split('.');
+  const normalized = path.startsWith('$.') ? path.slice(2) : path.startsWith('$') ? path.slice(1) : path;
+  const parts = normalized.split('.').filter(Boolean);
   let cur: unknown = obj;
   for (const p of parts) {
     if (cur == null || typeof cur !== 'object') return undefined;
     cur = (cur as Record<string, unknown>)[p];
   }
   return cur;
+}
+
+function resolveKnowledgeQuery(
+  config: KnowledgeNodeConfig,
+  inputData: Record<string, unknown>,
+  nodeStates: WorkflowRunState['nodeStates'],
+): string {
+  if ((config.queryMode ?? 'static') === 'dynamic') {
+    const source = config.queryNodeId ? nodeStates[config.queryNodeId]?.outputData : inputData;
+    const value = lookupPath(source ?? inputData, config.queryPath ?? '');
+    if (typeof value === 'string') return value;
+    if (value === null || value === undefined) return '';
+    return JSON.stringify(value);
+  }
+  return config.query ?? '';
 }
 
 function mergeBufferedInputs(buf: { receivedInputs: Record<string, unknown> }): Record<string, unknown> {

@@ -64,13 +64,15 @@ export function createRateLimiter(opts: RateLimitOptions): MiddlewareHandler {
  * then to `'unknown'` so the limiter still buckets test traffic together.
  */
 export function clientIp(c: Parameters<MiddlewareHandler>[0]): string {
-  const xff = c.req.header('x-forwarded-for');
-  if (xff) {
-    const first = xff.split(',')[0]?.trim();
-    if (first) return first;
+  if (String(process.env.AGENTIS_TRUST_PROXY ?? '').toLowerCase() === 'true') {
+    const xff = c.req.header('x-forwarded-for');
+    if (xff) {
+      const first = xff.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    const real = c.req.header('x-real-ip');
+    if (real) return real.trim();
   }
-  const real = c.req.header('x-real-ip');
-  if (real) return real.trim();
   // @hono/node-server stows the raw IncomingMessage on `c.env.incoming`.
   const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)
     ?.incoming;

@@ -26,6 +26,11 @@ export const UNAUTH_ALLOW_LIST: ReadonlyArray<UnauthEntry> = [
   { path: '/v1/docs', methods: ['GET'], prefix: true, reason: 'Scalar UI for the public schema.' },
   { path: '/.well-known/jwks.json', methods: ['GET'], reason: 'RS256 public key for JWT verifiers.' },
   { path: '/v1/auth/login', methods: ['POST'], reason: 'Bootstrap: must be reachable pre-token.' },
+  {
+    path: '/v1/auth/launch',
+    methods: ['GET', 'POST'],
+    reason: 'Local launch bootstrap for file-backed installs; returns 404 when env-managed secrets disable launch auth.',
+  },
   { path: '/v1/auth/refresh', methods: ['POST'], reason: 'Refresh tokens are presented in the body, not as bearer.' },
   {
     path: '/v1/webhooks/trigger/',

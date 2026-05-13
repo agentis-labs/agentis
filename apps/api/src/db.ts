@@ -6,8 +6,9 @@
  * logical schema names, so any code that imports `schema` from this module
  * is dialect-agnostic.
  *
- * V1 default: SQLite at `{dataDir}/data.db`. Standard mode (Postgres) is
- * opt-in via AGENTIS_DATABASE_URL.
+ * V1 runtime: local-first SQLite at `{dataDir}/data.db`. Standard/Postgres
+ * configuration is detected so operators get a clear startup error instead
+ * of a half-wired process.
  */
 
 import { join } from 'node:path';
@@ -44,11 +45,16 @@ export async function openDatabase(env: AgentisEnv): Promise<DbHandle> {
     };
   }
 
-  // Standard mode is partially scaffolded; the engine + services target the
-  // sqlite handle in V1. Switching the engine to dialect-agnostic helpers is
-  // tracked as DEBT in DECISIONS.md.
+  // V1 is intentionally local-first. The schema has standard-mode scaffolding,
+  // but the engine, realtime promotion hooks, and service composition require
+  // the embedded SQLite handle. Fail closed until the hosted runtime is wired
+  // end-to-end.
   throw new AgentisError(
-    'INTERNAL_ERROR',
+    'VALIDATION_FAILED',
     'Standard (Postgres) mode is scaffolded but the engine wiring is not complete in V1. Set AGENTIS_MODE=embedded for now.',
+    {
+      remediation: 'Unset AGENTIS_DATABASE_URL or set AGENTIS_MODE=embedded for the V1 local-first runtime.',
+      details: { requestedMode: mode, supportedMode: 'embedded' },
+    },
   );
 }

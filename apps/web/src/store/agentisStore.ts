@@ -45,7 +45,7 @@ export interface AgentisStore {
   // Workspace + ambient context
   workspaceId: string | null;
   ambientId: string | null;
-  setContext: (workspaceId: string, ambientId: string) => void;
+  setContext: (workspaceId: string, ambientId: string | null) => void;
   clearContext: () => void;
 
   // UI shell flags
@@ -85,12 +85,20 @@ export const useAgentisStore = create<AgentisStore>((set) => ({
 
   presenceByAgent: {},
   upsertPresence: (p) =>
-    set((s) => ({ presenceByAgent: { ...s.presenceByAgent, [p.agentId]: p } })),
+    set((s) => {
+      const current = s.presenceByAgent[p.agentId];
+      if (samePresence(current, p)) return s;
+      return { presenceByAgent: { ...s.presenceByAgent, [p.agentId]: p } };
+    }),
   clearPresence: () => set({ presenceByAgent: {} }),
 
   activeRuns: {},
   upsertActiveRun: (run) =>
-    set((s) => ({ activeRuns: { ...s.activeRuns, [run.runId]: run } })),
+    set((s) => {
+      const current = s.activeRuns[run.runId];
+      if (sameActiveRun(current, run)) return s;
+      return { activeRuns: { ...s.activeRuns, [run.runId]: run } };
+    }),
   removeActiveRun: (runId) =>
     set((s) => {
       // Object spread + delete — cheaper than Object.fromEntries(filter).
@@ -106,3 +114,18 @@ export const selectPresence = (agentId: string) => (s: AgentisStore) =>
   s.presenceByAgent[agentId];
 export const selectActiveRunCount = (s: AgentisStore) =>
   Object.keys(s.activeRuns).length;
+
+function samePresence(a: AgentPresence | undefined, b: AgentPresence): boolean {
+  return Boolean(a)
+    && a!.agentId === b.agentId
+    && a!.state === b.state
+    && a!.lastSeen === b.lastSeen;
+}
+
+function sameActiveRun(a: ActiveRunSummary | undefined, b: ActiveRunSummary): boolean {
+  return Boolean(a)
+    && a!.runId === b.runId
+    && a!.workflowId === b.workflowId
+    && a!.status === b.status
+    && a!.startedAt === b.startedAt;
+}

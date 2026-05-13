@@ -23,8 +23,15 @@ import { assertSafeUrl } from '../services/safeUrl.js';
 export interface HttpAdapterOptions {
   agentId: string;
   dispatchUrl: string;
+  cancelUrl?: string;
+  healthUrl?: string;
+  method?: 'POST' | 'GET' | 'PUT' | 'PATCH';
+  headers?: Record<string, string>;
+  payloadTemplate?: Record<string, unknown>;
+  dispatchTimeoutMs?: number;
   /** Shared secret used for both outbound auth header and inbound HMAC. */
-  sharedSecret: string;
+  sharedSecret?: string;
+  authToken?: string;
   logger: Logger;
 }
 
@@ -44,11 +51,25 @@ export class HttpAdapter implements AgentAdapter {
   }
 
   async healthCheck(): Promise<AdapterHealthStatus> {
-    return {
-      isHealthy: this.#breaker.state() !== 'open',
-      checkedAt: new Date().toISOString(),
-      ...(this.#breaker.state() === 'open' ? { error: 'circuit_breaker_open' } : {}),
-    };
+    if (this.#breaker.state() === 'open') {
+      return { isHealthy: false, checkedAt: new Date().toISOString(), error: 'circuit_breaker_open' };
+    }
+    if (!this.opts.healthUrl) return { isHealthy: true, checkedAt: new Date().toISOString() };
+    try {
+      const safe = await assertSafeUrl(this.opts.healthUrl, {
+        allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.opts.dispatchTimeoutMs ?? 30_000).unref?.();
+      try {
+        const res = await fetch(safe, { method: 'HEAD', headers: this.#headers(), signal: controller.signal });
+        return { isHealthy: res.ok || res.status === 401, latencyMs: undefined, checkedAt: new Date().toISOString(), ...(res.ok || res.status === 401 ? {} : { error: `status=${res.status}` }) };
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    } catch (err) {
+      return { isHealthy: false, error: (err as Error).message, checkedAt: new Date().toISOString() };
+    }
   }
 
   onEvent(handler: (e: NormalizedAgentEvent) => void): void {
@@ -60,20 +81,19 @@ export class HttpAdapter implements AgentAdapter {
       allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
     });
     await this.#breaker.exec(async () => {
-      const body = JSON.stringify({ task });
+      const method = this.opts.method ?? 'POST';
+      const payload = { ...(this.opts.payloadTemplate ?? {}), task };
+      const body = JSON.stringify(payload);
       const ts = Math.floor(Date.now() / 1000);
-      const sig = createHmac('sha256', this.opts.sharedSecret).update(`${ts}.${body}`).digest('hex');
+      const sig = this.opts.sharedSecret ? createHmac('sha256', this.opts.sharedSecret).update(`${ts}.${body}`).digest('hex') : null;
       const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS).unref?.();
+      const t = setTimeout(() => controller.abort(), this.opts.dispatchTimeoutMs ?? CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS).unref?.();
       try {
-        const res = await fetch(safe.toString(), {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-agentis-signature': `t=${ts},v1=${sig}`,
-            'user-agent': 'Agentis/1.0 (HttpAdapter)',
-          },
-          body,
+        const dispatchUrl = method === 'GET' ? appendQuery(safe, 'task', body) : safe.toString();
+        const res = await fetch(dispatchUrl, {
+          method,
+          headers: this.#headers(sig ? { 'x-agentis-signature': `t=${ts},v1=${sig}` } : undefined),
+          ...(method === 'GET' ? {} : { body }),
           signal: controller.signal,
         });
         if (!res.ok) {
@@ -89,11 +109,11 @@ export class HttpAdapter implements AgentAdapter {
     // Best-effort cancel.
     try {
       await this.#breaker.exec(async () => {
-        const safe = await assertSafeUrl(this.opts.dispatchUrl, {
+        const safe = await assertSafeUrl(this.opts.cancelUrl ?? this.opts.dispatchUrl, {
           allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
         });
-        const url = `${safe.toString().replace(/\/$/, '')}/cancel/${encodeURIComponent(taskId)}`;
-        await fetch(url, { method: 'POST' });
+        const url = this.opts.cancelUrl ? safe.toString() : `${safe.toString().replace(/\/$/, '')}/cancel/${encodeURIComponent(taskId)}`;
+        await fetch(url, { method: 'POST', headers: this.#headers() });
       });
     } catch {
       // ignore
@@ -109,6 +129,10 @@ export class HttpAdapter implements AgentAdapter {
     signatureHeader: string;
     payload: { eventType: NormalizedAgentEvent['eventType']; taskId: string; runId: string } & Record<string, unknown>;
   }): boolean {
+    if (!this.opts.sharedSecret) {
+      this.opts.logger.warn('http_adapter.callback_no_shared_secret', { agentId: this.opts.agentId });
+      return false;
+    }
     const ok = verifySignature(args.rawBody, args.signatureHeader, this.opts.sharedSecret);
     if (!ok) {
       this.opts.logger.warn('http_adapter.callback_bad_signature', { agentId: this.opts.agentId });
@@ -133,6 +157,22 @@ export class HttpAdapter implements AgentAdapter {
   breakerState() {
     return this.#breaker.state();
   }
+
+  #headers(extra?: Record<string, string>): Record<string, string> {
+    return {
+      ...(this.opts.headers ?? {}),
+      'content-type': 'application/json',
+      ...(this.opts.authToken ? { authorization: `Bearer ${this.opts.authToken}` } : {}),
+      ...(extra ?? {}),
+      'user-agent': 'Agentis/1.0 (HttpAdapter)',
+    };
+  }
+}
+
+function appendQuery(url: URL, key: string, value: string): string {
+  const next = new URL(url.toString());
+  next.searchParams.set(key, value);
+  return next.toString();
 }
 
 function verifySignature(rawBody: string, header: string, secret: string): boolean {

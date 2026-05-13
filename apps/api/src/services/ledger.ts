@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { eq, max as drizzleMax } from 'drizzle-orm';
+import { asc, eq, gt, max as drizzleMax, and } from 'drizzle-orm';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -97,12 +97,11 @@ export class LedgerService {
     const rows = this.db
       .select()
       .from(schema.ledgerEvents)
-      .where(eq(schema.ledgerEvents.runId, args.runId))
+      .where(and(eq(schema.ledgerEvents.runId, args.runId), gt(schema.ledgerEvents.sequenceNumber, after)))
+      .orderBy(asc(schema.ledgerEvents.sequenceNumber))
+      .limit(limit)
       .all();
     return rows
-      .filter((r) => r.sequenceNumber > after)
-      .sort((a, b) => a.sequenceNumber - b.sequenceNumber)
-      .slice(0, limit)
       .map((r) => ({
         id: r.id,
         runId: r.runId,

@@ -52,15 +52,21 @@ export function CommandPalette() {
 
   useEffect(() => {
     if (!open) return;
+    const query = q.trim();
+    if (query.length < 2) {
+      setHits([]);
+      setActive(0);
+      return;
+    }
     const handle = setTimeout(async () => {
       try {
-        const r = await api<{ hits: Hit[] }>(`/v1/command/search?q=${encodeURIComponent(q)}`);
+        const r = await api<{ hits: Hit[] }>(`/v1/command/search?q=${encodeURIComponent(query)}`);
         setHits(r.hits.slice(0, 12));
         setActive(0);
       } catch {
         setHits([]);
       }
-    }, 80);
+    }, 180);
     return () => clearTimeout(handle);
   }, [q, open]);
 

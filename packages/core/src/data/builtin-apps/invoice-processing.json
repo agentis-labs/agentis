@@ -1,0 +1,62 @@
+{
+  "slug": "invoice-processing",
+  "name": "Invoice Processing",
+  "version": "1.0.0",
+  "description": "Extracts invoice fields, checks policy, and routes approval exceptions.",
+  "tags": ["finance", "operations", "agentis"],
+  "contents": {
+    "kind": "agentis",
+    "agents": [
+      {
+        "name": "Invoice Processor",
+        "adapterType": "hermes",
+        "capabilityTags": ["invoice", "finance-ops", "approval"],
+        "config": {},
+        "instructions": "Extract invoice facts exactly, flag mismatches, and route approvals instead of guessing.",
+        "role": "agent"
+      }
+    ],
+    "workflows": [
+      {
+        "slug": "invoice-processing-main",
+        "title": "Invoice Processing",
+        "summary": "Extracts invoice metadata and returns payment or approval-routing outcomes.",
+        "graph": {
+          "version": 1,
+          "nodes": [
+            { "id": "trigger", "type": "trigger", "title": "New invoice", "position": { "x": 0, "y": 0 }, "config": { "kind": "trigger", "triggerType": "manual" } },
+            { "id": "process", "type": "agent_task", "title": "Extract and route", "position": { "x": 240, "y": 0 }, "config": { "kind": "agent_task", "agentPackageRef": "Invoice Processor", "capabilityTags": ["invoice", "approval"], "prompt": "Extract invoice fields, compare against policy, and return whether payment can proceed or approval is required.", "inputKeys": [], "outputKeys": ["invoices_processed", "approvals_requested"] } },
+            { "id": "response", "type": "response", "title": "Invoice outcome", "position": { "x": 520, "y": 0 }, "config": { "kind": "response", "content": "<process>" } }
+          ],
+          "edges": [
+            { "id": "trigger-process", "source": "trigger", "target": "process" },
+            { "id": "process-response", "source": "process", "target": "response" }
+          ],
+          "viewport": { "x": 0, "y": 0, "zoom": 1 },
+          "variables": []
+        },
+        "settings": { "outputLabels": ["invoices_processed", "approvals_requested"] }
+      }
+    ],
+    "credentialSlots": [
+      { "key": "erp_oauth", "service": "erp", "label": "ERP OAuth", "required": true, "oauthFlow": true }
+    ],
+    "datasetSpecs": [
+      { "key": "approval_policy", "label": "Approval policy", "description": "Vendor, amount, PO, and approval routing rules.", "acceptedFormats": ["csv", "pdf", "md"], "targetStore": "knowledge", "chunkingStrategy": "per-document", "optional": false }
+    ],
+    "knowledgeSeeds": [
+      { "title": "Invoice processing policy", "content": "Never approve payment without matching vendor, total, due date, and policy threshold.", "metadata": { "area": "finance" } }
+    ],
+    "evaluatorRubrics": [
+      { "nodeKind": "agent_task", "context": "Invoice output should include extracted fields, confidence, mismatches, and approval route.", "examples": [] }
+    ],
+    "workflowBaselines": [
+      { "workflowSlug": "invoice-processing-main", "p50DurationMs": 34000, "p95DurationMs": 90000, "expectedSuccessRate": 0.92, "costCentsPerRun": 10 }
+    ],
+    "entryWorkflowSlug": "invoice-processing-main",
+    "category": "Finance",
+    "replaces": "Manual invoice intake",
+    "costSavedPerMonth": "$3,000",
+    "readme": "Connect ERP credentials and load approval policy before processing invoice batches."
+  }
+}

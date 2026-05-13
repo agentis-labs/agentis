@@ -81,6 +81,21 @@ describe('<CommandPalette />', () => {
     expect(screen.getByText(/workflow/i)).toBeInTheDocument();
   });
 
+  it('does not query for one-character input', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ hits: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter>
+        <CommandPalette />
+      </MemoryRouter>,
+    );
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    const input = await screen.findByPlaceholderText(/Search workflows/i);
+    await userEvent.type(input, 'r');
+    await new Promise((resolve) => setTimeout(resolve, 220));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('closes when Escape is pressed', async () => {
     render(
       <MemoryRouter>

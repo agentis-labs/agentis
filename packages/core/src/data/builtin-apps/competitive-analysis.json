@@ -1,0 +1,62 @@
+{
+  "slug": "competitive-analysis",
+  "name": "Competitive Analysis",
+  "version": "1.0.0",
+  "description": "Tracks competitor changes, compares positioning, and produces battlecard updates.",
+  "tags": ["strategy", "sales", "agentis"],
+  "contents": {
+    "kind": "agentis",
+    "agents": [
+      {
+        "name": "Competitive Analyst",
+        "adapterType": "hermes",
+        "capabilityTags": ["competitive-intel", "positioning", "battlecards"],
+        "config": {},
+        "instructions": "Use evidence, avoid exaggeration, and turn changes into actionable sales or product notes.",
+        "role": "agent"
+      }
+    ],
+    "workflows": [
+      {
+        "slug": "competitive-analysis-main",
+        "title": "Competitive Analysis",
+        "summary": "Detects competitor changes and updates comparison notes.",
+        "graph": {
+          "version": 1,
+          "nodes": [
+            { "id": "trigger", "type": "trigger", "title": "Competitor check", "position": { "x": 0, "y": 0 }, "config": { "kind": "trigger", "triggerType": "manual" } },
+            { "id": "analyze", "type": "agent_task", "title": "Analyze changes", "position": { "x": 240, "y": 0 }, "config": { "kind": "agent_task", "agentPackageRef": "Competitive Analyst", "capabilityTags": ["competitive-intel", "battlecards"], "prompt": "Review competitor evidence, detect material changes, and produce positioning or battlecard updates.", "inputKeys": [], "outputKeys": ["analyses_run", "changes_detected"] } },
+            { "id": "response", "type": "response", "title": "Competitive update", "position": { "x": 520, "y": 0 }, "config": { "kind": "response", "content": "<analyze>" } }
+          ],
+          "edges": [
+            { "id": "trigger-analyze", "source": "trigger", "target": "analyze" },
+            { "id": "analyze-response", "source": "analyze", "target": "response" }
+          ],
+          "viewport": { "x": 0, "y": 0, "zoom": 1 },
+          "variables": []
+        },
+        "settings": { "outputLabels": ["analyses_run", "changes_detected"] }
+      }
+    ],
+    "credentialSlots": [
+      { "key": "web_monitor_key", "service": "web-monitor", "label": "Web monitor API key", "required": false, "oauthFlow": false }
+    ],
+    "datasetSpecs": [
+      { "key": "competitor_watchlist", "label": "Competitor watchlist", "description": "Competitor domains, products, pages, and comparison dimensions.", "acceptedFormats": ["csv", "md"], "targetStore": "knowledge", "chunkingStrategy": "per-row", "requiredFields": ["competitor", "url"], "optional": false }
+    ],
+    "knowledgeSeeds": [
+      { "title": "Competitive analysis policy", "content": "Prefer observable changes over opinion. Capture date, source, evidence, and suggested response.", "metadata": { "area": "strategy" } }
+    ],
+    "evaluatorRubrics": [
+      { "nodeKind": "agent_task", "context": "Competitive updates should be sourced, specific, and actionable for sales or product.", "examples": [] }
+    ],
+    "workflowBaselines": [
+      { "workflowSlug": "competitive-analysis-main", "p50DurationMs": 56000, "p95DurationMs": 145000, "expectedSuccessRate": 0.85, "costCentsPerRun": 19 }
+    ],
+    "entryWorkflowSlug": "competitive-analysis-main",
+    "category": "Strategy",
+    "replaces": "Manual competitor watch",
+    "costSavedPerMonth": "$3,400",
+    "readme": "Upload a competitor watchlist and run analysis when positioning or product pages change."
+  }
+}

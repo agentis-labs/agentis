@@ -14,3 +14,5 @@ export { AgentNode } from './AgentNode';
 export type { AgentNodeData } from './AgentNode';
 export { NodePalette } from './NodePalette';
 export { RunDrawer } from './RunDrawer';
+export { CanvasEngine } from './CanvasEngine';
+export type { CanvasEngineInstance } from './CanvasEngine';

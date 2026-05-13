@@ -11,6 +11,7 @@ export type WorkflowNodeType =
   | 'trigger'
   | 'agent_task'
   | 'skill_task'
+  | 'knowledge'
   | 'router'
   | 'merge'
   | 'checkpoint'
@@ -46,6 +47,7 @@ export type WorkflowNodeConfig =
   | TriggerNodeConfig
   | AgentTaskNodeConfig
   | SkillTaskNodeConfig
+  | KnowledgeNodeConfig
   | RouterNodeConfig
   | MergeNodeConfig
   | CheckpointNodeConfig
@@ -73,6 +75,17 @@ export interface SkillTaskNodeConfig {
   skillId: string;
   inputMapping: Record<string, string>;
   outputMapping: Record<string, string>;
+}
+
+export interface KnowledgeNodeConfig {
+  kind: 'knowledge';
+  knowledgeBaseId?: string;
+  queryMode?: 'static' | 'dynamic';
+  query?: string;
+  queryNodeId?: string;
+  queryPath?: string;
+  retrievalMode?: 'contextual' | 'strict' | 'exploratory';
+  topK?: number;
 }
 
 export interface RouterNodeConfig {

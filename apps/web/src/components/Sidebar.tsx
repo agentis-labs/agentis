@@ -16,6 +16,8 @@ import {
   Workflow as WorkflowIcon,
   AppWindow,
   Package as PackageIcon,
+  BookOpen,
+  Brain as BrainIcon,
   Settings as SettingsIcon,
   ChevronsLeft,
   ChevronsRight,
@@ -24,8 +26,8 @@ import {
   FolderOpen,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { api, workspace as wsStore } from '../lib/api';
-import { rtSubscribe, useRealtime } from '../lib/realtime';
+import { api } from '../lib/api';
+import { refreshWorkspaceSnapshot, useWorkspaceData } from '../lib/workspaceData';
 import { useToast } from './shared/Toast';
 import { useChatPanelStore } from './chat/ChatPanelStore';
 
@@ -38,10 +40,12 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/home',      label: 'Home',      icon: HomeIcon },
-  { to: '/agents',    label: 'Agents',    icon: Bot,         badge: 'liveAgents' },
-  { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
   { to: '/apps',      label: 'Apps',      icon: AppWindow },
+  { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
+  { to: '/agents',    label: 'Agents',    icon: Bot,         badge: 'liveAgents' },
   { to: '/packages',  label: 'Packages',  icon: PackageIcon },
+  { to: '/knowledge', label: 'Knowledge', icon: BookOpen },
+  { to: '/brain',     label: 'Brain',     icon: BrainIcon },
 ];
 
 const SPACE_COLORS = ['space-orange', 'space-blue', 'space-purple', 'space-teal', 'space-rose', 'space-lime'] as const;
@@ -54,11 +58,6 @@ interface Space {
   appCount?: number;
 }
 
-interface BadgeCounts {
-  liveAgents: number;
-  activeRuns: number;
-}
-
 const STORAGE_KEY = 'agentis.sidebar.collapsed';
 const SPACES_OPEN_KEY = 'agentis.sidebar.spacesOpen';
 
@@ -69,10 +68,9 @@ export function Sidebar() {
   const [spacesOpen, setSpacesOpen] = useState<boolean>(() => {
     try { return localStorage.getItem(SPACES_OPEN_KEY) !== '0'; } catch { return true; }
   });
-  const [spaces, setSpaces] = useState<Space[]>([]);
   const [creatingSpace, setCreatingSpace] = useState(false);
   const [newSpaceName, setNewSpaceName] = useState('');
-  const [counts, setCounts] = useState<BadgeCounts>({ liveAgents: 0, activeRuns: 0 });
+  const { spaces, counts } = useWorkspaceData();
   const nav = useNavigate();
   const toast = useToast();
   const chatState = useChatPanelStore((s) => s.state);
@@ -90,55 +88,6 @@ export function Sidebar() {
     try { localStorage.setItem(SPACES_OPEN_KEY, spacesOpen ? '1' : '0'); } catch { /* ignore */ }
   }, [spacesOpen]);
 
-  async function refreshCounts() {
-    const ws = wsStore.get();
-    if (!ws) return;
-    try {
-      const [agents, runs] = await Promise.allSettled([
-        api<{ agents: Array<{ status?: string }> }>(`/v1/agents`).catch(() => ({ agents: [] })),
-        api<{ runs:   Array<{ status: string }> }>(`/v1/runs?status=running`).catch(() => ({ runs: [] })),
-      ]);
-      const liveAgents =
-        agents.status === 'fulfilled'
-          ? agents.value.agents.filter((a) => a.status === 'online' || a.status === 'active' || a.status === 'running').length
-          : 0;
-      const activeRuns =
-        runs.status === 'fulfilled'
-          ? runs.value.runs.filter((r) => r.status === 'running' || r.status === 'pending').length
-          : 0;
-      setCounts({ liveAgents, activeRuns });
-    } catch { /* best-effort */ }
-  }
-
-  async function refreshSpaces() {
-    const ws = wsStore.get();
-    if (!ws) return;
-    try {
-      const data = await api<{ spaces: Space[] }>(`/v1/spaces`);
-      setSpaces(data.spaces ?? []);
-    } catch {
-      // Spaces endpoint may not exist yet — fallback gracefully
-      setSpaces([]);
-    }
-  }
-
-  useEffect(() => {
-    const ws = wsStore.get();
-    if (ws) rtSubscribe('workspace', { workspaceId: ws });
-    void refreshCounts();
-    void refreshSpaces();
-    const t = window.setInterval(() => void refreshCounts(), 30_000);
-    return () => window.clearInterval(t);
-  }, []);
-
-  useRealtime(
-    [
-      'run.created', 'run.running', 'run.completed', 'run.failed',
-      'agent.online', 'agent.offline', 'agent.busy',
-    ],
-    () => { void refreshCounts(); },
-  );
-
   async function handleCreateSpace(e: React.FormEvent) {
     e.preventDefault();
     const name = newSpaceName.trim();
@@ -146,12 +95,12 @@ export function Sidebar() {
     try {
       await api('/v1/spaces', {
         method: 'POST',
-        body: JSON.stringify({ name, slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') }),
+        body: JSON.stringify({ name }),
       });
       toast.success('Space created', name);
       setNewSpaceName('');
       setCreatingSpace(false);
-      void refreshSpaces();
+      void refreshWorkspaceSnapshot();
     } catch (err) {
       toast.error('Failed to create space', String(err));
     }
@@ -180,7 +129,7 @@ export function Sidebar() {
               <li key={item.to}>
                 <NavLink
                   to={item.to}
-                  title={collapsed ? item.label : undefined}
+                  title={item.label}
                   className={({ isActive }) =>
                     clsx(
                       'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',
@@ -242,7 +191,7 @@ export function Sidebar() {
                   <li key={s.id}>
                     <NavLink
                       to={`/apps?space=${s.id}`}
-                      title={collapsed ? s.name : undefined}
+                      title={s.name}
                       className={({ isActive }) =>
                         clsx(
                           'group relative flex items-center gap-2 rounded-nav px-2.5 py-1.5 text-[12px] transition-colors',
@@ -334,7 +283,7 @@ export function Sidebar() {
           <li>
             <NavLink
               to="/settings"
-              title={collapsed ? 'Settings' : undefined}
+              title="Workspace settings"
               className={({ isActive }) =>
                 clsx(
                   'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',

@@ -16,11 +16,13 @@ interface WorkflowCreateDialogProps {
   open: boolean;
   onClose: () => void;
   onCreated: (workflowId: string) => void;
+  /** If true, opens directly to the templates list (no prompt-first option). */
+  templatesOnly?: boolean;
 }
 
 interface Template { id: string; name: string; description?: string; }
 
-export function WorkflowCreateDialog({ open, onClose, onCreated }: WorkflowCreateDialogProps) {
+export function WorkflowCreateDialog({ open, onClose, onCreated, templatesOnly = false }: WorkflowCreateDialogProps) {
   const toast = useToast();
   const [prompt, setPrompt] = useState('');
   const [creating, setCreating] = useState(false);
@@ -29,9 +31,9 @@ export function WorkflowCreateDialog({ open, onClose, onCreated }: WorkflowCreat
 
   useEffect(() => {
     if (!open) return;
-    setPrompt(''); setShowTemplates(false);
+    setPrompt(''); setShowTemplates(templatesOnly);
     void api<{ templates: Template[] }>('/v1/workflows/templates').then((d) => setTemplates(d.templates ?? [])).catch(() => setTemplates([]));
-  }, [open]);
+  }, [open, templatesOnly]);
 
   useEffect(() => {
     if (!open) return;
@@ -45,11 +47,12 @@ export function WorkflowCreateDialog({ open, onClose, onCreated }: WorkflowCreat
   async function createBlank(initialPrompt?: string) {
     setCreating(true);
     try {
+      // The API requires `title` (not `name`) per createWorkflowSchema.
       const data = await api<{ workflow: { id: string } }>('/v1/workflows', {
         method: 'POST',
         body: JSON.stringify({
-          name: initialPrompt ? 'New workflow' : 'Untitled workflow',
-          initialPrompt: initialPrompt || undefined,
+          title: initialPrompt ? initialPrompt.slice(0, 80) : 'Untitled workflow',
+          summary: initialPrompt || undefined,
         }),
       });
       onCreated(data.workflow.id);
@@ -62,7 +65,7 @@ export function WorkflowCreateDialog({ open, onClose, onCreated }: WorkflowCreat
     try {
       const data = await api<{ workflow: { id: string } }>('/v1/workflows', {
         method: 'POST',
-        body: JSON.stringify({ templateId: t.id, name: t.name }),
+        body: JSON.stringify({ templateId: t.id, title: t.name }),
       });
       onCreated(data.workflow.id);
     } catch (e) { toast.error('Failed to use template', String(e)); }

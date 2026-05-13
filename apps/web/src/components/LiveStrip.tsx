@@ -13,60 +13,12 @@
  * Refreshed on every relevant realtime event; no polling.
  */
 
-import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
-import { api, workspace as wsStore } from '../lib/api';
-import { useRealtime, rtSubscribe } from '../lib/realtime';
-
-interface FleetOverview {
-  runs: { active: number };
-  gateways: { total: number; connected: number };
-  approvals: { pending: number };
-}
-
-interface ActivityRow {
-  id: string;
-  summary: string;
-  createdAt: string;
-}
-
-const REFRESH_EVENTS = [
-  'run.created',
-  'run.running',
-  'run.completed',
-  'run.failed',
-  'approval.requested',
-  'approval.resolved',
-  'gateway.connected',
-  'gateway.disconnected',
-  'gateway.degraded',
-];
+import { useWorkspaceData } from '../lib/workspaceData';
 
 export function LiveStrip() {
-  const [snap, setSnap] = useState<FleetOverview | null>(null);
-  const [latest, setLatest] = useState<ActivityRow | null>(null);
-
-  const refresh = useCallback(() => {
-    void api<FleetOverview>('/v1/dashboard/fleet-overview')
-      .then(setSnap)
-      .catch(() => {});
-    void api<{ events: ActivityRow[] }>('/v1/activity?limit=1')
-      .then((d) => setLatest(d.events[0] ?? null))
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const ws = wsStore.get();
-    if (ws) rtSubscribe('workspace', { workspaceId: ws });
-    refresh();
-  }, [refresh]);
-
-  useRealtime(REFRESH_EVENTS, refresh);
-  useRealtime(['activity.created'], (env) => {
-    const p = env.payload as { id: string; summary: string; createdAt: string };
-    if (p?.id) setLatest({ id: p.id, summary: p.summary, createdAt: p.createdAt });
-  });
+  const { fleet: snap, latestActivity: latest } = useWorkspaceData();
 
   if (!snap) {
     return (

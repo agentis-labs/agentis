@@ -27,6 +27,17 @@ const skillTaskConfigSchema = z.object({
   outputMapping: z.record(z.string(), z.string()).default({}),
 });
 
+const knowledgeConfigSchema = z.object({
+  kind: z.literal('knowledge'),
+  knowledgeBaseId: z.string().optional(),
+  queryMode: z.enum(['static', 'dynamic']).default('static'),
+  query: z.string().optional(),
+  queryNodeId: z.string().optional(),
+  queryPath: z.string().optional(),
+  retrievalMode: z.enum(['contextual', 'strict', 'exploratory']).default('contextual'),
+  topK: z.number().int().min(1).max(20).default(5),
+});
+
 const routerConfigSchema = z.object({
   kind: z.literal('router'),
   routingMode: z.enum(['first_match', 'all_matching', 'llm_route']),
@@ -66,29 +77,30 @@ const scratchpadConfigSchema = z.object({
   valuePath: z.string().optional(),
 });
 
-export const workflowNodeConfigSchema = z.discriminatedUnion('kind', [
+// Permissive config: accepts any object with a `kind` string. Concrete kinds
+// (triggerConfigSchema, etc.) are validated by the engine when a node actually
+// runs — at edit-time we don't want to reject draft workflows that still have
+// incomplete or non-canonical config (e.g., a freshly dragged "approval" node
+// with no fields yet, or legacy `variables` nodes from older versions).
+const fallbackConfigSchema = z.object({ kind: z.string().min(1) }).passthrough();
+
+export const workflowNodeConfigSchema = z.union([
   triggerConfigSchema,
   agentTaskConfigSchema,
   skillTaskConfigSchema,
+  knowledgeConfigSchema,
   routerConfigSchema,
   mergeConfigSchema,
   checkpointConfigSchema,
   subflowConfigSchema,
   scratchpadConfigSchema,
+  fallbackConfigSchema,
 ]);
 
 export const workflowNodeSchema = z.object({
   id: z.string().min(1),
-  type: z.enum([
-    'trigger',
-    'agent_task',
-    'skill_task',
-    'router',
-    'merge',
-    'checkpoint',
-    'subflow',
-    'scratchpad',
-  ]),
+  // Permissive at edit-time. Engine validates execution-time semantics.
+  type: z.string().min(1),
   title: z.string().min(1).max(255),
   position: z.object({ x: z.number(), y: z.number() }),
   config: workflowNodeConfigSchema,

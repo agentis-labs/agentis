@@ -11,29 +11,48 @@ const REFRESH = 'agentis.refresh';
 const WORKSPACE = 'agentis.workspace';
 const AMBIENT = 'agentis.ambient';
 
+function emitLocalEvent(name: string) {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(name));
+}
+
 export const tokens = {
   access: () => localStorage.getItem(ACCESS),
   refresh: () => localStorage.getItem(REFRESH),
   set(access: string, refresh: string) {
     localStorage.setItem(ACCESS, access);
     localStorage.setItem(REFRESH, refresh);
+    emitLocalEvent('agentis:auth-changed');
   },
   clear() {
     localStorage.removeItem(ACCESS);
     localStorage.removeItem(REFRESH);
+    emitLocalEvent('agentis:auth-changed');
   },
 };
 
 export const workspace = {
   get: () => localStorage.getItem(WORKSPACE),
-  set: (id: string) => localStorage.setItem(WORKSPACE, id),
-  clear: () => localStorage.removeItem(WORKSPACE),
+  set: (id: string) => {
+    localStorage.setItem(WORKSPACE, id);
+    emitLocalEvent('agentis:workspace-changed');
+  },
+  clear: () => {
+    localStorage.removeItem(WORKSPACE);
+    emitLocalEvent('agentis:workspace-changed');
+  },
 };
 
 export const ambient = {
   get: () => localStorage.getItem(AMBIENT),
-  set: (id: string) => localStorage.setItem(AMBIENT, id),
-  clear: () => localStorage.removeItem(AMBIENT),
+  set: (id: string) => {
+    localStorage.setItem(AMBIENT, id);
+    emitLocalEvent('agentis:ambient-changed');
+  },
+  clear: () => {
+    localStorage.removeItem(AMBIENT);
+    emitLocalEvent('agentis:ambient-changed');
+  },
 };
 
 export interface ApiError {
@@ -44,7 +63,12 @@ export interface ApiError {
 
 async function rawFetch(path: string, init: RequestInit = {}, retry = true): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
-  if (!headers.has('content-type') && init.body) headers.set('content-type', 'application/json');
+  const body = init.body;
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+  const isBinary =
+    (typeof Blob !== 'undefined' && body instanceof Blob)
+    || (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer);
+  if (!headers.has('content-type') && body && !isFormData && !isBinary) headers.set('content-type', 'application/json');
   const access = tokens.access();
   if (access) headers.set('authorization', `Bearer ${access}`);
   const ws = workspace.get();
@@ -87,6 +111,39 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
   return (await res.json()) as T;
 }
 
+export async function streamSse(
+  path: string,
+  init: RequestInit = {},
+  handlers: { onEvent?: (event: string, data: unknown) => void } = {},
+): Promise<void> {
+  const headers = new Headers(init.headers ?? {});
+  headers.set('accept', 'text/event-stream');
+  const res = await rawFetch(path, { ...init, headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    throw body.error as ApiError;
+  }
+  if (!res.body) return;
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let separator = buffer.indexOf('\n\n');
+    while (separator >= 0) {
+      const rawEvent = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      emitSseEvent(rawEvent, handlers.onEvent);
+      separator = buffer.indexOf('\n\n');
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) emitSseEvent(buffer, handlers.onEvent);
+}
+
 export async function login(username: string, password: string) {
   const res = await fetch('/v1/auth/login', {
     method: 'POST',
@@ -110,4 +167,24 @@ export function logout() {
   tokens.clear();
   workspace.clear();
   ambient.clear();
+}
+
+function emitSseEvent(raw: string, onEvent?: (event: string, data: unknown) => void): void {
+  if (!onEvent) return;
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith('event:')) event = line.slice('event:'.length).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice('data:'.length).trimStart());
+  }
+  const dataText = dataLines.join('\n');
+  if (!dataText) {
+    onEvent(event, null);
+    return;
+  }
+  try {
+    onEvent(event, JSON.parse(dataText) as unknown);
+  } catch {
+    onEvent(event, dataText);
+  }
 }

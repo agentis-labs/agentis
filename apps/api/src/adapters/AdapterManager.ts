@@ -4,8 +4,9 @@
  * Owns the lifecycle of agent adapters: registration, dispatch, cancel,
  * inbound event bridging, and per-adapter health introspection.
  *
- * V1 ships with three concrete adapters in this directory: OpenClawAdapter,
- * HttpAdapter, ClaudeCodeAdapter. Operators register them through the
+ * V1 ships with six concrete harness adapters: OpenClawAdapter,
+ * HermesAgentAdapter, ClaudeCodeAdapter, CodexAdapter, CursorAdapter, and
+ * HttpAdapter. Operators register them through the
  * `/v1/agents` routes; the engine knows nothing about which type backs an
  * agent — it just calls `dispatchTask(task, agentId)`.
  *

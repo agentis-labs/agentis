@@ -1,0 +1,62 @@
+{
+  "slug": "email-campaigns",
+  "name": "Email Campaigns",
+  "version": "1.0.0",
+  "description": "Builds audience-aware email sequences, QA checks, and launch plans.",
+  "tags": ["marketing", "email", "agentis"],
+  "contents": {
+    "kind": "agentis",
+    "agents": [
+      {
+        "name": "Email Marketer",
+        "adapterType": "hermes",
+        "capabilityTags": ["email", "segmentation", "copywriting"],
+        "config": {},
+        "instructions": "Write clear compliant email copy and segment audiences before recommending a launch.",
+        "role": "agent"
+      }
+    ],
+    "workflows": [
+      {
+        "slug": "email-campaigns-main",
+        "title": "Email Campaign Builder",
+        "summary": "Creates sequence copy, QA notes, and launch outputs.",
+        "graph": {
+          "version": 1,
+          "nodes": [
+            { "id": "trigger", "type": "trigger", "title": "Campaign request", "position": { "x": 0, "y": 0 }, "config": { "kind": "trigger", "triggerType": "manual" } },
+            { "id": "campaign", "type": "agent_task", "title": "Build campaign", "position": { "x": 240, "y": 0 }, "config": { "kind": "agent_task", "agentPackageRef": "Email Marketer", "capabilityTags": ["email", "copywriting"], "prompt": "Create email sequence copy, audience assumptions, QA checklist, and launch recommendation.", "inputKeys": [], "outputKeys": ["emails_sent", "campaigns_launched"] } },
+            { "id": "response", "type": "response", "title": "Campaign package", "position": { "x": 520, "y": 0 }, "config": { "kind": "response", "content": "<campaign>" } }
+          ],
+          "edges": [
+            { "id": "trigger-campaign", "source": "trigger", "target": "campaign" },
+            { "id": "campaign-response", "source": "campaign", "target": "response" }
+          ],
+          "viewport": { "x": 0, "y": 0, "zoom": 1 },
+          "variables": []
+        },
+        "settings": { "outputLabels": ["emails_sent", "campaigns_launched"] }
+      }
+    ],
+    "credentialSlots": [
+      { "key": "mailchimp_oauth", "service": "mailchimp", "label": "Email platform OAuth", "required": true, "oauthFlow": true }
+    ],
+    "datasetSpecs": [
+      { "key": "audience_segments", "label": "Audience segments", "description": "Segment definitions, lifecycle stage, and consent fields.", "acceptedFormats": ["csv", "xlsx"], "targetStore": "memory", "chunkingStrategy": "per-row", "requiredFields": ["segment", "email"], "optional": false }
+    ],
+    "knowledgeSeeds": [
+      { "title": "Email compliance policy", "content": "Respect unsubscribe intent, avoid misleading subject lines, and include clear value in every email.", "metadata": { "area": "marketing" } }
+    ],
+    "evaluatorRubrics": [
+      { "nodeKind": "agent_task", "context": "Campaign output should map audience, message, CTA, and QA risks.", "examples": [] }
+    ],
+    "workflowBaselines": [
+      { "workflowSlug": "email-campaigns-main", "p50DurationMs": 44000, "p95DurationMs": 115000, "expectedSuccessRate": 0.87, "costCentsPerRun": 13 }
+    ],
+    "entryWorkflowSlug": "email-campaigns-main",
+    "category": "Marketing",
+    "replaces": "Manual campaign draft and QA",
+    "costSavedPerMonth": "$2,700",
+    "readme": "Connect an email platform and upload segment data before generating launch-ready campaigns."
+  }
+}

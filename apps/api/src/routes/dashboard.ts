@@ -8,7 +8,7 @@
  */
 
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -21,28 +21,46 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
 
   app.get('/fleet-overview', (c) => {
     const ws = getWorkspace(c);
-    const agents = deps.db
-      .select()
+    const agentsTotal = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
       .from(schema.agents)
       .where(eq(schema.agents.workspaceId, ws.workspaceId))
-      .all();
-    const gateways = deps.db
-      .select()
+      .get());
+    const agentsOnline = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, ws.workspaceId), eq(schema.agents.status, 'online')))
+      .get());
+    const gatewaysTotal = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
       .from(schema.openclawGateways)
       .where(eq(schema.openclawGateways.workspaceId, ws.workspaceId))
-      .all();
-    const runs = deps.db
-      .select()
+      .get());
+    const gatewaysConnected = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.openclawGateways)
+      .where(and(eq(schema.openclawGateways.workspaceId, ws.workspaceId), eq(schema.openclawGateways.status, 'connected')))
+      .get());
+    const runsTotal = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
       .from(schema.workflowRuns)
       .where(eq(schema.workflowRuns.workspaceId, ws.workspaceId))
-      .all();
-    const workflows = deps.db
-      .select()
+      .get());
+    const activeRuns = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.workflowRuns)
+      .where(and(
+        eq(schema.workflowRuns.workspaceId, ws.workspaceId),
+        inArray(schema.workflowRuns.status, ['RUNNING', 'WAITING']),
+      ))
+      .get());
+    const workflowsTotal = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
       .from(schema.workflows)
       .where(eq(schema.workflows.workspaceId, ws.workspaceId))
-      .all();
-    const approvals = deps.db
-      .select()
+      .get());
+    const approvalsPending = countRows(deps.db
+      .select({ count: sql<number>`count(*)` })
       .from(schema.approvalRequests)
       .where(
         and(
@@ -50,25 +68,28 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
           eq(schema.approvalRequests.status, 'pending'),
         ),
       )
+      .get());
+    const recentRuns = deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.workspaceId, ws.workspaceId))
+      .orderBy(desc(schema.workflowRuns.createdAt))
+      .limit(10)
       .all();
 
-    const activeRuns = runs.filter((r) => r.status === 'RUNNING' || r.status === 'WAITING');
-    const recentRuns = runs
-      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      .slice(0, 10);
-
     return c.json({
-      agents: { total: agents.length, online: agents.filter((a) => a.status === 'online').length },
-      gateways: {
-        total: gateways.length,
-        connected: gateways.filter((g) => g.status === 'connected').length,
-      },
-      workflows: { total: workflows.length },
-      runs: { active: activeRuns.length, total: runs.length, recent: recentRuns },
-      approvals: { pending: approvals.length },
+      agents: { total: agentsTotal, online: agentsOnline },
+      gateways: { total: gatewaysTotal, connected: gatewaysConnected },
+      workflows: { total: workflowsTotal },
+      runs: { active: activeRuns, total: runsTotal, recent: recentRuns },
+      approvals: { pending: approvalsPending },
       operator: getUser(c),
     });
   });
 
   return app;
+}
+
+function countRows(row: { count: number | string | bigint } | undefined): number {
+  return Number(row?.count ?? 0);
 }

@@ -20,6 +20,7 @@
 
 export type SpanAttrValue = string | number | boolean;
 export type SpanAttrs = Record<string, SpanAttrValue | undefined>;
+import type { LlmTraceSpan } from '@agentis/core';
 
 export interface Telemetry {
   /**
@@ -28,6 +29,7 @@ export interface Telemetry {
    * re-thrown.
    */
   span<T>(name: string, fn: () => Promise<T> | T, attrs?: SpanAttrs): Promise<T>;
+  emitLlmTrace?(span: LlmTraceSpan): void;
   /** Flush + shut down any background exporters. Safe to call on no-op. */
   shutdown(): Promise<void>;
 }
@@ -61,11 +63,11 @@ export async function loadTelemetry(opts: OtelLoadOptions | null): Promise<Telem
   // compiler from chasing the OTel typings into the app's dep graph.
   // (Same trick used for isolated-vm / dockerode.)
   const dyn = (id: string) => import(/* @vite-ignore */ id);
-  let api: typeof import('@opentelemetry/api') | undefined;
+  let api: any;
   let sdkNode: any;
   let exporter: any;
   try {
-    api = (await dyn('@opentelemetry/api')) as typeof import('@opentelemetry/api');
+    api = await dyn('@opentelemetry/api');
     sdkNode = await dyn('@opentelemetry/sdk-node');
     exporter = await dyn('@opentelemetry/exporter-trace-otlp-http');
   } catch (err) {
@@ -98,7 +100,7 @@ export async function loadTelemetry(opts: OtelLoadOptions | null): Promise<Telem
 
   return {
     async span(name, fn, attrs) {
-      return await tracer.startActiveSpan(name, async (span) => {
+      return await tracer.startActiveSpan(name, async (span: any) => {
         try {
           if (attrs) {
             for (const [k, v] of Object.entries(attrs)) {

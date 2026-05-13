@@ -1,0 +1,63 @@
+{
+  "slug": "market-intelligence",
+  "name": "Market Intelligence",
+  "version": "1.0.0",
+  "description": "Monitors sources, summarizes market shifts, and produces executive briefs.",
+  "tags": ["strategy", "research", "agentis"],
+  "contents": {
+    "kind": "agentis",
+    "agents": [
+      {
+        "name": "Market Analyst",
+        "adapterType": "hermes",
+        "capabilityTags": ["research", "synthesis", "monitoring"],
+        "config": {},
+        "instructions": "Prioritize recent, sourced evidence and separate signal from speculation.",
+        "role": "agent"
+      }
+    ],
+    "workflows": [
+      {
+        "slug": "market-intelligence-main",
+        "title": "Market Intelligence Brief",
+        "summary": "Summarizes market changes and source coverage for a selected topic.",
+        "graph": {
+          "version": 1,
+          "nodes": [
+            { "id": "trigger", "type": "trigger", "title": "Research topic", "position": { "x": 0, "y": 0 }, "config": { "kind": "trigger", "triggerType": "manual" } },
+            { "id": "brief", "type": "agent_task", "title": "Create market brief", "position": { "x": 240, "y": 0 }, "config": { "kind": "agent_task", "agentPackageRef": "Market Analyst", "capabilityTags": ["research", "synthesis"], "prompt": "Review monitored sources, identify the top market changes, and draft an executive brief.", "inputKeys": [], "outputKeys": ["reports_generated", "sources_monitored"] } },
+            { "id": "response", "type": "response", "title": "Brief", "position": { "x": 520, "y": 0 }, "config": { "kind": "response", "content": "<brief>" } }
+          ],
+          "edges": [
+            { "id": "trigger-brief", "source": "trigger", "target": "brief" },
+            { "id": "brief-response", "source": "brief", "target": "response" }
+          ],
+          "viewport": { "x": 0, "y": 0, "zoom": 1 },
+          "variables": []
+        },
+        "settings": { "outputLabels": ["reports_generated", "sources_monitored"] }
+      }
+    ],
+    "credentialSlots": [
+      { "key": "news_api_key", "service": "newsapi", "label": "News API key", "required": false, "oauthFlow": false },
+      { "key": "drive_oauth", "service": "google-drive", "label": "Google Drive OAuth", "required": false, "oauthFlow": true }
+    ],
+    "datasetSpecs": [
+      { "key": "source_watchlist", "label": "Source watchlist", "description": "URLs, analyst feeds, and keywords to monitor.", "acceptedFormats": ["csv", "txt", "md"], "targetStore": "knowledge", "chunkingStrategy": "per-document", "optional": false }
+    ],
+    "knowledgeSeeds": [
+      { "title": "Market brief policy", "content": "Every insight needs a source and timestamp. Separate one-off events from durable trends.", "metadata": { "area": "strategy" } }
+    ],
+    "evaluatorRubrics": [
+      { "nodeKind": "agent_task", "context": "Briefs should cite sources, rank confidence, and call out stale evidence.", "examples": [] }
+    ],
+    "workflowBaselines": [
+      { "workflowSlug": "market-intelligence-main", "p50DurationMs": 60000, "p95DurationMs": 150000, "expectedSuccessRate": 0.84, "costCentsPerRun": 22 }
+    ],
+    "entryWorkflowSlug": "market-intelligence-main",
+    "category": "Strategy",
+    "replaces": "Manual analyst brief compilation",
+    "costSavedPerMonth": "$4,100",
+    "readme": "Add a source watchlist, then run briefs on topics or competitors."
+  }
+}

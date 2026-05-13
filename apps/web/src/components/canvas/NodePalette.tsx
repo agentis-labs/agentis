@@ -13,6 +13,7 @@ export const PALETTE_NODES: PaletteNodeType[] = [
   { type: 'trigger',    label: 'Trigger',      glyph: '⚡', description: 'Manual, schedule, webhook' },
   { type: 'agent_task', label: 'Agent task',   glyph: '◈', description: 'Delegate to a routed agent' },
   { type: 'skill',      label: 'Skill',        glyph: '✦', description: 'Run a typed deterministic skill' },
+  { type: 'knowledge',  label: 'Knowledge',    glyph: '◇', description: 'Retrieve workspace context' },
   { type: 'approval',   label: 'Approval',     glyph: '✓', description: 'Pause for human gate' },
   { type: 'branch',     label: 'Branch',       glyph: '⎇', description: 'Conditional fork' },
   { type: 'subflow',    label: 'Subflow',      glyph: '▦', description: 'Embed another workflow' },
@@ -22,7 +23,9 @@ export const PALETTE_NODES: PaletteNodeType[] = [
 
 interface ReusableWorkflow {
   id: string;
-  title: string;
+  // Listing endpoint may return either field depending on schema age.
+  title?: string;
+  name?: string;
 }
 
 export function NodePalette({
@@ -53,10 +56,13 @@ export function NodePalette({
           key={n.type}
           draggable
           onDragStart={(e) => {
-            e.dataTransfer.setData('application/x-agentis-node', n.type);
+            const payload = n.type === 'knowledge'
+              ? JSON.stringify({ type: 'knowledge', label: 'Knowledge', queryMode: 'static', topK: 5, retrievalMode: 'contextual' })
+              : n.type;
+            e.dataTransfer.setData('application/x-agentis-node', payload);
             e.dataTransfer.effectAllowed = 'copy';
           }}
-          onClick={() => onPick?.(n.type)}
+          onClick={() => onPick?.(n.type, n.type === 'knowledge' ? { label: 'Knowledge', queryMode: 'static', topK: 5, retrievalMode: 'contextual' } : undefined)}
           className="flex items-start gap-2 rounded-md border border-transparent bg-surface-2 px-2 py-1.5 text-left hover:border-accent/40"
           title={n.description}
         >
@@ -72,28 +78,31 @@ export function NodePalette({
         <>
           <div className="my-1 border-t border-line/60" />
           <h3 className="px-1 pb-1 text-[10px] uppercase tracking-wider text-text-muted">Reusable</h3>
-          {reusable.map((wf) => (
-            <button
-              key={wf.id}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(
-                  'application/x-agentis-node',
-                  JSON.stringify({ type: 'subflow', workflowId: wf.id, label: wf.title }),
-                );
-                e.dataTransfer.effectAllowed = 'copy';
-              }}
-              onClick={() => onPick?.('subflow', { workflowId: wf.id, label: wf.title })}
-              className="flex items-start gap-2 rounded-md border border-transparent bg-surface-2 px-2 py-1.5 text-left hover:border-accent/40"
-              title={`Subflow: ${wf.title}`}
-            >
-              <span className="text-base leading-none">▦</span>
-              <span className="flex flex-col">
-                <span className="font-medium text-text-primary">{wf.title}</span>
-                <span className="text-[10px] text-text-muted">Subflow</span>
-              </span>
-            </button>
-          ))}
+          {reusable.map((wf) => {
+            const label = wf.title ?? wf.name ?? 'Untitled workflow';
+            return (
+              <button
+                key={wf.id}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData(
+                    'application/x-agentis-node',
+                    JSON.stringify({ type: 'subflow', workflowId: wf.id, label }),
+                  );
+                  e.dataTransfer.effectAllowed = 'copy';
+                }}
+                onClick={() => onPick?.('subflow', { workflowId: wf.id, label })}
+                className="flex items-start gap-2 rounded-md border border-transparent bg-surface-2 px-2 py-1.5 text-left hover:border-accent/40"
+                title={`Subflow: ${label}`}
+              >
+                <span className="text-base leading-none">▦</span>
+                <span className="flex flex-col">
+                  <span className="font-medium text-text-primary">{label}</span>
+                  <span className="text-[10px] text-text-muted">Subflow</span>
+                </span>
+              </button>
+            );
+          })}
         </>
       )}
     </aside>

@@ -19,6 +19,7 @@ export const NODE_GLYPH: Record<string, string> = {
   checkpoint: '✓',
   subflow: '⊞',
   scratchpad: '◈',
+  knowledge: '◇',
 };
 
 export interface WorkflowNodeData {

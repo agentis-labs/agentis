@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload } from 'lucide-react';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
@@ -277,6 +277,7 @@ function ConnectionsTab() {
   const confirm = useConfirm();
   const [items, setItems] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
+  const [addOpen, setAddOpen] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -322,8 +323,13 @@ function ConnectionsTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Connections</h2>
-        <Button variant="primary" size="md" iconLeft={<Plus size={14} />}>Add connection</Button>
+        <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setAddOpen(true)}>Add connection</Button>
       </div>
+      <AddConnectionDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onCreated={() => { setAddOpen(false); void refresh(); }}
+      />
 
       {loading ? (
         <Skeleton height={200} />
@@ -373,6 +379,8 @@ function SecurityTab() {
   const [keys, setKeys] = useState<Array<{ id: string; name: string; preview: string; createdAt: string }>>([]);
   const [loading, setLoading] = useState(true);
   const confirm = useConfirm();
+  const [creatingOpen, setCreatingOpen] = useState(false);
+  const [revealedKey, setRevealedKey] = useState<{ name: string; secret: string } | null>(null);
 
   async function refresh() {
     try {
@@ -384,15 +392,15 @@ function SecurityTab() {
 
   useEffect(() => { void refresh(); }, []);
 
-  async function createKey() {
-    const name = window.prompt('Name for this API key:');
-    if (!name) return;
+  async function createKey(name: string) {
+    if (!name.trim()) return;
     try {
       const data = await api<{ key: { id: string; secret: string } }>('/v1/auth/api-keys', {
         method: 'POST',
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name: name.trim() }),
       });
-      window.alert(`Save this key — it won't be shown again:\n\n${data.key.secret}`);
+      setCreatingOpen(false);
+      setRevealedKey({ name: name.trim(), secret: data.key.secret });
       void refresh();
     } catch (e) { toast.error('Failed to create key', String(e)); }
   }
@@ -416,10 +424,19 @@ function SecurityTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">API Keys</h2>
-        <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => void createKey()}>
+        <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreatingOpen(true)}>
           New key
         </Button>
       </div>
+      <ApiKeyCreateDialog
+        open={creatingOpen}
+        onClose={() => setCreatingOpen(false)}
+        onCreate={createKey}
+      />
+      <ApiKeyRevealDialog
+        keyValue={revealedKey}
+        onClose={() => setRevealedKey(null)}
+      />
 
       {loading ? (
         <Skeleton height={150} />
@@ -447,6 +464,260 @@ function SecurityTab() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function ApiKeyCreateDialog({
+  open, onClose, onCreate,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreate: (name: string) => Promise<void> | void;
+}) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { if (open) setName(''); }, [open]);
+  if (!open) return null;
+
+  return (
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!name.trim() || busy) return;
+          setBusy(true);
+          try { await onCreate(name); }
+          finally { setBusy(false); }
+        }}
+        className="animate-scale-in w-full max-w-sm rounded-modal border border-line bg-surface shadow-modal"
+      >
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <h3 className="text-heading text-text-primary">New API key</h3>
+          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="space-y-3 px-5 py-5">
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Name</span>
+            <input
+              autoFocus
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g., CI deploy script"
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+            />
+          </label>
+          <p className="text-[11px] text-text-muted">
+            The full key will only be shown once after creation. Save it somewhere safe.
+          </p>
+        </div>
+        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={!name.trim() || busy}
+            className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
+          >{busy ? 'Creating…' : 'Create key'}</button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function ApiKeyRevealDialog({
+  keyValue, onClose,
+}: {
+  keyValue: { name: string; secret: string } | null;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [copied, setCopied] = useState(false);
+  if (!keyValue) return null;
+  return (
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+      <div className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <h3 className="text-heading text-text-primary">Save your API key</h3>
+          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="space-y-3 px-5 py-5">
+          <div className="rounded-card border border-warn/30 bg-warn-soft px-3 py-2 text-[12px] text-text-primary">
+            This is the only time this key will be shown. Copy and store it somewhere safe.
+          </div>
+          <div className="space-y-1.5">
+            <span className="text-[12px] text-text-muted">Key name</span>
+            <div className="text-[13px] text-text-primary">{keyValue.name}</div>
+          </div>
+          <div className="space-y-1.5">
+            <span className="text-[12px] text-text-muted">Secret</span>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 break-all rounded-input border border-line bg-surface-2 px-3 py-2 font-mono text-[12px] text-text-primary">{keyValue.secret}</code>
+              <Button
+                variant="secondary"
+                size="md"
+                iconLeft={<Copy size={12} />}
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(keyValue.secret);
+                    setCopied(true);
+                    toast.success('Copied');
+                    setTimeout(() => setCopied(false), 2000);
+                  } catch { /* ignore */ }
+                }}
+              >
+                {copied ? 'Copied' : 'Copy'}
+              </Button>
+            </div>
+          </div>
+        </div>
+        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover"
+          >Done</button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+interface AddConnectionDialogProps {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}
+
+const CONNECTION_KINDS = [
+  { kind: 'gateway',  label: 'OpenClaw Gateway', desc: 'Self-hosted compute', icon: Plug },
+  { kind: 'telegram', label: 'Telegram',         desc: 'Bot adapter',          icon: MessageSquare },
+  { kind: 'discord',  label: 'Discord',          desc: 'Bot adapter',          icon: Hash },
+  { kind: 'slack',    label: 'Slack',            desc: 'Bot adapter',          icon: Hash },
+  { kind: 'webhook',  label: 'Webhook',          desc: 'Inbound HTTP',         icon: WebhookIcon },
+] as const;
+
+function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogProps) {
+  const toast = useToast();
+  const [pickedKind, setPickedKind] = useState<typeof CONNECTION_KINDS[number]['kind'] | null>(null);
+  const [name, setName] = useState('');
+  const [token, setToken] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) { setPickedKind(null); setName(''); setToken(''); }
+  }, [open]);
+
+  if (!open) return null;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pickedKind || !name.trim() || busy) return;
+    setBusy(true);
+    try {
+      if (pickedKind === 'gateway') {
+        await api('/v1/gateways', {
+          method: 'POST',
+          body: JSON.stringify({ name: name.trim() }),
+        });
+      } else {
+        await api('/v1/channels', {
+          method: 'POST',
+          body: JSON.stringify({
+            kind: pickedKind,
+            name: name.trim(),
+            credentials: token.trim() ? { token: token.trim() } : {},
+          }),
+        });
+      }
+      toast.success('Connected', name.trim());
+      onCreated();
+    } catch (e) {
+      toast.error('Failed to connect', String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+      <form onSubmit={submit} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <h3 className="text-heading text-text-primary">Add connection</h3>
+          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="space-y-4 px-5 py-5">
+          {!pickedKind ? (
+            <div className="grid grid-cols-2 gap-2">
+              {CONNECTION_KINDS.map((c) => {
+                const Icon = c.icon;
+                return (
+                  <button
+                    key={c.kind}
+                    type="button"
+                    onClick={() => setPickedKind(c.kind)}
+                    className="flex flex-col items-start gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-left transition-colors hover:border-line-strong hover:bg-surface-3"
+                  >
+                    <Icon size={16} className="text-text-secondary" />
+                    <span className="text-subheading text-text-primary">{c.label}</span>
+                    <span className="text-[11px] text-text-muted">{c.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <>
+              <div>
+                <button type="button" onClick={() => setPickedKind(null)} className="text-[12px] text-text-muted hover:text-text-primary">
+                  ← Back
+                </button>
+              </div>
+              <label className="block">
+                <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Name</span>
+                <input
+                  autoFocus
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder={`My ${pickedKind}`}
+                  className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                />
+              </label>
+              {pickedKind !== 'gateway' && pickedKind !== 'webhook' && (
+                <label className="block">
+                  <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Bot token</span>
+                  <input
+                    type="password"
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    placeholder="Paste token"
+                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                  />
+                </label>
+              )}
+            </>
+          )}
+        </div>
+        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <button type="button" onClick={onClose} className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary">Cancel</button>
+          <button
+            type="submit"
+            disabled={!pickedKind || !name.trim() || busy}
+            className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
+          >{busy ? 'Connecting…' : 'Connect'}</button>
+        </footer>
+      </form>
     </div>
   );
 }

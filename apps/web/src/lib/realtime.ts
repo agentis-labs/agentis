@@ -8,18 +8,35 @@
 
 import { useEffect, useRef } from 'react';
 import { io, type Socket } from 'socket.io-client';
-import { tokens } from './api';
+import { tokens, workspace as workspaceStore } from './api';
 
 let sharedSocket: Socket | null = null;
+let sharedSocketToken: string | null = null;
 
 function getSocket(): Socket {
-  if (sharedSocket) return sharedSocket;
+  const token = tokens.access();
+  if (sharedSocket && sharedSocketToken === token) return sharedSocket;
+  if (sharedSocket) {
+    sharedSocket.disconnect();
+    sharedSocket = null;
+  }
+  sharedSocketToken = token;
   sharedSocket = io({
-    auth: { token: tokens.access() },
+    auth: { token },
     transports: ['websocket'],
     reconnection: true,
   });
   return sharedSocket;
+}
+
+export function disconnectRealtime() {
+  sharedSocket?.disconnect();
+  sharedSocket = null;
+  sharedSocketToken = null;
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('agentis:auth-changed', disconnectRealtime);
 }
 
 export interface RealtimeEnvelope<TPayload = unknown> {
@@ -42,14 +59,20 @@ export function useRealtime(events: string[], handler: (env: RealtimeEnvelope) =
 }
 
 export function rtSubscribe(
-  kind: 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation',
+  kind: 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room',
   args: Record<string, string>,
-) {
+): () => void {
   const sock = getSocket();
-  if (kind === 'workspace') sock.emit('subscribe:workspace', args.workspaceId);
-  else if (kind === 'run') sock.emit('subscribe:run', args);
-  else if (kind === 'workflow') sock.emit('subscribe:workflow', args);
-  else if (kind === 'gateway') sock.emit('subscribe:gateway', args);
-  else if (kind === 'agent') sock.emit('subscribe:agent', args);
-  else if (kind === 'conversation') sock.emit('subscribe:conversation', args);
+  const workspaceId = args.workspaceId ?? workspaceStore.get() ?? '';
+  const nextArgs = { ...args, workspaceId };
+  if (kind === 'workspace') sock.emit('subscribe:workspace', workspaceId);
+  else sock.emit(`subscribe:${kind}`, nextArgs);
+  return () => {
+    if (kind === 'workspace') sock.emit('unsubscribe:workspace', workspaceId);
+    else sock.emit(`unsubscribe:${kind}`, nextArgs);
+  };
+}
+
+export function emitRealtime(event: string, payload: unknown) {
+  getSocket().emit(event, payload);
 }

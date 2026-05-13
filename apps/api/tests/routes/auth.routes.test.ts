@@ -12,7 +12,7 @@ beforeEach(async () => {
 });
 
 function app() {
-  return ctx.buildApp([{ path: '/v1/auth', app: buildAuthRoutes({ db: ctx.db, auth: ctx.auth }) }]);
+  return ctx.buildApp([{ path: '/v1/auth', app: buildAuthRoutes({ db: ctx.db, auth: ctx.auth, secrets: ctx.secrets }) }]);
 }
 
 describe('POST /v1/auth/login', () => {
@@ -104,5 +104,48 @@ describe('GET /v1/auth/me', () => {
       headers: { Authorization: 'Bearer not-a-real-jwt' },
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('/v1/auth/launch', () => {
+  it('returns tokens on bare GET for local installs', async () => {
+    ctx.secrets.launchToken = 'local-launch-token';
+    const res = await app().request('/v1/auth/launch', { method: 'GET' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { accessToken: string; refreshToken: string; user: { id: string } };
+    expect(body.accessToken).toBeTruthy();
+    expect(body.refreshToken).toBeTruthy();
+    expect(body.user.id).toBe(ctx.user.id);
+  });
+
+  it('exchanges a valid POST token for a session', async () => {
+    ctx.secrets.launchToken = 'local-launch-token';
+    const res = await app().request('/v1/auth/launch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'local-launch-token' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { accessToken: string; refreshToken: string; user: { id: string } };
+    expect(body.accessToken).toBeTruthy();
+    expect(body.refreshToken).toBeTruthy();
+    expect(body.user.id).toBe(ctx.user.id);
+  });
+
+  it('rejects an invalid POST token', async () => {
+    ctx.secrets.launchToken = 'local-launch-token';
+    const res = await app().request('/v1/auth/launch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'wrong-token' }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('AUTH_INVALID_CREDENTIALS');
+  });
+
+  it('returns 404 when launch auth is unavailable', async () => {
+    const res = await app().request('/v1/auth/launch', { method: 'GET' });
+    expect(res.status).toBe(404);
   });
 });

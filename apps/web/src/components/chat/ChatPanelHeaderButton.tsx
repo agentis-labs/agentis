@@ -16,7 +16,7 @@ export function ChatPanelHeaderButton() {
   return (
     <button
       type="button"
-      onClick={() => setState(open ? 'hidden' : 'floating')}
+      onClick={() => setState(open ? 'hidden' : 'docked')}
       aria-label={`${open ? 'Close' : 'Open'} chat panel`}
       className={clsx(
         'relative inline-flex h-9 w-9 items-center justify-center rounded-btn border border-line bg-surface-2 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary',

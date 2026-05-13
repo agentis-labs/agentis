@@ -7,7 +7,7 @@
  * COMMAND_PALETTE_RESULT_LIMIT.
  */
 
-import { eq, and } from 'drizzle-orm';
+import { eq, and, like, desc } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, CONSTANTS } from '@agentis/core';
@@ -116,39 +116,60 @@ export class CommandIndex {
 
   search(workspaceId: string, query: string): CommandHit[] {
     const q = query.trim().toLowerCase();
+    if (q.length < 2) return [];
     const hits: CommandHit[] = [];
+    const pattern = `%${escapeLike(q)}%`;
 
-    const workflows = this.db.select().from(schema.workflows).where(eq(schema.workflows.workspaceId, workspaceId)).all();
+    const workflows = this.db.select().from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), like(schema.workflows.title, pattern)))
+      .limit(20)
+      .all();
     for (const w of workflows) {
       const score = relevance(q, w.title, w.summary ?? '');
       if (score > 0) hits.push({ type: 'workflow', id: w.id, title: w.title, subtitle: w.summary ?? undefined, href: `/workflows/${w.id}`, score });
     }
 
-    const agents = this.db.select().from(schema.agents).where(eq(schema.agents.workspaceId, workspaceId)).all();
+    const agents = this.db.select().from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), like(schema.agents.name, pattern)))
+      .limit(20)
+      .all();
     for (const a of agents) {
       const score = relevance(q, a.name, a.adapterType);
       if (score > 0) hits.push({ type: 'agent', id: a.id, title: a.name, subtitle: a.adapterType, href: `/agents/${a.id}`, score });
     }
 
-    const gateways = this.db.select().from(schema.openclawGateways).where(eq(schema.openclawGateways.workspaceId, workspaceId)).all();
+    const gateways = this.db.select().from(schema.openclawGateways)
+      .where(and(eq(schema.openclawGateways.workspaceId, workspaceId), like(schema.openclawGateways.name, pattern)))
+      .limit(10)
+      .all();
     for (const g of gateways) {
       const score = relevance(q, g.name, g.gatewayUrl);
       if (score > 0) hits.push({ type: 'gateway', id: g.id, title: g.name, subtitle: g.gatewayUrl, href: `/gateways/${g.id}`, score });
     }
 
-    const runs = this.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.workspaceId, workspaceId)).all();
+    const runs = this.db.select().from(schema.workflowRuns)
+      .where(and(eq(schema.workflowRuns.workspaceId, workspaceId), like(schema.workflowRuns.id, pattern)))
+      .orderBy(desc(schema.workflowRuns.createdAt))
+      .limit(10)
+      .all();
     for (const r of runs) {
       const score = relevance(q, r.id.slice(0, 8), r.status);
       if (score > 0) hits.push({ type: 'run', id: r.id, title: `Run ${r.id.slice(0, 8)}`, subtitle: r.status, href: `/runs/${r.id}`, score });
     }
 
-    const approvals = this.db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.workspaceId, workspaceId)).all();
+    const approvals = this.db.select().from(schema.approvalRequests)
+      .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), like(schema.approvalRequests.title, pattern)))
+      .limit(10)
+      .all();
     for (const a of approvals) {
       const score = relevance(q, a.title, a.summary);
       if (score > 0) hits.push({ type: 'approval', id: a.id, title: a.title, subtitle: a.summary, href: `/approvals?focus=${a.id}`, score });
     }
 
-    const skills = this.db.select().from(schema.skills).where(eq(schema.skills.workspaceId, workspaceId)).all();
+    const skills = this.db.select().from(schema.skills)
+      .where(and(eq(schema.skills.workspaceId, workspaceId), like(schema.skills.name, pattern)))
+      .limit(10)
+      .all();
     for (const s of skills) {
       const score = relevance(q, s.name, s.runtime);
       if (score > 0) hits.push({ type: 'skill', id: s.id, title: s.name, subtitle: `${s.runtime} • v${s.version}`, href: `/skills?focus=${s.id}`, score });
@@ -156,6 +177,10 @@ export class CommandIndex {
 
     return hits.sort((a, b) => b.score - a.score).slice(0, CONSTANTS.COMMAND_PALETTE_RESULT_LIMIT);
   }
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 function relevance(query: string, ...fields: string[]): number {

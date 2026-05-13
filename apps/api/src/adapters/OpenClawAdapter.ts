@@ -62,7 +62,15 @@ export interface OpenClawAdapterOptions {
   agentId: string;
   gatewayUrl: string;
   /** Decrypted device token. NEVER persisted in plaintext. */
-  deviceToken: string;
+  deviceToken?: string;
+  headers?: Record<string, string>;
+  password?: string;
+  agentName?: string;
+  sessionKeyStrategy?: 'issue' | 'fixed' | 'run';
+  sessionKey?: string;
+  disableDeviceAuth?: boolean;
+  timeoutSec?: number;
+  payloadTemplate?: Record<string, unknown>;
   /** Optional: the gateway-side session id to bind to (for mirrored conversations). */
   defaultSessionId?: string;
   logger: Logger;
@@ -85,7 +93,7 @@ export class OpenClawAdapter implements AgentAdapter {
     }
     const { WS } = loaded;
     this.#ws = new WS(this.opts.gatewayUrl, undefined, {
-      headers: { authorization: `Bearer ${this.opts.deviceToken}` },
+      headers: this.#authHeaders(),
     });
     this.#ws.on('open', () => this.opts.logger.info('openclaw.ws_open', { agentId: this.opts.agentId }));
     this.#ws.on('message', (raw) => this.#handleMessage(typeof raw === 'string' ? raw : raw.toString('utf8')));
@@ -135,7 +143,13 @@ export class OpenClawAdapter implements AgentAdapter {
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
     await this.#breaker.exec(async () => {
-      this.#sendOrThrow({ kind: 'task.dispatch', task });
+      this.#sendOrThrow({
+        ...(this.opts.payloadTemplate ?? {}),
+        kind: 'task.dispatch',
+        task,
+        ...(this.opts.agentName ? { agentName: this.opts.agentName } : {}),
+        sessionKey: this.#sessionKeyFor(task),
+      });
     });
   }
 
@@ -190,6 +204,9 @@ export class OpenClawAdapter implements AgentAdapter {
           connected: true,
           timestamp: at,
         });
+        return;
+      case 'connect.challenge':
+        this.#sendConnectResponse(msg);
         return;
       case 'agent.thinking':
         this.#emit({
@@ -281,6 +298,36 @@ export class OpenClawAdapter implements AgentAdapter {
       } catch (err) {
         this.opts.logger.error('openclaw.handler_threw', { err: (err as Error).message });
       }
+    }
+  }
+
+  #authHeaders(): Record<string, string> {
+    return {
+      ...(this.opts.headers ?? {}),
+      ...(this.opts.deviceToken ? { authorization: `Bearer ${this.opts.deviceToken}`, 'x-openclaw-token': this.opts.deviceToken } : {}),
+      ...(this.opts.password ? { 'x-openclaw-password': this.opts.password } : {}),
+    };
+  }
+
+  #sessionKeyFor(task: NormalizedTask): string {
+    if (this.opts.sessionKeyStrategy === 'fixed' && this.opts.sessionKey) return this.opts.sessionKey;
+    if (this.opts.sessionKeyStrategy === 'run') return `agentis-run-${task.runId}`;
+    const issueId = typeof task.inputData.issueId === 'string' ? task.inputData.issueId : task.runId;
+    return `agentis-issue-${issueId}`;
+  }
+
+  #sendConnectResponse(challenge: Record<string, unknown>): void {
+    try {
+      this.#sendOrThrow({
+        kind: 'req.connect',
+        clientId: `agentis-${this.opts.agentId}`,
+        role: 'operator',
+        scopes: ['agent:request', 'session:read', 'session:write'],
+        challenge: challenge.challenge,
+        device: this.opts.disableDeviceAuth ? null : { mode: 'ephemeral' },
+      });
+    } catch (err) {
+      this.opts.logger.warn('openclaw.connect_response_failed', { agentId: this.opts.agentId, err: (err as Error).message });
     }
   }
 }

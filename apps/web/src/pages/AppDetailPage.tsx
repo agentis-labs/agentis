@@ -1,17 +1,20 @@
 /**
- * AppDetailPage — tabs: Performance / Results / Configuration / Activity.
+ * AppDetailPage — three-layer app shell.
  *
- * Performance: stat bar + needs attention + run cards (the operator view)
- * Results:     visual UI for app outputs (the must-have feature)
- * Configuration: workflows, agents, settings, output labels
- * Activity:    audit log (power user view)
+ * Spec: docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §5, §11.
+ *       docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §5.1, §14.
+ *
+ *   [Output]  → operator surface (performance, results, config, activity)
+ *   [Canvas]  → system-composition graph (AppCanvasView)
+ *   [Brain]   → intelligence surface (BrainView with Map / Flow / Ledger modes)
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Check, X, Eye, RotateCcw, AlertTriangle, BarChart3,
   Tag, Play, FileText, AppWindow,
+  Target as OutputIcon, Workflow as CanvasIcon, Brain as MemoryIcon,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
@@ -21,6 +24,12 @@ import { FilterBar } from '../components/shared/FilterBar';
 import { Skeleton } from '../components/shared/Skeleton';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
+import { SegmentedControl } from '../components/shared/SegmentedControl';
+import { AppCanvasView } from '../components/app-graph/AppCanvasView';
+import { BrainView } from '../components/brain/BrainView';
+import { BrainManageView } from '../components/brain/BrainManageView';
+import { BrainTabHeader, type BrainMode } from '../components/brain/BrainTabHeader';
+import { AppKnowledgeActivationCard } from '../components/apps/AppKnowledgeActivationCard';
 
 interface AppDetail {
   id: string;
@@ -32,9 +41,16 @@ interface AppDetail {
   iconGlyph?: string;
   iconColor?: string;
   entryWorkflowId?: string;
-  outputLabels?: Array<{ label: string; path: string; format?: 'number' | 'currency' | 'percent' | 'text' }>;
+  outputLabels?: OutputLabel[];
   workflows?: Array<{ id: string; name: string }>;
   agents?: Array<{ id: string; name: string }>;
+}
+
+interface OutputLabel {
+  label: string;
+  path: string;
+  format?: 'number' | 'currency' | 'percent' | 'text';
+  artifactType?: 'document' | 'metric' | 'chart' | 'list' | 'file' | 'decision' | 'custom';
 }
 
 interface OutputMetric {
@@ -92,6 +108,14 @@ function formatDuration(ms?: number): string {
   return `${m}m ${s % 60}s`;
 }
 
+type Layer = 'output' | 'canvas' | 'brain';
+
+const LAYERS = [
+  { value: 'output' as Layer, label: 'Output', icon: <OutputIcon size={14} /> },
+  { value: 'canvas' as Layer, label: 'Canvas', icon: <CanvasIcon size={14} /> },
+  { value: 'brain'  as Layer, label: 'Brain',  icon: <MemoryIcon size={14} /> },
+] as const;
+
 export function AppDetailPage() {
   const { slug } = useParams<{ slug: string }>();
   const nav = useNavigate();
@@ -99,10 +123,32 @@ export function AppDetailPage() {
 
   const [app, setApp] = useState<AppDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<string>(() => {
-    const t = new URLSearchParams(window.location.search).get('tab');
-    return t || 'performance';
+  const [layer, setLayer] = useState<Layer>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const l = params.get('layer') as Layer | null;
+    if (l === 'output' || l === 'canvas' || l === 'brain') return l;
+    if (params.get('brain') === 'manage' || params.get('brain') === 'map') return 'brain';
+    if (l === ('memory' as Layer)) return 'brain';
+    if (params.get('new') === '1') return 'canvas';
+    if (params.get('tab')) return 'output';
+    return 'output';
   });
+  const [brainMode, setBrainMode] = useState<BrainMode>(() => {
+    const b = new URLSearchParams(window.location.search).get('brain');
+    return b === 'manage' ? 'manage' : 'map';
+  });
+  const [outputTab, setOutputTab] = useState<string>(() => {
+    const t = new URLSearchParams(window.location.search).get('tab');
+    return t || 'results';
+  });
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('layer', layer);
+    if (layer === 'brain') url.searchParams.set('brain', brainMode);
+    else url.searchParams.delete('brain');
+    window.history.replaceState(null, '', url.toString());
+  }, [layer, brainMode]);
 
   useEffect(() => {
     if (!slug) return;
@@ -111,6 +157,11 @@ export function AppDetailPage() {
       .catch(() => setApp(null))
       .finally(() => setLoading(false));
   }, [slug]);
+
+  function openBrainManage() {
+    setLayer('brain');
+    setBrainMode('manage');
+  }
 
   if (loading && !app) {
     return (
@@ -141,50 +192,72 @@ export function AppDetailPage() {
         <button onClick={() => nav('/apps')} className="mb-3 inline-flex items-center gap-1 text-[12px] text-text-muted hover:text-text-primary">
           <ArrowLeft size={12} /> Apps
         </button>
-        <div className="flex items-center gap-4">
-          <span
-            className="flex h-12 w-12 items-center justify-center rounded-card text-[20px] font-bold"
-            style={{ backgroundColor: app.iconColor ?? '#15171c' }}
-          >
-            {app.iconGlyph ?? '◈'}
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <h1 className="text-display text-text-primary">{app.name}</h1>
-              <StatusBadge status={app.status ?? 'idle'} size="sm" />
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <span
+              className="flex h-12 w-12 items-center justify-center rounded-card text-[20px] font-bold"
+              style={{ backgroundColor: app.iconColor ?? '#15171c' }}
+            >
+              {app.iconGlyph ?? '◈'}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h1 className="text-display text-text-primary">{app.name}</h1>
+                <StatusBadge status={app.status ?? 'idle'} size="sm" />
+              </div>
+              <div className="mt-1 flex flex-wrap gap-3 text-[12px] text-text-muted">
+                {app.version && <span>v{app.version}</span>}
+                {app.workflows && <span>{app.workflows.length} workflow{app.workflows.length === 1 ? '' : 's'}</span>}
+                {app.agents && <span>{app.agents.length} agent{app.agents.length === 1 ? '' : 's'}</span>}
+              </div>
+              {app.description && (
+                <p className="mt-2 text-[13px] text-text-secondary">{app.description}</p>
+              )}
             </div>
-            <div className="mt-1 flex flex-wrap gap-3 text-[12px] text-text-muted">
-              {app.version && <span>v{app.version}</span>}
-              {app.workflows && <span>{app.workflows.length} workflow{app.workflows.length === 1 ? '' : 's'}</span>}
-              {app.agents && <span>{app.agents.length} agent{app.agents.length === 1 ? '' : 's'}</span>}
-            </div>
-            {app.description && (
-              <p className="mt-2 text-[13px] text-text-secondary">{app.description}</p>
-            )}
           </div>
+          <SegmentedControl segments={LAYERS} value={layer} onChange={setLayer} />
         </div>
       </div>
 
-      <Tabs
-        param="tab"
-        defaultValue="performance"
-        value={tab}
-        onChange={setTab}
-        tabs={[
-          { value: 'performance', label: 'Performance' },
-          { value: 'results',     label: 'Results' },
-          { value: 'config',      label: 'Configuration' },
-          { value: 'activity',    label: 'Activity' },
-        ]}
-        className="px-6"
-      />
+      {layer === 'output' && (
+        <>
+          <Tabs
+            param="tab"
+            defaultValue="results"
+            value={outputTab}
+            onChange={setOutputTab}
+            tabs={[
+              { value: 'results',     label: 'Results' },
+              { value: 'performance', label: 'Performance' },
+              { value: 'config',      label: 'Configuration' },
+              { value: 'activity',    label: 'Recent runs' },
+            ]}
+            className="px-6"
+          />
+          <div className="flex-1 overflow-y-auto px-6 py-5">
+            {outputTab === 'results' && <AppKnowledgeActivationCard appSlug={app.slug} entryWorkflowId={app.entryWorkflowId} onManage={openBrainManage} />}
+            {outputTab === 'performance' && <PerformanceTab app={app} />}
+            {outputTab === 'results' && <ResultsTab app={app} />}
+            {outputTab === 'config' && <ConfigTab app={app} />}
+            {outputTab === 'activity' && <ActivityTab app={app} />}
+          </div>
+        </>
+      )}
 
-      <div className="flex-1 overflow-y-auto px-6 py-5">
-        {tab === 'performance' && <PerformanceTab app={app} />}
-        {tab === 'results' && <ResultsTab app={app} />}
-        {tab === 'config' && <ConfigTab app={app} />}
-        {tab === 'activity' && <ActivityTab app={app} />}
-      </div>
+      {layer === 'canvas' && (
+        <div className="flex-1 overflow-hidden">
+          <AppCanvasView slug={app.slug} />
+        </div>
+      )}
+
+      {layer === 'brain' && (
+        <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
+          <BrainTabHeader mode={brainMode} onChange={setBrainMode} />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {brainMode === 'map' ? <BrainView slug={app.slug} onManage={openBrainManage} /> : <BrainManageView slug={app.slug} />}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -350,13 +423,14 @@ function ResultsTab({ app }: { app: AppDetail }) {
   if (loading) return <Skeleton height={400} />;
 
   const labels = app.outputLabels ?? [];
+  const hasNonMetricArtifacts = labels.some((label) => (label.artifactType ?? (label.format ? 'metric' : 'document')) !== 'metric');
 
   if (labels.length === 0) {
     return (
       <EmptyState
         icon={<Tag size={48} />}
-        title="No output labels configured"
-        body="Configure output labels on this app's workflow to unlock the Results UI. Each label tells Agentis how to display a piece of run output as a meaningful business metric."
+        title="No outputs configured yet"
+        body="This app's results will show up here once you tell it what to track. Open the entry workflow and label what it produces — a number, a list, a document, or anything else."
         variant="page"
       />
     );
@@ -377,37 +451,83 @@ function ResultsTab({ app }: { app: AppDetail }) {
     <div className="space-y-4">
       <div className="text-[12px] text-text-muted">{results.length} result{results.length === 1 ? '' : 's'} · last 7 days</div>
 
-      {/* Adaptive renderer: detect tabular vs cards */}
-      <div className="overflow-hidden rounded-card border border-line bg-surface">
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-line bg-surface-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
-              {labels.map((l) => <th key={l.path} className="px-4 py-2.5 text-left">{l.label}</th>)}
-              <th className="px-4 py-2.5 text-left">When</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((r, i) => (
-              <tr key={i} className="border-b border-line/60 last:border-b-0">
-                {labels.map((l) => {
-                  const value = (r[l.path] ?? r['_extracted']?.[l.path as keyof object]) as unknown;
-                  return (
-                    <td key={l.path} className="px-4 py-3 text-[13px] text-text-primary">
-                      {formatValue(value, l.format)}
-                    </td>
-                  );
+      {hasNonMetricArtifacts ? (
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {results.map((r, i) => (
+            <div key={i} className="rounded-card border border-line bg-surface p-4">
+              <div className="mb-3 text-[11px] text-text-muted">
+                {(() => {
+                  const ts = r['_runStartedAt'] as string | undefined;
+                  return ts ? relativeTime(ts) : 'Result';
+                })()}
+              </div>
+              <div className="space-y-3">
+                {labels.map((label) => {
+                  const value = (r[label.path] ?? r['_extracted']?.[label.path as keyof object]) as unknown;
+                  return <ArtifactValue key={label.path} label={label} value={value} />;
                 })}
-                <td className="px-4 py-3 text-[12px] text-text-muted">
-                  {(() => {
-                    const ts = r['_runStartedAt'] as string | undefined;
-                    return ts ? relativeTime(ts) : '—';
-                  })()}
-                </td>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="overflow-hidden rounded-card border border-line bg-surface">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-line bg-surface-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
+                {labels.map((l) => <th key={l.path} className="px-4 py-2.5 text-left">{l.label}</th>)}
+                <th className="px-4 py-2.5 text-left">When</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {results.map((r, i) => (
+                <tr key={i} className="border-b border-line/60 last:border-b-0">
+                  {labels.map((l) => {
+                    const value = (r[l.path] ?? r['_extracted']?.[l.path as keyof object]) as unknown;
+                    return (
+                      <td key={l.path} className="px-4 py-3 text-[13px] text-text-primary">
+                        {formatValue(value, l.format)}
+                      </td>
+                    );
+                  })}
+                  <td className="px-4 py-3 text-[12px] text-text-muted">
+                    {(() => {
+                      const ts = r['_runStartedAt'] as string | undefined;
+                      return ts ? relativeTime(ts) : '—';
+                    })()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArtifactValue({ label, value }: { label: OutputLabel; value: unknown }) {
+  const artifactType = label.artifactType ?? (label.format ? 'metric' : 'document');
+  return (
+    <div className="rounded-card border border-line/70 bg-surface-2 px-3 py-2.5">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[12px] font-medium text-text-secondary">{label.label}</span>
+        <span className="rounded-full bg-surface px-2 py-0.5 text-[10px] capitalize text-text-muted">{artifactType}</span>
       </div>
+      {artifactType === 'metric' ? (
+        <div className="text-display text-text-primary">{formatValue(value, label.format)}</div>
+      ) : artifactType === 'list' && Array.isArray(value) ? (
+        <div className="space-y-1 text-[12px] text-text-primary">
+          {value.slice(0, 5).map((item, index) => <div key={index}>{formatValue(item)}</div>)}
+          {value.length > 5 && <div className="text-text-muted">+{value.length - 5} more</div>}
+        </div>
+      ) : artifactType === 'decision' ? (
+        <div className="inline-flex rounded-full bg-accent-soft px-2.5 py-1 text-[12px] font-medium text-accent">{formatValue(value)}</div>
+      ) : (
+        <div className="max-h-40 overflow-auto whitespace-pre-wrap text-[12px] leading-relaxed text-text-primary">
+          {formatValue(value)}
+        </div>
+      )}
     </div>
   );
 }
@@ -457,14 +577,15 @@ function ConfigTab({ app }: { app: AppDetail }) {
       <section>
         <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Output labels</h3>
         {(app.outputLabels ?? []).length === 0 ? (
-          <p className="text-[13px] text-text-muted">No output labels configured. Set them on the entry workflow's settings to enable the Results UI.</p>
+          <p className="text-[13px] text-text-muted">No outputs labeled yet. Open the entry workflow and label what it produces — then those values show up in the Results tab.</p>
         ) : (
           <div className="space-y-1.5">
             {app.outputLabels!.map((l) => (
               <div key={l.path} className="flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3">
                 <span className="text-[13px] font-medium text-text-primary">{l.label}</span>
                 <span className="font-mono text-[11px] text-text-muted">{l.path}</span>
-                {l.format && <span className="ml-auto text-[11px] text-text-muted">{l.format}</span>}
+                {l.artifactType && <span className="ml-auto text-[11px] capitalize text-text-muted">{l.artifactType}</span>}
+                {l.format && <span className={`${l.artifactType ? '' : 'ml-auto'} text-[11px] text-text-muted`}>{l.format}</span>}
               </div>
             ))}
           </div>

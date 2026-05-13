@@ -12,8 +12,25 @@ import type { AgentisSecrets } from '../secrets.js';
 import { requireAuth, getUser } from '../middleware/auth.js';
 import { createRateLimiter, clientIp } from '../middleware/rateLimit.js';
 
-export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; secrets: AgentisSecrets }) {
+export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; secrets?: AgentisSecrets }) {
   const app = new Hono();
+  const productionMode = process.env.NODE_ENV === 'production';
+
+  async function issueLaunchTokens() {
+    const launchToken = deps.secrets?.launchToken;
+    if (!launchToken) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', 'Launch auth is not available on this deployment');
+    }
+    const user = deps.db.select().from(schema.users).get();
+    if (!user) throw new AgentisError('AUTH_INVALID_CREDENTIALS', 'No operator user found');
+    const tokens = await deps.auth.issueTokens(user.id, user.username);
+    return {
+      user: toUser(user),
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresInSeconds: tokens.expiresInSeconds,
+    };
+  }
 
   // OWASP A07: throttle credential-stuffing. 5 attempts per minute per
   // (IP, username) — and a separate 20-per-minute IP-only ceiling so user
@@ -23,7 +40,7 @@ export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
   // login flow hundreds of times across the spec matrix. The contract is
   // pinned by the vitest suite (`tests/routes/authRateLimit.test.ts` +
   // `tests/middleware/rateLimit.test.ts`) which runs without TEST_MODE.
-  const testModeBypass = process.env.AGENTIS_TEST_MODE === '1';
+  const testModeBypass = !productionMode && process.env.AGENTIS_TEST_MODE === '1';
   const loginPerPair = createRateLimiter({
     limit: 5,
     windowMs: 60_000,
@@ -92,25 +109,23 @@ export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
    * while the server has a launchToken (i.e. local/file-backed installs).
    * Server deployments (env-var secrets) have no launchToken and always get 404.
    */
+  app.get('/launch', async (c) => {
+    if (productionMode) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', 'Launch auth is not available in production');
+    }
+    return c.json(await issueLaunchTokens());
+  });
+
   app.post('/launch', async (c) => {
-    const launchToken = deps.secrets.launchToken;
+    const launchToken = deps.secrets?.launchToken;
     if (!launchToken) {
-      throw new AgentisError('NOT_FOUND', 'Launch auth is not available on this deployment');
+      throw new AgentisError('RESOURCE_NOT_FOUND', 'Launch auth is not available on this deployment');
     }
     const body = (await c.req.json().catch(() => ({}))) as { token?: unknown };
     if (typeof body.token !== 'string' || body.token !== launchToken) {
       throw new AgentisError('AUTH_INVALID_CREDENTIALS', 'Invalid launch token');
     }
-    // Issue tokens for the first admin user (the operator seeded on first boot).
-    const user = deps.db.select().from(schema.users).get();
-    if (!user) throw new AgentisError('AUTH_INVALID_CREDENTIALS', 'No operator user found');
-    const tokens = await deps.auth.issueTokens(user.id, user.username);
-    return c.json({
-      user: toUser(user),
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-      expiresInSeconds: tokens.expiresInSeconds,
-    });
+    return c.json(await issueLaunchTokens());
   });
 
   return app;

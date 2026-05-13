@@ -55,6 +55,16 @@ export type AgentisErrorCode =
   | 'CHANNEL_CONNECTION_INACTIVE'
   | 'CHANNEL_BRIDGE_UNAVAILABLE'
   | 'CHANNEL_DISCORD_INBOUND_UNAVAILABLE'
+  // Packages / library
+  | 'PACKAGE_NOT_FOUND'
+  | 'PACKAGE_IMPORT_INVALID'
+  | 'PACKAGE_CHECKSUM_MISMATCH'
+  | 'PACKAGE_SLUG_CONFLICT'
+  // Integrations
+  | 'INTEGRATION_OPERATION_FAILED'
+  | 'INTEGRATION_CREDENTIAL_MISSING'
+  // Budgets
+  | 'BUDGET_LIMIT_EXCEEDED'
   // Tenancy / safety
   | 'CROSS_WORKSPACE_ACCESS'
   | 'OPERATION_RATE_LIMITED'
@@ -112,10 +122,12 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'RESOURCE_NOT_FOUND':
     case 'WORKFLOW_RUN_NOT_FOUND':
     case 'SKILL_NOT_FOUND':
+    case 'PACKAGE_NOT_FOUND':
       return 404;
     case 'RESOURCE_CONFLICT':
     case 'WORKFLOW_RUN_INVALID_STATE':
     case 'GRAPH_REVISION_CONFLICT':
+    case 'PACKAGE_SLUG_CONFLICT':
       return 409;
     case 'VALIDATION_FAILED':
     case 'WORKFLOW_GRAPH_INVALID':
@@ -127,6 +139,8 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'SKILL_REGISTRY_SCAN_BLOCKED':
     case 'SKILL_NETWORK_VIOLATION':
     case 'SKILL_SSRF_BLOCKED':
+    case 'PACKAGE_IMPORT_INVALID':
+    case 'PACKAGE_CHECKSUM_MISMATCH':
     case 'TRIGGER_INVALID_CONFIG':
     case 'TRIGGER_NOT_ACTIVE':
     case 'REPLAY_TARGET_INVALID':
@@ -134,6 +148,8 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'CHANNEL_KIND_UNAVAILABLE':
     case 'CHANNEL_CONNECTION_INACTIVE':
     case 'CHANNEL_DISCORD_INBOUND_UNAVAILABLE':
+    case 'INTEGRATION_CREDENTIAL_MISSING':
+    case 'BUDGET_LIMIT_EXCEEDED':
       return 422;
     case 'OPERATION_RATE_LIMITED':
       return 429;
@@ -142,6 +158,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'SKILL_DOCKER_UNAVAILABLE':
     case 'SKILL_RUNTIME_UNAVAILABLE':
     case 'CHANNEL_BRIDGE_UNAVAILABLE':
+    case 'INTEGRATION_OPERATION_FAILED':
       return 503;
     case 'ADAPTER_TIMEOUT':
     case 'SKILL_TIMEOUT':

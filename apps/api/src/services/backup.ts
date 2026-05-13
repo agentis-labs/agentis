@@ -28,7 +28,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { openSqlite } from '@agentis/db/sqlite';
 
 export interface BackupOptions {
@@ -175,6 +175,7 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
 
   const restored: string[] = [];
   for (const file of manifest.files) {
+    assertRestorableFile(file);
     const src = join(backupDir, file);
     if (!existsSync(src)) {
       throw new Error(
@@ -194,4 +195,11 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
   }
 
   return { dataDir, files: restored };
+}
+
+function assertRestorableFile(file: string): void {
+  const allowed = file === DB_NAME || file === SECRETS_NAME;
+  if (!allowed || isAbsolute(file) || file !== basename(file)) {
+    throw new Error(`Unsafe backup manifest file entry: ${file}`);
+  }
 }

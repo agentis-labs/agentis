@@ -1,12 +1,14 @@
 /**
  * Adapter contract — V1-SPEC §10.
  *
- * Adapters are how Agentis dispatches NormalizedTask payloads to OpenClaw,
- * Claude Code, or generic HTTP backends, and how they stream
+ * Adapters are how Agentis dispatches NormalizedTask payloads to V1 harnesses
+ * and how those harnesses stream
  * NormalizedAgentEvent back into the engine.
  */
 
-export type AdapterType = 'openclaw' | 'claude_code' | 'http';
+import type { ChatDelta, ChatMessage, ToolDefinition } from './chat.js';
+
+export type AdapterType = 'openclaw' | 'claude_code' | 'http' | 'codex' | 'cursor' | 'hermes' | 'hermes_agent' | 'local_llm';
 
 export interface AgentAdapter {
   readonly adapterType: AdapterType;
@@ -14,6 +16,7 @@ export interface AgentAdapter {
   disconnect(): Promise<void>;
   healthCheck(): Promise<AdapterHealthStatus>;
   dispatchTask(task: NormalizedTask): Promise<void>;
+  chat?(history: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta>;
   cancelTask(taskId: string): Promise<void>;
   createPersistentListener?(trigger: TriggerConfig): Promise<TriggerListenerHandle>;
   onEvent(handler: (event: NormalizedAgentEvent) => void): void;
@@ -22,23 +25,75 @@ export interface AgentAdapter {
 export type AgentAdapterConfig =
   | OpenClawAdapterConfig
   | ClaudeCodeAdapterConfig
+  | CodexAdapterConfig
+  | CursorAdapterConfig
+  | HermesAgentAdapterConfig
   | HttpAdapterConfig;
 
 export interface OpenClawAdapterConfig {
   adapterType: 'openclaw';
-  gatewayId: string;
+  gatewayId?: string;
   gatewayUrl: string;
-  deviceTokenCredentialId: string;
-  agentName: string;
+  deviceTokenCredentialId?: string;
+  authCredentialId?: string;
+  authToken?: string;
+  headers?: Record<string, string>;
+  password?: string;
+  agentName?: string;
+  sessionKeyStrategy?: 'issue' | 'fixed' | 'run';
+  sessionKey?: string;
+  disableDeviceAuth?: boolean;
+  devicePrivateKeyCredentialId?: string;
+  timeoutSec?: number;
+  payloadTemplate?: Record<string, unknown>;
 }
 
 export interface ClaudeCodeAdapterConfig {
   adapterType: 'claude_code';
-  claudeBinaryPath: string;
-  workingDirectory: string;
-  allowedTools: string[];
-  modelOverride?: string;
+  binaryPath?: string;
+  cwd?: string;
+  model?: string;
   maxTurns?: number;
+  allowedTools?: string[];
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  timeoutSec?: number;
+}
+
+export interface CodexAdapterConfig {
+  adapterType: 'codex';
+  binaryPath?: string;
+  cwd?: string;
+  model?: string;
+  maxTurns?: number;
+  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  fastMode?: boolean;
+  dangerouslyBypassApprovalsAndSandbox?: boolean;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  timeoutSec?: number;
+}
+
+export interface CursorAdapterConfig {
+  adapterType: 'cursor';
+  binaryPath?: string;
+  cwd?: string;
+  model?: string;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  timeoutSec?: number;
+}
+
+export interface HermesAgentAdapterConfig {
+  adapterType: 'hermes_agent';
+  binaryPath?: string;
+  cwd?: string;
+  model?: string;
+  maxTurns?: number;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  timeoutSec?: number;
+  graceSec?: number;
 }
 
 export interface HttpAdapterConfig {
@@ -48,6 +103,9 @@ export interface HttpAdapterConfig {
   dispatchPath: string;
   cancelPath?: string;
   healthPath?: string;
+  method?: 'POST' | 'GET' | 'PUT' | 'PATCH';
+  headers?: Record<string, string>;
+  payloadTemplate?: Record<string, unknown>;
   dispatchTimeoutMs: number;
 }
 

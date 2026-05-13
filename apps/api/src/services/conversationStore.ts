@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type RealtimeEventName } from '@agentis/core';
@@ -78,15 +78,73 @@ export class ConversationStore {
       .get()!;
   }
 
-  messages(conversationId: string, limit = 50) {
+  messages(conversationId: string, limit = 50, before?: string | null) {
     return this.deps.db
       .select()
       .from(schema.conversationMessages)
-      .where(eq(schema.conversationMessages.conversationId, conversationId))
+      .where(and(
+        eq(schema.conversationMessages.conversationId, conversationId),
+        ...(before ? [lt(schema.conversationMessages.createdAt, before)] : []),
+      ))
       .orderBy(desc(schema.conversationMessages.createdAt))
       .limit(limit)
       .all()
       .reverse();
+  }
+
+  updateMessage(args: {
+    workspaceId: string;
+    conversationId: string;
+    messageId: string;
+    body: string;
+  }) {
+    if (!args.body || args.body.length === 0) {
+      throw new AgentisError('VALIDATION_FAILED', 'Conversation message body required');
+    }
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const existing = this.deps.db
+      .select()
+      .from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, args.conversationId),
+        eq(schema.conversationMessages.id, args.messageId),
+      ))
+      .get();
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `message ${args.messageId} not found`);
+    this.deps.db
+      .update(schema.conversationMessages)
+      .set({ body: args.body })
+      .where(eq(schema.conversationMessages.id, args.messageId))
+      .run();
+    const message = { ...existing, body: args.body };
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+      { message, conversationId: args.conversationId, agentId: conversation.agentId },
+    );
+    return message;
+  }
+
+  deleteMessage(args: { workspaceId: string; conversationId: string; messageId: string }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const existing = this.deps.db
+      .select()
+      .from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, args.conversationId),
+        eq(schema.conversationMessages.id, args.messageId),
+      ))
+      .get();
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `message ${args.messageId} not found`);
+    this.deps.db.delete(schema.conversationMessages).where(eq(schema.conversationMessages.id, args.messageId)).run();
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_MESSAGE_DELETED,
+      { id: args.messageId, conversationId: args.conversationId, agentId: conversation.agentId },
+    );
+    return existing;
   }
 
   /** Append an outbound operator message and emit the realtime event. */
@@ -178,6 +236,7 @@ export class ConversationStore {
         .get();
       if (existing) return existing;
     }
+    const now = new Date().toISOString();
     const row = {
       id: randomUUID(),
       conversationId: args.conversationId,
@@ -188,9 +247,9 @@ export class ConversationStore {
       body: args.body,
       metadata: {},
       deliveryStatus: args.deliveryStatus,
+      createdAt: now,
     };
     this.deps.db.insert(schema.conversationMessages).values(row).run();
-    const now = new Date().toISOString();
     this.deps.db
       .update(schema.conversations)
       .set({
@@ -206,5 +265,20 @@ export class ConversationStore {
       { message: row, conversationId: args.conversationId, agentId: conversation.agentId },
     );
     return row;
+  }
+
+  #loadConversation(workspaceId: string, conversationId: string) {
+    const conversation = this.deps.db
+      .select()
+      .from(schema.conversations)
+      .where(and(
+        eq(schema.conversations.workspaceId, workspaceId),
+        eq(schema.conversations.id, conversationId),
+      ))
+      .get();
+    if (!conversation) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found`);
+    }
+    return conversation;
   }
 }

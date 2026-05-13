@@ -3,8 +3,8 @@
  */
 
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
-import { AgentisError, schemas } from '@agentis/core';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { AgentisError, schemas, type WorkflowGraphPatch } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -25,13 +25,17 @@ export function buildRunRoutes(deps: {
   app.get('/', (c) => {
     const ws = getWorkspace(c);
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 50), 1), 200);
+    const status = normalizeRunStatus(c.req.query('status'));
+    const predicate = status.length > 0
+      ? and(eq(schema.workflowRuns.workspaceId, ws.workspaceId), inArray(schema.workflowRuns.status, status))
+      : eq(schema.workflowRuns.workspaceId, ws.workspaceId);
     const rows = deps.db
       .select()
       .from(schema.workflowRuns)
-      .where(eq(schema.workflowRuns.workspaceId, ws.workspaceId))
-      .all()
-      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      .slice(0, limit);
+      .where(predicate)
+      .orderBy(desc(schema.workflowRuns.createdAt))
+      .limit(limit)
+      .all();
     return c.json({ runs: rows });
   });
 
@@ -67,12 +71,21 @@ export function buildRunRoutes(deps: {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     loadRun(deps.db, ws.workspaceId, id);
-    const patch = schemas.workflowGraphPatchSchema.parse(await c.req.json());
+    const patch = schemas.workflowGraphPatchSchema.parse(await c.req.json()) as WorkflowGraphPatch;
     const result = await deps.engine.applyGraphPatch({ runId: id, patch });
     return c.json({ runId: id, patchId: patch.patchId, ...result });
   });
 
   return app;
+}
+
+function normalizeRunStatus(status: string | undefined): string[] {
+  const value = status?.trim().toUpperCase();
+  if (!value) return [];
+  if (value === 'ACTIVE') return ['CREATED', 'PLANNING', 'RUNNING', 'WAITING'];
+  if (value === 'PENDING') return ['CREATED', 'PLANNING', 'WAITING'];
+  const allowed = new Set(['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'COMPLETED', 'FAILED', 'CANCELLED']);
+  return allowed.has(value) ? [value] : [];
 }
 
 function loadRun(db: AgentisSqliteDb, workspaceId: string, id: string) {

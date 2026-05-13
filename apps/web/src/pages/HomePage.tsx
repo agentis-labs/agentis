@@ -18,51 +18,18 @@ import {
   RotateCcw, Zap, Layers, Sparkles, ArrowRight,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { api, workspace as wsStore } from '../lib/api';
-import { useRealtime } from '../lib/realtime';
+import { api } from '../lib/api';
+import {
+  refreshWorkspaceSnapshot,
+  useWorkspaceData,
+  type WorkspaceApproval as Approval,
+  type WorkspaceFailedRun as FailedRun,
+} from '../lib/workspaceData';
 import { useToast } from '../components/shared/Toast';
 import { Skeleton } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
 import { Button } from '../components/shared/Button';
-
-interface Approval {
-  id: string;
-  agentName?: string;
-  workflowName?: string;
-  summary?: string;
-  runId?: string;
-  createdAt: string;
-}
-
-interface ActiveRun {
-  id: string;
-  workflowId: string;
-  workflowName: string;
-  status: string;
-  currentStep?: string;
-  totalSteps?: number;
-  stepIndex?: number;
-  startedAt: string;
-  agents?: Array<{ id: string; name: string }>;
-}
-
-interface FailedRun {
-  id: string;
-  workflowName?: string;
-  failedNode?: string;
-  finishedAt?: string;
-}
-
-interface Artifact {
-  id: string;
-  title: string;
-  agent?: string;
-  createdAt: string;
-  thumbUrl?: string;
-  kind?: 'html' | 'image' | 'doc' | 'code' | 'data';
-}
-
-interface Agent { id: string; name: string; status?: string; }
+import { KnowledgeStatusCard } from '../components/knowledge/KnowledgeStatusCard';
 
 const PLACEHOLDERS = [
   'Ask thomas to write the weekly newsletter…',
@@ -95,14 +62,7 @@ function timeOfDay(): string {
 export function HomePage() {
   const nav = useNavigate();
   const toast = useToast();
-
-  const [me, setMe] = useState<{ name: string } | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [activeRuns, setActiveRuns] = useState<ActiveRun[]>([]);
-  const [failedRuns, setFailedRuns] = useState<FailedRun[]>([]);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { me, agents, approvals, activeRuns, failedRuns, artifacts, loading } = useWorkspaceData();
 
   // Composer state
   const [recipient, setRecipient] = useState<{ id: string; name: string } | null>(null);
@@ -111,32 +71,6 @@ export function HomePage() {
   const [placeholderIdx, setPlaceholderIdx] = useState(0);
   const [sending, setSending] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
-
-  async function refresh() {
-    if (!wsStore.get()) return;
-    try {
-      const [meRes, agentsRes, apsRes, runsRunningRes, runsFailedRes, artsRes] = await Promise.allSettled([
-        api<{ user: { name: string } }>('/v1/auth/me'),
-        api<{ agents: Agent[] }>('/v1/agents'),
-        api<{ approvals: Approval[] }>('/v1/approvals?status=pending'),
-        api<{ runs: ActiveRun[] }>('/v1/runs?status=running&limit=5'),
-        api<{ runs: FailedRun[] }>('/v1/runs?status=failed&limit=3'),
-        api<{ artifacts: Artifact[] }>('/v1/artifacts?limit=6'),
-      ]);
-      if (meRes.status === 'fulfilled') setMe(meRes.value.user ?? null);
-      if (agentsRes.status === 'fulfilled') setAgents(agentsRes.value.agents ?? []);
-      if (apsRes.status === 'fulfilled') setApprovals(apsRes.value.approvals ?? []);
-      if (runsRunningRes.status === 'fulfilled') setActiveRuns(runsRunningRes.value.runs ?? []);
-      if (runsFailedRes.status === 'fulfilled') setFailedRuns(runsFailedRes.value.runs ?? []);
-      if (artsRes.status === 'fulfilled') setArtifacts(artsRes.value.artifacts ?? []);
-    } catch { /* ignore */ }
-    setLoading(false);
-  }
-
-  useEffect(() => { void refresh(); }, []);
-  useRealtime(['approval.requested', 'approval.resolved', 'run.created', 'run.running', 'run.completed', 'run.failed'], () => {
-    void refresh();
-  });
 
   // Cycle placeholder
   useEffect(() => {
@@ -181,18 +115,18 @@ export function HomePage() {
     try {
       await api(`/v1/approvals/${a.id}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'approved' }) });
       toast.success('Approved');
-      void refresh();
+      void refreshWorkspaceSnapshot();
     } catch (e) { toast.error('Failed to approve', String(e)); }
   }
   async function handleReject(a: Approval) {
     try {
       await api(`/v1/approvals/${a.id}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'rejected' }) });
       toast.success('Rejected');
-      void refresh();
+      void refreshWorkspaceSnapshot();
     } catch (e) { toast.error('Failed to reject', String(e)); }
   }
   async function handleRetry(r: FailedRun) {
-    try { await api(`/v1/runs/${r.id}/retry`, { method: 'POST' }); toast.success('Retry started'); void refresh(); }
+    try { await api(`/v1/runs/${r.id}/retry`, { method: 'POST' }); toast.success('Retry started'); void refreshWorkspaceSnapshot(); }
     catch (e) { toast.error('Retry failed', String(e)); }
   }
 
@@ -253,56 +187,15 @@ export function HomePage() {
   return (
     <div className="relative">
       {/* Hero / chat-first section */}
-      <section className="px-6 pt-12 pb-20 md:px-12 md:pt-20">
+      <section className="px-6 pt-12 pb-12 md:px-12 md:pt-16">
         <div className="mx-auto max-w-3xl">
           <div className="text-center">
             <h1 className="text-display text-text-primary">{greeting.greeting}</h1>
             <p className="mt-2 text-[15px] text-text-secondary">{greeting.summary}</p>
           </div>
 
-          {/* Composer */}
-          <div className="mt-10 rounded-card border border-line bg-surface shadow-card">
-            <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
-              {/* Recipient pill */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setRecipientOpen((v) => !v)}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-pill border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-primary hover:bg-surface-3"
-                >
-                  <Bot size={11} className="text-accent" />
-                  {recipient?.name ?? 'Recipient'}
-                  <ChevronDown size={11} className="text-text-muted" />
-                </button>
-                {recipientOpen && (
-                  <div className="absolute z-10 mt-1.5 max-h-60 w-56 overflow-y-auto rounded-card border border-line bg-surface shadow-dropdown">
-                    {agents.length === 0 ? (
-                      <div className="p-3 text-[12px] text-text-muted">No agents available.</div>
-                    ) : (
-                      agents.map((a) => (
-                        <button
-                          key={a.id}
-                          type="button"
-                          onClick={() => { setRecipient({ id: a.id, name: a.name }); setRecipientOpen(false); }}
-                          className={clsx(
-                            'flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors',
-                            recipient?.id === a.id
-                              ? 'bg-accent-soft text-accent'
-                              : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
-                          )}
-                        >
-                          <Bot size={12} />
-                          {a.name}
-                          <span className="ml-auto text-[10px] text-text-muted">{a.status ?? ''}</span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
-              <span className="text-[11px] text-text-muted">RECIPIENT</span>
-            </div>
-
+          {/* Composer — minimal, single rounded card */}
+          <div className="mt-10 rounded-3xl border border-line bg-surface px-1.5 py-1.5 shadow-card focus-within:border-line-strong">
             <textarea
               ref={taRef}
               value={draft}
@@ -313,53 +206,83 @@ export function HomePage() {
                   void handleSend();
                 }
               }}
-              rows={3}
-              placeholder={PLACEHOLDERS[placeholderIdx]}
-              className="block min-h-[88px] w-full resize-none bg-transparent px-4 py-3 text-[15px] leading-relaxed text-text-primary placeholder:text-text-muted focus:outline-none"
-              style={{ maxHeight: 160 }}
+              rows={2}
+              placeholder={agents.length === 0 ? 'Set up an agent to start chatting…' : PLACEHOLDERS[placeholderIdx]}
+              className="block min-h-[60px] w-full resize-none bg-transparent px-3.5 py-2.5 text-[15px] leading-relaxed text-text-primary placeholder:text-text-muted focus:outline-none"
+              style={{ maxHeight: 180 }}
             />
 
-            <div className="flex items-center justify-between border-t border-line px-3 py-2">
-              <span className="text-[11px] text-text-muted">
-                Enter to send · Shift+Enter for newline
-              </span>
+            <div className="flex items-center gap-1 px-2 pb-1.5 pt-1">
+              {/* Recipient pill */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setRecipientOpen((v) => !v)}
+                  disabled={agents.length === 0}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-pill bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Bot size={11} className="text-accent" />
+                  {recipient?.name ?? 'Pick agent'}
+                  <ChevronDown size={11} className="text-text-muted" />
+                </button>
+                {recipientOpen && agents.length > 0 && (
+                  <div className="absolute bottom-full left-0 z-10 mb-1.5 max-h-60 w-56 overflow-y-auto rounded-card border border-line bg-surface shadow-dropdown">
+                    {agents.map((a) => (
+                      <button
+                        key={a.id}
+                        type="button"
+                        onClick={() => { setRecipient({ id: a.id, name: a.name }); setRecipientOpen(false); }}
+                        className={clsx(
+                          'flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors',
+                          recipient?.id === a.id
+                            ? 'bg-accent-soft text-accent'
+                            : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
+                        )}
+                      >
+                        <Bot size={12} />
+                        {a.name}
+                        <span className="ml-auto text-[10px] text-text-muted">{a.status ?? ''}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <button
                 type="button"
                 onClick={() => void handleSend()}
                 disabled={!draft.trim() || !recipient || sending}
-                className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-canvas transition-all hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Send"
+                title="Send (Enter)"
+                className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-full bg-accent text-canvas transition-all hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent/40"
               >
-                <Send size={12} /> Send
+                <Send size={13} />
               </button>
             </div>
           </div>
 
           {/* Suggestion chips */}
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-            {chips.map((c, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={c.onClick}
-                className="inline-flex h-8 items-center rounded-pill border border-line bg-surface-2 px-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-text-primary"
-              >
-                {c.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="mt-12 text-center text-[11px] uppercase tracking-wider text-text-muted">
-            ↓ Your active platform ↓
-          </div>
+          {chips.length > 0 && (
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              {chips.map((c, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={c.onClick}
+                  className="inline-flex h-7 items-center rounded-pill border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-text-primary"
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-
-        {/* Smooth gradient fade into content */}
-        <div aria-hidden className="pointer-events-none absolute inset-x-0 -mt-16 h-24 section-fade-gradient" />
       </section>
 
       {/* Below-fold ops content */}
       <section className="px-6 pb-12 md:px-12">
         <div className="mx-auto max-w-5xl space-y-10">
+          <KnowledgeStatusCard />
 
           {/* Needs Attention */}
           {(approvals.length > 0 || failedRuns.length > 0) && (

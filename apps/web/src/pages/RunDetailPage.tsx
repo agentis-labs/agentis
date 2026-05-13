@@ -13,6 +13,7 @@ import {
   ArrowLeft, FileText, Code as CodeIcon, BookOpen, RotateCcw, ChevronRight,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { useToast } from '../components/shared/Toast';
@@ -98,13 +99,20 @@ export function RunDetailPage() {
 
   useEffect(() => {
     const ws = wsStore.get();
-    if (ws) rtSubscribe('workspace', { workspaceId: ws });
+    const unsubscribe = ws ? rtSubscribe('workspace', { workspaceId: ws }) : undefined;
     void refresh();
+    return () => unsubscribe?.();
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [id]);
 
-  useRealtime(['run.completed', 'run.failed', 'run.running', 'node.completed', 'node.failed'], (evt) => {
-    const payload = evt as { runId?: string; id?: string };
+  useRealtime([
+    REALTIME_EVENTS.RUN_COMPLETED,
+    REALTIME_EVENTS.RUN_FAILED,
+    REALTIME_EVENTS.RUN_RUNNING,
+    REALTIME_EVENTS.NODE_COMPLETED,
+    REALTIME_EVENTS.NODE_FAILED,
+  ], (evt) => {
+    const payload = evt.payload as { runId?: string; id?: string };
     if (payload?.runId === id || payload?.id === id) void refresh();
   });
 
@@ -131,7 +139,8 @@ export function RunDetailPage() {
   }
 
   const r = data.run;
-  const failedNode = r.nodes.find((n) => n.status === 'failed');
+  const nodes = r.nodes ?? [];
+  const failedNode = nodes.find((n) => n.status === 'failed');
 
   return (
     <div className="flex h-full flex-col">
@@ -240,8 +249,9 @@ function StoryView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode:
     return lines.join(' ');
   }, [run]);
 
-  const completedNodes = run.nodes.filter((n) => n.status === 'completed');
-  const failedNode = run.nodes.find((n) => n.status === 'failed');
+  const nodes = run.nodes ?? [];
+  const completedNodes = nodes.filter((n) => n.status === 'completed');
+  const failedNode = nodes.find((n) => n.status === 'failed');
 
   return (
     <div className="space-y-6">
@@ -253,7 +263,7 @@ function StoryView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode:
         <div>
           <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">What happened</h3>
           <ol className="space-y-1.5">
-            {run.nodes.map((n, i) => (
+            {nodes.map((n, i) => (
               <li
                 key={n.id}
                 onClick={() => onSelectNode(n)}
@@ -305,6 +315,7 @@ function StoryView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode:
 }
 
 function TechnicalView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode: (n: RunNode) => void }) {
+  const nodes = run.nodes ?? [];
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -329,7 +340,7 @@ function TechnicalView({ run, onSelectNode }: { run: RunDetail['run']; onSelectN
               </tr>
             </thead>
             <tbody>
-              {run.nodes.map((n, i) => (
+              {nodes.map((n, i) => (
                 <tr
                   key={n.id}
                   onClick={() => onSelectNode(n)}

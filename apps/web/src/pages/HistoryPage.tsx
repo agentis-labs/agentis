@@ -10,6 +10,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Clock, SearchX, Eye, RotateCcw, ArrowRight, AlertTriangle, Check, X, Bot,
 } from 'lucide-react';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { api, workspace as wsStore } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
 import { useToast } from '../components/shared/Toast';
@@ -25,7 +26,7 @@ type EventType = 'all' | 'runs' | 'activity' | 'audit';
 
 interface HistoryEvent {
   id: string;
-  type: 'run.completed' | 'run.failed' | 'agent.task' | 'audit' | string;
+  type: typeof REALTIME_EVENTS.RUN_COMPLETED | typeof REALTIME_EVENTS.RUN_FAILED | 'agent.task' | 'audit' | string;
   title: string;
   subtitle?: string;
   timestamp: string;
@@ -84,7 +85,7 @@ export function HistoryPage() {
         );
         setEvents((runs.runs ?? []).map((r) => ({
           id: `run-${r.id}`,
-          type: r.status === 'failed' ? 'run.failed' : 'run.completed',
+          type: r.status === 'failed' ? REALTIME_EVENTS.RUN_FAILED : REALTIME_EVENTS.RUN_COMPLETED,
           title: r.status === 'failed' ? `${r.workflowName ?? 'Workflow'} failed` : `${r.workflowName ?? 'Workflow'} completed`,
           timestamp: r.finishedAt ?? r.startedAt ?? new Date().toISOString(),
           status: r.status,
@@ -98,12 +99,17 @@ export function HistoryPage() {
 
   useEffect(() => {
     const ws = wsStore.get();
-    if (ws) rtSubscribe('workspace', { workspaceId: ws });
+    const unsubscribe = ws ? rtSubscribe('workspace', { workspaceId: ws }) : undefined;
     void refresh();
+    return () => unsubscribe?.();
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [tab]);
 
-  useRealtime(['run.completed', 'run.failed', 'agent.task.completed'], () => { void refresh(); });
+  useRealtime([
+    REALTIME_EVENTS.RUN_COMPLETED,
+    REALTIME_EVENTS.RUN_FAILED,
+    REALTIME_EVENTS.AGENT_TASK_COMPLETED,
+  ], () => { void refresh(); });
 
   const filtered = useMemo(() => {
     if (!search.trim()) return events;
@@ -198,10 +204,10 @@ export function HistoryPage() {
                     </span>
                     <StatusBadge status={e.status ?? 'info'} size="sm" />
                     <span className="flex-1 truncate text-[13px] text-text-primary">{e.title}</span>
-                    {e.type === 'run.failed' && e.runId && (
+                    {e.type === REALTIME_EVENTS.RUN_FAILED && e.runId && (
                       <Button variant="secondary" size="sm" iconLeft={<RotateCcw size={11} />} onClick={(ev) => { ev.stopPropagation(); void handleRetry(e.runId!); }}>Retry</Button>
                     )}
-                    {(e.type === 'run.completed' || e.type === 'run.failed') && e.runId && (
+                    {(e.type === REALTIME_EVENTS.RUN_COMPLETED || e.type === REALTIME_EVENTS.RUN_FAILED) && e.runId && (
                       <Button variant="ghost" size="sm" iconRight={<ArrowRight size={11} />} onClick={(ev) => { ev.stopPropagation(); nav(`/runs/${e.runId}`); }}>View</Button>
                     )}
                   </button>
@@ -249,7 +255,7 @@ export function HistoryPage() {
               {selected.runId && (
                 <Button variant="primary" size="sm" iconLeft={<Eye size={11} />} onClick={() => nav(`/runs/${selected.runId}`)}>View run</Button>
               )}
-              {selected.type === 'run.failed' && selected.runId && (
+              {selected.type === REALTIME_EVENTS.RUN_FAILED && selected.runId && (
                 <Button variant="secondary" size="sm" iconLeft={<RotateCcw size={11} />} onClick={() => void handleRetry(selected.runId!)}>Retry</Button>
               )}
             </div>

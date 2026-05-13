@@ -10,6 +10,7 @@ out/
 
 # Local Agentis runtime data (embedded mode)
 .agentis/
+.claude/
 
 # Env / secrets
 .env

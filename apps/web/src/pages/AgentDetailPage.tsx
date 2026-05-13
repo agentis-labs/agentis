@@ -17,6 +17,10 @@ import { Button } from '../components/shared/Button';
 import { Skeleton } from '../components/shared/Skeleton';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
+import { MemoryEntryRow } from '../components/knowledge/MemoryEntryRow';
+import { MemoryWriteForm } from '../components/knowledge/MemoryWriteForm';
+import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
+import type { MemoryKind } from '../components/knowledge/types';
 
 interface AgentDetail {
   id: string;
@@ -25,6 +29,18 @@ interface AgentDetail {
   status?: string;
   spaceId?: string;
   spaceName?: string;
+  adapterType?: string;
+  runtimeModel?: string | null;
+  config?: Record<string, unknown> | null;
+  role?: string | null;
+  colorHex?: string | null;
+  capabilityTags?: string[] | null;
+  instructions?: string | null;
+  avatarGlyph?: string | null;
+  monthlyBudgetCents?: number | null;
+  currentMonthSpendCents?: number | null;
+  isPaused?: boolean | null;
+  reportsTo?: string | null;
   adapter?: { type?: string; model?: string; config?: Record<string, unknown> };
   avatarUrl?: string | null;
   systemPrompt?: string;
@@ -42,10 +58,16 @@ interface InstructionFile {
 interface MemoryEntry {
   id: string;
   source: 'agent' | 'platform';
+  sourceType?: string;
   type?: string;
+  kind?: string;
   title?: string;
   content: string;
+  trust?: number;
+  confidence?: number;
+  importance?: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 interface RunHistoryEntry {
@@ -174,7 +196,7 @@ export function AgentDetailPage() {
             )}
             <div className="mt-2 flex flex-wrap gap-3 text-[12px] text-text-muted">
               {agent.spaceName && <span>{agent.spaceName}</span>}
-              {agent.adapter?.type && <span>{agent.adapter.type}{agent.adapter.model ? ` · ${agent.adapter.model}` : ''}</span>}
+              <span>{harnessLabel(agentHarnessType(agent))}{agentRuntimeModel(agent) ? ` · ${agentRuntimeModel(agent)}` : ''}</span>
               {agent.createdAt && <span>Created {relativeTime(agent.createdAt)}</span>}
             </div>
           </div>
@@ -214,8 +236,8 @@ function OverviewTab({ agent }: { agent: AgentDetail }) {
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <Stat label="Status" value={agent.status ?? 'offline'} />
-        <Stat label="Adapter" value={agent.adapter?.type ?? 'Not set'} />
-        <Stat label="Model" value={agent.adapter?.model ?? '—'} />
+        <Stat label="Harness" value={harnessLabel(agentHarnessType(agent))} />
+        <Stat label="Model" value={agentRuntimeModel(agent) ?? '—'} />
       </div>
       {agent.description && (
         <div className="rounded-card border border-line bg-surface p-4">
@@ -356,35 +378,56 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
 }
 
 function MemoryTab({ agent }: { agent: AgentDetail }) {
+  const toast = useToast();
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'agent' | 'platform'>('all');
+  const [kindFilter, setKindFilter] = useState<'all' | MemoryKind>('all');
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      setLoading(true);
-      try {
-        const data = await api<{ entries: MemoryEntry[] }>(`/v1/agents/${agent.id}/memory`);
-        if (!cancelled) setEntries(data.entries ?? []);
-      } catch {
-        if (!cancelled) setEntries([]);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [agent.id]);
+  async function refresh() {
+    setLoading(true);
+    try {
+      const data = await api<{ entries: MemoryEntry[] }>(`/v1/agents/${agent.id}/memory`);
+      setEntries(data.entries ?? []);
+    } catch {
+      setEntries([]);
+    } finally {
+      setLoading(false);
+    }
+  }
 
-  const filtered = entries.filter((e) => filter === 'all' || e.source === filter);
+  useEffect(() => { void refresh(); }, [agent.id]);
+
+  async function saveMemory(entry: { kind: MemoryKind; title: string; content: string }) {
+    await api(`/v1/agents/${agent.id}/memory`, { method: 'POST', body: JSON.stringify(entry) });
+    toast.success('Agent memory saved', entry.title);
+    await refresh();
+  }
+
+  async function archiveMemory(id: string) {
+    await api(`/v1/memory/${id}`, { method: 'DELETE' });
+    toast.success('Agent memory archived');
+    await refresh();
+  }
+
+  const filtered = entries.filter((e) => {
+    if (filter !== 'all' && e.source !== filter) return false;
+    return kindFilter === 'all' || (e.kind ?? e.type) === kindFilter;
+  });
 
   if (loading) return <Skeleton height={300} />;
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <MemoryWriteForm
+        submitLabel="Save to agent memory"
+        placeholder="A rule, fact, or preference injected into this agent's future work."
+        onSubmit={saveMemory}
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-[12px] text-text-muted">{entries.length} {entries.length === 1 ? 'memory' : 'memories'}</span>
-        <div className="ml-auto flex gap-1">
+        <div className="ml-auto flex flex-wrap gap-1">
           {(['all', 'agent', 'platform'] as const).map((f) => (
             <button
               key={f}
@@ -397,6 +440,18 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
               }`}
             >{f === 'all' ? 'All' : f === 'agent' ? 'Agent-native' : 'Platform'}</button>
           ))}
+          {(['fact', 'rule', 'preference', 'pattern', 'lesson'] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => setKindFilter(kindFilter === kind ? 'all' : kind)}
+              className={`inline-flex h-7 items-center rounded-pill border px-2.5 text-[11px] font-medium capitalize ${
+                kindFilter === kind
+                  ? 'border-accent-muted bg-accent-soft text-accent'
+                  : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary'
+              }`}
+            >{kind}</button>
+          ))}
         </div>
       </div>
 
@@ -404,22 +459,11 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
         <EmptyState
           icon={<FileText size={48} />}
           title="No memories yet"
-          body="Memories accumulate as this agent works. Both agent-native memories (from the harness) and platform memories (from Agentis interactions) appear here."
+          body="Add a rule, fact, or preference to shape how this agent behaves on every task. Auto-learned memories will appear here as the agent works."
         />
       ) : (
         <div className="space-y-2">
-          {filtered.map((m) => (
-            <div key={m.id} className="rounded-card border border-line bg-surface p-4">
-              <div className="flex items-center gap-2 text-[11px] text-text-muted">
-                <span className={`inline-block h-1.5 w-1.5 rounded-full ${m.source === 'agent' ? 'bg-info' : 'bg-accent'}`} />
-                {m.source === 'agent' ? 'Agent-native' : 'Platform'}
-                {m.type && <span>· {m.type}</span>}
-                <span className="ml-auto">{relativeTime(m.createdAt)}</span>
-              </div>
-              {m.title && <div className="mt-1.5 text-subheading text-text-primary">{m.title}</div>}
-              <div className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary">{m.content}</div>
-            </div>
-          ))}
+          {filtered.map((m) => <MemoryEntryRow key={m.id} entry={m} onArchive={(id) => void archiveMemory(id)} />)}
         </div>
       )}
     </div>
@@ -427,58 +471,49 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
 }
 
 function ConnectionsTab({ agent, onChange }: { agent: AgentDetail; onChange: () => void }) {
-  const toast = useToast();
-  const [adapter, setAdapter] = useState(agent.adapter?.type ?? 'openai');
-  const [model, setModel] = useState(agent.adapter?.model ?? '');
-  const [saving, setSaving] = useState(false);
-
-  async function save() {
-    setSaving(true);
-    try {
-      await api(`/v1/agents/${agent.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ adapter: { type: adapter, model } }),
-      });
-      toast.success('Connection updated');
-      onChange();
-    } catch (e) {
-      toast.error('Failed to update', String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
-    <div className="max-w-xl space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-[12px] font-medium text-text-secondary">Adapter type</label>
-        <select
-          value={adapter}
-          onChange={(e) => setAdapter(e.target.value)}
-          className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
-        >
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openai-compat">OpenAI-compatible</option>
-          <option value="gateway">Gateway (self-hosted)</option>
-        </select>
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-[12px] font-medium text-text-secondary">Model</label>
-        <input
-          type="text"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder="e.g., gpt-4o, claude-sonnet-4-6"
-          className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-        />
-      </div>
-      <Button
-        variant="primary" size="md" iconLeft={<Save size={12} />}
-        disabled={saving} onClick={() => void save()}
-      >Save changes</Button>
-    </div>
+    <AgentConfigPanel
+      agent={{
+        id: agent.id,
+        name: agent.name,
+        adapterType: agentHarnessType(agent),
+        runtimeModel: agentRuntimeModel(agent),
+        role: agent.role ?? null,
+        status: agent.status ?? 'offline',
+        colorHex: agent.colorHex ?? null,
+        capabilityTags: agent.capabilityTags ?? null,
+        instructions: agent.instructions ?? agent.systemPrompt ?? null,
+        avatarGlyph: agent.avatarGlyph ?? null,
+        isPaused: agent.isPaused ?? null,
+        monthlyBudgetCents: agent.monthlyBudgetCents ?? null,
+        currentMonthSpendCents: agent.currentMonthSpendCents ?? null,
+        config: agent.config ?? agent.adapter?.config ?? null,
+        reportsTo: agent.reportsTo ?? null,
+      }}
+      allAgents={[]}
+      onSaved={onChange}
+    />
   );
+}
+
+function agentHarnessType(agent: AgentDetail) {
+  return agent.adapterType ?? agent.adapter?.type ?? 'http';
+}
+
+function agentRuntimeModel(agent: AgentDetail) {
+  return agent.runtimeModel ?? agent.adapter?.model ?? null;
+}
+
+function harnessLabel(adapterType: string) {
+  switch (adapterType) {
+    case 'openclaw': return 'OpenClaw';
+    case 'hermes_agent': return 'Hermes Agent';
+    case 'claude_code': return 'Claude Code';
+    case 'codex': return 'Codex';
+    case 'cursor': return 'Cursor';
+    case 'http': return 'HTTP / Webhook';
+    default: return 'Harness';
+  }
 }
 
 function HistoryTab({ agent }: { agent: AgentDetail }) {

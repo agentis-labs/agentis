@@ -16,7 +16,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
 
 const isoNow = () => sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
 
@@ -66,6 +66,23 @@ export const ambients = sqliteTable('ambients', {
   /** local | dev | staging | prod | fleet | custom */
   kind: text('kind').notNull().default('local'),
   settings: text('settings', { mode: 'json' }).notNull().default(sql`'{}'`),
+  ...baseTimestamps(),
+});
+
+// Spaces — UIUX §23 grouping primitive used by the sidebar/apps page.
+// Optional and organizational only (no permission boundaries in V1).
+export const spaces = sqliteTable('spaces', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  color: text('color'),
+  /** Optional team association (no team table yet — accepts any string). */
+  teamId: text('team_id'),
   ...baseTimestamps(),
 });
 
@@ -139,6 +156,11 @@ export const agents = sqliteTable('agents', {
   lastHeartbeatAt: text('last_heartbeat_at'),
   currentTaskId: text('current_task_id'),
   colorHex: text('color_hex'),
+  instructions: text('instructions'),
+  avatarGlyph: text('avatar_glyph'),
+  runtimeModel: text('runtime_model'),
+  /** agent | orchestrator | reviewer | critic. */
+  role: text('role'),
   ...baseTimestamps(),
 });
 
@@ -159,6 +181,8 @@ export const agentPackages = sqliteTable('agent_packages', {
   name: text('name').notNull(),
   version: text('version').notNull(),
   manifest: text('manifest', { mode: 'json' }).notNull(),
+  /** App Canvas: instance system-composition graph (AppGraph JSON, nullable). */
+  appGraph: text('app_graph', { mode: 'json' }),
   installedAt: text('installed_at').notNull().default(isoNow() as unknown as string),
 });
 
@@ -219,6 +243,10 @@ export const workflows = sqliteTable('workflows', {
   graph: text('graph', { mode: 'json' }).notNull(),
   settings: text('settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   isFromRegistry: integer('is_from_registry', { mode: 'boolean' }).notNull().default(false),
+  maxConcurrentRuns: integer('max_concurrent_runs'),
+  /** queue | drop | error. */
+  concurrencyOverflow: text('concurrency_overflow'),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
   ...baseTimestamps(),
 });
 
@@ -277,6 +305,78 @@ export const workflowRunSnapshots = sqliteTable('workflow_run_snapshots', {
   /** Monotonic counter of ledger events at snapshot time; used for recovery. */
   sequenceNumber: integer('sequence_number').notNull(),
   runState: text('run_state', { mode: 'json' }).notNull(),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+export const artifacts = sqliteTable('artifacts', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  runId: text('run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+  workflowId: text('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
+  agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  conversationId: text('conversation_id'),
+  nodeId: text('node_id'),
+  /** html | image | document | code | data */
+  type: text('type').notNull().default('document'),
+  title: text('title').notNull(),
+  content: text('content').notNull().default(''),
+  thumbnailUrl: text('thumbnail_url'),
+  metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+  ...baseTimestamps(),
+});
+
+export const rooms = sqliteTable('rooms', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  teamId: text('team_id'),
+  /** workspace | team | custom | thread */
+  kind: text('kind').notNull().default('custom'),
+  name: text('name').notNull(),
+  description: text('description'),
+  isTeamDefault: integer('is_team_default', { mode: 'boolean' }).notNull().default(false),
+  /** workspace | team | private */
+  visibility: text('visibility').notNull().default('workspace'),
+  pinnedAt: text('pinned_at'),
+  lastMessageAt: text('last_message_at'),
+  ...baseTimestamps(),
+});
+
+export const roomAgents = sqliteTable('room_agents', {
+  roomId: text('room_id')
+    .notNull()
+    .references(() => rooms.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id')
+    .notNull()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  addedAt: text('added_at').notNull().default(isoNow() as unknown as string),
+  addedBy: text('added_by'),
+});
+
+export const roomMessages = sqliteTable('room_messages', {
+  id: text('id').primaryKey(),
+  roomId: text('room_id')
+    .notNull()
+    .references(() => rooms.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** operator | agent | system */
+  authorType: text('author_type').notNull(),
+  authorId: text('author_id'),
+  contentType: text('content_type').notNull().default('text'),
+  content: text('content', { mode: 'json' }).notNull().default(sql`'{}'`),
+  replyToId: text('reply_to_id'),
+  mentions: text('mentions', { mode: 'json' }).notNull().default(sql`'[]'`),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
@@ -503,7 +603,692 @@ export const channelDeliveries = sqliteTable('channel_deliveries', {
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   /** Adapter-issued unique id (Telegram update_id, Discord message id, etc.). */
-  externalId: text('external_id').notNull().unique(),
+  externalId: text('external_id').notNull(),
   receivedAt: text('received_at').notNull().default(isoNow() as unknown as string),
   conversationMessageId: text('conversation_message_id'),
+});
+
+// ────────────────────────────────────────────────────────────
+// Agent-First runtime (AGENT-FIRST-ARCHITECTURE.md §18)
+// ────────────────────────────────────────────────────────────
+
+/** App runtime contracts — Plane 1.
+ *  Snapshotted at run start so an in-flight run is immune to mid-run package edits. */
+export const appRuntimeContracts = sqliteTable('app_runtime_contracts', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Optional pointer to an installed package. Null = ad hoc workflow contract. */
+  packageId: text('package_id'),
+  packageVersion: text('package_version'),
+  /** AppRuntimeContract JSON. */
+  contract: text('contract', { mode: 'json' }).notNull(),
+  /** Hash of the contract JSON for cache lookups + replay anchors. */
+  contractHash: text('contract_hash').notNull(),
+  ...baseTimestamps(),
+});
+
+/** Per-run evaluator verdicts — Plane 6.
+ *  Records every evaluator stage outcome so policy decisions are auditable. */
+export const runEvaluations = sqliteTable('run_evaluations', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id').notNull(),
+  nodeId: text('node_id'),
+  evaluatorId: text('evaluator_id').notNull(),
+  /** schema | rule | rubric | llm — which tier produced the verdict. */
+  tier: text('tier').notNull(),
+  verdict: text('verdict').notNull(), // pass | fail | partial
+  score: text('score'), // 0..1 stored as text for precision parity with PG numeric
+  details: text('details', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** Cost incurred by this evaluation in cents (LLM tier only). */
+  costCents: integer('cost_cents').notNull().default(0),
+  evaluatedAt: text('evaluated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Policy engine decisions — Plane 6.
+ *  Captures the runtime policy verdict (allow/warn/pause/escalate/degrade/fail). */
+export const runPolicyEvents = sqliteTable('run_policy_events', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id').notNull(),
+  /** dispatch | retry | replan | terminal | budget | escalation */
+  trigger: text('trigger').notNull(),
+  /** allow | warn | pause | escalate | degrade | fail */
+  decision: text('decision').notNull(),
+  reason: text('reason').notNull(),
+  context: text('context', { mode: 'json' }).notNull().default(sql`'{}'`),
+  decidedAt: text('decided_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Per-node turn state — Plane 3 (multi-turn agent_task).
+ *  Externalizes the turn loop so the run JSON does not bloat with raw transcripts. */
+export const turnState = sqliteTable('turn_state', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id').notNull(),
+  nodeId: text('node_id').notNull(),
+  turnIndex: integer('turn_index').notNull(),
+  /** working memory summary, kept compact for the next turn's prompt */
+  summary: text('summary'),
+  /** Raw turn payload — last response, tool results, evaluator status. */
+  payload: text('payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** Active blockers preventing forward progress (escalation triggers). */
+  blockers: text('blockers', { mode: 'json' }).notNull().default(sql`'[]'`),
+  costCents: integer('cost_cents').notNull().default(0),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** App baseline snapshots — Plane 8.
+ *  Aggregated only after N successful runs; never written from a single run. */
+export const appBaselineSnapshots = sqliteTable('app_baseline_snapshots', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** App identity (package id) or workflow id when no package. */
+  appId: text('app_id').notNull(),
+  costCentsP50: integer('cost_cents_p50'),
+  costCentsP95: integer('cost_cents_p95'),
+  latencyMsP50: integer('latency_ms_p50'),
+  latencyMsP95: integer('latency_ms_p95'),
+  /** 0..1 stored as text for precision. */
+  evaluatorPassRate: text('evaluator_pass_rate'),
+  outputCompletenessRate: text('output_completeness_rate'),
+  /** Sample window metadata. */
+  runCount: integer('run_count').notNull(),
+  firstRunAt: text('first_run_at').notNull(),
+  lastRunAt: text('last_run_at').notNull(),
+  capturedAt: text('captured_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// App Knowledge Wedge — Agentis 1.1 (docs/APP-KNOWLEDGE-WEDGE-ARCHITECTURE.md)
+//
+// Six tables that materialise the four intelligence classes:
+//   - knowledge_chunks            (Class 1 seed knowledge + Class 2 imported docs)
+//   - app_memory                  (Class 1 seed memory + Class 4 promoted memory)
+//   - app_evaluator_examples      (Class 3 evaluator examples)
+//   - dataset_imports             (Class 2 ingestion jobs + impact preview)
+//   - workflow_baselines          (per-workflow rolling baselines)
+//   - app_promoted_patterns       (Class 4 distilled execution patterns)
+//
+// All tables are workspace-scoped and key off `app_id` (a string identifier
+// that maps to either an installed package id or a workflow id when no
+// package is involved — same convention as `app_baseline_snapshots`).
+// ────────────────────────────────────────────────────────────
+
+/** Knowledge plane storage: seeds (on activation) + ingested document chunks. */
+export const knowledgeChunks = sqliteTable('knowledge_chunks', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** App identity (package id) or workflow id when no package. */
+  appId: text('app_id').notNull(),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  /** Tokenised content, used by the V1 lexical retriever. JSON array of strings. */
+  contentTokens: text('content_tokens', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** seed | import | promotion. */
+  source: text('source').notNull(),
+  /** Provenance — package version, dataset key, ingestion job id, etc. */
+  provenance: text('provenance', { mode: 'json' }).notNull().default(sql`'{}'`),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** Reserved for vector retrieval. JSON array of floats — null on lexical-only path. */
+  embedding: text('embedding', { mode: 'json' }),
+  /** 0..1 stored as text for precision. */
+  trust: text('trust').notNull().default('1'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** App memory: typed episodes (facts, preferences, patterns, rules, lessons). */
+export const appMemory = sqliteTable('app_memory', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').notNull(),
+  /** fact | preference | pattern | rule | lesson. */
+  kind: text('kind').notNull(),
+  /** seed | promotion | operator. */
+  source: text('source').notNull(),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  trust: text('trust').notNull().default('1'),
+  /** 0..1 stored as text. */
+  importance: text('importance').notNull().default('0.5'),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  provenance: text('provenance', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** Adapter provenance for collective-brain contributions. */
+  adapterType: text('adapter_type'),
+  /** 0..1 confidence for workspace-global recall and graph ranking. */
+  globalConfidence: text('global_confidence').notNull().default('0'),
+  reinforcedAt: text('reinforced_at'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Class 3: persisted evaluator examples sourced from seeds, imports, runs. */
+export const appEvaluatorExamples = sqliteTable('app_evaluator_examples', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').notNull(),
+  evaluatorKey: text('evaluator_key').notNull(),
+  /** seed | import | operator | promotion. */
+  source: text('source').notNull(),
+  input: text('input', { mode: 'json' }).notNull(),
+  expected: text('expected', { mode: 'json' }).notNull(),
+  /** pass | fail. */
+  verdict: text('verdict').notNull(),
+  score: text('score'),
+  reason: text('reason'),
+  /** Optional run that produced this example (operator-confirmed verdicts). */
+  originRunId: text('origin_run_id'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Dataset ingestion jobs — class 2 import lifecycle.
+ *
+ * One row per `(app_id, dataset_key, run)`. Items are tracked aggregate-only
+ * to keep V1 simple; if granular per-item recovery is needed, add a sibling
+ * `dataset_import_items` table later.
+ */
+export const datasetImports = sqliteTable('dataset_imports', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').notNull(),
+  datasetKey: text('dataset_key').notNull(),
+  /** pending | parsing | chunking | indexing | completed | failed | cancelled. */
+  status: text('status').notNull(),
+  sourceMeta: text('source_meta', { mode: 'json' }).notNull().default(sql`'{}'`),
+  totalItems: integer('total_items').notNull().default(0),
+  processedItems: integer('processed_items').notNull().default(0),
+  storedItems: integer('stored_items').notNull().default(0),
+  errors: text('errors', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** Filled in once status === 'completed'. */
+  impact: text('impact', { mode: 'json' }),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Per-workflow rolling baselines — distinct from `app_baseline_snapshots`
+ * (which is the Plane 8 cross-app aggregate).
+ *
+ * Each row is one snapshot in a versioned series; the latest row per
+ * `(app_id, workflow_id)` is the active baseline.
+ */
+export const workflowBaselines = sqliteTable('workflow_baselines', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').notNull(),
+  workflowId: text('workflow_id').notNull(),
+  /** seed | derived. */
+  source: text('source').notNull(),
+  p50DurationMs: integer('p50_duration_ms'),
+  p95DurationMs: integer('p95_duration_ms'),
+  /** 0..1 stored as text. */
+  successRate: text('success_rate'),
+  costCentsPerRun: integer('cost_cents_per_run'),
+  sampleSize: integer('sample_size').notNull().default(0),
+  windowStart: text('window_start').notNull(),
+  windowEnd: text('window_end').notNull(),
+  capturedAt: text('captured_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Per-item row for granular ingestion recovery (Agentis 1.1.1).
+ *
+ * One row per parsed item inside a dataset import job. Items are identified
+ * by their content hash so the pipeline can skip already-completed rows when
+ * the operator re-uploads the same file via the /resume endpoint.
+ *
+ * This table is a sibling to `dataset_imports` — aggregate counters on the
+ * job row stay as-is; this table adds row-level granularity.
+ */
+export const datasetImportItems = sqliteTable('dataset_import_items', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Parent ingestion job. */
+  importJobId: text('import_job_id')
+    .notNull()
+    .references(() => datasetImports.id, { onDelete: 'cascade' }),
+  /** 0-indexed position in the parsed payload. */
+  itemIndex: integer('item_index').notNull(),
+  /** pending | completed | failed | skipped. */
+  status: text('status').notNull().default('pending'),
+  /** SHA-256 hex of the item's content — dedup key for resume. */
+  contentHash: text('content_hash').notNull(),
+  /** ID of the record written to the target store (first chunk's id). */
+  storedId: text('stored_id'),
+  /** Error message if status === 'failed'. */
+  error: text('error'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// Memory Architecture — Agentis Memory OS
+// docs/memory/MEMORY-ARCHITECTURE.md
+//
+// Five tables that materialise the memory layers beyond the wedge:
+//   - working_memory_entries   (Layer 1: typed scratchpad — durable variant)
+//   - memory_episodes          (Layer 3: durable runtime episodes)
+//   - memory_promotion_events  (Layer 3 audit trail)
+//   - rolling_baseline_snapshots (Layer 4: rolling-window baselines)
+//
+// The wedge tables (`knowledge_chunks`, `app_memory`, `app_evaluator_examples`,
+// `workflow_baselines`, `app_promoted_patterns`) cover Layers 2 and 4 already.
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Layer 1 — durable working memory entries.
+ *
+ * The in-process scratchpad lives in memory; this table persists important
+ * working entries (working summaries, plans, blockers) so they survive
+ * process restarts and can be inspected post-mortem.
+ */
+export const workingMemoryEntries = sqliteTable('working_memory_entries', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id').notNull(),
+  /** run | agent | subflow | turn | eval | artifact | system. */
+  namespace: text('namespace').notNull(),
+  /** working_plan | working_summary | pending_questions | tool_result_cache | artifact_draft | evaluation_state | turn_history | blocker | note. */
+  kind: text('kind').notNull(),
+  /** Stable identifier within (namespace, kind). E.g. agentId, taskId. */
+  entryKey: text('entry_key').notNull(),
+  payload: text('payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  tokenEstimate: integer('token_estimate').notNull().default(0),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Layer 3 — Runtime episodic memory.
+ *
+ * Distinct from `app_memory` (which holds typed knowledge: facts/rules/patterns).
+ * `memory_episodes` holds execution-derived lessons: decisions, failures,
+ * recoveries, success patterns, approvals, evaluator outcomes, etc.
+ */
+export const memoryEpisodes = sqliteTable('memory_episodes', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** App scope. NULL = workspace-global. */
+  appId: text('app_id'),
+  workflowId: text('workflow_id'),
+  runId: text('run_id'),
+  agentId: text('agent_id'),
+  /** decision | failure | recovery | success_pattern | approval | evaluator_outcome | incident | artifact_outcome | distilled_lesson. */
+  type: text('type').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary').notNull(),
+  details: text('details'),
+  /** run_promotion | agent_write | operator_write | evaluator_write | system_write. */
+  source: text('source').notNull(),
+  /** 0..1 stored as text for precision (matches the wedge's convention). */
+  confidence: text('confidence').notNull().default('0.5'),
+  importance: text('importance').notNull().default('0.5'),
+  trust: text('trust').notNull().default('0.5'),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  entities: text('entities', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** good | bad | mixed | NULL. */
+  outcomeStatus: text('outcome_status'),
+  /** Reserved for vector retrieval. JSON array of floats. */
+  embedding: text('embedding', { mode: 'json' }),
+  metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** When the episode was last reinforced (re-promoted or re-confirmed). */
+  reinforcedAt: text('reinforced_at'),
+  /** When the episode was archived. NULL = active. */
+  archivedAt: text('archived_at'),
+  /** ID of an episode that supersedes this one (NULL = current). */
+  supersededBy: text('superseded_by'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Memory promotion audit trail (§10).
+ *
+ * One row per promotion candidate decision (promoted/rejected/merged/superseded).
+ * Lets operators see exactly why a given episode landed in durable memory
+ * and what was filtered out.
+ */
+export const memoryPromotionEvents = sqliteTable('memory_promotion_events', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id'),
+  runId: text('run_id'),
+  candidateTitle: text('candidate_title').notNull(),
+  candidatePayload: text('candidate_payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** evaluator_failure_summary | approval_rationale | replay_root_cause | tool_failure_pattern | winning_output_pattern | final_artifact_validation | operator_distillation | agent_proposal. */
+  candidateSource: text('candidate_source').notNull(),
+  /** promoted | rejected | merged | superseded. */
+  decision: text('decision').notNull(),
+  /** human_approved | evaluator_validated | repeated_pattern | major_failure | major_success | importance_threshold | operator_written | duplicate | low_importance | low_confidence. */
+  reason: text('reason').notNull(),
+  /** Episode that was created or updated (NULL on rejection). */
+  episodeId: text('episode_id'),
+  /** 0..1 score at decision time. */
+  score: text('score').notNull().default('0'),
+  notes: text('notes'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Layer 4 — Rolling-window baseline snapshots.
+ *
+ * Each row is one rolling-window view (rolling_7d / rolling_30d / rolling_90d)
+ * of a workflow's performance. The latest row per (workflowId, window) is
+ * the active baseline for that window.
+ *
+ * Distinct from `workflow_baselines` (which is the wedge's seed/derived per-window-anonymous
+ * snapshot) and `app_baseline_snapshots` (Plane 8 cross-app aggregate).
+ */
+export const rollingBaselineSnapshots = sqliteTable('rolling_baseline_snapshots', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id'),
+  workflowId: text('workflow_id').notNull(),
+  /** rolling_7d | rolling_30d | rolling_90d. */
+  window: text('window').notNull(),
+  /** 0..1 stored as text. */
+  successRate: text('success_rate').notNull().default('0'),
+  p50LatencyMs: integer('p50_latency_ms').notNull().default(0),
+  p95LatencyMs: integer('p95_latency_ms').notNull().default(0),
+  avgCostMicros: integer('avg_cost_micros').notNull().default(0),
+  /** Stored as text (allows fractional averages: 1.5 replays/run). */
+  avgReplayCount: text('avg_replay_count').notNull().default('0'),
+  avgApprovalCount: text('avg_approval_count').notNull().default('0'),
+  evaluatorPassRate: text('evaluator_pass_rate').notNull().default('0'),
+  sampleSize: integer('sample_size').notNull().default(0),
+  windowStart: text('window_start').notNull(),
+  windowEnd: text('window_end').notNull(),
+  capturedAt: text('captured_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Class 4: promoted execution intelligence — the compounding layer.
+ *
+ * Patterns are written here only when promotion thresholds are met. Each
+ * pattern has confidence + trust + evidence count so retrieval can rank
+ * confidently and the UI can show provenance.
+ */
+export const appPromotedPatterns = sqliteTable('app_promoted_patterns', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').notNull(),
+  /** successful_playbook | failure_with_fix | approved_output_pattern | business_rule | recurring_exception. */
+  kind: text('kind').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary').notNull(),
+  /** Schema depends on kind. */
+  payload: text('payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** 0..1 stored as text. */
+  confidence: text('confidence').notNull().default('0.5'),
+  trust: text('trust').notNull().default('0.8'),
+  evidenceCount: integer('evidence_count').notNull().default(1),
+  provenance: text('provenance', { mode: 'json' }).notNull().default(sql`'{}'`),
+  reinforcedAt: text('reinforced_at').notNull().default(isoNow() as unknown as string),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// Package library (PackagerService)
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Canonical package library row.
+ * Written by PackagerService.create / packFrom* / importManifest.
+ * Read by PackagerService.list/get/usePackage.
+ */
+export const libraryPackages = sqliteTable('library_packages', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  ambientId: text('ambient_id').references(() => ambients.id, { onDelete: 'set null' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  slug: text('slug').notNull(),
+  name: text('name').notNull(),
+  version: text('version').notNull().default('1.0.0'),
+  /** agent | workflow | skill | agentis | integration. */
+  kind: text('kind').notNull(),
+  description: text('description'),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** Typed PackageContents JSON. */
+  contents: text('contents', { mode: 'json' }).notNull(),
+  /** ID of the resource this package was packed from (null for imports). */
+  sourceId: text('source_id'),
+  /** Kind of the source resource. */
+  sourceKind: text('source_kind'),
+  /** SHA-256 hex of stable-JSON contents. */
+  checksum: text('checksum'),
+  /** Remote registry ID (null for local packages). */
+  remoteId: text('remote_id'),
+  ...baseTimestamps(),
+});
+
+/**
+ * Installed app instances (created by PackagerService.usePackage for agentis packages).
+ * Read by the /v1/apps list endpoint.
+ */
+export const appInstances = sqliteTable('app_instances', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  ambientId: text('ambient_id').references(() => ambients.id, { onDelete: 'set null' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  packageId: text('package_id').references(() => libraryPackages.id, { onDelete: 'set null' }),
+  spaceId: text('space_id').references(() => spaces.id, { onDelete: 'set null' }),
+  slug: text('slug').notNull(),
+  name: text('name').notNull(),
+  version: text('version').notNull().default('1.0.0'),
+  /** setup | active | paused | error. */
+  status: text('status').notNull().default('active'),
+  entryWorkflowId: text('entry_workflow_id'),
+  /** Full AgentisPackageContents snapshot at activation time. */
+  packageContents: text('package_contents', { mode: 'json' }).notNull().default(sql`'{}'`),
+  credentialBindings: text('credential_bindings', { mode: 'json' }).notNull().default(sql`'{}'`),
+  datasetStatuses: text('dataset_statuses', { mode: 'json' }).notNull().default(sql`'[]'`),
+  knowledgeBaseIds: text('knowledge_base_ids', { mode: 'json' }).notNull().default(sql`'{}'`),
+  activatedAt: text('activated_at').notNull().default(isoNow() as unknown as string),
+  pausedAt: text('paused_at'),
+  lastRunAt: text('last_run_at'),
+  ...baseTimestamps(),
+});
+
+// ────────────────────────────────────────────────────────────
+// Knowledge bases, documents, chunks
+// ────────────────────────────────────────────────────────────
+
+export const knowledgeBases = sqliteTable('knowledge_bases', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  description: text('description'),
+  embeddingModel: text('embedding_model').notNull().default('lexical-v1'),
+  embeddingDimension: integer('embedding_dimension').notNull().default(0),
+  chunkingConfig: text('chunking_config', { mode: 'json' }).notNull().default(sql`'{}'`),
+  ...baseTimestamps(),
+});
+
+export const kbDocuments = sqliteTable('kb_documents', {
+  id: text('id').primaryKey(),
+  knowledgeBaseId: text('knowledge_base_id')
+    .notNull()
+    .references(() => knowledgeBases.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  mimeType: text('mime_type').notNull().default('text/plain'),
+  /** pending | ready | error | archived. */
+  status: text('status').notNull().default('pending'),
+  tokenCount: integer('token_count').notNull().default(0),
+  error: text('error'),
+  archivedAt: text('archived_at'),
+  ...baseTimestamps(),
+});
+
+export const kbChunks = sqliteTable('kb_chunks', {
+  id: text('id').primaryKey(),
+  documentId: text('document_id')
+    .notNull()
+    .references(() => kbDocuments.id, { onDelete: 'cascade' }),
+  knowledgeBaseId: text('knowledge_base_id')
+    .notNull()
+    .references(() => knowledgeBases.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  chunkIndex: integer('chunk_index').notNull().default(0),
+  content: text('content').notNull(),
+  metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+  tokenCount: integer('token_count').notNull().default(0),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// Collective Brain — cross-agent knowledge graph
+// docs/memory/COLLECTIVE-BRAIN-ARCHITECTURE.md
+// ────────────────────────────────────────────────────────────
+
+export const knowledgeLinks = sqliteTable('knowledge_links', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  sourceId: text('source_id').notNull(),
+  /** kb_chunk | knowledge_chunk | episode | memory | pattern. */
+  sourceKind: text('source_kind').notNull(),
+  targetId: text('target_id').notNull(),
+  /** kb_chunk | knowledge_chunk | episode | memory | pattern. */
+  targetKind: text('target_kind').notNull(),
+  /** supports | contradicts | refines | derived_from | co_observed. */
+  relation: text('relation').notNull(),
+  confidence: real('confidence').notNull().default(0.5),
+  reinforceCount: integer('reinforce_count').notNull().default(1),
+  agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  adapterType: text('adapter_type'),
+  runId: text('run_id'),
+  appId: text('app_id'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// Fleet / Organization layer — migration v12
+// docs/memory/MEMORY-ARCHITECTURE.md
+// ────────────────────────────────────────────────────────────
+
+/** Workspace teams — each team owns a dedicated Ambient. */
+export const teams = sqliteTable('teams', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  ambientId: text('ambient_id')
+    .notNull()
+    .references(() => ambients.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  description: text('description'),
+  iconGlyph: text('icon_glyph'),
+  colorHex: text('color_hex'),
+  /** JSON blob stored in profile_json column. */
+  profile: text('profile_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Per-team operating context (operating principles, constraints, etc.). */
+export const teamContext = sqliteTable('team_context', {
+  id: text('id').primaryKey(),
+  teamId: text('team_id')
+    .notNull()
+    .references(() => teams.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  operatingPrinciples: text('operating_principles').notNull().default(''),
+  constraints: text('constraints').notNull().default(''),
+  handoffs: text('handoffs').notNull().default(''),
+  successMetrics: text('success_metrics').notNull().default(''),
+  escalationRules: text('escalation_rules').notNull().default(''),
+  sharedPrompt: text('shared_prompt').notNull().default(''),
+  updatedByUserId: text('updated_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Persistent operator / agent memory entries. */
+export const memoryEntries = sqliteTable('memory_entries', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  teamId: text('team_id').references(() => teams.id, { onDelete: 'set null' }),
+  agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  userId: text('user_id').references(() => users.id, { onDelete: 'set null' }),
+  /** operator | agent | system. */
+  sourceType: text('source_type').notNull().default('operator'),
+  sourceId: text('source_id'),
+  /** note | policy | fact | rule | preference. */
+  kind: text('kind').notNull().default('note'),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  /** 1-10 integer priority. */
+  importance: integer('importance').notNull().default(5),
+  /** 0..1 confidence score. */
+  confidence: real('confidence').notNull().default(1),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** NULL = active; non-null = soft-archived. */
+  archivedAt: text('archived_at'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
 });

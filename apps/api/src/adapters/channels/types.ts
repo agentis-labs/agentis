@@ -8,7 +8,7 @@
  * posts in the in-app conversation.
  */
 
-export type ChannelKind = 'telegram' | 'discord';
+export type ChannelKind = 'telegram' | 'discord' | 'slack';
 
 export interface ParsedInboundMessage {
   /** Adapter-issued unique id for idempotency (e.g. Telegram update_id). */

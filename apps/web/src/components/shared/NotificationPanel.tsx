@@ -10,7 +10,7 @@ import { Bell, Check, X, Eye, RotateCcw, AlertTriangle, XCircle, Clock } from 'l
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
-import { useRealtime } from '../../lib/realtime';
+import { refreshWorkspaceSnapshot, useWorkspaceData } from '../../lib/workspaceData';
 import { useToast } from './Toast';
 
 export interface AgentisNotification {
@@ -42,68 +42,10 @@ function relativeTime(iso: string): string {
 
 export function NotificationPanel() {
   const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<AgentisNotification[]>([]);
-  const [loading, setLoading] = useState(false);
+  const { notifications: items, loading } = useWorkspaceData();
   const ref = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
   const toast = useToast();
-
-  async function refresh() {
-    setLoading(true);
-    try {
-      const merged: AgentisNotification[] = [];
-
-      // Pending approvals first
-      try {
-        const a = await api<{ approvals: Array<{ id: string; agentName?: string; summary?: string; runId?: string; workflowName?: string; createdAt: string }> }>(
-          '/v1/approvals?status=pending',
-        );
-        for (const ap of a.approvals ?? []) {
-          merged.push({
-            id: `approval-${ap.id}`,
-            type: 'approval',
-            title: 'Approval needed',
-            context: ap.summary || `${ap.workflowName ?? 'workflow'} · ${ap.agentName ?? 'agent'}`,
-            timestamp: ap.createdAt,
-            runId: ap.runId,
-            workflowName: ap.workflowName,
-            agentName: ap.agentName,
-            approvalId: ap.id,
-          });
-        }
-      } catch { /* ignore */ }
-
-      // Recent failed runs
-      try {
-        const r = await api<{ runs: Array<{ id: string; status: string; workflowName?: string; finishedAt?: string; failedNode?: string }> }>(
-          '/v1/runs?status=failed&limit=5',
-        );
-        for (const run of r.runs ?? []) {
-          merged.push({
-            id: `failed-${run.id}`,
-            type: 'failure',
-            title: 'Workflow failed',
-            context: `${run.workflowName ?? 'Workflow'}${run.failedNode ? ` · failed at ${run.failedNode}` : ''}`,
-            timestamp: run.finishedAt ?? new Date().toISOString(),
-            runId: run.id,
-            workflowName: run.workflowName,
-          });
-        }
-      } catch { /* ignore */ }
-
-      setItems(merged.slice(0, 5));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  useRealtime(['approval.requested', 'approval.resolved', 'run.failed', 'run.completed'], () => {
-    void refresh();
-  });
 
   // Click outside to close
   useEffect(() => {
@@ -128,7 +70,7 @@ export function NotificationPanel() {
         body: JSON.stringify({ decision: 'approved' }),
       });
       toast.success('Approved');
-      void refresh();
+      void refreshWorkspaceSnapshot();
     } catch (e) {
       toast.error('Failed to approve', String(e));
     }
@@ -142,7 +84,7 @@ export function NotificationPanel() {
         body: JSON.stringify({ decision: 'rejected' }),
       });
       toast.success('Rejected');
-      void refresh();
+      void refreshWorkspaceSnapshot();
     } catch (e) {
       toast.error('Failed to reject', String(e));
     }
@@ -153,7 +95,7 @@ export function NotificationPanel() {
     try {
       await api(`/v1/runs/${n.runId}/retry`, { method: 'POST' });
       toast.success('Retry started');
-      void refresh();
+      void refreshWorkspaceSnapshot();
     } catch (e) {
       toast.error('Retry failed', String(e));
     }

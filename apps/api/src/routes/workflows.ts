@@ -11,6 +11,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { EventBus } from '../event-bus.js';
+import type { PackagerService } from '../services/packager.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { validateWorkflowGraph } from '../engine/validateGraph.js';
@@ -21,6 +22,8 @@ export function buildWorkflowRoutes(deps: {
   auth: AuthService;
   engine: WorkflowEngine;
   bus: EventBus;
+  /** Optional: when provided, every create/update mirrors the workflow into Packages. */
+  packager?: PackagerService;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -35,18 +38,41 @@ export function buildWorkflowRoutes(deps: {
     return c.json({ workflows: rows });
   });
 
+  // ── Workflow collections (UI grouping) ────────────────────────────────
+  // A "collection" is a free-form string operators assign in workflow
+  // settings.collection. We expose distinct collection names + counts so the
+  // Workflows page can render named groups ("Growth Funnel", "Onboarding").
+  app.get('/collections', (c) => {
+    const ws = getWorkspace(c);
+    const rows = deps.db
+      .select({ id: schema.workflows.id, settings: schema.workflows.settings, title: schema.workflows.title })
+      .from(schema.workflows)
+      .where(eq(schema.workflows.workspaceId, ws.workspaceId))
+      .all();
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const collection = (((row.settings as Record<string, unknown> | null) ?? {}).collection as string | undefined)?.trim();
+      if (!collection) continue;
+      counts.set(collection, (counts.get(collection) ?? 0) + 1);
+    }
+    const collections = Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return c.json({ collections });
+  });
+
   app.post('/', async (c) => {
     const ws = getWorkspace(c);
     const body = schemas.createWorkflowSchema.parse({
       ...(await c.req.json()),
       workspaceId: ws.workspaceId,
     });
-    const graph: WorkflowGraph = body.graph ?? {
+    const graph = (body.graph ?? {
       version: 1,
       nodes: [],
       edges: [],
       viewport: { x: 0, y: 0, zoom: 1 },
-    };
+    }) as WorkflowGraph;
     if (graph.nodes.length > 0) validateWorkflowGraph(graph);
 
     const id = randomUUID();
@@ -63,6 +89,9 @@ export function buildWorkflowRoutes(deps: {
         settings: body.settings,
       })
       .run();
+    // 10.14: auto-save into the Packages library
+    try { deps.packager?.mirrorWorkflow({ workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id }, id); }
+    catch { /* best-effort mirror */ }
     return c.json({ workflow: { id, ...body, graph } }, 201);
   });
 
@@ -78,18 +107,21 @@ export function buildWorkflowRoutes(deps: {
     const id = c.req.param('id');
     const wf = loadWorkflow(deps.db, ws.workspaceId, id);
     const body = schemas.updateWorkflowSchema.parse(await c.req.json());
-    if (body.graph) validateWorkflowGraph(body.graph);
+    if (body.graph) validateWorkflowGraph(body.graph as WorkflowGraph);
     deps.db
       .update(schema.workflows)
       .set({
         title: body.title ?? wf.title,
         summary: body.summary === undefined ? wf.summary : body.summary,
-        graph: body.graph ?? (wf.graph as WorkflowGraph),
+        graph: (body.graph as WorkflowGraph | undefined) ?? (wf.graph as WorkflowGraph),
         settings: body.settings ?? (wf.settings as Record<string, unknown>),
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflows.id, id))
       .run();
+    // 10.14: keep the mirrored package in sync
+    try { deps.packager?.mirrorWorkflow({ workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id }, id); }
+    catch { /* best-effort mirror */ }
     return c.json({ ok: true });
   });
 
