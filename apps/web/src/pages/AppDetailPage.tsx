@@ -1,24 +1,17 @@
 /**
- * AppDetailPage — three-layer app shell.
+ * AppDetailPage — tabs: Performance / Results / Configuration / Activity.
  *
- * Spec: docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §5, §11.
- *       docs/memory/THE-BRAIN-UX-ARCHITECTURE.md §5.1, §14.
- *
- *   [Output]  → operator surface (performance, results, activity)
- *   [Canvas]  → system-composition graph (AppCanvasView)
- *   [Brain]   → intelligence surface (BrainView with Map / Flow / Ledger modes)
- *
- * Each layer is a distinct identity for the app: what it does / how it's
- * built / what it knows. The segmented shell at the top is the new core
- * mental model — replaces the old admin-style tabs.
+ * Performance: stat bar + needs attention + run cards (the operator view)
+ * Results:     visual UI for app outputs (the must-have feature)
+ * Configuration: workflows, agents, settings, output labels
+ * Activity:    audit log (power user view)
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Check, X, Eye, RotateCcw, AlertTriangle, BarChart3,
   Tag, Play, FileText, AppWindow,
-  Target as OutputIcon, Workflow as CanvasIcon, Brain as MemoryIcon,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
@@ -28,9 +21,6 @@ import { FilterBar } from '../components/shared/FilterBar';
 import { Skeleton } from '../components/shared/Skeleton';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
-import { SegmentedControl } from '../components/shared/SegmentedControl';
-import { AppCanvasView } from '../components/app-graph/AppCanvasView';
-import { BrainView } from '../components/brain/BrainView';
 
 interface AppDetail {
   id: string;
@@ -102,14 +92,6 @@ function formatDuration(ms?: number): string {
   return `${m}m ${s % 60}s`;
 }
 
-type Layer = 'output' | 'canvas' | 'brain';
-
-const LAYERS = [
-  { value: 'output' as Layer, label: 'Output', icon: <OutputIcon size={14} /> },
-  { value: 'canvas' as Layer, label: 'Canvas', icon: <CanvasIcon size={14} /> },
-  { value: 'brain'  as Layer, label: 'Brain',  icon: <MemoryIcon size={14} /> },
-] as const;
-
 export function AppDetailPage() {
   const { slug } = useParams<{ slug: string }>();
   const nav = useNavigate();
@@ -117,26 +99,10 @@ export function AppDetailPage() {
 
   const [app, setApp] = useState<AppDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [layer, setLayer] = useState<Layer>(() => {
-    const params = new URLSearchParams(window.location.search);
-    const l = params.get('layer') as Layer | null;
-    if (l === 'output' || l === 'canvas' || l === 'brain') return l;
-    // Back-compat: previous shell labelled the third segment "memory".
-    if (l === ('memory' as Layer)) return 'brain';
-    if (params.get('tab')) return 'output';
-    return 'output';
-  });
-  const [outputTab, setOutputTab] = useState<string>(() => {
+  const [tab, setTab] = useState<string>(() => {
     const t = new URLSearchParams(window.location.search).get('tab');
     return t || 'performance';
   });
-
-  // Reflect layer in URL so reloads + deep-links preserve state.
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    url.searchParams.set('layer', layer);
-    window.history.replaceState(null, '', url.toString());
-  }, [layer]);
 
   useEffect(() => {
     if (!slug) return;
@@ -175,70 +141,50 @@ export function AppDetailPage() {
         <button onClick={() => nav('/apps')} className="mb-3 inline-flex items-center gap-1 text-[12px] text-text-muted hover:text-text-primary">
           <ArrowLeft size={12} /> Apps
         </button>
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <span
-              className="flex h-12 w-12 items-center justify-center rounded-card text-[20px] font-bold"
-              style={{ backgroundColor: app.iconColor ?? '#15171c' }}
-            >
-              {app.iconGlyph ?? '◈'}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <h1 className="text-display text-text-primary">{app.name}</h1>
-                <StatusBadge status={app.status ?? 'idle'} size="sm" />
-              </div>
-              <div className="mt-1 flex flex-wrap gap-3 text-[12px] text-text-muted">
-                {app.version && <span>v{app.version}</span>}
-                {app.workflows && <span>{app.workflows.length} workflow{app.workflows.length === 1 ? '' : 's'}</span>}
-                {app.agents && <span>{app.agents.length} agent{app.agents.length === 1 ? '' : 's'}</span>}
-              </div>
-              {app.description && (
-                <p className="mt-2 text-[13px] text-text-secondary">{app.description}</p>
-              )}
+        <div className="flex items-center gap-4">
+          <span
+            className="flex h-12 w-12 items-center justify-center rounded-card text-[20px] font-bold"
+            style={{ backgroundColor: app.iconColor ?? '#15171c' }}
+          >
+            {app.iconGlyph ?? '◈'}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="text-display text-text-primary">{app.name}</h1>
+              <StatusBadge status={app.status ?? 'idle'} size="sm" />
             </div>
+            <div className="mt-1 flex flex-wrap gap-3 text-[12px] text-text-muted">
+              {app.version && <span>v{app.version}</span>}
+              {app.workflows && <span>{app.workflows.length} workflow{app.workflows.length === 1 ? '' : 's'}</span>}
+              {app.agents && <span>{app.agents.length} agent{app.agents.length === 1 ? '' : 's'}</span>}
+            </div>
+            {app.description && (
+              <p className="mt-2 text-[13px] text-text-secondary">{app.description}</p>
+            )}
           </div>
-          {/* The new shell-level segmented control — App Canvas §5. */}
-          <SegmentedControl segments={LAYERS} value={layer} onChange={setLayer} />
         </div>
       </div>
 
-      {layer === 'output' && (
-        <>
-          <Tabs
-            param="tab"
-            defaultValue="performance"
-            value={outputTab}
-            onChange={setOutputTab}
-            tabs={[
-              { value: 'performance', label: 'Performance' },
-              { value: 'results',     label: 'Results' },
-              { value: 'config',      label: 'Configuration' },
-              { value: 'activity',    label: 'Activity' },
-            ]}
-            className="px-6"
-          />
+      <Tabs
+        param="tab"
+        defaultValue="performance"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { value: 'performance', label: 'Performance' },
+          { value: 'results',     label: 'Results' },
+          { value: 'config',      label: 'Configuration' },
+          { value: 'activity',    label: 'Activity' },
+        ]}
+        className="px-6"
+      />
 
-          <div className="flex-1 overflow-y-auto px-6 py-5">
-            {outputTab === 'performance' && <PerformanceTab app={app} />}
-            {outputTab === 'results' && <ResultsTab app={app} />}
-            {outputTab === 'config' && <ConfigTab app={app} />}
-            {outputTab === 'activity' && <ActivityTab app={app} />}
-          </div>
-        </>
-      )}
-
-      {layer === 'canvas' && (
-        <div className="flex-1 overflow-hidden">
-          <AppCanvasView slug={app.slug} />
-        </div>
-      )}
-
-      {layer === 'brain' && (
-        <div className="flex-1 overflow-hidden">
-          <BrainView slug={app.slug} />
-        </div>
-      )}
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        {tab === 'performance' && <PerformanceTab app={app} />}
+        {tab === 'results' && <ResultsTab app={app} />}
+        {tab === 'config' && <ConfigTab app={app} />}
+        {tab === 'activity' && <ActivityTab app={app} />}
+      </div>
     </div>
   );
 }

@@ -167,19 +167,4 @@ export type NormalizedAgentEvent =
       status: 'online' | 'busy' | 'offline' | 'error';
       timestamp: string;
     }
-  | { eventType: 'agent.heartbeat'; agentId: string; connected: boolean; timestamp: string }
-  | {
-      /** Multi-turn boundary signal. Adapter emits one per turn; 'done' = final turn. */
-      eventType: 'task.turn';
-      agentId: string;
-      taskId: string;
-      runId: string;
-      workflowId: string;
-      /** 'continue' = more turns needed; 'done' = task finished (multi-turn); 'blocked' = escalate */
-      status: 'continue' | 'done' | 'blocked';
-      output: Record<string, unknown>;
-      summary?: string;
-      costCents?: number;
-      blockers?: string[];
-      timestamp: string;
-    };
+  | { eventType: 'agent.heartbeat'; agentId: string; connected: boolean; timestamp: string };

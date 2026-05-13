@@ -37,26 +37,6 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Embedded migrations are inlined as a string literal in embedded-sql.ts
   // so distribution stays a single JS bundle with zero file-resolution risk.
   sqlite.exec(EMBEDDED_INIT_SQL);
-
-  // ── Idempotent column additions ─────────────────────────────────────────
-  // For pre-existing databases, the CREATE TABLE statements above are no-ops
-  // (IF NOT EXISTS), so newly added columns must be added explicitly via
-  // ALTER TABLE. SQLite has no `ADD COLUMN IF NOT EXISTS`; we check
-  // pragma_table_info first.
-  const columnExists = (table: string, column: string): boolean => {
-    const rows = sqlite
-      .prepare(`SELECT name FROM pragma_table_info(?)`)
-      .all(table) as Array<{ name: string }>;
-    return rows.some((r) => r.name === column);
-  };
-  const addColumn = (table: string, column: string, ddl: string): void => {
-    if (!columnExists(table, column)) {
-      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
-    }
-  };
-
-  // App Canvas: per-instance app graph (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §12.4).
-  addColumn('agent_packages', 'app_graph', 'TEXT');
 }
 
 export { schema };

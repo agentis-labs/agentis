@@ -15,7 +15,6 @@ import { HistoryPage } from './pages/HistoryPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { WorkspacesPage } from './pages/WorkspacesPage';
 import { ChatPage } from './pages/ChatPage';
-import { BrainPage } from './pages/BrainPage';
 import { CommandPalette } from './components/CommandPalette';
 import { AmbientSelector } from './components/TopBarPills';
 import { LiveStrip } from './components/LiveStrip';
@@ -165,7 +164,6 @@ export function App() {
             <Route path="/workflows/:id" element={<WorkflowCanvasPage />} />
             <Route path="/apps" element={<AppsPage />} />
             <Route path="/apps/:slug" element={<AppDetailPage />} />
-            <Route path="/brain" element={<BrainPage />} />
             <Route path="/packages" element={<PackagesPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/runs/:id" element={<RunDetailPage />} />
