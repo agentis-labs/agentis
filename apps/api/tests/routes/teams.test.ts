@@ -94,31 +94,6 @@ describe('/v1/teams', () => {
     expect(designBody.context.handoffs).toContain('Research Lead');
   });
 
-  it('writes team memory and returns it in team detail surfaces', async () => {
-    const created = await app().request('/v1/teams', {
-      method: 'POST',
-      headers: ctx.authHeaders,
-      body: JSON.stringify({ name: 'Launch Team' }),
-    });
-    const { team } = (await created.json()) as { team: { id: string } };
-
-    const writeRes = await app().request(`/v1/teams/${team.id}/memory`, {
-      method: 'POST',
-      headers: ctx.authHeaders,
-      body: JSON.stringify({ title: 'Launch constraint', content: 'Do not publish without legal approval.', importance: 9, tags: ['launch'] }),
-    });
-    expect(writeRes.status).toBe(201);
-
-    const memoryRes = await app().request(`/v1/teams/${team.id}/memory`, { headers: ctx.authHeaders });
-    expect(memoryRes.status).toBe(200);
-    const memoryBody = (await memoryRes.json()) as { memory: Array<{ title: string; teamId: string }> };
-    expect(memoryBody.memory).toMatchObject([{ title: 'Launch constraint', teamId: team.id }]);
-
-    const detailRes = await app().request(`/v1/teams/${team.id}`, { headers: ctx.authHeaders });
-    const detailBody = (await detailRes.json()) as { memory: Array<{ title: string }> };
-    expect(detailBody.memory.map((entry) => entry.title)).toContain('Launch constraint');
-  });
-
   it('rejects unauthenticated access', async () => {
     const res = await app().request('/v1/teams');
     expect(res.status).toBe(401);

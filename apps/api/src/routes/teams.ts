@@ -1,8 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -29,17 +27,6 @@ const contextSchema = z.object({
   successMetrics: z.string().max(12000).optional(),
   escalationRules: z.string().max(12000).optional(),
   sharedPrompt: z.string().max(24000).optional(),
-});
-
-const memorySchema = z.object({
-  agentId: z.string().uuid().nullable().optional(),
-  kind: z.string().trim().min(1).max(80).default('note'),
-  title: z.string().trim().min(1).max(200),
-  content: z.string().trim().min(1).max(32000),
-  importance: z.number().int().min(1).max(10).default(5),
-  confidence: z.number().min(0).max(1).default(1),
-  tags: z.array(z.string().trim().min(1).max(60)).max(20).default([]),
-  metadata: z.record(z.unknown()).default({}),
 });
 
 const designSchema = z.object({
@@ -81,7 +68,6 @@ export function buildTeamRoutes(deps: {
       stats: deps.teams.stats(ws.workspaceId, ws.user.id, id),
       agents: agentsForTeam(deps.db, ws.workspaceId, team.ambientId),
       workflows: workflowsForTeam(deps.db, ws.workspaceId, team.ambientId),
-      memory: memoryForTeam(deps.db, ws.workspaceId, team.id, 8),
       approvals: approvalsForTeam(deps.db, ws.workspaceId, team.ambientId),
     });
   });
@@ -130,35 +116,6 @@ export function buildTeamRoutes(deps: {
     return c.json({ workflows: workflowsForTeam(deps.db, ws.workspaceId, team.ambientId) });
   });
 
-  app.get('/:id/memory', (c) => {
-    const ws = getWorkspace(c);
-    deps.teams.get(ws.workspaceId, ws.user.id, c.req.param('id'));
-    const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 50), 1), 200);
-    return c.json({ memory: memoryForTeam(deps.db, ws.workspaceId, c.req.param('id'), limit) });
-  });
-
-  app.post('/:id/memory', async (c) => {
-    const ws = getWorkspace(c);
-    const team = deps.teams.get(ws.workspaceId, ws.user.id, c.req.param('id'));
-    const body = memorySchema.parse(await c.req.json());
-    const memory = insertMemory(deps, {
-      workspaceId: ws.workspaceId,
-      teamId: team.id,
-      agentId: body.agentId ?? null,
-      userId: ws.user.id,
-      sourceType: 'operator',
-      sourceId: null,
-      kind: body.kind,
-      title: body.title,
-      content: body.content,
-      importance: body.importance,
-      confidence: body.confidence,
-      tags: body.tags,
-      metadata: body.metadata,
-    });
-    return c.json({ memory }, 201);
-  });
-
   app.post('/:id/design', async (c) => {
     const ws = getWorkspace(c);
     const team = deps.teams.get(ws.workspaceId, ws.user.id, c.req.param('id'));
@@ -190,43 +147,6 @@ function approvalsForTeam(db: AgentisSqliteDb, workspaceId: string, ambientId: s
   return db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.workspaceId, workspaceId)).all()
     .filter((approval) => approval.ambientId === ambientId && approval.status === 'pending' && !approval.dismissedAt)
     .sort((a, b) => b.priority - a.priority || b.createdAt.localeCompare(a.createdAt));
-}
-
-function memoryForTeam(db: AgentisSqliteDb, workspaceId: string, teamId: string, limit: number) {
-  return db.select().from(schema.memoryEntries).where(eq(schema.memoryEntries.workspaceId, workspaceId)).all()
-    .filter((memory) => memory.teamId === teamId && !memory.archivedAt)
-    .sort((a, b) => b.importance - a.importance || b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, limit);
-}
-
-function insertMemory(deps: { db: AgentisSqliteDb; bus: EventBus }, args: {
-  workspaceId: string;
-  teamId: string | null;
-  agentId: string | null;
-  userId: string | null;
-  sourceType: string;
-  sourceId: string | null;
-  kind: string;
-  title: string;
-  content: string;
-  importance: number;
-  confidence: number;
-  tags: string[];
-  metadata: Record<string, unknown>;
-}) {
-  if (args.teamId) {
-    const team = deps.db.select().from(schema.teams).where(and(eq(schema.teams.id, args.teamId), eq(schema.teams.workspaceId, args.workspaceId))).get();
-    if (!team) throw new AgentisError('RESOURCE_NOT_FOUND', 'Team not found');
-  }
-  if (args.agentId) {
-    const agent = deps.db.select().from(schema.agents).where(and(eq(schema.agents.id, args.agentId), eq(schema.agents.workspaceId, args.workspaceId))).get();
-    if (!agent) throw new AgentisError('RESOURCE_NOT_FOUND', 'Agent not found');
-  }
-  const now = new Date().toISOString();
-  const memory = { id: randomUUID(), ...args, createdAt: now, updatedAt: now, archivedAt: null };
-  deps.db.insert(schema.memoryEntries).values(memory).run();
-  deps.bus.publish(REALTIME_ROOMS.workspace(args.workspaceId), REALTIME_EVENTS.MEMORY_WRITTEN, { memory });
-  return memory;
 }
 
 function proposeTeamDesign(teamName: string, brief: string) {

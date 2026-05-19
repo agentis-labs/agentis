@@ -156,26 +156,6 @@ describe('GET /v1/agents', () => {
       .run();
 
     ctx.db
-      .insert(schema.memoryEntries)
-      .values({
-        id: randomUUID(),
-        workspaceId: ctx.workspace.id,
-        agentId,
-        userId: ctx.user.id,
-        sourceType: 'operator',
-        kind: 'fact',
-        title: 'Escalation note',
-        content: 'Escalate when confidence is low.',
-        importance: 7,
-        confidence: 1,
-        tags: [],
-        metadata: {},
-        createdAt: now,
-        updatedAt: now,
-      })
-      .run();
-
-    ctx.db
       .insert(schema.approvalRequests)
       .values({
         id: randomUUID(),
@@ -202,7 +182,7 @@ describe('GET /v1/agents', () => {
         runsToday: number;
         spendTodayCents: number;
         pendingApprovals: number;
-        connectionCounts: { apps: number; workflows: number; memoryPlanes: number };
+        connectionCounts: { workflows: number };
       }>;
     };
     expect(body.agents).toEqual([
@@ -211,7 +191,7 @@ describe('GET /v1/agents', () => {
         runsToday: 1,
         spendTodayCents: 25,
         pendingApprovals: 1,
-        connectionCounts: { apps: 0, workflows: 1, memoryPlanes: 1 },
+        connectionCounts: { workflows: 1 },
       }),
     ]);
   });

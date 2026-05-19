@@ -336,16 +336,6 @@ describe('GET /v1/workflows/:id/output', () => {
   });
 });
 
-describe('GET /v1/workflows/:id/records', () => {
-  it('returns an empty table list when the graph has no data_write nodes', async () => {
-    const id = seedWorkflow();
-    const res = await app().request(`/v1/workflows/${id}/records`, { headers: ctx.authHeaders });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { tables: unknown[] };
-    expect(body.tables).toEqual([]);
-  });
-});
-
 describe('POST /v1/workflows/:id/run', () => {
   it('rejects an empty-graph workflow with WORKFLOW_GRAPH_INVALID', async () => {
     const id = seedWorkflow({ version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } });
