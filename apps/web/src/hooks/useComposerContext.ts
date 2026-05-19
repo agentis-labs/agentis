@@ -53,7 +53,7 @@ export function useComposerContext(ctx: {
 function normalizeRole(agent: ComposerContextAgent): string {
   const role = agent.role?.toLowerCase();
   if (role) return role;
-  return /orchestrator|brain/i.test(agent.name) ? 'orchestrator' : 'worker';
+  return /orchestrator/i.test(agent.name) ? 'orchestrator' : 'worker';
 }
 
 function isActiveAgent(status: string | undefined): boolean {

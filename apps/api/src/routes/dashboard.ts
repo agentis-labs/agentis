@@ -24,10 +24,7 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     const agentsTotal = countRows(deps.db
       .select({ count: sql<number>`count(*)` })
       .from(schema.agents)
-      .where(and(
-        eq(schema.agents.workspaceId, ws.workspaceId),
-        or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
-      ))
+      .where(eq(schema.agents.workspaceId, ws.workspaceId))
       .get());
     const agentsOnline = countRows(deps.db
       .select({ count: sql<number>`count(*)` })
@@ -35,7 +32,6 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .where(and(
         eq(schema.agents.workspaceId, ws.workspaceId),
         eq(schema.agents.status, 'online'),
-        or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
       ))
       .get());
     const gatewaysTotal = countRows(deps.db

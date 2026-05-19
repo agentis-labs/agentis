@@ -15,7 +15,6 @@ import { ConfirmProvider } from './components/shared/ConfirmDialog';
 import { ToastProvider } from './components/shared/Toast';
 import { tokens, workspace as wsStore, ambient as ambientStore, api, logout } from './lib/api';
 import { useAgentisStore } from './store/agentisStore';
-import { useMemoryPromotionNotifier } from './lib/memoryPromotion';
 import { useLocation } from 'react-router-dom';
 // Initialize theme on app boot
 import './components/shared/ThemeToggle';
@@ -26,8 +25,6 @@ const WorkflowCanvasPage = lazy(() => import('./pages/WorkflowCanvasPage').then(
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((m) => ({ default: m.RunDetailPage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })));
 const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })));
-const AppsPage = lazy(() => import('./pages/AppsPage').then((m) => ({ default: m.AppsPage })));
-const AppDetailPage = lazy(() => import('./pages/AppDetailPage').then((m) => ({ default: m.AppDetailPage })));
 const PackagesPage = lazy(() => import('./pages/PackagesPage').then((m) => ({ default: m.PackagesPage })));
 const KnowledgePage = lazy(() => import('./pages/KnowledgePage').then((m) => ({ default: m.KnowledgePage })));
 const KnowledgeBasePage = lazy(() => import('./pages/KnowledgeBasePage').then((m) => ({ default: m.KnowledgeBasePage })));
@@ -35,9 +32,7 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ defa
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
-const BrainPage = lazy(() => import('./pages/UnifiedBrainPage').then((m) => ({ default: m.UnifiedBrainPage })));
 const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
-const AppCreationWizard = lazy(() => import('./pages/AppCreationWizard').then((m) => ({ default: m.AppCreationWizard })));
 
 interface Workspace {
   id: string;
@@ -196,16 +191,8 @@ export function App() {
               <Route path="/agents/:id" element={<AgentDetailPage />} />
               <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/workflows/:id" element={<WorkflowCanvasPage />} />
-              <Route path="/apps" element={<AppsPage />} />
-              <Route path="/apps/new" element={<AppCreationWizard />} />
-              <Route path="/apps/:slug" element={<AppDetailPage />} />
-              <Route path="/apps/:slug/results/:resultId" element={<AppDetailPage />} />
               <Route path="/knowledge" element={<KnowledgePage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
-              <Route path="/brain" element={<BrainPage />} />
-              <Route path="/brain/health" element={<BrainPage />} />
-              <Route path="/brain/config" element={<BrainPage />} />
-              <Route path="/brain/disputes" element={<BrainPage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/packages" element={<PackagesPage />} />
               <Route path="/history" element={<HistoryPage />} />
@@ -263,8 +250,6 @@ function Shell({
   const location = useLocation();
   const onChatPage = location.pathname.startsWith('/chat');
   const embedded = new URLSearchParams(location.search).get('embed') === '1';
-
-  useMemoryPromotionNotifier();
 
   if (embedded) {
     return <main className="h-full min-h-0 bg-canvas">{children}</main>;

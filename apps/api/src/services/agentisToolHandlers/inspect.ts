@@ -143,51 +143,6 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
     },
     {
       definition: {
-        id: 'agentis.cost.inspect',
-        family: 'inspect',
-        description: 'Aggregated cost summary for a run (LLM tokens, evaluator cost, totals).',
-        inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
-        mutating: false,
-        mcpExposed: true,
-      },
-      handler: async (args, ctx) => {
-        const runId = String(args.runId);
-        // Sum evaluator costs for this run.
-        const evals = deps.db
-          .select()
-          .from(schema.runEvaluations)
-          .where(
-            and(
-              eq(schema.runEvaluations.workspaceId, ctx.workspaceId),
-              eq(schema.runEvaluations.runId, runId),
-            ),
-          )
-          .all();
-        const evaluatorCostCents = evals.reduce((sum, e) => sum + (e.costCents ?? 0), 0);
-        // Sum turn costs for this run.
-        const turns = deps.db
-          .select()
-          .from(schema.turnState)
-          .where(
-            and(
-              eq(schema.turnState.workspaceId, ctx.workspaceId),
-              eq(schema.turnState.runId, runId),
-            ),
-          )
-          .all();
-        const turnCostCents = turns.reduce((sum, t) => sum + (t.costCents ?? 0), 0);
-        return {
-          runId,
-          evaluatorCostCents,
-          turnCostCents,
-          totalCostCents: evaluatorCostCents + turnCostCents,
-          evaluatorCount: evals.length,
-          turnCount: turns.length,
-        };
-      },
-    },
-    {
-      definition: {
         id: 'agentis.approval.list',
         family: 'inspect',
         description: 'List pending approvals for the workspace.',

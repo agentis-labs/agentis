@@ -100,8 +100,8 @@ export interface ViewportContext {
   ambientId?: string | null;
   /** Active resource id on the current surface (e.g. workflowId, agentId, runId). */
   resourceId?: string;
-  resourceKind?: 'workflow' | 'run' | 'agent' | 'team' | 'app' | 'artifact' | 'skill' | 'package' | 'ledger' | 'room' | 'space' | 'unknown';
-  /** Optional active space id (UIUX §23) when surface is 'apps_space' or any space-scoped view. */
+  resourceKind?: 'workflow' | 'run' | 'agent' | 'team' | 'artifact' | 'skill' | 'package' | 'ledger' | 'room' | 'space' | 'unknown';
+  /** Optional active space id (UIUX §23) for any space-scoped view. */
   spaceId?: string | null;
   spaceName?: string | null;
   selection?: {
@@ -124,16 +124,12 @@ export type AgentisSurface =
   | 'canvas'
   | 'runs'
   | 'run_detail'
-  | 'apps'
-  | 'apps_space'
-  | 'app_detail'
   | 'artifacts'
   | 'artifact_detail'
   | 'packages'
   | 'skills'
   | 'ledger'
   | 'history'
-  | 'data'
   | 'settings'
   | 'chat'
   | 'unknown';

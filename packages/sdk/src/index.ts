@@ -2,14 +2,13 @@ import {
   agentisPackageContentsSchema,
   packageManifestSchema,
   type AgentisPackageContents,
-  type DatasetSpec,
   type PackageExportEnvelope,
   type PackageManifest,
   type WorkflowGraph,
 } from '@agentis/core';
 import { createHash } from 'node:crypto';
 
-export type AgentisAppDefinition = Omit<AgentisPackageContents, 'kind'> & { kind?: 'agentis' };
+export type AgentisPackageDefinition = Omit<AgentisPackageContents, 'kind'> & { kind?: 'agentis' };
 
 export interface BuildManifestOptions {
   slug: string;
@@ -21,12 +20,8 @@ export interface BuildManifestOptions {
   author?: PackageManifest['author'];
 }
 
-export function defineAgentisApp(definition: AgentisAppDefinition): AgentisPackageContents {
+export function defineAgentisPackage(definition: AgentisPackageDefinition): AgentisPackageContents {
   return agentisPackageContentsSchema.parse({ kind: 'agentis', ...definition });
-}
-
-export function defineDataset(spec: DatasetSpec): DatasetSpec {
-  return spec;
 }
 
 export function defineWorkflow(args: {
@@ -91,19 +86,10 @@ export function createAgentisClient(options: AgentisClientOptions = {}) {
     return await res.json() as T;
   }
   return {
-    listApps: () => request('/v1/apps'),
-    activatePackage: (packageId: string) => request(`/v1/apps/activate/${encodeURIComponent(packageId)}`, { method: 'POST' }),
+    listPackages: () => request('/v1/packages'),
     importPackage: (manifest: PackageManifest | PackageExportEnvelope) => request('/v1/packages/import', {
       method: 'POST',
       body: JSON.stringify(manifest),
-    }),
-    runEvalSuite: (suiteId: string, syncTimeoutMs?: number) => request(`/v1/evals/${encodeURIComponent(suiteId)}/run`, {
-      method: 'POST',
-      body: JSON.stringify({ syncTimeoutMs }),
-    }),
-    evaluatePolicy: (body: Record<string, unknown>) => request('/v1/policies/evaluate', {
-      method: 'POST',
-      body: JSON.stringify(body),
     }),
   };
 }

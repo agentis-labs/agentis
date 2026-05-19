@@ -182,10 +182,8 @@ export class TeamService {
 
   stats(workspaceId: string, userId: string, teamId: string) {
     const team = this.get(workspaceId, userId, teamId);
-    const agents = this.db.select().from(schema.agents).where(and(
-      eq(schema.agents.workspaceId, workspaceId),
-      or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
-    )).all()
+    const agents = this.db.select().from(schema.agents)
+      .where(eq(schema.agents.workspaceId, workspaceId)).all()
       .filter((agent) => agent.ambientId === team.ambientId);
     const workflows = this.db.select().from(schema.workflows).where(eq(schema.workflows.workspaceId, workspaceId)).all()
       .filter((workflow) => workflow.ambientId === team.ambientId);

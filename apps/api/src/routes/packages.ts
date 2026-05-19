@@ -24,12 +24,10 @@ import type { Context } from 'hono';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { AgentisError, CONSTANTS } from '@agentis/core';
-import type { AgentisPackageContents, AppGraph, PackageContents, PackageManifest } from '@agentis/core';
+import type { AgentisPackageContents, PackageContents, PackageManifest } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { AppActivation } from '../services/appActivation.js';
-import type { AppDataService } from '../services/appDataService.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -68,163 +66,11 @@ const templateDefSchema = z.object({
   variables: z.array(z.unknown()).default([]),
 });
 
-const datasetSpecSchema = z.object({
-  key: z.string().min(1),
-  label: z.string().min(1),
-  description: z.string().min(1),
-  icon: z.string().optional(),
-  acceptedFormats: z.array(z.string().min(1)).default([]),
-  targetStore: z.enum(['knowledge', 'memory', 'evaluator_examples', 'baseline_inputs']),
-  chunkingStrategy: z.enum(['per-row', 'per-document', 'per-function', 'sliding-window', 'semantic']),
-  requiredFields: z.array(z.string().min(1)).optional(),
-  optional: z.boolean().default(false),
-  recommended: z.boolean().default(false),
-  wedgeRole: z.enum([
-    'primary_specialization',
-    'performance_booster',
-    'compliance_guardrail',
-    'historical_context',
-    'quality_calibration',
-  ]).default('historical_context'),
-  expectedImpact: z.object({
-    affects: z.array(z.enum(['retrieval', 'routing', 'evaluation', 'output_quality', 'cost_efficiency'])).default([]),
-    note: z.string().optional(),
-  }).optional(),
-  embeddingHint: z.string().optional(),
-  freshnessExpectation: z.enum(['static', 'monthly', 'weekly', 'daily', 'live']).optional(),
-  sizeWarningAboveRows: z.number().int().positive().optional(),
-  example: z.object({
-    sampleColumns: z.array(z.string()).optional(),
-    exportInstructions: z.string().optional(),
-  }).optional(),
-});
-
 const knowledgeSeedSchema = z.object({
   title: z.string().min(1),
   content: z.string().min(1),
   tags: z.array(z.string()).default([]),
   metadata: z.record(z.unknown()).default({}),
-});
-
-const memorySeedSchema = z.object({
-  title: z.string().min(1),
-  content: z.string().min(1),
-  trust: z.number().min(0).max(1).optional(),
-  importance: z.number().min(0).max(1).optional(),
-  tags: z.array(z.string()).default([]),
-  metadata: z.record(z.unknown()).default({}),
-});
-
-const evaluatorExampleSeedSchema = z.object({
-  evaluatorKey: z.string().min(1),
-  input: z.unknown(),
-  expected: z.unknown(),
-  verdict: z.enum(['pass', 'fail']),
-  reason: z.string().optional(),
-  score: z.number().optional(),
-});
-
-const evaluatorRubricSchema = z.object({
-  nodeKind: z.string().min(1),
-  context: z.string().min(1),
-  examples: z.array(evaluatorExampleSeedSchema).default([]),
-});
-
-const workflowBaselineSeedSchema = z.object({
-  workflowSlug: z.string().min(1),
-  p50DurationMs: z.number().optional(),
-  p95DurationMs: z.number().optional(),
-  expectedSuccessRate: z.number().optional(),
-  costCentsPerRun: z.number().optional(),
-  derivedFromRuns: z.number().int().nonnegative().optional(),
-});
-
-const runtimeEpisodeSeedSchema = z.object({
-  type: z.enum([
-    'decision',
-    'failure',
-    'recovery',
-    'success_pattern',
-    'approval',
-    'evaluator_outcome',
-    'incident',
-    'artifact_outcome',
-    'distilled_lesson',
-  ]),
-  title: z.string().min(1),
-  summary: z.string().min(1),
-  details: z.string().optional(),
-  outcomeStatus: z.enum(['good', 'bad', 'mixed']).optional(),
-  importance: z.number().min(0).max(1).optional(),
-  trust: z.number().min(0).max(1).optional(),
-  tags: z.array(z.string()).default([]),
-  entities: z.array(z.string()).default([]),
-});
-
-const memoryPolicySchema = z.object({
-  minImportanceForPromotion: z.number().min(0).max(1).optional(),
-  minTrustForRetrieval: z.number().min(0).max(1).optional(),
-  requireHumanConfirmForAgentWrites: z.boolean().optional(),
-  highRiskTags: z.array(z.string()).optional(),
-  maxEpisodesPerType: z.number().int().nonnegative().optional(),
-}).optional();
-
-const retrievalPolicySchema = z.object({
-  defaultMode: z.enum(['strict', 'normal', 'exploratory']).optional(),
-  defaultBudgetClass: z.enum(['cheap', 'balanced', 'power']).optional(),
-  caps: z.object({
-    knowledge: z.number().int().nonnegative().optional(),
-    episodes: z.number().int().nonnegative().optional(),
-    evaluatorExamples: z.number().int().nonnegative().optional(),
-    baselineHints: z.number().int().nonnegative().optional(),
-  }).optional(),
-  includeWorkingSummary: z.boolean().optional(),
-}).optional();
-
-const appGraphNodeTypeSchema = z.enum([
-  'app_core',
-  'entry_workflow',
-  'workflow_module',
-  'agent_group',
-  'knowledge_source',
-  'memory_surface',
-  'integration_surface',
-  'approval_surface',
-  'output_surface',
-  'scheduler',
-  'channel_surface',
-  'brain_surface',
-]);
-
-const appGraphEdgeTypeSchema = z.enum([
-  'activates',
-  'feeds',
-  'reads_from',
-  'writes_to',
-  'approves',
-  'publishes_to',
-  'observes',
-  'depends_on',
-]);
-
-const appGraphSchema = z.object({
-  version: z.literal(1),
-  nodes: z.array(z.object({
-    id: z.string().min(1),
-    type: appGraphNodeTypeSchema,
-    title: z.string().min(1),
-    position: z.object({ x: z.number(), y: z.number() }),
-    config: z.record(z.unknown()).default({}),
-    zone: z.enum(['inputs', 'core', 'outputs']).optional(),
-  })).default([]),
-  edges: z.array(z.object({
-    id: z.string().min(1),
-    source: z.string().min(1),
-    target: z.string().min(1),
-    type: appGraphEdgeTypeSchema,
-    label: z.string().optional(),
-  })).default([]),
-  viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }).default({ x: 0, y: 0, zoom: 1 }),
 });
 
 const manifestSchema = z.object({
@@ -236,16 +82,7 @@ const manifestSchema = z.object({
   skills: z.array(skillDefSchema).default([]),
   workflowTemplates: z.array(templateDefSchema).default([]),
   credentials: z.array(z.unknown()).default([]),
-  datasetSpecs: z.array(datasetSpecSchema).default([]),
   knowledgeSeeds: z.array(knowledgeSeedSchema).default([]),
-  memorySeeds: z.array(memorySeedSchema).default([]),
-  evaluatorRubrics: z.array(evaluatorRubricSchema).default([]),
-  evaluatorExampleSeeds: z.array(evaluatorExampleSeedSchema).default([]),
-  workflowBaselines: z.array(workflowBaselineSeedSchema).default([]),
-  runtimeEpisodeSeeds: z.array(runtimeEpisodeSeedSchema).default([]),
-  memoryPolicy: memoryPolicySchema,
-  retrievalPolicy: retrievalPolicySchema,
-  appGraphTemplate: appGraphSchema.optional(),
 }).passthrough();
 
 const installLocalSchema = z.object({
@@ -278,15 +115,12 @@ export function buildPackageRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
   bus?: EventBus;
-  activation?: AppActivation;
-  appData?: AppDataService;
   logger?: Logger;
 }) {
   const app = new Hono();
   const packager = new PackagerService({
     db: deps.db,
     bus: deps.bus,
-    appData: deps.appData,
     logger: deps.logger,
   });
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -476,11 +310,9 @@ export function buildPackageRoutes(deps: {
           },
         };
       }),
-      integrations: [], credentialSlots: [], datasetSpecs: [],
-      knowledgeSeeds: [], memorySeeds: [], evaluatorRubrics: [],
-      evaluatorExampleSeeds: [], runtimeEpisodeSeeds: [],
-      workflowBaselines: [],
-      screenshotUrls: [], crossAppDependencies: [],
+      integrations: [], credentialSlots: [],
+      knowledgeSeeds: [],
+      screenshotUrls: [],
     };
 
     const row = packager.create(s, meta, 'agentis', contents);
@@ -570,18 +402,8 @@ export function buildPackageRoutes(deps: {
       })),
       integrations: [],
       credentialSlots: [],
-      datasetSpecs: m.datasetSpecs,
       knowledgeSeeds: m.knowledgeSeeds,
-      memorySeeds: m.memorySeeds,
-      evaluatorRubrics: m.evaluatorRubrics,
-      evaluatorExampleSeeds: m.evaluatorExampleSeeds,
-      workflowBaselines: m.workflowBaselines,
-      runtimeEpisodeSeeds: m.runtimeEpisodeSeeds,
-      memoryPolicy: m.memoryPolicy,
-      retrievalPolicy: m.retrievalPolicy,
-      appGraphTemplate: m.appGraphTemplate as AppGraph | undefined,
       screenshotUrls: [],
-      crossAppDependencies: [],
     };
 
     const row = packager.create(
@@ -595,7 +417,7 @@ export function buildPackageRoutes(deps: {
     return c.json(
       {
         packageId: row.id,
-        appInstanceId: installed.resourceId,
+        resourceId: installed.resourceId,
         path: installed.path,
         name: m.name,
         version: m.version,

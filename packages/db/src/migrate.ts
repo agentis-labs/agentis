@@ -57,101 +57,6 @@ function listAppliedVersions(sqlite: Database.Database): Set<number> {
   return new Set(rows.map((r) => r.version));
 }
 
-function tableExists(sqlite: Database.Database, tableName: string): boolean {
-  return Boolean(
-    sqlite
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`)
-      .get(tableName),
-  );
-}
-
-function columnExists(sqlite: Database.Database, tableName: string, columnName: string): boolean {
-  if (!tableExists(sqlite, tableName)) return false;
-  const rows = sqlite.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
-  return rows.some((row) => row.name === columnName);
-}
-
-function indexExists(sqlite: Database.Database, indexName: string): boolean {
-  return Boolean(
-    sqlite
-      .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`)
-      .get(indexName),
-  );
-}
-
-function engine10xSchemaIsPresent(sqlite: Database.Database): boolean {
-  return (
-    columnExists(sqlite, 'workflows', 'max_concurrent_runs') &&
-    columnExists(sqlite, 'workflows', 'concurrency_overflow') &&
-    columnExists(sqlite, 'workflow_edges', 'data_contract') &&
-    tableExists(sqlite, 'workflow_run_queue') &&
-    tableExists(sqlite, 'node_execution_cache') &&
-    tableExists(sqlite, 'workflow_event_subscriptions') &&
-    tableExists(sqlite, 'schedule_runs')
-  );
-}
-
-function workflowTagsSchemaIsPresent(sqlite: Database.Database): boolean {
-  return columnExists(sqlite, 'workflows', 'tags');
-}
-
-function workflowRunReplaySchemaIsPresent(sqlite: Database.Database): boolean {
-  return columnExists(sqlite, 'workflow_runs', 'is_replay');
-}
-
-function agentCapabilityVersionSchemaIsPresent(sqlite: Database.Database): boolean {
-  return columnExists(sqlite, 'agents', 'capability_version');
-}
-
-function spacesSchemaIsPresent(sqlite: Database.Database): boolean {
-  return tableExists(sqlite, 'spaces') && columnExists(sqlite, 'app_instances', 'space_id');
-}
-
-function agentHierarchyCanvasSchemaIsPresent(sqlite: Database.Database): boolean {
-  return columnExists(sqlite, 'agents', 'description')
-    && columnExists(sqlite, 'agents', 'space_id')
-    && columnExists(sqlite, 'agents', 'canvas_position');
-}
-
-function intentContractsSchemaIsPresent(sqlite: Database.Database): boolean {
-  return columnExists(sqlite, 'workflows', 'intended_behavior')
-    && columnExists(sqlite, 'app_instances', 'intended_behavior')
-    && columnExists(sqlite, 'workflow_runs', 'conversation_id')
-    && indexExists(sqlite, 'idx_runs_conversation');
-}
-
-const IMPLIED_MIGRATION_STAMPS: readonly {
-  readonly version: number;
-  readonly isPresent: (sqlite: Database.Database) => boolean;
-}[] = [
-  { version: 9, isPresent: engine10xSchemaIsPresent },
-  { version: 20, isPresent: workflowTagsSchemaIsPresent },
-  { version: 21, isPresent: workflowRunReplaySchemaIsPresent },
-  { version: 23, isPresent: agentCapabilityVersionSchemaIsPresent },
-  { version: 25, isPresent: spacesSchemaIsPresent },
-  { version: 28, isPresent: agentHierarchyCanvasSchemaIsPresent },
-  { version: 31, isPresent: intentContractsSchemaIsPresent },
-] as const;
-
-function stampImpliedMigrations(
-  sqlite: Database.Database,
-  already: Set<number>,
-): Migration[] {
-  const stamped: Migration[] = [];
-  for (const stamp of IMPLIED_MIGRATION_STAMPS) {
-    if (already.has(stamp.version) || !stamp.isPresent(sqlite)) continue;
-    const migration = SQLITE_MIGRATIONS.find((m) => m.version === stamp.version);
-    if (migration) {
-      sqlite
-        .prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
-        .run(migration.version, migration.name);
-      already.add(migration.version);
-      stamped.push(migration);
-    }
-  }
-  return stamped;
-}
-
 /**
  * If the database was initialised by a pre-runner build (i.e. has core
  * tables but an empty `schema_migrations`), record version 1 as already
@@ -198,7 +103,7 @@ export function runSqliteMigrations(sqlite: Database.Database): RunSqliteMigrati
   backfillIfPreExisting(sqlite);
 
   const already = listAppliedVersions(sqlite);
-  const applied: Migration[] = stampImpliedMigrations(sqlite, already);
+  const applied: Migration[] = [];
 
   // Defensive ordering — the runtime registry is already sorted by version,
   // but we sort again so a future hand-edit can't introduce silent mis-order.
@@ -209,7 +114,6 @@ export function runSqliteMigrations(sqlite: Database.Database): RunSqliteMigrati
     applyMigration(sqlite, migration);
     already.add(migration.version);
     applied.push(migration);
-    applied.push(...stampImpliedMigrations(sqlite, already));
   }
 
   applied.sort((a, b) => a.version - b.version);

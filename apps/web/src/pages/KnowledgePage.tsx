@@ -1,21 +1,46 @@
 /**
- * KnowledgePage — DEPRECATED entry point. The unified Brain page now hosts
- * the Documents / Bases / Memory / Episodes panels at /brain?tab=*. This
- * route is kept as a thin redirect so deep links continue to land somewhere
- * useful while we migrate.
+ * KnowledgePage — workspace knowledge surface.
  *
- * Spec: docs/UIUX-refactor/BRAIN-PAGE-REDESIGN.md §4.
+ * Hosts the Documents / Bases panels. Knowledge is shared across the whole
+ * workspace; every agent and workflow can draw on it.
  */
 
-import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
+import { Tabs } from '../components/shared/Tabs';
+import {
+  WorkspaceKnowledgePanels,
+  type WorkspaceKnowledgeTab,
+} from '../components/knowledge/WorkspaceKnowledgePanels';
+
+function normalizeTab(raw: string | null): WorkspaceKnowledgeTab {
+  return raw === 'bases' ? 'bases' : 'documents';
+}
 
 export function KnowledgePage() {
-  const nav = useNavigate();
-  useEffect(() => {
-    const value = new URLSearchParams(window.location.search).get('tab');
-    const tab = value === 'bases' || value === 'memory' || value === 'episodes' ? value : 'documents';
-    nav(`/brain?tab=${tab}`, { replace: true });
-  }, [nav]);
-  return null;
+  const [searchParams] = useSearchParams();
+  const tab = normalizeTab(searchParams.get('tab'));
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="border-b border-line px-6 py-4">
+        <h1 className="text-display text-text-primary">Knowledge</h1>
+        <p className="mt-1 text-[13px] text-text-secondary">
+          Documents and knowledge bases shared across the workspace.
+        </p>
+      </div>
+      <Tabs
+        param="tab"
+        value={tab}
+        defaultValue="documents"
+        tabs={[
+          { value: 'documents', label: 'Documents' },
+          { value: 'bases', label: 'Knowledge Bases' },
+        ]}
+        className="px-6"
+      />
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        <WorkspaceKnowledgePanels tab={tab} />
+      </div>
+    </div>
+  );
 }

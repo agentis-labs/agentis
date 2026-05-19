@@ -86,7 +86,7 @@ const DEFAULT_DESCRIPTION: Record<AgentRole, string> = {
 };
 
 const DEFAULT_INSTRUCTIONS: Record<AgentRole, string> = {
-  orchestrator: 'You are the workspace brain. Route goals, delegate clearly, and keep the operator updated with concise status and blockers.',
+  orchestrator: 'You are the workspace orchestrator. Route goals, delegate clearly, and keep the operator updated with concise status and blockers.',
   manager: 'You own one domain. Translate goals into executable work, coordinate specialists, and keep priorities explicit.',
   worker: 'You are a specialist operator. Execute assigned work precisely, surface blockers early, and return reusable results.',
 };
@@ -136,7 +136,7 @@ export async function runBootstrapCmd(argv: string[]): Promise<number> {
         });
         return 0;
       }
-      writeJson({ ok: false, error: `Workspace brain already exists: ${existingOrchestrator.name}` }, true);
+      writeJson({ ok: false, error: `Workspace orchestrator already exists: ${existingOrchestrator.name}` }, true);
       return 1;
     }
 

@@ -19,19 +19,16 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
     const activeRun = derived.resourceKind === 'workflow'
       ? Object.values(activeRuns).find((run) => run.workflowId === derived.resourceId && ['queued', 'running', 'paused'].includes(run.status))
       : null;
-    // UIUX \u00a723: When viewing /apps with a ?space= filter, surface upgrades to 'apps_space'.
     const spaceId = searchParams.get('space');
     const activeSpace = spaceId ? spaces.find((space) => space.id === spaceId) ?? null : null;
-    const isAppsSpace = derived.surface === 'apps' && Boolean(spaceId);
-    const surface: AgentisSurface = isAppsSpace ? 'apps_space' : derived.surface;
     return {
-      surface,
+      surface: derived.surface,
       route,
-      title: isAppsSpace ? `${activeSpace?.name ?? 'Space'} apps` : derived.title,
+      title: derived.title,
       workspaceId: workspaceId ?? undefined,
       ambientId: ambientId ?? null,
-      resourceId: isAppsSpace ? spaceId ?? undefined : derived.resourceId,
-      resourceKind: isAppsSpace ? 'space' : derived.resourceKind,
+      resourceId: derived.resourceId,
+      resourceKind: derived.resourceKind,
       activeRunId: activeRun?.runId ?? null,
       spaceId: spaceId ?? null,
       spaceName: activeSpace?.name ?? null,
@@ -58,8 +55,6 @@ function deriveSurface(pathname: string): Pick<ViewportContext, 'surface' | 'res
   if (root === 'agents') return { surface: 'agents', title: 'Agents' };
   if (root === 'teams' && id) return { surface: 'team_detail', resourceKind: 'team', resourceId: id, title: 'Team detail' };
   if (root === 'teams') return { surface: 'teams', title: 'Teams' };
-  if (root === 'apps' && id) return { surface: 'app_detail', resourceKind: 'app', resourceId: id, title: 'App detail' };
-  if (root === 'apps') return { surface: 'apps', title: 'Apps' };
   if (root === 'artifacts' && id) return { surface: 'artifact_detail', resourceKind: 'artifact', resourceId: id, title: 'Artifact detail' };
   if (root === 'artifacts') return { surface: 'artifacts', title: 'Artifacts' };
   if (root === 'packages') return { surface: 'packages', title: 'Packages' };

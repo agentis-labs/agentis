@@ -184,7 +184,7 @@ function assertTrigger(db: AgentisSqliteDb, workspaceId: string, triggerId: stri
 
 function assertSchedule(db: AgentisSqliteDb, workspaceId: string, scheduleId: string) {
   const schedule = db.select().from(schema.scheduleRuns).where(and(eq(schema.scheduleRuns.id, scheduleId), eq(schema.scheduleRuns.workspaceId, workspaceId))).get();
-  if (!schedule) throw new AgentisError('SCHEDULE_NOT_FOUND', 'Schedule not found');
+  if (!schedule) throw new AgentisError('RESOURCE_NOT_FOUND', 'Schedule not found');
   return schedule;
 }
 

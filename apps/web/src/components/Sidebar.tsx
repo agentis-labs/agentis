@@ -1,10 +1,9 @@
 /**
  * Sidebar — primary navigation rail (5 items + Spaces + Settings).
  *
- * Replaces the previous 11-item flat structure with the new IA from
- * UIUX-REPLAN.md §6.1: Home / Agents / Workflows / Apps / Packages /
- * SPACES / Settings. Live badges on Agents (live count) and Workflows
- * (active runs). Auto-collapse when ChatPanel is docked.
+ * Home / Workflows / Agents / Knowledge / Packages / SPACES / Settings.
+ * Live badges on Agents (live count) and Workflows (active runs).
+ * Auto-collapse when ChatPanel is docked.
  */
 
 import { useEffect, useState } from 'react';
@@ -14,9 +13,8 @@ import {
   Home as HomeIcon,
   Bot,
   Workflow as WorkflowIcon,
-  AppWindow,
+  BookOpen,
   Package as PackageIcon,
-  Brain as BrainIcon,
   Settings as SettingsIcon,
   ChevronsLeft,
   ChevronsRight,
@@ -46,11 +44,10 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/home',      label: 'Home',      icon: HomeIcon },
-  { to: '/apps',      label: 'Apps',      icon: AppWindow },
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
   { to: '/agents',    label: 'Agents',    icon: Bot,         badge: 'liveAgents' },
+  { to: '/knowledge', label: 'Knowledge', icon: BookOpen },
   { to: '/packages',  label: 'Packages',  icon: PackageIcon },
-  { to: '/brain',     label: 'Brain',     icon: BrainIcon },
 ];
 
 const SPACE_COLORS = ['#f97316', '#3b82f6', '#a855f7', '#14b8a6', '#f43f5e', '#84cc16'] as const;
@@ -73,7 +70,6 @@ interface Space {
   color?: string | null;
   colorHex?: string;
   iconGlyph?: string | null;
-  appCount?: number;
 }
 
 const STORAGE_KEY = 'agentis.sidebar.collapsed';
@@ -225,7 +221,7 @@ export function Sidebar() {
                 {spaces.map((s, idx) => (
                   <li key={s.id}>
                     <NavLink
-                      to={`/apps?space=${s.id}`}
+                      to={`/home?space=${s.id}`}
                       title={s.name}
                       className={({ isActive }) =>
                         clsx(
@@ -242,14 +238,7 @@ export function Sidebar() {
                         color={spaceColor(s, idx)}
                         onClick={!collapsed ? () => setEditingSpaceIconId((current) => current === s.id ? null : s.id) : undefined}
                       />
-                      {!collapsed && (
-                        <>
-                          <span className="flex-1 truncate">{s.name}</span>
-                          {s.appCount != null && s.appCount > 0 && (
-                            <span className="text-[10px] text-text-muted">{s.appCount}</span>
-                          )}
-                        </>
-                      )}
+                      {!collapsed && <span className="flex-1 truncate">{s.name}</span>}
                     </NavLink>
                     {!collapsed && editingSpaceIconId === s.id && (
                       <div className="px-2 pb-2">

@@ -263,8 +263,8 @@ function sortRank(s: AgentFeedSection): number {
 
 function roleOf(agent: WorkspaceAgent): AgentFeedRole {
   const role = (agent.role ?? '').toLowerCase();
-  if (role.includes('orchestrator') || role.includes('brain')) return 'orchestrator';
-  if (!role && /orchestrator|brain/i.test(agent.name)) return 'orchestrator';
+  if (role.includes('orchestrator')) return 'orchestrator';
+  if (!role && /orchestrator/i.test(agent.name)) return 'orchestrator';
   if (role.includes('manager') || role.includes('lead')) return 'manager';
   return 'worker';
 }

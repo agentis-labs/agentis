@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   CONSTANTS,
   AgentisError,
@@ -39,10 +39,7 @@ import {
   type MergeNodeConfig,
   type CheckpointNodeConfig,
   type ScratchpadNodeConfig,
-  type DataWriteNodeConfig,
-  type DataReadNodeConfig,
   type AgentSwarmNodeConfig,
-  type BrainLookupNodeConfig,
   type ArtifactCollectNodeConfig,
   type WorkflowEdge,
   type WorkflowGraphPatch,
@@ -59,11 +56,6 @@ import type { SkillRuntime } from '../services/skillRuntime.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
 import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
-import type { CollectiveBrainService } from '../services/collectiveBrain.js';
-import type { BrainPromotionQueueWorker } from '../services/brainPromotionQueueWorker.js';
-import type { AgentAbilityService } from '../services/agentAbilityService.js';
-import type { UserProfileService } from '../services/userProfileService.js';
-import type { AppDataService } from '../services/appDataService.js';
 import type { ConversationStore } from '../services/conversationStore.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
@@ -81,15 +73,6 @@ export interface EngineDeps {
   adapters: AdapterManager;
   subflows?: SubflowExecutor;
   knowledgeBases?: KnowledgeBaseService;
-  collectiveBrain?: CollectiveBrainService;
-  /** Durable brain promotion queue (BRAIN-ABILITIES-REPLAN.md §BL10). */
-  brainQueue?: BrainPromotionQueueWorker;
-  /** Agent abilities — procedural how-to injection at dispatch (Part IV). */
-  abilities?: AgentAbilityService;
-  /** Operator profile — USER.md-equivalent injection at dispatch (§BL8). */
-  userProfiles?: UserProfileService;
-  /** App Data layer — required for `data_write` nodes (AGENTIS-PLATFORM-10X §A5). */
-  appData?: AppDataService;
   /** Conversation bridge — lets chat-started runs report terminal state back to the thread. */
   conversations?: ConversationStore;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
@@ -141,7 +124,6 @@ export class WorkflowEngine {
       inflightDispatches: 0,
       swarms: new Map(),
       selfHealAttempts: new Map(),
-      thinkingTraces: new Map(),
     };
     this.#runs.set(ctx.runId, ctx);
 
@@ -183,6 +165,48 @@ export class WorkflowEngine {
   }
 
   /**
+   * Start every pending run buffered in `workflow_run_queue` for a workflow.
+   * Drains the concurrency-overflow queue; called by SchedulerService.tick().
+   */
+  async drainWorkflowQueue(workflowId: string): Promise<number> {
+    const pending = this.deps.db
+      .select()
+      .from(schema.workflowRunQueue)
+      .where(and(
+        eq(schema.workflowRunQueue.workflowId, workflowId),
+        eq(schema.workflowRunQueue.status, 'pending'),
+      ))
+      .all();
+    let started = 0;
+    for (const item of pending) {
+      const initialState = item.initialState as unknown as WorkflowRunState | null;
+      const graph = item.graphSnapshot as unknown as WorkflowGraph | null;
+      this.deps.db
+        .update(schema.workflowRunQueue)
+        .set({
+          status: initialState && graph ? 'dequeued' : 'dropped',
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.workflowRunQueue.id, item.id))
+        .run();
+      if (!initialState || !graph) continue;
+      await this.startRun({
+        workspaceId: item.workspaceId,
+        ambientId: item.ambientId,
+        conversationId: null,
+        workflowId,
+        userId: item.userId,
+        triggerId: item.triggerId,
+        inputs: (item.inputs as Record<string, unknown>) ?? {},
+        initialState,
+        graph,
+      });
+      started += 1;
+    }
+    return started;
+  }
+
+  /**
    * Async completion callback for agent-dispatched tasks.
    * Adapters emit task.completed via NormalizedAgentEvent; the adapter
    * manager forwards into here.
@@ -199,29 +223,8 @@ export class WorkflowEngine {
       await this.#onSwarmSubtask(ctx, swarm.nodeId, swarm.index, args.output, null);
       return;
     }
-    const node = ctx.graph.nodes.find((candidate) => candidate.id === args.nodeId) ?? null;
     await this.#completeNode(ctx, args.nodeId, args.output);
-    if (node?.config.kind === 'agent_task') {
-      this.#maybePromoteFromAgentTask(ctx, node, node.config, args.output);
-    }
     void this.#tick(ctx);
-  }
-
-  /**
-   * Capture an `agent.thinking` reasoning trace (B3). The richest learning
-   * signal — the agent's reflection on what it noticed and why — is collected
-   * per agent_task node and handed to the ability reviewer at completion.
-   */
-  recordThinking(runId: string, nodeId: string, text: string): void {
-    if (!text) return;
-    const ctx = this.#runs.get(runId);
-    if (!ctx) return;
-    const swarm = parseSwarmTaskId(nodeId);
-    const key = swarm ? swarm.nodeId : nodeId;
-    const trace = ctx.thinkingTraces.get(key) ?? [];
-    if (trace.length >= 40) return; // bound memory per node
-    trace.push(text);
-    ctx.thinkingTraces.set(key, trace);
   }
 
   async notifyTaskFailed(args: { runId: string; nodeId: string; error: string }): Promise<void> {
@@ -507,21 +510,6 @@ export class WorkflowEngine {
         await this.#dispatchAgentTask(ctx, node, node.config, item.inputData);
         return; // adapter event will call notifyTaskCompleted
       }
-      case 'data_write': {
-        const result = await this.#executeDataWrite(ctx, node, node.config, item.inputData);
-        await this.#completeNode(ctx, node.id, result);
-        return;
-      }
-      case 'data_read': {
-        const result = await this.#executeDataRead(ctx, node, node.config, item.inputData);
-        await this.#completeNode(ctx, node.id, result);
-        return;
-      }
-      case 'brain_lookup': {
-        const result = await this.#executeBrainLookup(ctx, node.config, item.inputData);
-        await this.#completeNode(ctx, node.id, result);
-        return;
-      }
       case 'agent_swarm': {
         await this.#dispatchAgentSwarm(ctx, node, node.config, item.inputData);
         return; // swarm subtask events resolve the node
@@ -621,10 +609,9 @@ export class WorkflowEngine {
     if (!query) throw new AgentisError('VALIDATION_FAILED', 'knowledge node query is empty');
 
     const topK = Math.min(Math.max(config.topK ?? 5, 1), 20);
-    const knowledgeScope = ctx.appId ? { appId: ctx.appId, includeWorkspace: true } : undefined;
     const bases = config.knowledgeBaseId
-      ? [this.deps.knowledgeBases.getKnowledgeBase(ctx.workspaceId, config.knowledgeBaseId, knowledgeScope)]
-      : this.deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId, knowledgeScope);
+      ? [this.deps.knowledgeBases.getKnowledgeBase(ctx.workspaceId, config.knowledgeBaseId)]
+      : this.deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId);
     const perBaseTopK = config.knowledgeBaseId ? topK : Math.max(topK, 5);
 
     const results = bases
@@ -679,341 +666,22 @@ export class WorkflowEngine {
       startedAt: new Date().toISOString(),
     };
 
-    // B2 — query the Brain for atoms relevant to this task and inject them as
-    // a frozen context block. Degrades gracefully to no block when the Brain
-    // is empty or retrieval fails. Atom injections are recorded so the
-    // evaluator feedback loop (Gap14) can later credit/penalise them.
-    let brainContext: string | undefined;
-    if (this.deps.collectiveBrain) {
-      try {
-        const result = await this.deps.collectiveBrain.buildDispatchContext({
-          workspaceId: ctx.workspaceId,
-          appId: this.#resolveAppId(ctx),
-          agentId: config.agentId,
-          runId: ctx.runId,
-          taskDescription: `${node.title}\n${config.prompt}`,
-        });
-        if (result.block) brainContext = result.block;
-      } catch (err) {
-        this.deps.logger.warn('collective_brain.dispatch_context.failed', {
-          runId: ctx.runId,
-          nodeId: node.id,
-          message: (err as Error).message,
-        });
-      }
-    }
-
-    // Part IV — inject the agent's relevant procedural abilities (how-to
-    // knowledge), ranked by task relevance. Frozen at dispatch.
-    let abilityBlock = '';
-    if (this.deps.abilities) {
-      try {
-        const result = await this.deps.abilities.buildDispatchBlock({
-          workspaceId: ctx.workspaceId,
-          agentId: config.agentId,
-          workflowId: ctx.workflowId,
-          appId: this.#resolveAppId(ctx),
-          runId: ctx.runId,
-          taskDescription: `${node.title}\n${config.prompt}`,
-        });
-        abilityBlock = result.block;
-      } catch (err) {
-        this.deps.logger.warn('agent_abilities.dispatch_block.failed', {
-          runId: ctx.runId,
-          nodeId: node.id,
-          message: (err as Error).message,
-        });
-      }
-    }
-
-    // §BL8 — operator profile (USER.md equivalent), frozen at dispatch.
-    let profileBlock = '';
-    if (this.deps.userProfiles) {
-      try {
-        profileBlock = this.deps.userProfiles.buildDispatchBlock(ctx.workspaceId);
-      } catch {
-        profileBlock = '';
-      }
-    }
-
-    const sections = [config.prompt];
-    if (profileBlock) sections.push(`=== ${profileBlock}`);
-    if (abilityBlock) sections.push(`=== AGENT ABILITIES (proven procedures) ===\n${abilityBlock}`);
-    if (brainContext) sections.push(`=== BRAIN CONTEXT (knowledge from past runs) ===\n${brainContext}`);
-    const description = sections.join('\n\n');
-
     await this.deps.adapters.dispatchTask({
       taskId,
       runId: ctx.runId,
       workflowId: ctx.workflowId,
       nodeId: node.id,
       title: node.title,
-      description,
+      description: config.prompt,
       inputData,
       scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
       capabilityTags: config.capabilityTags,
       timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
-      brainContext,
     }, config.agentId);
   }
 
-  #maybePromoteFromAgentTask(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: AgentTaskNodeConfig,
-    output: Record<string, unknown>,
-  ): void {
-    if (!this.deps.collectiveBrain) return;
-    const inputData = ctx.state.nodeStates[node.id]?.inputData ?? null;
-    // B1 — promote to the owning app's scope, not workspace scope. The hardcoded
-    // `appId: null` poisoned app-brain isolation on every run.
-    const appId = this.#resolveAppId(ctx);
-    const thinkingTrace = ctx.thinkingTraces.get(node.id) ?? [];
-    try {
-      if (this.deps.brainQueue) {
-        // BL10 — durable, restart-safe enqueue instead of `queueMicrotask`.
-        this.deps.brainQueue.enqueue({
-          workspaceId: ctx.workspaceId,
-          itemType: 'atom_promotion',
-          priority: 'normal',
-          payload: {
-            workspaceId: ctx.workspaceId,
-            appId,
-            workflowId: ctx.workflowId,
-            runId: ctx.runId,
-            nodeId: node.id,
-            agentId: config.agentId ?? null,
-            taskInput: inputData,
-            taskOutput: output,
-          },
-        });
-        // Part IV — distil a procedural ability from this run (Path 1).
-        if (this.deps.abilities) {
-          this.deps.brainQueue.enqueue({
-            workspaceId: ctx.workspaceId,
-            itemType: 'ability_review',
-            priority: 'normal',
-            payload: {
-              workspaceId: ctx.workspaceId,
-              agentId: config.agentId ?? null,
-              workflowId: ctx.workflowId,
-              runId: ctx.runId,
-              taskTitle: node.title,
-              taskInput: inputData,
-              taskOutput: output,
-              thinkingTrace,
-            },
-          });
-        }
-      } else {
-        // Fallback when the queue is not wired (tests) — synchronous lexical path.
-        queueMicrotask(() => {
-          try {
-            this.deps.collectiveBrain!.extractAndPromote({
-              workspaceId: ctx.workspaceId,
-              workflowId: ctx.workflowId,
-              runId: ctx.runId,
-              nodeId: node.id,
-              agentId: config.agentId ?? null,
-              appId,
-              taskInput: inputData,
-              taskOutput: output,
-            });
-          } catch (err) {
-            this.deps.logger.warn('collective_brain.agent_task_promotion.failed', {
-              runId: ctx.runId,
-              nodeId: node.id,
-              message: (err as Error).message,
-            });
-          }
-        });
-      }
-    } catch (err) {
-      this.deps.logger.warn('collective_brain.agent_task_promotion.failed', {
-        runId: ctx.runId,
-        nodeId: node.id,
-        message: (err as Error).message,
-      });
-    }
-  }
-
   // ────────────────────────────────────────────────────────────
-  // Data layer — data_write node (AGENTIS-PLATFORM-10X §A5)
-  // ────────────────────────────────────────────────────────────
-
-  async #executeDataWrite(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: DataWriteNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    if (!this.deps.appData) {
-      throw new AgentisError(
-        'WORKFLOW_GRAPH_INVALID',
-        'data_write node present but AppDataService not wired',
-      );
-    }
-    const appId = config.appId ?? this.#resolveAppId(ctx);
-    if (!appId) {
-      throw new AgentisError(
-        'WORKFLOW_GRAPH_INVALID',
-        `data_write node ${node.id} could not resolve an owning app — set config.appId`,
-      );
-    }
-    const recordSource = config.recordPath
-      ? lookupPath(inputData, config.recordPath)
-      : inputData;
-    if (!recordSource || typeof recordSource !== 'object' || Array.isArray(recordSource)) {
-      throw new AgentisError(
-        'VALIDATION_FAILED',
-        `data_write node ${node.id}: input record is not an object`,
-      );
-    }
-    const record = recordSource as Record<string, unknown>;
-
-    if (config.operation === 'insert') {
-      const { id } = this.deps.appData.insert(ctx.workspaceId, appId, config.table, record);
-      return { id, table: config.table, operation: 'insert' };
-    }
-    if (config.operation === 'upsert') {
-      const idField = config.idField ?? 'id';
-      const result = this.deps.appData.upsert(
-        ctx.workspaceId,
-        appId,
-        config.table,
-        record,
-        idField,
-      );
-      return { id: result.id, table: config.table, operation: result.created ? 'insert' : 'update' };
-    }
-    // update
-    const targetId = config.idField ? record[config.idField] : record.id;
-    if (typeof targetId !== 'string' || !targetId) {
-      throw new AgentisError(
-        'VALIDATION_FAILED',
-        `data_write node ${node.id}: update requires an id (idField=${config.idField ?? 'id'})`,
-      );
-    }
-    this.deps.appData.update(ctx.workspaceId, appId, config.table, targetId, record);
-    return { id: targetId, table: config.table, operation: 'update' };
-  }
-
-  /**
-   * Read records from the app's structured Data layer. Lets a workflow act on
-   * its own accumulated operational data without leaving the engine.
-   */
-  async #executeDataRead(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: DataReadNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    if (!this.deps.appData) {
-      throw new AgentisError(
-        'WORKFLOW_GRAPH_INVALID',
-        'data_read node present but AppDataService not wired',
-      );
-    }
-    const appId = config.appId ?? this.#resolveAppId(ctx);
-    if (!appId) {
-      throw new AgentisError(
-        'WORKFLOW_GRAPH_INVALID',
-        `data_read node ${node.id} could not resolve an owning app — set config.appId`,
-      );
-    }
-    const where: Record<string, unknown> = { ...(config.where ?? {}) };
-    for (const [col, path] of Object.entries(config.whereFrom ?? {})) {
-      where[col] = lookupPath(inputData, path);
-    }
-    const result = this.deps.appData.query(appId, config.table, {
-      where,
-      expression: config.filter,
-      limit: config.limit,
-      orderBy: config.orderBy,
-      orderDir: config.orderDir,
-    });
-    const key = config.outputKey ?? 'records';
-    if (config.single) {
-      return {
-        [key]: result.records[0] ?? null,
-        found: result.records.length > 0,
-        table: config.table,
-      };
-    }
-    return { [key]: result.records, total: result.total, table: config.table };
-  }
-
-  /** Resolve the owning app of the running workflow (cached on the context). */
-  #resolveAppId(ctx: RunningContext): string | null {
-    if (ctx.appId !== undefined) return ctx.appId;
-    let appId: string | null = null;
-    try {
-      const wf = this.deps.db
-        .select({ appId: schema.workflows.appId })
-        .from(schema.workflows)
-        .where(eq(schema.workflows.id, ctx.workflowId))
-        .get();
-      appId = wf?.appId ?? null;
-      if (!appId) {
-        const app = this.deps.db
-          .select({ id: schema.appInstances.id })
-          .from(schema.appInstances)
-          .where(eq(schema.appInstances.entryWorkflowId, ctx.workflowId))
-          .get();
-        appId = app?.id ?? null;
-      }
-    } catch {
-      appId = null;
-    }
-    ctx.appId = appId;
-    return appId;
-  }
-
-  // ────────────────────────────────────────────────────────────
-  // Brain lookup node (AGENTIS-PLATFORM-10X §Layer 4)
-  // ────────────────────────────────────────────────────────────
-
-  async #executeBrainLookup(
-    ctx: RunningContext,
-    config: BrainLookupNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const outputKey = config.outputKey ?? 'atoms';
-    if (!this.deps.collectiveBrain) {
-      return { [outputKey]: [], query: '', resultCount: 0 };
-    }
-    let query = config.query ?? '';
-    if ((config.queryMode ?? 'static') === 'dynamic' && config.queryPath) {
-      const v = lookupPath(inputData, config.queryPath);
-      query = typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v);
-    }
-    query = query.trim();
-    const topK = Math.min(Math.max(config.topK ?? 5, 1), 25);
-    let atoms: unknown[] = [];
-    try {
-      const brain = this.deps.collectiveBrain as unknown as {
-        search?: (a: { workspaceId: string; query: string; topK: number }) => unknown[];
-        query?: (a: { workspaceId: string; query: string; topK: number }) => unknown[];
-      };
-      const fn = brain.search ?? brain.query;
-      if (fn && query) {
-        atoms = fn.call(this.deps.collectiveBrain, {
-          workspaceId: ctx.workspaceId,
-          query,
-          topK,
-        });
-      }
-    } catch (err) {
-      this.deps.logger.warn('brain_lookup.failed', {
-        runId: ctx.runId,
-        message: (err as Error).message,
-      });
-    }
-    return { [outputKey]: atoms, query, resultCount: Array.isArray(atoms) ? atoms.length : 0 };
-  }
-
-  // ────────────────────────────────────────────────────────────
-  // Artifact collect node (AGENTIS-PLATFORM-10X §A12)
+  // Artifact collect node
   // ────────────────────────────────────────────────────────────
 
   async #executeArtifactCollect(
@@ -1582,29 +1250,6 @@ export class WorkflowEngine {
       workflowId: ctx.workflowId,
     });
 
-    // Cross-workflow event signaling (AGENTIS-PLATFORM-10X §A3): a workflow
-    // reaching a terminal state fires APP_WORKFLOW_COMPLETED / _FAILED so the
-    // `workflow_completed` trigger can chain the next domain without coupling.
-    if (status === 'COMPLETED' || status === 'FAILED') {
-      const appWfEvent =
-        status === 'COMPLETED'
-          ? REALTIME_EVENTS.APP_WORKFLOW_COMPLETED
-          : REALTIME_EVENTS.APP_WORKFLOW_FAILED;
-      const appWfPayload = {
-        runId: ctx.runId,
-        workflowId: ctx.workflowId,
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        userId: ctx.userId,
-        status,
-      };
-      this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), appWfEvent, appWfPayload);
-      const appId = this.#resolveAppId(ctx);
-      if (appId) {
-        this.deps.bus.publish(REALTIME_ROOMS.app(appId), appWfEvent, { ...appWfPayload, appId });
-      }
-    }
-
     if (finishing && previous !== status) {
       await this.#appendTerminalConversationMessage(ctx, status);
     }
@@ -1726,14 +1371,10 @@ interface RunningContext {
   inflightDispatches: number;
   startedAt?: string;
   scratchpad?: { snapshot: Record<string, unknown> };
-  /** Owning app id — `undefined` = not resolved yet, `null` = resolved as none. */
-  appId?: string | null;
   /** Active agent_swarm nodes keyed by node id. */
   swarms: Map<string, SwarmState>;
   /** Self-heal attempt counters keyed by agent_task node id. */
   selfHealAttempts: Map<string, number>;
-  /** B3 — accumulated `agent.thinking` text per agent_task node id. */
-  thinkingTraces: Map<string, string[]>;
 }
 
 interface SwarmState {

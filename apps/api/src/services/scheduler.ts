@@ -212,7 +212,7 @@ export class EventChainService {
       .from(schema.workflowRuns)
       .where(eq(schema.workflowRuns.id, runId))
       .get();
-    if (!sourceRun) return { fired: 0 };
+    if (!sourceRun || !sourceRun.workflowId) return { fired: 0 };
 
     const subscriptions = this.deps.db
       .select()

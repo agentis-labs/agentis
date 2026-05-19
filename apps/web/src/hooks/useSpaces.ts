@@ -55,7 +55,6 @@ export function useSpaces(): {
       REALTIME_EVENTS.SPACE_CREATED,
       REALTIME_EVENTS.SPACE_UPDATED,
       REALTIME_EVENTS.SPACE_DELETED,
-      REALTIME_EVENTS.APP_SPACE_CHANGED,
     ],
     () => {
       void refresh();

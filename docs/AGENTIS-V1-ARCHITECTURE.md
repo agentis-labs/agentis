@@ -141,29 +141,21 @@ dispatching each item through `#dispatchNode()`.
 
 ### 3.2 Node kinds
 
+v1.0.0 ships eleven node kinds. `#dispatchNode()` routes on `node.config.kind`:
+
 | Kind | Behaviour |
 |---|---|
 | `trigger` | Pass-through; seeds initial inputs |
 | `agent_task` | Dispatches to AdapterManager; async callback via `notifyTaskCompleted` |
+| `agent_swarm` | Parallel agent fan-out over an input array; merges results (`collect_all` / `first_success` / `majority_vote`) |
 | `skill_task` | Runs a registered skill in the workspace; result returned synchronously |
-| `evaluator` | Scores an agent output against a rubric; emits pass/fail verdict |
-| `guardrails` | Policy gate — blocks or allows passage based on content policy |
-| `goal_task` | Structured goal decomposition node |
-| `scratchpad` | Named working memory; readable/writable by any node in the same run |
-| `variables` | Binds or updates workflow-level variables |
-| `context_compress` | Reduces context size via key_filter, extractive, or llm_summary strategy |
-| `table` | Reads/writes structured tabular data |
-| `knowledge` | Queries a connected knowledge base |
-| `router` | Dynamic branching based on a condition expression |
-| `checkpoint` | Saves a named state snapshot; enables partial replay |
-| `human_in_the_loop` | Pauses execution pending an operator approval decision |
-| `wait` | Timed pause |
-| `loop` | Iterates over a collection, dispatching child subgraphs per item |
-| `parallel` | Fan-out to N concurrent child branches, fan-in at merge |
-| `merge` | Union pass-through for converging parallel branches |
-| `response` | Emits the run's final output value |
+| `knowledge` | Queries connected knowledge bases via cosine/lexical retrieval |
+| `scratchpad` | Named working memory; read / write / append / delete within a run |
+| `router` | Dynamic branching on SafeConditionParser expressions (`first_match` / `all_matching` / `llm_route`) |
+| `merge` | Union pass-through for converging branches |
+| `checkpoint` | Human-in-the-loop approval gate; pauses the run pending an operator decision |
+| `artifact_collect` | Gathers upstream artifact refs into a named, versioned collection |
 | `subflow` | Nests a complete workflow as a child run via `SubflowExecutor` |
-| `integration` | Executes a connector action via `ConnectorRegistry` |
 
 ### 3.3 Tick loop
 
@@ -310,7 +302,10 @@ the final figure on `workflow_runs.cost_micros`.
 | `manual` | Operator-initiated via `POST /v1/workflows/:id/runs` |
 | `cron` | Time-based schedule via `node-cron` expressions |
 | `webhook` | HMAC-verified inbound HTTP call to `/v1/webhooks/trigger/:triggerId` |
-| `listener` | Responds to internal realtime events (e.g., `RUN_COMPLETED` on another workflow) |
+| `persistent_listener` | Long-lived adapter listener (`AgentAdapter.createPersistentListener`) |
+
+Cross-workflow chaining is handled separately by `EventChainService` via
+`workflow_event_subscriptions` (see §5.4) — not by a trigger type.
 
 ### 5.2 TriggerRuntime
 
@@ -475,12 +470,6 @@ Retrieval uses cosine similarity between the query embedding and stored chunk
 embeddings, returning top-K chunks above a configurable similarity threshold.
 Results are injected into the node's output context.
 
-### 8.4 Auto-linking
-
-`KnowledgeAutoLinker` connects newly uploaded documents to relevant existing
-workspace knowledge by comparing embeddings and inserting `knowledge_links`
-with a computed weight.
-
 ---
 
 ## 9. Packages & Registry
@@ -493,12 +482,13 @@ An Agentis package is a JSON manifest that declares a bundle of resources:
 
 ```typescript
 interface AgentisPackageContents {
-  agents:      AgentSeed[]
-  workflows:   WorkflowSeed[]
-  skills:      SkillSeed[]
-  triggers?:   TriggerSeed[]
-  credentials?: CredentialSeed[]
-  knowledge?:  KnowledgeBaseSeed[]
+  kind:            'agentis'
+  agents:          AgentContents[]
+  workflows:       WorkflowContents[]
+  skills:          SkillContents[]
+  integrations:    IntegrationContents[]
+  credentialSlots: CredentialSlot[]
+  knowledgeSeeds:  KnowledgeSeed[]
 }
 ```
 

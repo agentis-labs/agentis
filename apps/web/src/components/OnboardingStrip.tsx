@@ -45,7 +45,7 @@ export function OnboardingStrip() {
           ? `Assign a manager${wizardSpace ? ` for ${wizardSpace.name}` : ''}`
           : undefined}
       intro={wizardPreset?.role === 'orchestrator'
-        ? 'This is the workspace brain. Give it a runtime first so every other surface has a real command target.'
+        ? 'This is the workspace orchestrator. Give it a runtime first so every other surface has a real command target.'
         : wizardPreset?.role === 'manager'
           ? `Managers are optional, but ${wizardSpace?.name ?? 'this space'} will operate more cleanly with a coordinator above its workers and workflows.`
           : undefined}

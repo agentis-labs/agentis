@@ -19,7 +19,6 @@ import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { EventBus } from '../event-bus.js';
 import type { PackagerService } from '../services/packager.js';
-import type { AppDataService } from '../services/appDataService.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { validateWorkflowGraph } from '../engine/validateGraph.js';
@@ -32,8 +31,6 @@ export function buildWorkflowRoutes(deps: {
   bus: EventBus;
   /** Optional: when provided, every create/update mirrors the workflow into Packages. */
   packager?: PackagerService;
-  /** Optional: backs the workflow Output tab's accumulated-records browser. */
-  appData?: AppDataService;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -254,106 +251,6 @@ export function buildWorkflowRoutes(deps: {
     return c.json({ lastRun: mapRunSummary(run, triggerMap), outputs });
   });
 
-  /**
-   * Accumulated records written by this workflow's `data_write` nodes.
-   * Drives the Output tab's conditional "Accumulated Records" section.
-   * One entry per distinct target table.
-   */
-  app.get('/:id/records', (c) => {
-    const ws = getWorkspace(c);
-    const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-    const targets = dataWriteTargets(wf.graph as WorkflowGraph);
-    if (targets.length === 0 || !deps.appData) return c.json({ tables: [] });
-    const fallbackAppId = resolveWorkflowAppId(deps.db, id);
-    const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 5), 1), 100);
-
-    const seen = new Set<string>();
-    const tables: Array<Record<string, unknown>> = [];
-    for (const t of targets) {
-      const appId = t.appId ?? fallbackAppId;
-      if (!appId) continue;
-      const key = `${appId}:${t.table}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      try {
-        const result = deps.appData.query(appId, t.table, {
-          limit,
-          orderBy: 'created_at',
-          orderDir: 'desc',
-        });
-        tables.push({
-          table: t.table,
-          appId,
-          total: result.total,
-          records: result.records,
-          schema: deps.appData.schema(appId, t.table),
-        });
-      } catch {
-        // Table not provisioned yet (workflow never run) — surface it empty.
-        tables.push({ table: t.table, appId, total: 0, records: [], schema: null });
-      }
-    }
-    return c.json({ tables });
-  });
-
-  /** Export one accumulated-records table as CSV text (operator download). */
-  app.get('/:id/records/export', (c) => {
-    const ws = getWorkspace(c);
-    const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-    const table = c.req.query('table');
-    if (!table) throw new AgentisError('VALIDATION_FAILED', 'table query param required');
-    if (!deps.appData) throw new AgentisError('INTERNAL_ERROR', 'Data layer unavailable');
-    const appId = resolveRecordAppId(deps.db, wf.graph as WorkflowGraph, id, table);
-    if (!appId) throw new AgentisError('RESOURCE_NOT_FOUND', 'No data table for this workflow');
-    const result = deps.appData.query(appId, table, { limit: 500, orderBy: 'created_at', orderDir: 'desc' });
-    return c.json({ filename: `${table}.csv`, csv: recordsToCsv(result.records) });
-  });
-
-  /** Paginated browse of one accumulated-records table (drives "Load more"). */
-  app.get('/:id/records/:table', (c) => {
-    const ws = getWorkspace(c);
-    const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-    const table = c.req.param('table');
-    if (!deps.appData) return c.json({ table, total: 0, records: [], schema: null });
-    const appId = resolveRecordAppId(deps.db, wf.graph as WorkflowGraph, id, table);
-    if (!appId) return c.json({ table, total: 0, records: [], schema: null });
-    const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 20), 1), 200);
-    const offset = Math.max(Number(c.req.query('offset') ?? 0), 0);
-    try {
-      const result = deps.appData.query(appId, table, {
-        limit,
-        offset,
-        orderBy: 'created_at',
-        orderDir: 'desc',
-      });
-      return c.json({
-        table,
-        appId,
-        total: result.total,
-        records: result.records,
-        schema: deps.appData.schema(appId, table),
-      });
-    } catch {
-      return c.json({ table, appId, total: 0, records: [], schema: null });
-    }
-  });
-
-  /** Clear every record this workflow accumulated in one table. */
-  app.delete('/:id/records', (c) => {
-    const ws = getWorkspace(c);
-    const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-    const table = c.req.query('table');
-    if (!table) throw new AgentisError('VALIDATION_FAILED', 'table query param required');
-    if (!deps.appData) throw new AgentisError('INTERNAL_ERROR', 'Data layer unavailable');
-    const appId = resolveRecordAppId(deps.db, wf.graph as WorkflowGraph, id, table);
-    if (!appId) throw new AgentisError('RESOURCE_NOT_FOUND', 'No data table for this workflow');
-    const removed = deps.appData.clearTable(ws.workspaceId, appId, table);
-    return c.json({ ok: true, removed });
-  });
 
   return app;
 }
@@ -482,66 +379,6 @@ function formatFinalNodeOutput(
     kind,
     value: nodeState.outputData ?? null,
   };
-}
-
-/** Extract distinct { table, appId? } targets from a graph's data_write nodes. */
-function dataWriteTargets(graph: WorkflowGraph): Array<{ table: string; appId?: string }> {
-  const out: Array<{ table: string; appId?: string }> = [];
-  for (const node of graph.nodes ?? []) {
-    const config = node.config as { kind?: string; table?: string; appId?: string };
-    if (config?.kind === 'data_write' && typeof config.table === 'string' && config.table) {
-      out.push({ table: config.table, appId: config.appId });
-    }
-  }
-  return out;
-}
-
-/** Resolve the app that owns a workflow (direct appId, or app entry workflow). */
-function resolveWorkflowAppId(db: AgentisSqliteDb, workflowId: string): string | null {
-  const wf = db
-    .select({ appId: schema.workflows.appId })
-    .from(schema.workflows)
-    .where(eq(schema.workflows.id, workflowId))
-    .get();
-  if (wf?.appId) return wf.appId;
-  const app = db
-    .select({ id: schema.appInstances.id })
-    .from(schema.appInstances)
-    .where(eq(schema.appInstances.entryWorkflowId, workflowId))
-    .get();
-  return app?.id ?? null;
-}
-
-/** Resolve the app id backing a specific data_write table for a workflow. */
-function resolveRecordAppId(
-  db: AgentisSqliteDb,
-  graph: WorkflowGraph,
-  workflowId: string,
-  table: string,
-): string | null {
-  const explicit = dataWriteTargets(graph).find((t) => t.table === table)?.appId;
-  return explicit ?? resolveWorkflowAppId(db, workflowId);
-}
-
-/** Serialize records to CSV. Columns are the union of all record keys. */
-function recordsToCsv(records: Array<Record<string, unknown>>): string {
-  if (records.length === 0) return '';
-  const columns: string[] = [];
-  for (const rec of records) {
-    for (const key of Object.keys(rec)) {
-      if (!columns.includes(key)) columns.push(key);
-    }
-  }
-  const escape = (value: unknown): string => {
-    if (value === null || value === undefined) return '';
-    const str = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-  };
-  const lines = [columns.join(',')];
-  for (const rec of records) {
-    lines.push(columns.map((col) => escape(rec[col])).join(','));
-  }
-  return lines.join('\r\n');
 }
 
 function loadWorkflow(db: AgentisSqliteDb, workspaceId: string, id: string) {

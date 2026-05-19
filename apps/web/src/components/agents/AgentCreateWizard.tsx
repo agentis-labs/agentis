@@ -95,13 +95,13 @@ const ROLE_OPTIONS: Array<{
   {
     value: 'orchestrator',
     title: 'Orchestrator',
-    subtitle: 'The workspace brain. Routes goals, managers, and workers.',
+    subtitle: 'The workspace orchestrator. Routes goals, managers, and workers.',
     icon: OrchestratorGlyph,
   },
   {
     value: 'manager',
     title: 'Manager',
-    subtitle: 'Owns a domain or space. Coordinates execution under the brain.',
+    subtitle: 'Owns a domain or space. Coordinates execution under the orchestrator.',
     icon: ManagerGlyph,
   },
   {
@@ -129,7 +129,7 @@ function defaultNameForRole(role: AgentRole): string {
 }
 
 function roleSummary(role: AgentRole): string {
-  if (role === 'orchestrator') return 'Workspace brain';
+  if (role === 'orchestrator') return 'Workspace orchestrator';
   if (role === 'manager') return 'Manager';
   return 'Worker';
 }
@@ -707,8 +707,8 @@ function HierarchyNotice({
     return (
       <div className={clsx('rounded-lg border px-3 py-3 text-sm', orchestrator ? 'border-danger/30 bg-danger/5 text-danger' : 'border-line bg-surface-2 text-text-muted')}>
         {orchestrator
-          ? `A workspace brain already exists: ${orchestrator.name}. Commission this agent as a manager or worker instead.`
-          : 'This agent will be the workspace brain. One orchestrator per workspace.'}
+          ? `A workspace orchestrator already exists: ${orchestrator.name}. Commission this agent as a manager or worker instead.`
+          : 'This agent will be the workspace orchestrator. One orchestrator per workspace.'}
       </div>
     );
   }
@@ -716,7 +716,7 @@ function HierarchyNotice({
   if (role === 'manager' && !orchestrator) {
     return (
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-sm text-text-muted">
-        Managers need a workspace brain to report to.
+        Managers need a workspace orchestrator to report to.
         <button type="button" onClick={onBecomeOrchestrator} className="ml-2 text-accent hover:underline">Commission orchestrator instead</button>
       </div>
     );
@@ -726,7 +726,7 @@ function HierarchyNotice({
     <label className="block space-y-1.5">
       <span className="text-xs font-medium text-text-secondary">{role === 'manager' ? 'Reports to' : 'Supervised by'}</span>
       <select value={reportsTo} onChange={(event) => onReportsToChange(event.target.value)} className={inputCls}>
-        <option value="">{role === 'manager' ? 'No brain selected' : 'No supervisor selected'}</option>
+        <option value="">{role === 'manager' ? 'No orchestrator selected' : 'No supervisor selected'}</option>
         {supervisors.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.role ? ` - ${agent.role}` : ''}</option>)}
       </select>
     </label>

@@ -237,7 +237,7 @@ function buildGraph(
       data: {
         agent: {
           id: '__ghost_orchestrator__',
-          name: 'Set up the workspace brain',
+          name: 'Set up the workspace orchestrator',
           ghostDescription: 'The orchestrator routes work, approvals, and command.',
           isGhost: true,
           createPreset: { role: 'orchestrator' },
@@ -303,7 +303,7 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
             type="button"
             onClick={(event) => { event.stopPropagation(); data.onGhostCreate?.(agent.createPreset ?? undefined); }}
             className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-line bg-surface-2 text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary"
-            aria-label="Set up the workspace brain"
+            aria-label="Set up the workspace orchestrator"
           >
             <Plus size={14} />
           </button>

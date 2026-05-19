@@ -7,10 +7,8 @@
  * during V1.0/V1.1 development.
  */
 
-import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { z } from 'zod';
-import { and, desc, eq, inArray, isNull, ne, or } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { CONSTANTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -24,12 +22,6 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { buildAgentMutationRoutes } from './agentMutations.js';
 import { PLAYBOOK_LIBRARY } from '../data/playbook-library.js';
-
-const writeAgentMemorySchema = z.object({
-  kind: z.enum(['fact', 'rule', 'preference', 'pattern', 'lesson']).default('fact'),
-  title: z.string().trim().min(1).max(160),
-  content: z.string().trim().min(1).max(8000),
-});
 
 export interface AgentRoutesDeps {
   db: AgentisSqliteDb;
@@ -53,10 +45,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       .from(schema.agents)
       .where(role
         ? and(eq(schema.agents.workspaceId, ws.workspaceId), eq(schema.agents.role, role))
-        : and(
-          eq(schema.agents.workspaceId, ws.workspaceId),
-          or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
-        ))
+        : eq(schema.agents.workspaceId, ws.workspaceId))
       .all();
     const agentIds = rows.map((agent) => agent.id);
     const spaces = deps.db
@@ -101,17 +90,6 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         ))
         .all()
       : [];
-    const memories = agentIds.length > 0
-      ? deps.db
-        .select({ agentId: schema.memoryEntries.agentId })
-        .from(schema.memoryEntries)
-        .where(and(
-          eq(schema.memoryEntries.workspaceId, ws.workspaceId),
-          inArray(schema.memoryEntries.agentId, agentIds),
-          isNull(schema.memoryEntries.archivedAt),
-        ))
-        .all()
-      : [];
     const workflows = deps.db
       .select({ id: schema.workflows.id, graph: schema.workflows.graph })
       .from(schema.workflows)
@@ -139,12 +117,6 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       if (!agentId) continue;
       const stats = statsByAgent.get(agentId);
       if (stats) stats.pendingApprovals += 1;
-    }
-
-    for (const memory of memories) {
-      if (!memory.agentId) continue;
-      const stats = statsByAgent.get(memory.agentId);
-      if (stats) stats.memoryPlaneCount += 1;
     }
 
     for (const workflow of workflows) {
@@ -176,9 +148,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
           spendTodayCents: stats.spendTodayCents,
           pendingApprovals: stats.pendingApprovals,
           connectionCounts: {
-            apps: 0,
             workflows: stats.workflowIds.size,
-            memoryPlanes: stats.memoryPlaneCount,
           },
         };
       }),
@@ -210,17 +180,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       .filter((workflow) => workflowUsesAgent(workflow.graph, id))
       .slice(0, 20)
       .map(({ graph: _graph, ...workflow }) => workflow);
-    const memoryCount = deps.db
-      .select({ id: schema.memoryEntries.id })
-      .from(schema.memoryEntries)
-      .where(and(eq(schema.memoryEntries.workspaceId, ws.workspaceId), eq(schema.memoryEntries.agentId, id), isNull(schema.memoryEntries.archivedAt)))
-      .limit(25)
-      .all().length;
     return c.json({
-      apps: [],
       workflows,
       tasks,
-      memoryPlanes: memoryCount > 0 ? [{ id: 'agent-memory', name: `${memoryCount} memories` }] : [],
     });
   });
 
@@ -240,81 +202,6 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       return c.json({ error: { code: 'RESOURCE_NOT_FOUND', message: 'agent not found' } }, 404);
     }
     return c.json({ agent: presentAgent(agent, deps.adapters) });
-  });
-
-  app.get('/:id/memory', (c) => {
-    const ws = getWorkspace(c);
-    const id = c.req.param('id');
-    const agent = deps.db
-      .select({ id: schema.agents.id, workspaceId: schema.agents.workspaceId })
-      .from(schema.agents)
-      .where(and(eq(schema.agents.id, id), eq(schema.agents.workspaceId, ws.workspaceId)))
-      .get();
-    if (!agent) {
-      return c.json({ error: { code: 'RESOURCE_NOT_FOUND', message: 'agent not found' } }, 404);
-    }
-    const rows = deps.db
-      .select()
-      .from(schema.memoryEntries)
-      .where(and(
-        eq(schema.memoryEntries.workspaceId, ws.workspaceId),
-        eq(schema.memoryEntries.agentId, id),
-        isNull(schema.memoryEntries.archivedAt),
-      ))
-      .orderBy(desc(schema.memoryEntries.updatedAt))
-      .limit(100)
-      .all();
-    return c.json({
-      entries: rows.map((row) => ({
-        id: row.id,
-        source: row.sourceType === 'agent' ? 'agent' : 'platform',
-        sourceType: row.sourceType,
-        type: row.kind,
-        kind: row.kind,
-        title: row.title,
-        content: row.content,
-        trust: row.confidence,
-        importance: row.importance,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      })),
-    });
-  });
-
-  app.post('/:id/memory', async (c) => {
-    const ws = getWorkspace(c);
-    const id = c.req.param('id');
-    const agent = deps.db
-      .select({ id: schema.agents.id, workspaceId: schema.agents.workspaceId })
-      .from(schema.agents)
-      .where(and(eq(schema.agents.id, id), eq(schema.agents.workspaceId, ws.workspaceId)))
-      .get();
-    if (!agent) {
-      return c.json({ error: { code: 'RESOURCE_NOT_FOUND', message: 'agent not found' } }, 404);
-    }
-    const body = writeAgentMemorySchema.parse(await c.req.json());
-    const now = new Date().toISOString();
-    const memory = {
-      id: randomUUID(),
-      workspaceId: ws.workspaceId,
-      teamId: null,
-      agentId: id,
-      userId: ws.user.id,
-      sourceType: 'operator',
-      sourceId: null,
-      kind: body.kind,
-      title: body.title,
-      content: body.content,
-      importance: 7,
-      confidence: 1,
-      tags: [],
-      metadata: { scope: 'agent' },
-      archivedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    deps.db.insert(schema.memoryEntries).values(memory).run();
-    return c.json({ memory, written: true }, 201);
   });
 
   // Mount the full mutation surface (POST /, PATCH /:id, DELETE /:id,
@@ -363,7 +250,6 @@ function createAgentNodeStats() {
     runsToday: 0,
     spendTodayCents: 0,
     pendingApprovals: 0,
-    memoryPlaneCount: 0,
     workflowIds: new Set<string>(),
     todayRunIds: new Set<string>(),
   };

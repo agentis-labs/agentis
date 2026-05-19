@@ -137,8 +137,6 @@ const ECOSYSTEM_REFRESH_EVENTS = [
   REALTIME_EVENTS.SPACE_CREATED,
   REALTIME_EVENTS.SPACE_UPDATED,
   REALTIME_EVENTS.SPACE_DELETED,
-  REALTIME_EVENTS.APP_SPACE_CHANGED,
-  REALTIME_EVENTS.MEMORY_WRITTEN,
 ] as const;
 
 const NODE = {
@@ -833,7 +831,7 @@ export function buildCanvasModel(
   if (roles.orchestrator) {
     nodes.push(agentNode(roles.orchestrator, 'orchestrator', { x: canvasSize.width / 2, y: 170 }, activeAgentIds, approvals, activeRuns));
   } else {
-    nodes.push(ghostNode('ghost-orchestrator', 'orchestrator', 'Orchestrator', 'commission your workspace brain', { x: canvasSize.width / 2, y: 170 }, NODE.orchestrator));
+    nodes.push(ghostNode('ghost-orchestrator', 'orchestrator', 'Orchestrator', 'commission your workspace orchestrator', { x: canvasSize.width / 2, y: 170 }, NODE.orchestrator));
   }
 
   const managerNodeIds: string[] = [];
@@ -1015,7 +1013,7 @@ function GhostEmptyState({ onCreateOrchestrator }: { onCreateOrchestrator: () =>
       <PackageOpen size={32} className="mx-auto text-text-muted" />
       <h2 className="mt-3 text-heading text-text-primary">Your AI organization will appear here.</h2>
       <p className="mt-2 text-[13px] leading-relaxed text-text-secondary">
-        Start with the orchestrator. Once the workspace brain is commissioned, managers and workers can branch beneath it.
+        Start with the orchestrator. Once the workspace orchestrator is commissioned, managers and workers can branch beneath it.
       </p>
       <button
         type="button"
@@ -1124,7 +1122,7 @@ function computeHomeViewport(containerSize: VirtualCanvasSize, bounds: CanvasBou
 
 function classifyAgents(agents: WorkspaceAgent[]) {
   const orchestrator = agents.find((agent) => normalizeRole(agent) === 'orchestrator')
-    ?? agents.find((agent) => /orchestrator|brain/i.test(agent.name))
+    ?? agents.find((agent) => /orchestrator/i.test(agent.name))
     ?? null;
   const managers = agents
     .filter((agent) => agent.id !== orchestrator?.id && normalizeRole(agent) === 'manager')
@@ -1484,7 +1482,7 @@ function normalizeRole(agent: WorkspaceAgent): string {
   const role = stringField(record, ['role', 'agentRole', 'type'])?.toLowerCase();
   if (role?.includes('orchestrator')) return 'orchestrator';
   if (role?.includes('manager')) return 'manager';
-  if (/orchestrator|brain/i.test(agent.name)) return 'orchestrator';
+  if (/orchestrator/i.test(agent.name)) return 'orchestrator';
   if (/manager|lead|owner/i.test(agent.name)) return 'manager';
   return 'worker';
 }

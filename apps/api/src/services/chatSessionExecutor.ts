@@ -336,10 +336,6 @@ export class ChatSessionExecutor {
     const adapterHealth = this.#deps.adapters?.list()
       .filter((registration) => agentInventory.some((agentRow) => agentRow.id === registration.agentId))
       .map((registration) => ({ agentId: registration.agentId, adapterType: registration.adapterType })) ?? [];
-    const turnCosts = db.select().from(schema.turnState).where(eq(schema.turnState.workspaceId, ctx.workspaceId)).all()
-      .reduce((sum, row) => sum + (row.costCents ?? 0), 0);
-    const evaluatorCosts = db.select().from(schema.runEvaluations).where(eq(schema.runEvaluations.workspaceId, ctx.workspaceId)).all()
-      .reduce((sum, row) => sum + (row.costCents ?? 0), 0);
     return {
       workspaceName: workspace?.name,
       agentName: agent?.name,
@@ -347,7 +343,6 @@ export class ChatSessionExecutor {
       activeRuns,
       pendingApprovals,
       gatewayHealth: { gateways, registeredAdapters: adapterHealth },
-      budgetSnapshot: { totalRecordedCostCents: turnCosts + evaluatorCosts, turnCostCents: turnCosts, evaluatorCostCents: evaluatorCosts },
     };
   }
 

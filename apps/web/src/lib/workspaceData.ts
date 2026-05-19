@@ -161,7 +161,6 @@ export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.SPACE_CREATED,
   REALTIME_EVENTS.SPACE_UPDATED,
   REALTIME_EVENTS.SPACE_DELETED,
-  REALTIME_EVENTS.APP_SPACE_CHANGED,
   REALTIME_EVENTS.ACTIVITY_CREATED,
 ] as const;
 
@@ -214,7 +213,7 @@ function deriveNotifications(
       id: 'setup-orchestrator',
       type: 'setup',
       title: 'Commission your orchestrator',
-      context: 'The orchestrator is the workspace brain. Needed for routing, approvals, and command.',
+      context: 'The orchestrator routes goals, approvals, and command across the workspace.',
       timestamp: new Date().toISOString(),
       actionLabel: 'Commission orchestrator',
       actionEvent: 'agentis:commission-orchestrator',

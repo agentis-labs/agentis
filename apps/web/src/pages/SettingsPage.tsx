@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, Brain } from 'lucide-react';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
@@ -18,7 +18,7 @@ import { Skeleton } from '../components/shared/Skeleton';
 import { ThemeToggle } from '../components/shared/ThemeToggle';
 import { StatusBadge } from '../components/shared/StatusBadge';
 
-type Tab = 'profile' | 'workspace' | 'intelligence' | 'connections' | 'security' | 'budget';
+type Tab = 'profile' | 'workspace' | 'connections' | 'security' | 'budget';
 
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -36,7 +36,6 @@ export function SettingsPage() {
         tabs={[
           { value: 'profile',     label: 'Profile' },
           { value: 'workspace',   label: 'Workspace' },
-          { value: 'intelligence', label: 'Intelligence' },
           { value: 'connections', label: 'Connections' },
           { value: 'security',    label: 'Security' },
           { value: 'budget',      label: 'Budget' },
@@ -46,7 +45,6 @@ export function SettingsPage() {
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {tab === 'profile' && <ProfileTab />}
         {tab === 'workspace' && <WorkspaceTab />}
-        {tab === 'intelligence' && <IntelligenceTab />}
         {tab === 'connections' && <ConnectionsTab />}
         {tab === 'security' && <SecurityTab />}
         {tab === 'budget' && <BudgetTab />}
@@ -123,31 +121,6 @@ function ProfileTab() {
   );
 }
 
-function IntelligenceTab() {
-  return (
-    <div className="max-w-xl">
-      <div className="rounded-card border border-line bg-surface p-5">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-card bg-accent-soft text-accent">
-            <Brain size={16} />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-text-primary">Brain intelligence moved to the Brain page</h2>
-            <p className="mt-2 text-[13px] leading-relaxed text-text-muted">
-              Embeddings, degraded-mode warnings, and background model setup are configured where the Brain health signals are visible.
-            </p>
-            <Link
-              to="/brain/config"
-              className="mt-4 inline-flex h-9 items-center justify-center rounded-input bg-accent px-3 text-[13px] font-semibold text-accent-contrast transition hover:opacity-90 active:translate-y-px"
-            >
-              Open Brain Config
-            </Link>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function WorkspaceTab() {
   const toast = useToast();

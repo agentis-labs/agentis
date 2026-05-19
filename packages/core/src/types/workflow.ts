@@ -17,15 +17,9 @@ export type WorkflowNodeType =
   | 'checkpoint'
   | 'subflow'
   | 'scratchpad'
-  /** Direct write into the app's structured Data layer (AGENTIS-PLATFORM-10X §A5). */
-  | 'data_write'
-  /** Query the app's structured Data layer from inside a running workflow (§Layer 3). */
-  | 'data_read'
-  /** Parallel agent fan-out over an input array (AGENTIS-PLATFORM-10X §A8). */
+  /** Parallel agent fan-out over an input array. */
   | 'agent_swarm'
-  /** Query the Collective Brain graph from inside a running workflow (§Layer 4). */
-  | 'brain_lookup'
-  /** Collect and version artifacts produced by upstream nodes (AGENTIS-PLATFORM-10X §A12). */
+  /** Collect and version artifacts produced by upstream nodes. */
   | 'artifact_collect';
 
 export interface WorkflowGraph {
@@ -68,41 +62,19 @@ export type WorkflowNodeConfig = (
   | CheckpointNodeConfig
   | SubflowNodeConfig
   | ScratchpadNodeConfig
-  | DataWriteNodeConfig
-  | DataReadNodeConfig
   | AgentSwarmNodeConfig
-  | BrainLookupNodeConfig
   | ArtifactCollectNodeConfig
 ) & WorkflowOutputConfig;
 
-/**
- * Trigger node config.
- *
- * `data_event` and `workflow_completed` are the cross-workflow event
- * primitives (AGENTIS-PLATFORM-10X §A2, §A3) that make apps autonomous —
- * a write into the Data layer or the completion of one workflow can start
- * another with no synchronous coupling.
- */
+/** Trigger node config. */
 export interface TriggerNodeConfig {
   kind: 'trigger';
   triggerType:
     | 'manual'
     | 'cron'
     | 'webhook'
-    | 'persistent_listener'
-    | 'data_event'
-    | 'workflow_completed';
+    | 'persistent_listener';
   triggerId?: string;
-  /** For `data_event`: the Data table to watch. */
-  table?: string;
-  /** For `data_event`: which mutation fires the trigger. */
-  event?: 'insert' | 'update' | 'delete' | 'any';
-  /** For `data_event`: a SafeConditionParser expression on the record. */
-  filter?: string;
-  /** For `workflow_completed`: the upstream workflow whose completion fires this. */
-  sourceWorkflowId?: string;
-  /** For `workflow_completed`: only fire on this terminal status. */
-  sourceStatus?: 'COMPLETED' | 'FAILED' | 'any';
 }
 
 /**
@@ -127,47 +99,6 @@ export interface AgentTaskNodeConfig {
 }
 
 /**
- * Direct write into the app's structured Data layer. No agent dispatch, no
- * skill invocation — the engine calls `AppDataService` with the node input.
- */
-export interface DataWriteNodeConfig {
-  kind: 'data_write';
-  table: string;
-  operation: 'insert' | 'update' | 'upsert';
-  /** JSONPath into the node input to extract the record (defaults to whole input). */
-  recordPath?: string;
-  /** For update/upsert: the field to match the existing row on. */
-  idField?: string;
-  /** Explicit app id — only needed for ephemeral runs with no owning app. */
-  appId?: string;
-}
-
-/**
- * Read records from the app's structured Data layer. No agent dispatch — the
- * engine calls `AppDataService.query` and returns the matched records so
- * downstream nodes can act on accumulated operational data.
- */
-export interface DataReadNodeConfig {
-  kind: 'data_read';
-  table: string;
-  /** Literal equality filters: column → value. */
-  where?: Record<string, unknown>;
-  /** Dynamic equality filters: column → JSONPath into the node input. */
-  whereFrom?: Record<string, string>;
-  /** SafeConditionParser expression applied per-row (post-SQL filter). */
-  filter?: string;
-  limit?: number;
-  orderBy?: string;
-  orderDir?: 'asc' | 'desc';
-  /** Output key for the result (default 'records'). */
-  outputKey?: string;
-  /** When true, return only the first matching record instead of an array. */
-  single?: boolean;
-  /** Explicit app id — only needed for ephemeral runs with no owning app. */
-  appId?: string;
-}
-
-/**
  * Parallel agent fan-out. The engine spawns one task per element of the
  * input array (bounded by `maxParallel`) and merges results.
  */
@@ -185,21 +116,10 @@ export interface AgentSwarmNodeConfig {
   outputKey: string;
 }
 
-/** Query the Collective Brain graph for the most relevant knowledge atoms. */
-export interface BrainLookupNodeConfig {
-  kind: 'brain_lookup';
-  /** Static query, or pulled dynamically from upstream output. */
-  queryMode?: 'static' | 'dynamic';
-  query?: string;
-  queryPath?: string;
-  topK?: number;
-  outputKey?: string;
-}
-
 /**
  * Collect artifacts (files, media, generated pages) from upstream nodes into a
  * named, versioned collection. The node gathers `ArtifactRef` objects from the
- * input data and writes them to the app's artifact store (AGENTIS-PLATFORM-10X §A12).
+ * input data and writes them to the artifact store.
  */
 export interface ArtifactCollectNodeConfig {
   kind: 'artifact_collect';

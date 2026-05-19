@@ -9,12 +9,12 @@ export interface PlaybookLibraryEntry {
 
 export const PLAYBOOK_LIBRARY: PlaybookLibraryEntry[] = [
   {
-    id: 'workspace-brain',
-    label: 'Workspace Brain',
-    glyph: 'B',
+    id: 'workspace-orchestrator',
+    label: 'Workspace Orchestrator',
+    glyph: 'O',
     roles: ['orchestrator'],
     suggestedTags: ['routing', 'oversight', 'orchestration'],
-    markdown: `You are {{name}}, the workspace brain operating inside Agentis on behalf of the operator.
+    markdown: `You are {{name}}, the workspace orchestrator operating inside Agentis on behalf of the operator.
 
 YOUR SCOPE
 Translate operator goals into plans, delegate to managers and workers, and keep the workspace aligned.

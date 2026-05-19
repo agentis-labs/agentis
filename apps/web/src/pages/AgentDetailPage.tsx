@@ -17,13 +17,10 @@ import { Button } from '../components/shared/Button';
 import { Skeleton } from '../components/shared/Skeleton';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
-import { MemoryEntryRow } from '../components/knowledge/MemoryEntryRow';
-import { MemoryWriteForm } from '../components/knowledge/MemoryWriteForm';
 import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
 import { AgentChannelsTab } from '../components/agents/AgentChannelsTab';
-import type { MemoryKind } from '../components/knowledge/types';
 
-type TabKey = 'identity' | 'instructions' | 'memory' | 'runtime' | 'channels' | 'history';
+type TabKey = 'identity' | 'instructions' | 'runtime' | 'channels' | 'history';
 
 /** Map legacy tab values (overview / connections) onto the redesigned set. */
 function normalizeTab(raw: string | null): TabKey {
@@ -35,7 +32,6 @@ function normalizeTab(raw: string | null): TabKey {
     case 'runtime':
       return 'runtime';
     case 'instructions':
-    case 'memory':
     case 'channels':
     case 'history':
       return raw;
@@ -75,21 +71,6 @@ interface InstructionFile {
   content: string;
   readonly?: boolean;
   source: 'harness' | 'platform';
-}
-
-interface MemoryEntry {
-  id: string;
-  source: 'agent' | 'platform';
-  sourceType?: string;
-  type?: string;
-  kind?: string;
-  title?: string;
-  content: string;
-  trust?: number;
-  confidence?: number;
-  importance?: number;
-  createdAt: string;
-  updatedAt?: string;
 }
 
 interface RunHistoryEntry {
@@ -251,7 +232,6 @@ export function AgentDetailPage() {
         tabs={[
           { value: 'identity',     label: 'Identity' },
           { value: 'instructions', label: 'Instructions' },
-          { value: 'memory',       label: 'Memory' },
           { value: 'runtime',      label: 'Runtime' },
           { value: 'channels',     label: 'Channels' },
           { value: 'history',      label: 'History' },
@@ -262,7 +242,6 @@ export function AgentDetailPage() {
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {tab === 'identity' && <IdentityTab agent={agent} allAgents={allAgents} allSpaces={allSpaces} onChange={refresh} />}
         {tab === 'instructions' && <InstructionsTab agent={agent} />}
-        {tab === 'memory' && <MemoryTab agent={agent} />}
         {tab === 'runtime' && <RuntimeTab agent={agent} allAgents={allAgents} onChange={refresh} />}
         {tab === 'channels' && <AgentChannelsTab agentId={agent.id} agentName={agent.name} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
@@ -634,98 +613,6 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
   );
 }
 
-function MemoryTab({ agent }: { agent: AgentDetail }) {
-  const toast = useToast();
-  const [entries, setEntries] = useState<MemoryEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'agent' | 'platform'>('all');
-  const [kindFilter, setKindFilter] = useState<'all' | MemoryKind>('all');
-
-  async function refresh() {
-    setLoading(true);
-    try {
-      const data = await api<{ entries: MemoryEntry[] }>(`/v1/agents/${agent.id}/memory`);
-      setEntries(data.entries ?? []);
-    } catch {
-      setEntries([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => { void refresh(); }, [agent.id]);
-
-  async function saveMemory(entry: { kind: MemoryKind; title: string; content: string }) {
-    await api(`/v1/agents/${agent.id}/memory`, { method: 'POST', body: JSON.stringify(entry) });
-    toast.success('Agent memory saved', entry.title);
-    await refresh();
-  }
-
-  async function archiveMemory(id: string) {
-    await api(`/v1/memory/${id}`, { method: 'DELETE' });
-    toast.success('Agent memory archived');
-    await refresh();
-  }
-
-  const filtered = entries.filter((e) => {
-    if (filter !== 'all' && e.source !== filter) return false;
-    return kindFilter === 'all' || (e.kind ?? e.type) === kindFilter;
-  });
-
-  if (loading) return <Skeleton height={300} />;
-
-  return (
-    <div className="space-y-4">
-      <MemoryWriteForm
-        submitLabel="Save to agent memory"
-        placeholder="A rule, fact, or preference injected into this agent's future work."
-        onSubmit={saveMemory}
-      />
-
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[12px] text-text-muted">{entries.length} {entries.length === 1 ? 'memory' : 'memories'}</span>
-        <div className="ml-auto flex flex-wrap gap-1">
-          {(['all', 'agent', 'platform'] as const).map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setFilter(f)}
-              className={`inline-flex h-7 items-center rounded-pill border px-2.5 text-[11px] font-medium ${
-                filter === f
-                  ? 'border-accent-muted bg-accent-soft text-accent'
-                  : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary'
-              }`}
-            >{f === 'all' ? 'All' : f === 'agent' ? 'Agent-native' : 'Platform'}</button>
-          ))}
-          {(['fact', 'rule', 'preference', 'pattern', 'lesson'] as const).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              onClick={() => setKindFilter(kindFilter === kind ? 'all' : kind)}
-              className={`inline-flex h-7 items-center rounded-pill border px-2.5 text-[11px] font-medium capitalize ${
-                kindFilter === kind
-                  ? 'border-accent-muted bg-accent-soft text-accent'
-                  : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary'
-              }`}
-            >{kind}</button>
-          ))}
-        </div>
-      </div>
-
-      {filtered.length === 0 ? (
-        <EmptyState
-          icon={<FileText size={48} />}
-          title="No memories yet"
-          body="Add a rule, fact, or preference to shape how this agent behaves on every task. Auto-learned memories will appear here as the agent works."
-        />
-      ) : (
-        <div className="space-y-2">
-          {filtered.map((m) => <MemoryEntryRow key={m.id} entry={m} onArchive={(id) => void archiveMemory(id)} />)}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /**
  * Runtime tab — how the agent connects to a harness, its model, capability

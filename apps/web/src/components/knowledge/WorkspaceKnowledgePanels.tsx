@@ -1,10 +1,6 @@
 /**
  * WorkspaceKnowledgePanels — body of the workspace-knowledge tabs.
  *
- * Extracted from KnowledgePage so the unified Brain page can host the same
- * Documents / Bases / Memory / Episodes panels under a single surface
- * (spec: docs/UIUX-refactor/BRAIN-PAGE-REDESIGN.md §4).
- *
  * The parent owns the active tab key, so this component is purely a
  * controlled view that fetches its own data.
  */
@@ -17,11 +13,9 @@ import { Skeleton } from '../shared/Skeleton';
 import { WorkspaceDocDropZone } from './WorkspaceDocDropZone';
 import { DocumentList } from './DocumentList';
 import { KnowledgeBaseList } from './KnowledgeBaseList';
-import { WorkspaceMemoryTab } from './WorkspaceMemoryTab';
-import { EpisodesTab } from './EpisodesTab';
 import type { KnowledgeBaseRow, KnowledgeDocumentRow } from './types';
 
-export type WorkspaceKnowledgeTab = 'documents' | 'bases' | 'memory' | 'episodes';
+export type WorkspaceKnowledgeTab = 'documents' | 'bases';
 
 export interface WorkspaceKnowledgePanelsHandles {
   documentCount: number;
@@ -105,7 +99,7 @@ export function WorkspaceKnowledgePanels({ tab, onCounts }: WorkspaceKnowledgePa
     await refresh();
   }
 
-  if (loading && tab !== 'memory' && tab !== 'episodes') {
+  if (loading) {
     return <Skeleton height={340} />;
   }
 
@@ -132,8 +126,6 @@ export function WorkspaceKnowledgePanels({ tab, onCounts }: WorkspaceKnowledgePa
           onPackage={(base) => void packageBase(base)}
         />
       )}
-      {tab === 'memory' && <WorkspaceMemoryTab />}
-      {tab === 'episodes' && <EpisodesTab />}
     </div>
   );
 }

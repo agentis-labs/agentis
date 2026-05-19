@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, isNull, or } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 
 export interface CreateKnowledgeBaseArgs {
   workspaceId: string;
-  appId?: string | null;
   name: string;
   description?: string | null;
 }
@@ -41,40 +40,19 @@ export interface SearchKnowledgeArgs {
   topK?: number;
 }
 
-interface KnowledgeBaseScopeOptions {
-  appId?: string | null;
-  includeWorkspace?: boolean;
-}
-
 export class KnowledgeBaseService {
-  private autoLinker: { autoLink: (input: { workspaceId: string; appId?: string | null; sourceId: string; sourceKind: 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern'; sourceTitle: string; sourceContent: string; siblingHeadId?: string | null; siblingHeadKind?: 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern' | null }) => number } | null = null;
-
   constructor(private readonly db: AgentisSqliteDb) {}
 
-  /** Wire the auto-linker after construction (it depends on CollectiveBrainService, which is created later). */
-  setAutoLinker(linker: NonNullable<KnowledgeBaseService['autoLinker']>): void {
-    this.autoLinker = linker;
-  }
-
-  listKnowledgeBases(workspaceId: string, options?: KnowledgeBaseScopeOptions) {
-    const appId = options?.appId ?? null;
-    const includeWorkspace = options?.includeWorkspace ?? false;
+  listKnowledgeBases(workspaceId: string) {
     return this.db
       .select()
       .from(schema.knowledgeBases)
-      .where(and(
-        eq(schema.knowledgeBases.workspaceId, workspaceId),
-        appId
-          ? (includeWorkspace
-            ? or(eq(schema.knowledgeBases.appId, appId), isNull(schema.knowledgeBases.appId))!
-            : eq(schema.knowledgeBases.appId, appId))
-          : isNull(schema.knowledgeBases.appId),
-      ))
+      .where(eq(schema.knowledgeBases.workspaceId, workspaceId))
       .all()
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
-  getKnowledgeBase(workspaceId: string, knowledgeBaseId: string, options?: KnowledgeBaseScopeOptions) {
+  getKnowledgeBase(workspaceId: string, knowledgeBaseId: string) {
     const kb = this.db
       .select()
       .from(schema.knowledgeBases)
@@ -86,11 +64,6 @@ export class KnowledgeBaseService {
       )
       .get();
     if (!kb) throw new AgentisError('RESOURCE_NOT_FOUND', 'Knowledge base not found');
-    if (options?.appId) {
-      const includeWorkspace = options.includeWorkspace ?? false;
-      const visibleToApp = kb.appId === options.appId || (includeWorkspace && kb.appId == null);
-      if (!visibleToApp) throw new AgentisError('RESOURCE_NOT_FOUND', 'Knowledge base not found');
-    }
     return kb;
   }
 
@@ -99,7 +72,6 @@ export class KnowledgeBaseService {
     const kb = {
       id: randomUUID(),
       workspaceId: args.workspaceId,
-      appId: args.appId ?? null,
       name: args.name,
       description: args.description ?? null,
       embeddingModel: 'lexical-v1',
@@ -154,7 +126,6 @@ export class KnowledgeBaseService {
     return this.persistDocument({
       workspaceId: args.workspaceId,
       knowledgeBaseId: args.knowledgeBaseId,
-      appId: knowledgeBase.appId ?? null,
       name: args.name,
       mimeType,
       content,
@@ -162,7 +133,7 @@ export class KnowledgeBaseService {
   }
 
   async addDocumentFromBytes(args: AddKnowledgeDocumentBytesArgs) {
-    const knowledgeBase = this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
+    this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
     const mimeType = args.mimeType ?? mimeTypeFromName(args.name);
     const content = await extractTextFromBytes(args.bytes, mimeType, args.name);
     if (!content.trim()) throw new AgentisError('VALIDATION_FAILED', 'Document content is empty');
@@ -170,14 +141,13 @@ export class KnowledgeBaseService {
     return this.persistDocument({
       workspaceId: args.workspaceId,
       knowledgeBaseId: args.knowledgeBaseId,
-      appId: knowledgeBase.appId ?? null,
       name: args.name,
       mimeType,
       content,
     });
   }
 
-  private persistDocument(args: AddKnowledgeDocumentArgs & { appId?: string | null; content: string }) {
+  private persistDocument(args: AddKnowledgeDocumentArgs & { content: string }) {
     const now = new Date().toISOString();
     const documentId = randomUUID();
     const chunks = chunkText(args.content);
@@ -211,26 +181,6 @@ export class KnowledgeBaseService {
         tokenCount: tokenize(chunk).length,
         createdAt: now,
       }).run();
-    }
-
-    // Best-effort auto-link new chunks into the collective brain so the
-    // graph never appears as a disconnected cloud of orphans after upload.
-    if (this.autoLinker && chunkIds.length > 0) {
-      const headId = chunkIds[0]!;
-      for (let index = 0; index < chunkIds.length; index += 1) {
-        const id = chunkIds[index]!;
-        const content = chunks[index] ?? '';
-        this.autoLinker.autoLink({
-          workspaceId: args.workspaceId,
-          appId: args.appId ?? null,
-          sourceId: id,
-          sourceKind: 'kb_chunk',
-          sourceTitle: args.name,
-          sourceContent: content,
-          siblingHeadId: index === 0 ? null : headId,
-          siblingHeadKind: index === 0 ? null : 'kb_chunk',
-        });
-      }
     }
 
     return { ...document, chunks: chunks.length };

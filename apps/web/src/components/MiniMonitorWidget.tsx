@@ -79,7 +79,7 @@ export function MiniMonitorWidget({ open, onClose }: { open: boolean; onClose: (
     const body = draft.trim();
     if (!body) return;
     if (!orchestrator) {
-      toast.warn('No orchestrator yet', 'Commission the workspace brain before sending monitor prompts.');
+      toast.warn('No orchestrator yet', 'Commission the workspace orchestrator before sending monitor prompts.');
       return;
     }
     setSending(true);

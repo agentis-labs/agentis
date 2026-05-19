@@ -133,7 +133,6 @@ export class CommandIndex {
       .where(and(
         eq(schema.agents.workspaceId, workspaceId),
         like(schema.agents.name, pattern),
-        or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
       ))
       .limit(20)
       .all();
