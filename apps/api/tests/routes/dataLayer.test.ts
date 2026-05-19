@@ -99,6 +99,38 @@ describe('Sprint B data layer routes', () => {
     expect(searchBody.results[0]?.score).toBeGreaterThan(0);
   });
 
+  it('accepts HTML documents and indexes readable text only', async () => {
+    const createRes = await app().request('/v1/knowledge-bases', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'Help Center' }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = (await createRes.json()) as { knowledgeBase: { id: string } };
+
+    const docRes = await app().request(`/v1/knowledge-bases/${created.knowledgeBase.id}/documents`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        name: 'billing.html',
+        mimeType: 'text/html',
+        content: '<html><head><style>.hidden{display:none}</style><script>window.secret = "ignore me"</script></head><body><h1>Billing Policy</h1><p>Retry failed invoices after card verification.</p><ul><li>Send a receipt after recovery.</li></ul></body></html>',
+      }),
+    });
+    expect(docRes.status).toBe(201);
+
+    const searchRes = await app().request(`/v1/knowledge-bases/${created.knowledgeBase.id}/search`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ query: 'billing retry receipt', topK: 3 }),
+    });
+    const searchBody = (await searchRes.json()) as { results: Array<{ content: string; score: number }> };
+    expect(searchBody.results[0]?.content).toContain('Billing Policy');
+    expect(searchBody.results[0]?.content).toContain('Retry failed invoices');
+    expect(searchBody.results[0]?.content).not.toContain('<h1>');
+    expect(searchBody.results[0]?.content).not.toContain('window.secret');
+  });
+
   it('stores and downloads workspace files', async () => {
     const uploadRes = await app().request('/v1/files', {
       method: 'POST',

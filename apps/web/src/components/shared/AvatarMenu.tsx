@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, LogOut } from 'lucide-react';
+import { RadioTower, Settings as SettingsIcon, LogOut } from 'lucide-react';
 import clsx from 'clsx';
 import { ThemeToggle } from './ThemeToggle';
 
@@ -15,6 +15,8 @@ interface AvatarMenuProps {
   name: string;
   email?: string;
   imageUrl?: string;
+  miniMonitorOpen?: boolean;
+  onToggleMiniMonitor?: () => void;
   onLogout: () => void;
 }
 
@@ -28,7 +30,7 @@ function initials(name: string): string {
   return ((first[0] ?? '') + (last[0] ?? '')).toUpperCase();
 }
 
-export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps) {
+export function AvatarMenu({ name, email, imageUrl, miniMonitorOpen = false, onToggleMiniMonitor, onLogout }: AvatarMenuProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
@@ -97,6 +99,18 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
           </div>
 
           <div className="p-1">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onToggleMiniMonitor?.();
+              }}
+              className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+            >
+              <RadioTower size={14} />
+              {miniMonitorOpen ? 'Hide mini monitor' : 'Show mini monitor'}
+            </button>
             <button
               type="button"
               role="menuitem"

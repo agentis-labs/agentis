@@ -8,11 +8,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ReactFlow, Background, Controls, type Edge, type Node } from '@xyflow/react';
+import type { Edge, Node } from '@xyflow/react';
 import { Maximize2 } from 'lucide-react';
-import '@xyflow/react/dist/style.css';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime } from '../../lib/realtime';
+import { CanvasEngine } from '../canvas/CanvasEngine';
 
 interface Props {
   runId: string;
@@ -89,7 +89,7 @@ export function CanvasEmbed({ runId, workflowId, initialNodes = [], initialEdges
             Waiting for canvas events…
           </div>
         ) : (
-          <ReactFlow
+          <CanvasEngine
             nodes={nodes}
             edges={edges}
             fitView
@@ -100,11 +100,12 @@ export function CanvasEmbed({ runId, workflowId, initialNodes = [], initialEdges
             panOnDrag={false}
             zoomOnScroll={false}
             zoomOnPinch={false}
+            zoomOnDoubleClick={false}
+            controlsPosition="top-right"
+            backgroundGap={16}
+            backgroundColor="#23252d"
             proOptions={{ hideAttribution: true }}
-          >
-            <Background gap={16} />
-            <Controls showInteractive={false} />
-          </ReactFlow>
+          />
         )}
       </div>
     </div>

@@ -34,6 +34,7 @@ export const tokens = {
 export const workspace = {
   get: () => localStorage.getItem(WORKSPACE),
   set: (id: string) => {
+    if (localStorage.getItem(WORKSPACE) === id) return;
     localStorage.setItem(WORKSPACE, id);
     emitLocalEvent('agentis:workspace-changed');
   },
@@ -46,6 +47,7 @@ export const workspace = {
 export const ambient = {
   get: () => localStorage.getItem(AMBIENT),
   set: (id: string) => {
+    if (localStorage.getItem(AMBIENT) === id) return;
     localStorage.setItem(AMBIENT, id);
     emitLocalEvent('agentis:ambient-changed');
   },
@@ -59,6 +61,21 @@ export interface ApiError {
   code: string;
   message: string;
   details?: unknown;
+}
+
+export function apiErrorMessage(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const shaped = error as { message?: unknown; code?: unknown };
+    const message = typeof shaped.message === 'string' && shaped.message.trim()
+      ? shaped.message.trim()
+      : null;
+    const code = typeof shaped.code === 'string' && shaped.code.trim() ? shaped.code.trim() : null;
+    if (message && code) return `${message} (${code})`;
+    if (message) return message;
+    if (code) return code;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 async function rawFetch(path: string, init: RequestInit = {}, retry = true): Promise<Response> {

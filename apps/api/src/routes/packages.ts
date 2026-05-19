@@ -29,6 +29,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { AppActivation } from '../services/appActivation.js';
+import type { AppDataService } from '../services/appDataService.js';
+import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
@@ -272,9 +274,21 @@ const packMetaSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-export function buildPackageRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus?: EventBus; activation?: AppActivation }) {
+export function buildPackageRoutes(deps: {
+  db: AgentisSqliteDb;
+  auth: AuthService;
+  bus?: EventBus;
+  activation?: AppActivation;
+  appData?: AppDataService;
+  logger?: Logger;
+}) {
   const app = new Hono();
-  const packager = new PackagerService({ db: deps.db, bus: deps.bus });
+  const packager = new PackagerService({
+    db: deps.db,
+    bus: deps.bus,
+    appData: deps.appData,
+    logger: deps.logger,
+  });
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
   function scope(c: Context) {
@@ -287,18 +301,26 @@ export function buildPackageRoutes(deps: { db: AgentisSqliteDb; auth: AuthServic
       id: row.id,
       name: row.name,
       slug: row.slug,
-      kind: (row.kind === 'agentis' ? 'app' : row.kind) as 'app' | 'workflow' | 'agent' | 'skill',
+      kind: (row.kind === 'agentis' ? 'app' : row.kind) as 'app' | 'workflow' | 'agent' | 'skill' | 'integration',
       version: row.version,
       description: row.description ?? '',
       isTemplate: false,
     };
   }
 
+  function isSupportedPackageRow(row: typeof schema.libraryPackages.$inferSelect) {
+    return row.kind === 'agentis'
+      || row.kind === 'workflow'
+      || row.kind === 'agent'
+      || row.kind === 'skill'
+      || row.kind === 'integration';
+  }
+
   // ── List ───────────────────────────────────────────────────────────────────
   app.get('/', (c) => {
     const ws = getWorkspace(c);
     const rows = packager.list({ workspaceId: ws.workspaceId });
-    return c.json({ packages: rows.map(toPackageDto) });
+    return c.json({ packages: rows.filter(isSupportedPackageRow).map(toPackageDto) });
   });
 
   // ── Compatibility pack shortcuts ──────────────────────────────────────────
@@ -331,10 +353,19 @@ export function buildPackageRoutes(deps: { db: AgentisSqliteDb; auth: AuthServic
 
   app.get('/:id/export', (c) => {
     const ws = getWorkspace(c);
+    const row = packager.get(c.req.param('id'), ws.workspaceId);
+    if (!isSupportedPackageRow(row)) {
+      throw new AgentisError('VALIDATION_FAILED', 'knowledge packages are temporarily disabled');
+    }
     return c.json(packager.exportEnvelope(c.req.param('id'), ws.workspaceId));
   });
 
   app.post('/:id/use', (c) => {
+    const ws = getWorkspace(c);
+    const row = packager.get(c.req.param('id'), ws.workspaceId);
+    if (!isSupportedPackageRow(row)) {
+      throw new AgentisError('VALIDATION_FAILED', 'knowledge packages are temporarily disabled');
+    }
     const result = packager.usePackage(scope(c), c.req.param('id'));
     return c.json(result, 201);
   });
@@ -345,6 +376,9 @@ export function buildPackageRoutes(deps: { db: AgentisSqliteDb; auth: AuthServic
     const id = c.req.param('id');
 
     const libRow = packager.get(id, ws.workspaceId);
+    if (!isSupportedPackageRow(libRow)) {
+      throw new AgentisError('VALIDATION_FAILED', 'knowledge packages are temporarily disabled');
+    }
     const contents = libRow.contents as PackageContents;
     const manifest = packager.manifestFromRow(libRow);
     const pkgDto = toPackageDto(libRow);
@@ -388,7 +422,6 @@ export function buildPackageRoutes(deps: { db: AgentisSqliteDb; auth: AuthServic
       const row = packager.packFromSkill(s, body.skillIds[0]!, meta);
       return c.json(toPackageDto(row), 201);
     }
-
     // App bundle / multi-resource → agentis package with snapshotted contents
     const workflows = body.workflowIds.length > 0
       ? deps.db.select().from(schema.workflows)

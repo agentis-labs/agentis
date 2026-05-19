@@ -31,6 +31,20 @@ export interface ChatToolCall {
   arguments: unknown;
 }
 
+export interface ChatConfirmationRequest {
+  turnId: string;
+  toolCall: {
+    id: string;
+    name: string;
+    args: unknown;
+  };
+  title: string;
+  body: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  expiresAt: string;
+}
+
 /**
  * Discriminated union streamed by `AgentAdapter.chat()`.
  * Consumers accumulate `text` deltas, act on `tool_call` events,
@@ -40,6 +54,7 @@ export type ChatDelta =
   | { type: 'thinking'; delta: string }
   | { type: 'text'; delta: string }
   | { type: 'tool_call'; id: string; name: string; args: unknown }
+  | ({ type: 'confirmation_required' } & ChatConfirmationRequest)
   | { type: 'tool_result'; id: string; name: string; result: unknown; error?: string }
   | { type: 'done'; finishReason: 'stop' | 'tool_calls' | 'max_turns' | 'error' };
 

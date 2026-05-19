@@ -32,6 +32,20 @@ describe('workflowGraphSchema', () => {
     expect(() => schemas.workflowGraphSchema.parse(validGraph)).not.toThrow();
   });
 
+  it('preserves the optional output declaration flag', () => {
+    const parsed = schemas.workflowGraphSchema.parse({
+      ...validGraph,
+      nodes: [
+        {
+          ...validGraph.nodes[0],
+          config: { ...validGraph.nodes[0].config, isOutput: true },
+        },
+        validGraph.nodes[1],
+      ],
+    });
+    expect(parsed.nodes[0]!.config.isOutput).toBe(true);
+  });
+
   it('rejects unknown version', () => {
     expect(() =>
       schemas.workflowGraphSchema.parse({ ...validGraph, version: 2 as unknown as 1 }),

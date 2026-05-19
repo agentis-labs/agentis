@@ -5,13 +5,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
-import type { RealtimeEventName, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
+import type { AgentisPackageContents, AppGraph, AppSurface, RealtimeEventName, WorkflowContents, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
+import { PackagerService } from '../packager.js';
 
 export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -241,6 +242,250 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
     },
     {
       definition: {
+        id: 'agentis.app.create',
+        family: 'build',
+        description: 'Create a deployed Agentis app from an operator goal. Builds an entry workflow when no workflowId is provided.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            goal: { type: 'string' },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            workflowId: { type: 'string' },
+          },
+          required: ['goal'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const goal = String(args.goal ?? '').trim();
+        if (!goal) throw new Error('app.create requires goal');
+        const appName = String(args.name ?? appNameFromGoal(goal)).trim() || appNameFromGoal(goal);
+        const description = String(args.description ?? goal).trim();
+        const workflow = loadOrBuildEntryWorkflow(args.workflowId ? String(args.workflowId) : null, goal, appName, deps, ctx.workspaceId);
+        const packager = new PackagerService({ db: deps.db, bus: deps.bus });
+        const contents: AgentisPackageContents & Record<string, unknown> = {
+          kind: 'agentis',
+          agents: [],
+          skills: [],
+          workflows: [{
+            slug: 'entry',
+            title: workflow.title,
+            summary: goal,
+            graph: workflow.graph,
+            settings: workflow.settings,
+          }],
+          integrations: [],
+          credentialSlots: [],
+          datasetSpecs: [],
+          knowledgeSeeds: [],
+          memorySeeds: [],
+          evaluatorRubrics: [],
+          evaluatorExampleSeeds: [],
+          workflowBaselines: [],
+          runtimeEpisodeSeeds: [],
+          screenshotUrls: [],
+          crossAppDependencies: [],
+          entryWorkflowSlug: 'entry',
+          category: inferAppCategory(goal),
+          description,
+          summary: goal,
+          iconGlyph: initials(appName),
+          iconColor: '#34d399',
+          appGraphTemplate: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+        };
+        const pkg = packager.create(
+          { workspaceId: ctx.workspaceId, ambientId: ctx.ambientId ?? null, userId: ctx.userId },
+          { name: appName, version: '1.0.0', description, tags: ['orchestrator-created', 'app'] },
+          'agentis',
+          contents,
+        );
+        const used = packager.usePackage(
+          { workspaceId: ctx.workspaceId, ambientId: ctx.ambientId ?? null, userId: ctx.userId },
+          pkg.id,
+        );
+        const appRow = deps.db.select().from(schema.appInstances).where(eq(schema.appInstances.id, used.resourceId)).get();
+        if (!appRow || appRow.workspaceId !== ctx.workspaceId) throw new Error('created app could not be loaded');
+        const nextContents = {
+          ...((appRow.packageContents ?? {}) as Record<string, unknown>),
+          appGraphTemplate: buildAppGraphTemplate(appName, workflow.title, appRow.entryWorkflowId ?? ''),
+        };
+        deps.db.update(schema.appInstances)
+          .set({ packageContents: nextContents, updatedAt: new Date().toISOString() })
+          .where(eq(schema.appInstances.id, appRow.id))
+          .run();
+        return {
+          appId: appRow.id,
+          slug: appRow.slug,
+          name: appRow.name,
+          entryWorkflowId: appRow.entryWorkflowId,
+          path: `${used.path}?layer=output&tab=results`,
+          canvasPath: `${used.path}?layer=canvas`,
+          message: `Created app "${appName}" with an entry workflow.`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.app.compose',
+        family: 'build',
+        description: 'Complete or update an existing draft Agentis app. Can attach an entry workflow, create/link worker agents, update declared surfaces, and replace the app canvas graph.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            appId: { type: 'string' },
+            slug: { type: 'string' },
+            goal: { type: 'string' },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            workflowId: { type: 'string' },
+            workflowTitle: { type: 'string' },
+            surfaces: { type: 'array', items: { type: 'object' } },
+            agents: { type: 'array', items: { type: 'object' } },
+            appGraph: { type: 'object' },
+          },
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const target = String(args.appId ?? args.slug ?? '').trim();
+        if (!target) throw new Error('app.compose requires appId or slug');
+
+        const appRow = deps.db
+          .select()
+          .from(schema.appInstances)
+          .where(and(
+            eq(schema.appInstances.workspaceId, ctx.workspaceId),
+            or(eq(schema.appInstances.id, target), eq(schema.appInstances.slug, target))!,
+          ))
+          .get();
+        if (!appRow) throw new Error(`app ${target} not found`);
+
+        const now = new Date().toISOString();
+        const appName = String(args.name ?? appRow.name).trim() || appRow.name;
+        const goal = String(args.goal ?? args.description ?? appRow.name).trim();
+        const description = String(args.description ?? goal).trim();
+        const currentContents = recordFromUnknown(appRow.packageContents) as AgentisPackageContents & Record<string, unknown>;
+
+        const createdAgentIds = createRequestedAgents(args.agents, deps, ctx, appRow.id);
+        let entryWorkflowId = appRow.entryWorkflowId ?? null;
+        let workflowTitle = 'Entry workflow';
+        let workflowSummary = goal;
+        let workflowGraph: WorkflowGraph | null = null;
+        let workflowSettings: Record<string, unknown> = {};
+
+        if (args.workflowId || goal) {
+          const workflow = loadOrBuildEntryWorkflow(args.workflowId ? String(args.workflowId) : null, goal, appName, deps, ctx.workspaceId);
+          workflowTitle = String(args.workflowTitle ?? workflow.title);
+          workflowSummary = goal || workflow.title;
+          workflowGraph = workflow.graph;
+          workflowSettings = workflow.settings;
+
+          if (args.workflowId) {
+            entryWorkflowId = String(args.workflowId);
+          } else {
+            entryWorkflowId = randomUUID();
+            deps.db.insert(schema.workflows).values({
+              id: entryWorkflowId,
+              workspaceId: ctx.workspaceId,
+              ambientId: ctx.ambientId ?? null,
+              userId: ctx.userId,
+              title: workflowTitle,
+              summary: workflowSummary,
+              graph: workflow.graph,
+              settings: workflow.settings,
+              tags: [appRow.slug],
+              appId: appRow.id,
+              createdAt: now,
+              updatedAt: now,
+            }).run();
+          }
+        }
+
+        const surfaces: AppSurface[] | undefined = Array.isArray(args.surfaces)
+          ? args.surfaces.map(normalizeSurface).filter((surface): surface is AppSurface => Boolean(surface))
+          : currentContents.surfaces;
+        const appGraph = args.appGraph && typeof args.appGraph === 'object'
+          ? args.appGraph as AppGraph
+          : buildAppGraphTemplate(appName, workflowTitle, entryWorkflowId ?? '');
+
+        const workflows: WorkflowContents[] = Array.isArray(currentContents.workflows) ? [...currentContents.workflows] : [];
+        if (entryWorkflowId && workflowGraph) {
+          const entryWorkflow: WorkflowContents = {
+            slug: 'entry',
+            title: workflowTitle,
+            summary: workflowSummary,
+            graph: workflowGraph,
+            settings: workflowSettings,
+          };
+          const index = workflows.findIndex((workflow) => {
+            const record = recordFromUnknown(workflow);
+            return record.slug === 'entry' || record.title === workflowTitle;
+          });
+          if (index >= 0) workflows[index] = entryWorkflow;
+          else workflows.unshift(entryWorkflow);
+        }
+
+        const nextContents: AgentisPackageContents & Record<string, unknown> = {
+          ...currentContents,
+          name: appName,
+          description,
+          summary: goal || description,
+          creationMode: 'orchestrated_draft',
+          surfaces: surfaces ?? [{ type: 'thread' }],
+          workflows,
+          entryWorkflowSlug: entryWorkflowId ? 'entry' : currentContents.entryWorkflowSlug,
+          appGraphTemplate: appGraph,
+          agents: Array.isArray(currentContents.agents) ? currentContents.agents : [],
+          orchestratorBuild: {
+            updatedAt: now,
+            createdAgentIds,
+            entryWorkflowId,
+          },
+        };
+
+        deps.db.update(schema.appInstances)
+          .set({
+            name: appName,
+            entryWorkflowId,
+            packageContents: nextContents,
+            status: 'active',
+            updatedAt: now,
+          })
+          .where(eq(schema.appInstances.id, appRow.id))
+          .run();
+
+        deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.APP_CANVAS_UPDATED, {
+          appId: appRow.id,
+          slug: appRow.slug,
+          appName,
+          entryWorkflowId,
+          graph: appGraph,
+          updatedAt: now,
+        });
+        deps.bus.publish(REALTIME_ROOMS.app(appRow.id), REALTIME_EVENTS.APP_CANVAS_UPDATED, {
+          appId: appRow.id,
+          slug: appRow.slug,
+          appName,
+          entryWorkflowId,
+          graph: appGraph,
+          updatedAt: now,
+        });
+
+        return {
+          appId: appRow.id,
+          slug: appRow.slug,
+          name: appName,
+          entryWorkflowId,
+          createdAgentIds,
+          path: `/apps/${appRow.slug}`,
+          canvasPath: `/apps/${appRow.slug}?layer=canvas`,
+          message: `Updated "${appName}" with ${entryWorkflowId ? 'an entry workflow' : 'app architecture'} and refreshed the canvas.`,
+        };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.plan',
         family: 'inspect',
         description: 'Break a complex objective into executable steps.',
@@ -313,6 +558,153 @@ function titleFromDescription(description: string): string {
     .trim();
   const base = cleaned.length > 0 ? cleaned : 'Generated Workflow';
   return base.length > 80 ? `${base.slice(0, 77)}...` : capitalize(base);
+}
+
+function appNameFromGoal(goal: string): string {
+  const title = titleFromDescription(goal)
+    .replace(/\s+workflow$/i, '')
+    .replace(/\s+app$/i, '')
+    .trim();
+  return `${title || 'Agentis'} app`;
+}
+
+function normalizeSurface(value: unknown): AppSurface | null {
+  const record = recordFromUnknown(value);
+  const type = typeof record.type === 'string' ? record.type : '';
+  if (!['thread', 'dashboard', 'api', 'webhook_receiver', 'stream', 'embed', 'artifact', 'page'].includes(type)) {
+    return null;
+  }
+  return {
+    type: type as AppSurface['type'],
+    ...(typeof record.label === 'string' ? { label: record.label } : {}),
+    ...(typeof record.description === 'string' ? { description: record.description } : {}),
+  };
+}
+
+function createRequestedAgents(
+  value: unknown,
+  deps: ToolHandlerDeps,
+  ctx: { workspaceId: string; ambientId?: string | null; userId: string },
+  appId: string,
+): string[] {
+  if (!Array.isArray(value)) return [];
+  const created: string[] = [];
+  const now = new Date().toISOString();
+  for (const item of value) {
+    const record = recordFromUnknown(item);
+    const name = typeof record.name === 'string' ? record.name.trim() : '';
+    if (!name) continue;
+    const id = randomUUID();
+    const capabilityTags = Array.isArray(record.capabilityTags)
+      ? record.capabilityTags.filter((tag): tag is string => typeof tag === 'string')
+      : [];
+    deps.db.insert(schema.agents).values({
+      id,
+      workspaceId: ctx.workspaceId,
+      ambientId: ctx.ambientId ?? null,
+      userId: ctx.userId,
+      packageId: null,
+      name,
+      description: typeof record.description === 'string' ? record.description : null,
+      adapterType: typeof record.adapterType === 'string' ? record.adapterType : 'http',
+      capabilityTags,
+      config: { ...recordFromUnknown(record.config), appId },
+      status: 'offline',
+      colorHex: typeof record.colorHex === 'string' ? record.colorHex : '#34d399',
+      instructions: typeof record.instructions === 'string' ? record.instructions : null,
+      avatarGlyph: typeof record.avatarGlyph === 'string' ? record.avatarGlyph : initials(name),
+      role: typeof record.role === 'string' ? record.role : 'worker',
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+    created.push(id);
+    deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.AGENT_CREATED, {
+      agent: { id, name, role: typeof record.role === 'string' ? record.role : 'worker', status: 'offline' },
+      source: 'app.compose',
+      appId,
+    });
+  }
+  return created;
+}
+
+function loadOrBuildEntryWorkflow(
+  workflowId: string | null,
+  goal: string,
+  appName: string,
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+): { title: string; graph: WorkflowGraph; settings: Record<string, unknown> } {
+  if (workflowId) {
+    const existing = deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get();
+    if (!existing || existing.workspaceId !== workspaceId) throw new Error(`workflow ${workflowId} not found`);
+    return {
+      title: existing.title,
+      graph: existing.graph as WorkflowGraph,
+      settings: recordFromUnknown(existing.settings),
+    };
+  }
+  const graph = buildWorkflowDraft(goal, deps, workspaceId);
+  validateWorkflowGraph(graph);
+  return {
+    title: `${appName.replace(/\s+app$/i, '')} workflow`,
+    graph,
+    settings: {},
+  };
+}
+
+function buildAppGraphTemplate(appName: string, workflowTitle: string, entryWorkflowId: string): AppGraph {
+  return {
+    version: 1,
+    viewport: { x: 0, y: 0, zoom: 1 },
+    nodes: [
+      {
+        id: 'app_core',
+        type: 'app_core',
+        title: appName,
+        position: { x: 80, y: 160 },
+        zone: 'core',
+        config: { kind: 'app_core', entryWorkflowId, description: 'Main app surface' },
+      },
+      {
+        id: 'entry_workflow',
+        type: 'entry_workflow',
+        title: workflowTitle,
+        position: { x: 390, y: 160 },
+        zone: 'core',
+        config: { kind: 'entry_workflow', workflowId: entryWorkflowId },
+      },
+      {
+        id: 'output_surface',
+        type: 'output_surface',
+        title: 'Results',
+        position: { x: 700, y: 160 },
+        zone: 'outputs',
+        config: { kind: 'output_surface', artifactType: 'document', outputKey: 'result' },
+      },
+    ],
+    edges: [
+      { id: 'edge_core_entry', source: 'app_core', target: 'entry_workflow', type: 'activates', label: 'runs' },
+      { id: 'edge_entry_output', source: 'entry_workflow', target: 'output_surface', type: 'feeds', label: 'produces' },
+    ],
+  };
+}
+
+function inferAppCategory(goal: string): string {
+  const lower = goal.toLowerCase();
+  if (/lead|deal|sales|crm/.test(lower)) return 'Sales';
+  if (/support|ticket|customer/.test(lower)) return 'Support';
+  if (/research|analy[sz]e|competitor|market/.test(lower)) return 'Research';
+  if (/ops|operation|schedule|coordinate/.test(lower)) return 'Operations';
+  return 'Automation';
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean).slice(0, 2);
+  return (parts.map((part) => part[0]?.toUpperCase() ?? '').join('') || 'A').slice(0, 2);
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function capitalize(value: string): string {

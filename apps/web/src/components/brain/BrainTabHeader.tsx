@@ -1,12 +1,14 @@
 import clsx from 'clsx';
-import { Database, Network } from 'lucide-react';
+import { Activity, BookOpen, GitCompare, Network } from 'lucide-react';
 
-export type BrainMode = 'map' | 'manage';
+export type BrainMode = 'map' | 'knowledge' | 'health' | 'disputes';
 
 export function BrainTabHeader({ mode, onChange }: { mode: BrainMode; onChange: (mode: BrainMode) => void }) {
   const items = [
     { value: 'map' as const, label: 'Map', icon: <Network size={12} /> },
-    { value: 'manage' as const, label: 'Manage', icon: <Database size={12} /> },
+    { value: 'knowledge' as const, label: 'Knowledge', icon: <BookOpen size={12} /> },
+    { value: 'health' as const, label: 'Health', icon: <Activity size={12} /> },
+    { value: 'disputes' as const, label: 'Disputes', icon: <GitCompare size={12} /> },
   ];
   return (
     <div className="flex items-center justify-end border-b border-line bg-surface px-5 py-2">

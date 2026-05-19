@@ -26,7 +26,7 @@ interface Package {
   id: string;
   name: string;
   slug: string;
-  kind: 'app' | 'skill' | 'workflow' | 'agent';
+  kind: 'app' | 'skill' | 'workflow' | 'agent' | 'integration';
   version?: string;
   description?: string;
   isTemplate?: boolean;
@@ -61,6 +61,7 @@ const TYPE_ICONS: Record<Package['kind'], LucideIcon> = {
   skill:    Sparkles,
   workflow: WorkflowIcon,
   agent:    Bot,
+  integration: PackageIcon,
 };
 
 export function PackagesPage() {
@@ -242,7 +243,7 @@ export function PackagesPage() {
       <div className="flex flex-wrap items-center gap-3 border-b border-line px-6 py-4">
         <div>
           <h1 className="text-display text-text-primary">Packages</h1>
-          <div className="mt-0.5 text-[12px] text-text-muted">Everything you've built — apps, workflows, agents, skills</div>
+          <div className="mt-0.5 text-[12px] text-text-muted">Everything you've built - apps, workflows, agents, and skills</div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <Button variant="secondary" size="md" iconLeft={<ArrowDownToLine size={14} />} onClick={() => void handleImport()}>
@@ -583,7 +584,7 @@ function NewPackageDialog({
             {/* Type selector */}
             <div>
               <div className="mb-2 text-[12px] font-medium text-text-secondary">Package type</div>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {KIND_CONFIG.map(({ value, label, icon: Icon }) => (
                   <button
                     key={value}
@@ -978,7 +979,9 @@ function PackageDetailDrawer({
   }
 
   const Icon = TYPE_ICONS[pkg.kind];
-  const totalItems = (detail?.workflows.length ?? 0) + (detail?.agents.length ?? 0) + (detail?.skills.length ?? 0);
+  const totalItems = (detail?.workflows.length ?? 0)
+    + (detail?.agents.length ?? 0)
+    + (detail?.skills.length ?? 0);
 
   return (
     <>

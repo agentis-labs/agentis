@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import type { WorkflowGraph, WorkflowRunState } from '@agentis/core';
+import { REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type WorkflowRunState } from '@agentis/core';
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
@@ -49,9 +49,26 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           graph,
           inputs,
         });
+        deps.db.insert(schema.workflowRuns).values({
+          id: runId,
+          workspaceId: ctx.workspaceId,
+          ambientId: ctx.ambientId ?? null,
+          workflowId: wf.id,
+          conversationId: ctx.conversationId ?? null,
+          userId: ctx.userId,
+          status: 'CREATED',
+          runState: initialState,
+          triggerId: null,
+        }).run();
+        deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.RUN_CREATED, {
+          runId,
+          workflowId: wf.id,
+          ambientId: ctx.ambientId ?? null,
+        });
         const handle = await deps.engine.startRun({
           workspaceId: ctx.workspaceId,
           ambientId: ctx.ambientId ?? null,
+          conversationId: ctx.conversationId ?? null,
           workflowId: wf.id,
           userId: ctx.userId,
           triggerId: null,
@@ -242,8 +259,10 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     .get();
   if (!run) return { found: false, runId };
   const state = run.runState as WorkflowRunState;
-  const workflow = deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, run.workflowId)).get();
-  const graph = workflow?.graph as WorkflowGraph | undefined;
+  const workflow = run.workflowId
+    ? deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, run.workflowId)).get()
+    : null;
+  const graph = (workflow?.graph ?? run.graphSnapshot ?? undefined) as WorkflowGraph | undefined;
   const total = Math.max(Object.keys(state.nodeStates ?? {}).length, graph?.nodes.length ?? 0, 1);
   const completed = state.completedNodeIds?.length ?? 0;
   const failed = state.failedNodeIds?.length ?? 0;
@@ -253,7 +272,8 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     found: true,
     runId: run.id,
     workflowId: run.workflowId,
-    workflowTitle: workflow?.title ?? null,
+    workflowTitle: workflow?.title ?? run.ephemeralTitle ?? null,
+    isEphemeral: run.isEphemeral,
     status: run.status,
     progress: Math.min(1, (completed + failed) / total),
     currentNode: activeNode ? { id: activeNode.id, title: activeNode.title, type: activeNode.type } : null,
@@ -298,7 +318,8 @@ function listRuns(
     runs: rows.map((run) => ({
       id: run.id,
       workflowId: run.workflowId,
-      workflowTitle: workflows.get(run.workflowId)?.title ?? null,
+      workflowTitle: run.workflowId ? workflows.get(run.workflowId)?.title ?? null : run.ephemeralTitle ?? null,
+      isEphemeral: run.isEphemeral,
       status: run.status,
       createdAt: run.createdAt,
       startedAt: run.startedAt,

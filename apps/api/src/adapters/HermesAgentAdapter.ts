@@ -7,6 +7,7 @@ import type {
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
+import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 
 export interface HermesAgentAdapterOptions {
   agentId: string;
@@ -58,9 +59,12 @@ export class HermesAgentAdapter implements AgentAdapter {
     let terminalEventEmitted = false;
     let timeout: NodeJS.Timeout | undefined;
     try {
-      childProcess = spawn(binary, args, {
+      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
+      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
+      childProcess = spawn(target.command, target.args, {
         cwd: this.opts.cwd,
-        env: { ...process.env, ...(this.opts.env ?? {}) },
+        env,
+        windowsHide: true,
         signal: controller.signal,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

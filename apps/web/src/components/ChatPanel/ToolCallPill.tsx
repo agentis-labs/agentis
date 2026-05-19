@@ -85,7 +85,6 @@ export function ToolCallPill({ data }: { data: ToolCallPillData }) {
             </>
           )}
         </span>
-        {void StatusIcon}
       </button>
       {expanded && canExpand && (
         <pre className="m-0 max-h-72 overflow-auto whitespace-pre-wrap break-all border-t border-line/60 bg-canvas px-3 py-2 font-mono text-[10px] text-text">

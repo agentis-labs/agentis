@@ -53,6 +53,20 @@ export function buildGatewayRoutes(deps: {
     return c.json({ gateway: gw });
   });
 
+  app.get('/:id/models', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const gw = deps.db
+      .select({ id: schema.openclawGateways.id })
+      .from(schema.openclawGateways)
+      .where(and(eq(schema.openclawGateways.id, id), eq(schema.openclawGateways.workspaceId, ws.workspaceId)))
+      .get();
+    if (!gw) {
+      return c.json({ error: { code: 'RESOURCE_NOT_FOUND', message: 'gateway not found' } }, 404);
+    }
+    return c.json({ models: [] });
+  });
+
   app.route('/', buildGatewayMutationRoutes(deps));
 
   return app;

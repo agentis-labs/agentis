@@ -12,7 +12,7 @@ interface KnowledgeSnapshot {
   episodes: EpisodeRowData[];
 }
 
-export function KnowledgeStatusCard() {
+export function KnowledgeStatusCard({ hideWhenSeeded = false }: { hideWhenSeeded?: boolean } = {}) {
   const nav = useNavigate();
   const [snapshot, setSnapshot] = useState<KnowledgeSnapshot | null>(null);
 
@@ -46,6 +46,7 @@ export function KnowledgeStatusCard() {
   if (!snapshot) return null;
 
   const empty = total === 0;
+  if (hideWhenSeeded && !empty) return null;
 
   return (
     <section className="rounded-card border border-line bg-surface p-4">

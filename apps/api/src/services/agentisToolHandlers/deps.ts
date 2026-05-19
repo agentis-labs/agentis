@@ -27,6 +27,14 @@ import type { EpisodicMemoryStore } from '../episodicMemoryStore.js';
 import type { MemoryPromotion } from '../memoryPromotion.js';
 import type { RollingBaselineStore } from '../rollingBaselineStore.js';
 import type { KnowledgeBaseService } from '../knowledgeBase.js';
+import type { AppResultsService } from '../appResultsService.js';
+import type { AppThreadService } from '../appThreadService.js';
+import type { CollectiveBrainService } from '../collectiveBrain.js';
+import type { SessionAtomService } from '../sessionAtomService.js';
+import type { SessionSearchService } from '../sessionSearchService.js';
+import type { BrainPromotionQueueWorker } from '../brainPromotionQueueWorker.js';
+import type { PeerRepresentationService } from '../peerRepresentationService.js';
+import type { AgentAbilityService } from '../agentAbilityService.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -52,4 +60,14 @@ export interface ToolHandlerDeps {
   episodes?: EpisodicMemoryStore;
   memoryPromotion?: MemoryPromotion;
   rollingBaselines?: RollingBaselineStore;
+  /** Apps Output surface (APP-OUTPUT-REPLAN.md). Optional during incremental rollout. */
+  appResults?: AppResultsService;
+  appThread?: AppThreadService;
+  /** Phase 3 Brain tools. Optional so focused tests can mount small registries. */
+  collectiveBrain?: CollectiveBrainService;
+  sessionAtoms?: SessionAtomService;
+  sessionSearch?: SessionSearchService;
+  brainQueue?: BrainPromotionQueueWorker;
+  peerRepresentations?: PeerRepresentationService;
+  abilities?: AgentAbilityService;
 }

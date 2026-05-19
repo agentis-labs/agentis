@@ -7,7 +7,7 @@
  * COMMAND_PALETTE_RESULT_LIMIT.
  */
 
-import { eq, and, like, desc } from 'drizzle-orm';
+import { eq, and, like, desc, isNull, ne, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, CONSTANTS } from '@agentis/core';
@@ -130,7 +130,11 @@ export class CommandIndex {
     }
 
     const agents = this.db.select().from(schema.agents)
-      .where(and(eq(schema.agents.workspaceId, workspaceId), like(schema.agents.name, pattern)))
+      .where(and(
+        eq(schema.agents.workspaceId, workspaceId),
+        like(schema.agents.name, pattern),
+        or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
+      ))
       .limit(20)
       .all();
     for (const a of agents) {

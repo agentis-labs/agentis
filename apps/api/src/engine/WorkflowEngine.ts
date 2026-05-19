@@ -39,6 +39,11 @@ import {
   type MergeNodeConfig,
   type CheckpointNodeConfig,
   type ScratchpadNodeConfig,
+  type DataWriteNodeConfig,
+  type DataReadNodeConfig,
+  type AgentSwarmNodeConfig,
+  type BrainLookupNodeConfig,
+  type ArtifactCollectNodeConfig,
   type WorkflowEdge,
   type WorkflowGraphPatch,
 } from '@agentis/core';
@@ -55,6 +60,11 @@ import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
 import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
 import type { CollectiveBrainService } from '../services/collectiveBrain.js';
+import type { BrainPromotionQueueWorker } from '../services/brainPromotionQueueWorker.js';
+import type { AgentAbilityService } from '../services/agentAbilityService.js';
+import type { UserProfileService } from '../services/userProfileService.js';
+import type { AppDataService } from '../services/appDataService.js';
+import type { ConversationStore } from '../services/conversationStore.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
@@ -72,6 +82,16 @@ export interface EngineDeps {
   subflows?: SubflowExecutor;
   knowledgeBases?: KnowledgeBaseService;
   collectiveBrain?: CollectiveBrainService;
+  /** Durable brain promotion queue (BRAIN-ABILITIES-REPLAN.md §BL10). */
+  brainQueue?: BrainPromotionQueueWorker;
+  /** Agent abilities — procedural how-to injection at dispatch (Part IV). */
+  abilities?: AgentAbilityService;
+  /** Operator profile — USER.md-equivalent injection at dispatch (§BL8). */
+  userProfiles?: UserProfileService;
+  /** App Data layer — required for `data_write` nodes (AGENTIS-PLATFORM-10X §A5). */
+  appData?: AppDataService;
+  /** Conversation bridge — lets chat-started runs report terminal state back to the thread. */
+  conversations?: ConversationStore;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
   telemetry?: Telemetry;
 }
@@ -79,6 +99,7 @@ export interface EngineDeps {
 export interface StartRunArgs {
   workspaceId: string;
   ambientId: string | null;
+  conversationId?: string | null;
   workflowId: string;
   userId: string;
   triggerId: string | null;
@@ -111,12 +132,16 @@ export class WorkflowEngine {
       workflowId: args.workflowId,
       workspaceId: args.workspaceId,
       ambientId: args.ambientId,
+      conversationId: args.conversationId ?? null,
       userId: args.userId,
       graph: args.graph,
       downstreamEdges: buildDownstreamEdges(args.graph),
       state: args.initialState,
       eventsSinceSnapshot: 0,
       inflightDispatches: 0,
+      swarms: new Map(),
+      selfHealAttempts: new Map(),
+      thinkingTraces: new Map(),
     };
     this.#runs.set(ctx.runId, ctx);
 
@@ -149,7 +174,10 @@ export class WorkflowEngine {
 
   async cancelRun(runId: string): Promise<void> {
     const ctx = this.#runs.get(runId);
-    if (!ctx) return;
+    if (!ctx) {
+      await this.#cancelPersistedRun(runId);
+      return;
+    }
     await this.#transitionRunStatus(ctx, 'CANCELLED');
     this.#runs.delete(runId);
   }
@@ -166,6 +194,11 @@ export class WorkflowEngine {
   }): Promise<void> {
     const ctx = this.#runs.get(args.runId);
     if (!ctx) return;
+    const swarm = parseSwarmTaskId(args.nodeId);
+    if (swarm) {
+      await this.#onSwarmSubtask(ctx, swarm.nodeId, swarm.index, args.output, null);
+      return;
+    }
     const node = ctx.graph.nodes.find((candidate) => candidate.id === args.nodeId) ?? null;
     await this.#completeNode(ctx, args.nodeId, args.output);
     if (node?.config.kind === 'agent_task') {
@@ -174,9 +207,62 @@ export class WorkflowEngine {
     void this.#tick(ctx);
   }
 
+  /**
+   * Capture an `agent.thinking` reasoning trace (B3). The richest learning
+   * signal — the agent's reflection on what it noticed and why — is collected
+   * per agent_task node and handed to the ability reviewer at completion.
+   */
+  recordThinking(runId: string, nodeId: string, text: string): void {
+    if (!text) return;
+    const ctx = this.#runs.get(runId);
+    if (!ctx) return;
+    const swarm = parseSwarmTaskId(nodeId);
+    const key = swarm ? swarm.nodeId : nodeId;
+    const trace = ctx.thinkingTraces.get(key) ?? [];
+    if (trace.length >= 40) return; // bound memory per node
+    trace.push(text);
+    ctx.thinkingTraces.set(key, trace);
+  }
+
   async notifyTaskFailed(args: { runId: string; nodeId: string; error: string }): Promise<void> {
     const ctx = this.#runs.get(args.runId);
     if (!ctx) return;
+    const swarm = parseSwarmTaskId(args.nodeId);
+    if (swarm) {
+      await this.#onSwarmSubtask(ctx, swarm.nodeId, swarm.index, null, args.error);
+      return;
+    }
+    const node = ctx.graph.nodes.find((candidate) => candidate.id === args.nodeId) ?? null;
+    // Self-healing agent task (AGENTIS-PLATFORM-10X §A9): re-dispatch with the
+    // error context appended so the agent can correct itself.
+    if (node?.config.kind === 'agent_task' && node.config.retryPolicy?.selfHeal) {
+      const max = node.config.retryPolicy.maxSelfHealAttempts ?? 2;
+      const attempts = ctx.selfHealAttempts.get(node.id) ?? 0;
+      if (attempts < max) {
+        ctx.selfHealAttempts.set(node.id, attempts + 1);
+        this.deps.logger.info('engine.self_heal.retry', {
+          runId: ctx.runId,
+          nodeId: node.id,
+          attempt: attempts + 1,
+          max,
+        });
+        this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, {
+          runId: ctx.runId,
+          nodeId: node.id,
+          attempt: attempts + 1,
+          reason: 'self_heal',
+        });
+        const inputData = ctx.state.nodeStates[node.id]?.inputData ?? {};
+        const healConfig: AgentTaskNodeConfig = {
+          ...node.config,
+          prompt:
+            `${node.config.prompt}\n\n---\nPREVIOUS ATTEMPT FAILED (attempt ${attempts + 1}/${max}).\n` +
+            `Error: ${args.error}\nAnalyse the error and correct your output.`,
+        };
+        await this.#dispatchAgentTask(ctx, node, healConfig, inputData);
+        return;
+      }
+    }
     await this.#failNode(ctx, args.nodeId, args.error);
     void this.#tick(ctx);
   }
@@ -215,7 +301,10 @@ export class WorkflowEngine {
       );
     }
 
-    const baseGraph = ctx?.graph ?? this.#loadWorkflowGraph(run.workflowId);
+    const baseGraph = ctx?.graph ?? (run.workflowId ? this.#loadWorkflowGraph(run.workflowId) : run.graphSnapshot as WorkflowGraph | null);
+    if (!baseGraph) {
+      throw new AgentisError('WORKFLOW_RUN_INVALID_STATE', 'Run has no saved workflow or graph snapshot to patch');
+    }
     let merged: WorkflowGraph;
     try {
       merged = mergeGraphPatch(baseGraph, patch);
@@ -223,7 +312,7 @@ export class WorkflowEngine {
       throw new AgentisError('GRAPH_PATCH_INVALID', (err as Error).message);
     }
     try {
-      validateWorkflowGraph(merged);
+      validateWorkflowGraph(merged, { currentWorkflowId: run.workflowId });
     } catch (err) {
       // Re-throw as GRAPH_PATCH_INVALID so callers can distinguish cycles
       // discovered at patch-apply time from at-rest WORKFLOW_GRAPH_INVALID.
@@ -233,10 +322,17 @@ export class WorkflowEngine {
 
     const newRevision = currentRevision + 1;
 
-    await this.deps.db
-      .update(schema.workflows)
-      .set({ graph: merged as unknown as object, updatedAt: new Date().toISOString() })
-      .where(eq(schema.workflows.id, run.workflowId));
+    if (run.workflowId) {
+      await this.deps.db
+        .update(schema.workflows)
+        .set({ graph: merged as unknown as object, updatedAt: new Date().toISOString() })
+        .where(eq(schema.workflows.id, run.workflowId));
+    } else {
+      await this.deps.db
+        .update(schema.workflowRuns)
+        .set({ graphSnapshot: merged as unknown as object, updatedAt: new Date().toISOString() })
+        .where(eq(schema.workflowRuns.id, run.id));
+    }
 
     if (ctx) {
       ctx.graph = merged;
@@ -343,16 +439,20 @@ export class WorkflowEngine {
       Object.keys(ctx.state.activeExecutions).length === 0 &&
       ctx.inflightDispatches === 0
     ) {
-      const stillWaiting = Object.values(ctx.state.waitingInputs).some(
-        (b) => b.requiredInputs.length > 0,
-      );
-      if (!stillWaiting) {
-        const finalStatus: WorkflowRunStatus =
-          ctx.state.failedNodeIds.length > 0 ? 'FAILED' : 'COMPLETED';
-        await this.#transitionRunStatus(ctx, finalStatus);
+      if (ctx.state.failedNodeIds.length > 0) {
+        this.#skipBlockedNodes(ctx, 'Skipped because an upstream node failed');
+        await this.#transitionRunStatus(ctx, 'FAILED');
         this.#runs.delete(ctx.runId);
       } else {
-        await this.#transitionRunStatus(ctx, 'WAITING');
+        const stillWaiting = Object.values(ctx.state.waitingInputs).some(
+          (b) => b.requiredInputs.length > 0,
+        );
+        if (!stillWaiting) {
+          await this.#transitionRunStatus(ctx, 'COMPLETED');
+          this.#runs.delete(ctx.runId);
+        } else {
+          await this.#transitionRunStatus(ctx, 'WAITING');
+        }
       }
     }
   }
@@ -406,6 +506,30 @@ export class WorkflowEngine {
       case 'agent_task': {
         await this.#dispatchAgentTask(ctx, node, node.config, item.inputData);
         return; // adapter event will call notifyTaskCompleted
+      }
+      case 'data_write': {
+        const result = await this.#executeDataWrite(ctx, node, node.config, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'data_read': {
+        const result = await this.#executeDataRead(ctx, node, node.config, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'brain_lookup': {
+        const result = await this.#executeBrainLookup(ctx, node.config, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'agent_swarm': {
+        await this.#dispatchAgentSwarm(ctx, node, node.config, item.inputData);
+        return; // swarm subtask events resolve the node
+      }
+      case 'artifact_collect': {
+        const result = await this.#executeArtifactCollect(ctx, node, node.config, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
       }
       case 'subflow': {
         const cfg = node.config as { kind: 'subflow'; workflowId: string; inputMapping?: Record<string, string> };
@@ -497,9 +621,10 @@ export class WorkflowEngine {
     if (!query) throw new AgentisError('VALIDATION_FAILED', 'knowledge node query is empty');
 
     const topK = Math.min(Math.max(config.topK ?? 5, 1), 20);
+    const knowledgeScope = ctx.appId ? { appId: ctx.appId, includeWorkspace: true } : undefined;
     const bases = config.knowledgeBaseId
-      ? [this.deps.knowledgeBases.getKnowledgeBase(ctx.workspaceId, config.knowledgeBaseId)]
-      : this.deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId);
+      ? [this.deps.knowledgeBases.getKnowledgeBase(ctx.workspaceId, config.knowledgeBaseId, knowledgeScope)]
+      : this.deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId, knowledgeScope);
     const perBaseTopK = config.knowledgeBaseId ? topK : Math.max(topK, 5);
 
     const results = bases
@@ -553,17 +678,82 @@ export class WorkflowEngine {
       executorRef: config.agentId,
       startedAt: new Date().toISOString(),
     };
+
+    // B2 — query the Brain for atoms relevant to this task and inject them as
+    // a frozen context block. Degrades gracefully to no block when the Brain
+    // is empty or retrieval fails. Atom injections are recorded so the
+    // evaluator feedback loop (Gap14) can later credit/penalise them.
+    let brainContext: string | undefined;
+    if (this.deps.collectiveBrain) {
+      try {
+        const result = await this.deps.collectiveBrain.buildDispatchContext({
+          workspaceId: ctx.workspaceId,
+          appId: this.#resolveAppId(ctx),
+          agentId: config.agentId,
+          runId: ctx.runId,
+          taskDescription: `${node.title}\n${config.prompt}`,
+        });
+        if (result.block) brainContext = result.block;
+      } catch (err) {
+        this.deps.logger.warn('collective_brain.dispatch_context.failed', {
+          runId: ctx.runId,
+          nodeId: node.id,
+          message: (err as Error).message,
+        });
+      }
+    }
+
+    // Part IV — inject the agent's relevant procedural abilities (how-to
+    // knowledge), ranked by task relevance. Frozen at dispatch.
+    let abilityBlock = '';
+    if (this.deps.abilities) {
+      try {
+        const result = await this.deps.abilities.buildDispatchBlock({
+          workspaceId: ctx.workspaceId,
+          agentId: config.agentId,
+          workflowId: ctx.workflowId,
+          appId: this.#resolveAppId(ctx),
+          runId: ctx.runId,
+          taskDescription: `${node.title}\n${config.prompt}`,
+        });
+        abilityBlock = result.block;
+      } catch (err) {
+        this.deps.logger.warn('agent_abilities.dispatch_block.failed', {
+          runId: ctx.runId,
+          nodeId: node.id,
+          message: (err as Error).message,
+        });
+      }
+    }
+
+    // §BL8 — operator profile (USER.md equivalent), frozen at dispatch.
+    let profileBlock = '';
+    if (this.deps.userProfiles) {
+      try {
+        profileBlock = this.deps.userProfiles.buildDispatchBlock(ctx.workspaceId);
+      } catch {
+        profileBlock = '';
+      }
+    }
+
+    const sections = [config.prompt];
+    if (profileBlock) sections.push(`=== ${profileBlock}`);
+    if (abilityBlock) sections.push(`=== AGENT ABILITIES (proven procedures) ===\n${abilityBlock}`);
+    if (brainContext) sections.push(`=== BRAIN CONTEXT (knowledge from past runs) ===\n${brainContext}`);
+    const description = sections.join('\n\n');
+
     await this.deps.adapters.dispatchTask({
       taskId,
       runId: ctx.runId,
       workflowId: ctx.workflowId,
       nodeId: node.id,
       title: node.title,
-      description: config.prompt,
+      description,
       inputData,
       scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
       capabilityTags: config.capabilityTags,
       timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
+      brainContext,
     }, config.agentId);
   }
 
@@ -575,26 +765,521 @@ export class WorkflowEngine {
   ): void {
     if (!this.deps.collectiveBrain) return;
     const inputData = ctx.state.nodeStates[node.id]?.inputData ?? null;
-    queueMicrotask(() => {
-      try {
-        this.deps.collectiveBrain!.extractAndPromote({
+    // B1 — promote to the owning app's scope, not workspace scope. The hardcoded
+    // `appId: null` poisoned app-brain isolation on every run.
+    const appId = this.#resolveAppId(ctx);
+    const thinkingTrace = ctx.thinkingTraces.get(node.id) ?? [];
+    try {
+      if (this.deps.brainQueue) {
+        // BL10 — durable, restart-safe enqueue instead of `queueMicrotask`.
+        this.deps.brainQueue.enqueue({
           workspaceId: ctx.workspaceId,
-          workflowId: ctx.workflowId,
-          runId: ctx.runId,
-          nodeId: node.id,
-          agentId: config.agentId ?? null,
-          appId: null,
-          taskInput: inputData,
-          taskOutput: output,
+          itemType: 'atom_promotion',
+          priority: 'normal',
+          payload: {
+            workspaceId: ctx.workspaceId,
+            appId,
+            workflowId: ctx.workflowId,
+            runId: ctx.runId,
+            nodeId: node.id,
+            agentId: config.agentId ?? null,
+            taskInput: inputData,
+            taskOutput: output,
+          },
         });
+        // Part IV — distil a procedural ability from this run (Path 1).
+        if (this.deps.abilities) {
+          this.deps.brainQueue.enqueue({
+            workspaceId: ctx.workspaceId,
+            itemType: 'ability_review',
+            priority: 'normal',
+            payload: {
+              workspaceId: ctx.workspaceId,
+              agentId: config.agentId ?? null,
+              workflowId: ctx.workflowId,
+              runId: ctx.runId,
+              taskTitle: node.title,
+              taskInput: inputData,
+              taskOutput: output,
+              thinkingTrace,
+            },
+          });
+        }
+      } else {
+        // Fallback when the queue is not wired (tests) — synchronous lexical path.
+        queueMicrotask(() => {
+          try {
+            this.deps.collectiveBrain!.extractAndPromote({
+              workspaceId: ctx.workspaceId,
+              workflowId: ctx.workflowId,
+              runId: ctx.runId,
+              nodeId: node.id,
+              agentId: config.agentId ?? null,
+              appId,
+              taskInput: inputData,
+              taskOutput: output,
+            });
+          } catch (err) {
+            this.deps.logger.warn('collective_brain.agent_task_promotion.failed', {
+              runId: ctx.runId,
+              nodeId: node.id,
+              message: (err as Error).message,
+            });
+          }
+        });
+      }
+    } catch (err) {
+      this.deps.logger.warn('collective_brain.agent_task_promotion.failed', {
+        runId: ctx.runId,
+        nodeId: node.id,
+        message: (err as Error).message,
+      });
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Data layer — data_write node (AGENTIS-PLATFORM-10X §A5)
+  // ────────────────────────────────────────────────────────────
+
+  async #executeDataWrite(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: DataWriteNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.appData) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'data_write node present but AppDataService not wired',
+      );
+    }
+    const appId = config.appId ?? this.#resolveAppId(ctx);
+    if (!appId) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        `data_write node ${node.id} could not resolve an owning app — set config.appId`,
+      );
+    }
+    const recordSource = config.recordPath
+      ? lookupPath(inputData, config.recordPath)
+      : inputData;
+    if (!recordSource || typeof recordSource !== 'object' || Array.isArray(recordSource)) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `data_write node ${node.id}: input record is not an object`,
+      );
+    }
+    const record = recordSource as Record<string, unknown>;
+
+    if (config.operation === 'insert') {
+      const { id } = this.deps.appData.insert(ctx.workspaceId, appId, config.table, record);
+      return { id, table: config.table, operation: 'insert' };
+    }
+    if (config.operation === 'upsert') {
+      const idField = config.idField ?? 'id';
+      const result = this.deps.appData.upsert(
+        ctx.workspaceId,
+        appId,
+        config.table,
+        record,
+        idField,
+      );
+      return { id: result.id, table: config.table, operation: result.created ? 'insert' : 'update' };
+    }
+    // update
+    const targetId = config.idField ? record[config.idField] : record.id;
+    if (typeof targetId !== 'string' || !targetId) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `data_write node ${node.id}: update requires an id (idField=${config.idField ?? 'id'})`,
+      );
+    }
+    this.deps.appData.update(ctx.workspaceId, appId, config.table, targetId, record);
+    return { id: targetId, table: config.table, operation: 'update' };
+  }
+
+  /**
+   * Read records from the app's structured Data layer. Lets a workflow act on
+   * its own accumulated operational data without leaving the engine.
+   */
+  async #executeDataRead(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: DataReadNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.appData) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'data_read node present but AppDataService not wired',
+      );
+    }
+    const appId = config.appId ?? this.#resolveAppId(ctx);
+    if (!appId) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        `data_read node ${node.id} could not resolve an owning app — set config.appId`,
+      );
+    }
+    const where: Record<string, unknown> = { ...(config.where ?? {}) };
+    for (const [col, path] of Object.entries(config.whereFrom ?? {})) {
+      where[col] = lookupPath(inputData, path);
+    }
+    const result = this.deps.appData.query(appId, config.table, {
+      where,
+      expression: config.filter,
+      limit: config.limit,
+      orderBy: config.orderBy,
+      orderDir: config.orderDir,
+    });
+    const key = config.outputKey ?? 'records';
+    if (config.single) {
+      return {
+        [key]: result.records[0] ?? null,
+        found: result.records.length > 0,
+        table: config.table,
+      };
+    }
+    return { [key]: result.records, total: result.total, table: config.table };
+  }
+
+  /** Resolve the owning app of the running workflow (cached on the context). */
+  #resolveAppId(ctx: RunningContext): string | null {
+    if (ctx.appId !== undefined) return ctx.appId;
+    let appId: string | null = null;
+    try {
+      const wf = this.deps.db
+        .select({ appId: schema.workflows.appId })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.id, ctx.workflowId))
+        .get();
+      appId = wf?.appId ?? null;
+      if (!appId) {
+        const app = this.deps.db
+          .select({ id: schema.appInstances.id })
+          .from(schema.appInstances)
+          .where(eq(schema.appInstances.entryWorkflowId, ctx.workflowId))
+          .get();
+        appId = app?.id ?? null;
+      }
+    } catch {
+      appId = null;
+    }
+    ctx.appId = appId;
+    return appId;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Brain lookup node (AGENTIS-PLATFORM-10X §Layer 4)
+  // ────────────────────────────────────────────────────────────
+
+  async #executeBrainLookup(
+    ctx: RunningContext,
+    config: BrainLookupNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const outputKey = config.outputKey ?? 'atoms';
+    if (!this.deps.collectiveBrain) {
+      return { [outputKey]: [], query: '', resultCount: 0 };
+    }
+    let query = config.query ?? '';
+    if ((config.queryMode ?? 'static') === 'dynamic' && config.queryPath) {
+      const v = lookupPath(inputData, config.queryPath);
+      query = typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v);
+    }
+    query = query.trim();
+    const topK = Math.min(Math.max(config.topK ?? 5, 1), 25);
+    let atoms: unknown[] = [];
+    try {
+      const brain = this.deps.collectiveBrain as unknown as {
+        search?: (a: { workspaceId: string; query: string; topK: number }) => unknown[];
+        query?: (a: { workspaceId: string; query: string; topK: number }) => unknown[];
+      };
+      const fn = brain.search ?? brain.query;
+      if (fn && query) {
+        atoms = fn.call(this.deps.collectiveBrain, {
+          workspaceId: ctx.workspaceId,
+          query,
+          topK,
+        });
+      }
+    } catch (err) {
+      this.deps.logger.warn('brain_lookup.failed', {
+        runId: ctx.runId,
+        message: (err as Error).message,
+      });
+    }
+    return { [outputKey]: atoms, query, resultCount: Array.isArray(atoms) ? atoms.length : 0 };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Artifact collect node (AGENTIS-PLATFORM-10X §A12)
+  // ────────────────────────────────────────────────────────────
+
+  async #executeArtifactCollect(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ArtifactCollectNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    // Extract artifact references from upstream input.
+    const raw = config.artifactPath ? lookupPath(inputData, config.artifactPath) : inputData;
+    const refs: unknown[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+
+    // Filter by accepted types when specified.
+    const accepted = config.acceptTypes;
+    const filtered = accepted
+      ? refs.filter((r) => {
+          const t = r && typeof r === 'object' ? (r as Record<string, unknown>).type : null;
+          return typeof t === 'string' && accepted.includes(t as 'html' | 'image' | 'document' | 'code' | 'data');
+        })
+      : refs;
+
+    // Persist each artifact to the workspace artifact store.
+    const collectedIds: string[] = [];
+    const now = new Date().toISOString();
+    for (const ref of filtered) {
+      const rec = ref && typeof ref === 'object' ? (ref as Record<string, unknown>) : {};
+      const type = typeof rec.type === 'string' ? rec.type : 'document';
+      const title = typeof rec.title === 'string' ? rec.title : config.collectionName;
+      const content = typeof rec.content === 'string' ? rec.content : typeof rec.url === 'string' ? rec.url : '';
+      const id = randomUUID();
+      try {
+        this.deps.db
+          .insert(schema.artifacts)
+          .values({
+            id,
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            type: type as 'html' | 'image' | 'document' | 'code' | 'data',
+            title: `${config.collectionName}: ${title}`.slice(0, 200),
+            content,
+            thumbnailUrl: typeof rec.thumbnailUrl === 'string' ? rec.thumbnailUrl : null,
+            runId: ctx.runId,
+            workflowId: ctx.state.workflowId,
+            agentId: null,
+            conversationId: null,
+            nodeId: node.id,
+            metadata: {
+              collectionName: config.collectionName,
+              versioned: config.versioned !== false,
+              requireApproval: config.requireApproval ?? false,
+              ...(rec.metadata && typeof rec.metadata === 'object' ? rec.metadata : {}),
+            },
+            createdAt: now,
+            updatedAt: now,
+          })
+          .run();
+        collectedIds.push(id);
       } catch (err) {
-        this.deps.logger.warn('collective_brain.agent_task_promotion.failed', {
-          runId: ctx.runId,
-          nodeId: node.id,
+        this.deps.logger.warn('artifact_collect.insert_failed', {
+          runId: ctx.runId, nodeId: node.id,
           message: (err as Error).message,
         });
       }
+    }
+
+    this.deps.logger.info('artifact_collect.done', {
+      runId: ctx.runId,
+      nodeId: node.id,
+      collectionName: config.collectionName,
+      collected: collectedIds.length,
+      total: refs.length,
     });
+
+    return {
+      collectionName: config.collectionName,
+      artifactIds: collectedIds,
+      count: collectedIds.length,
+      requireApproval: config.requireApproval ?? false,
+    };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Agent swarm node (AGENTIS-PLATFORM-10X §A8)
+  // ────────────────────────────────────────────────────────────
+
+  async #dispatchAgentSwarm(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: AgentSwarmNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<void> {
+    const arrRaw = lookupPath(inputData, config.inputArrayPath);
+    const items = Array.isArray(arrRaw) ? arrRaw : [];
+    if (items.length === 0) {
+      await this.#completeNode(ctx, node.id, { [config.outputKey]: [], count: 0 });
+      return;
+    }
+    const agentId = config.agentId ?? this.#resolveSwarmAgent(config.capabilityTags);
+    if (!agentId) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        `agent_swarm node ${node.id}: no agent bound and none match capability tags`,
+      );
+    }
+    const maxParallel = Math.min(Math.max(config.maxParallel || 1, 1), 64);
+    const swarm: SwarmState = {
+      nodeId: node.id,
+      total: items.length,
+      next: 0,
+      items,
+      agentId,
+      config,
+      results: new Map(),
+      failures: new Map(),
+      settled: false,
+    };
+    ctx.swarms.set(node.id, swarm);
+    // Hold the node open with a synthetic active execution.
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `swarm:${node.id}`,
+      nodeId: node.id,
+      executorType: 'agent',
+      executorRef: agentId,
+      startedAt: new Date().toISOString(),
+    };
+    const initial = Math.min(maxParallel, items.length);
+    for (let i = 0; i < initial; i++) {
+      this.#dispatchSwarmSubtask(ctx, node, swarm, swarm.next++);
+    }
+  }
+
+  #resolveSwarmAgent(capabilityTags: string[]): string | null {
+    try {
+      const registered = new Set(this.deps.adapters.list().map((r) => r.agentId));
+      if (registered.size === 0) return null;
+      if (capabilityTags.length > 0) {
+        const agents = this.deps.db
+          .select({ id: schema.agents.id, capabilityTags: schema.agents.capabilityTags })
+          .from(schema.agents)
+          .all();
+        for (const a of agents) {
+          if (!registered.has(a.id)) continue;
+          const tags = Array.isArray(a.capabilityTags) ? (a.capabilityTags as string[]) : [];
+          if (tags.some((t) => capabilityTags.includes(t))) return a.id;
+        }
+      }
+      return [...registered][0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  #dispatchSwarmSubtask(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    swarm: SwarmState,
+    index: number,
+  ): void {
+    const item = swarm.items[index];
+    const taskId = `${node.id}::swarm::${index}`;
+    void this.deps.adapters
+      .dispatchTask(
+        {
+          taskId,
+          runId: ctx.runId,
+          workflowId: ctx.workflowId,
+          nodeId: taskId,
+          title: `${node.title} [${index + 1}/${swarm.total}]`,
+          description: swarm.config.prompt,
+          inputData: { item, index, prompt: swarm.config.prompt },
+          scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
+          capabilityTags: swarm.config.capabilityTags,
+          timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
+        },
+        swarm.agentId,
+      )
+      .catch((err) => {
+        void this.#onSwarmSubtask(ctx, node.id, index, null, (err as Error).message);
+      });
+  }
+
+  async #onSwarmSubtask(
+    ctx: RunningContext,
+    nodeId: string,
+    index: number,
+    output: Record<string, unknown> | null,
+    error: string | null,
+  ): Promise<void> {
+    const swarm = ctx.swarms.get(nodeId);
+    if (!swarm || swarm.settled) return;
+    if (error) swarm.failures.set(index, error);
+    else swarm.results.set(index, output ?? {});
+
+    const node = ctx.graph.nodes.find((n) => n.id === nodeId);
+
+    // first_success: settle as soon as one subtask succeeds.
+    if (swarm.config.mergeStrategy === 'first_success' && !error && node) {
+      swarm.settled = true;
+      ctx.swarms.delete(nodeId);
+      delete ctx.state.activeExecutions[nodeId];
+      await this.#completeNode(ctx, nodeId, {
+        [swarm.config.outputKey]: [output ?? {}],
+        count: 1,
+        strategy: 'first_success',
+      });
+      void this.#tick(ctx);
+      return;
+    }
+
+    // Dispatch the next queued item to keep the pool saturated.
+    if (swarm.next < swarm.total && node) {
+      this.#dispatchSwarmSubtask(ctx, node, swarm, swarm.next++);
+    }
+
+    const done = swarm.results.size + swarm.failures.size;
+    if (done < swarm.total || !node) return;
+
+    swarm.settled = true;
+    ctx.swarms.delete(nodeId);
+    delete ctx.state.activeExecutions[nodeId];
+
+    if (swarm.results.size === 0) {
+      await this.#failNode(
+        ctx,
+        nodeId,
+        `agent_swarm: all ${swarm.total} subtasks failed`,
+      );
+      void this.#tick(ctx);
+      return;
+    }
+    const merged = this.#mergeSwarm(swarm);
+    await this.#completeNode(ctx, nodeId, merged);
+    void this.#tick(ctx);
+  }
+
+  #mergeSwarm(swarm: SwarmState): Record<string, unknown> {
+    const ordered = [...swarm.results.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, v]) => v);
+    if (swarm.config.mergeStrategy === 'majority_vote') {
+      const tally = new Map<string, number>();
+      for (const r of ordered) {
+        const key = JSON.stringify(r);
+        tally.set(key, (tally.get(key) ?? 0) + 1);
+      }
+      let bestKey = '';
+      let bestN = -1;
+      for (const [k, n] of tally) {
+        if (n > bestN) {
+          bestN = n;
+          bestKey = k;
+        }
+      }
+      return {
+        [swarm.config.outputKey]: bestKey ? JSON.parse(bestKey) : null,
+        votes: bestN,
+        count: ordered.length,
+        strategy: 'majority_vote',
+      };
+    }
+    return {
+      [swarm.config.outputKey]: ordered,
+      count: ordered.length,
+      failures: swarm.failures.size,
+      strategy: 'collect_all',
+    };
   }
 
   async #executeScratchpadNode(
@@ -696,6 +1381,7 @@ export class WorkflowEngine {
       runId: ctx.runId,
       nodeId: node.id,
     });
+    this.#emitWorkStep(ctx, node, 'start');
     ctx.eventsSinceSnapshot += 1;
   }
 
@@ -725,6 +1411,8 @@ export class WorkflowEngine {
       nodeId,
       outputPreview: compactRealtimePayload(output),
     });
+    const completedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
+    if (completedNode) this.#emitWorkStep(ctx, completedNode, 'complete');
     ctx.eventsSinceSnapshot += 1;
 
     // Fan out to downstream nodes.
@@ -777,7 +1465,87 @@ export class WorkflowEngine {
       nodeId,
       error,
     });
+    const failedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
+    if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
     await this.#persistRun(ctx);
+  }
+
+  #skipBlockedNodes(ctx: RunningContext, reason: string): void {
+    markOpenNodesSkipped(ctx.state, reason);
+  }
+
+  async #cancelPersistedRun(runId: string): Promise<void> {
+    const run = await this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId))
+      .get();
+    if (!run || isTerminalRunStatus(run.status)) return;
+
+    const state = run.runState as unknown as WorkflowRunState | null;
+    if (state) {
+      state.status = 'CANCELLED';
+      markOpenNodesSkipped(state, 'Run cancelled');
+    }
+    const now = new Date().toISOString();
+    await this.deps.db
+      .update(schema.workflowRuns)
+      .set({
+        status: 'CANCELLED',
+        runState: (state ?? run.runState) as unknown as object,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(schema.workflowRuns.id, runId));
+  }
+
+  /**
+   * Publish a human-readable AGENT_WORK_STEP to the workspace room so the
+   * canvas Live feed can attribute work to a named agent in real time.
+   * NODE_* events stay run-scoped and id-only; this is the agent-facing layer.
+   */
+  #emitWorkStep(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    phase: 'start' | 'complete' | 'fail',
+    detail?: string,
+  ): void {
+    const config = node.config as { kind?: string; agentId?: string | null };
+    const agentId =
+      config.kind === 'agent_task' || config.kind === 'agent_swarm'
+        ? config.agentId ?? null
+        : null;
+    let agentName: string | undefined;
+    if (agentId) {
+      const row = this.deps.db
+        .select({ name: schema.agents.name })
+        .from(schema.agents)
+        .where(eq(schema.agents.id, agentId))
+        .get();
+      agentName = row?.name;
+    }
+    const description =
+      phase === 'start'
+        ? node.title
+        : phase === 'complete'
+          ? `Completed ${node.title}`
+          : `Failed at ${node.title}`;
+    this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+      workspaceId: ctx.workspaceId,
+      runId: ctx.runId,
+      workflowId: ctx.workflowId,
+      nodeId: node.id,
+      agentId,
+      agentName,
+      step: config.kind ?? 'node',
+      phase,
+      description,
+      detail,
+      progress: {
+        done: ctx.state.completedNodeIds.length,
+        total: ctx.graph.nodes.length,
+      },
+    });
   }
 
   async #transitionRunStatus(ctx: RunningContext, status: WorkflowRunStatus): Promise<void> {
@@ -813,6 +1581,33 @@ export class WorkflowEngine {
       status,
       workflowId: ctx.workflowId,
     });
+
+    // Cross-workflow event signaling (AGENTIS-PLATFORM-10X §A3): a workflow
+    // reaching a terminal state fires APP_WORKFLOW_COMPLETED / _FAILED so the
+    // `workflow_completed` trigger can chain the next domain without coupling.
+    if (status === 'COMPLETED' || status === 'FAILED') {
+      const appWfEvent =
+        status === 'COMPLETED'
+          ? REALTIME_EVENTS.APP_WORKFLOW_COMPLETED
+          : REALTIME_EVENTS.APP_WORKFLOW_FAILED;
+      const appWfPayload = {
+        runId: ctx.runId,
+        workflowId: ctx.workflowId,
+        workspaceId: ctx.workspaceId,
+        ambientId: ctx.ambientId,
+        userId: ctx.userId,
+        status,
+      };
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), appWfEvent, appWfPayload);
+      const appId = this.#resolveAppId(ctx);
+      if (appId) {
+        this.deps.bus.publish(REALTIME_ROOMS.app(appId), appWfEvent, { ...appWfPayload, appId });
+      }
+    }
+
+    if (finishing && previous !== status) {
+      await this.#appendTerminalConversationMessage(ctx, status);
+    }
 
     // If this is a child subflow run reaching a terminal state, notify the executor.
     if (finishing && this.deps.subflows && previous !== status) {
@@ -864,6 +1659,51 @@ export class WorkflowEngine {
       runState: ctx.state as unknown as object,
     });
   }
+
+  async #appendTerminalConversationMessage(ctx: RunningContext, status: WorkflowRunStatus): Promise<void> {
+    if (!this.deps.conversations) return;
+    const run = this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, ctx.runId))
+      .get();
+    const conversationId = run?.conversationId ?? ctx.conversationId ?? null;
+    if (!conversationId) return;
+
+    const workflow = run?.workflowId
+      ? this.deps.db
+          .select({ title: schema.workflows.title })
+          .from(schema.workflows)
+          .where(eq(schema.workflows.id, run.workflowId))
+          .get()
+      : null;
+    const title = run?.ephemeralTitle ?? workflow?.title ?? 'Workflow run';
+    const statusLabel = status === 'COMPLETED' ? 'completed' : status === 'FAILED' ? 'failed' : 'cancelled';
+
+    try {
+      this.deps.conversations.appendSystem({
+        workspaceId: ctx.workspaceId,
+        conversationId,
+        sessionMessageId: `run-terminal:${ctx.runId}`,
+        body: `Run ${statusLabel}: ${title}`,
+        metadata: {
+          source: 'workflow',
+          runId: ctx.runId,
+          workflowId: run?.workflowId ?? null,
+          runStatus: status,
+          runTitle: title,
+          isEphemeral: Boolean(run?.isEphemeral),
+        },
+      });
+    } catch (error) {
+      this.deps.logger.warn('engine.conversation_run_bridge.failed', {
+        workspaceId: ctx.workspaceId,
+        runId: ctx.runId,
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 interface RunningContext {
@@ -871,6 +1711,7 @@ interface RunningContext {
   workflowId: string;
   workspaceId: string;
   ambientId: string | null;
+  conversationId: string | null;
   userId: string;
   graph: WorkflowGraph;
   downstreamEdges: Map<string, WorkflowEdge[]>;
@@ -885,6 +1726,37 @@ interface RunningContext {
   inflightDispatches: number;
   startedAt?: string;
   scratchpad?: { snapshot: Record<string, unknown> };
+  /** Owning app id — `undefined` = not resolved yet, `null` = resolved as none. */
+  appId?: string | null;
+  /** Active agent_swarm nodes keyed by node id. */
+  swarms: Map<string, SwarmState>;
+  /** Self-heal attempt counters keyed by agent_task node id. */
+  selfHealAttempts: Map<string, number>;
+  /** B3 — accumulated `agent.thinking` text per agent_task node id. */
+  thinkingTraces: Map<string, string[]>;
+}
+
+interface SwarmState {
+  nodeId: string;
+  total: number;
+  /** Index of the next item to dispatch. */
+  next: number;
+  items: unknown[];
+  agentId: string;
+  config: AgentSwarmNodeConfig;
+  results: Map<number, Record<string, unknown>>;
+  failures: Map<number, string>;
+  settled: boolean;
+}
+
+/** Parse a `${nodeId}::swarm::${index}` synthetic task id. */
+function parseSwarmTaskId(taskId: string): { nodeId: string; index: number } | null {
+  const marker = '::swarm::';
+  const at = taskId.lastIndexOf(marker);
+  if (at < 0) return null;
+  const index = Number(taskId.slice(at + marker.length));
+  if (!Number.isInteger(index)) return null;
+  return { nodeId: taskId.slice(0, at), index };
 }
 
 function resolveParallelism(): number {
@@ -1003,6 +1875,25 @@ function mapInputs(
     }
   }
   return out;
+}
+
+function markOpenNodesSkipped(state: WorkflowRunState, reason: string): void {
+  const now = new Date().toISOString();
+  state.readyQueue = [];
+  state.waitingInputs = {};
+  state.activeExecutions = {};
+  for (const ns of Object.values(state.nodeStates)) {
+    if (ns.status === 'PENDING' || ns.status === 'WAITING' || ns.status === 'RUNNING') {
+      ns.status = 'SKIPPED';
+      ns.completedAt = now;
+      ns.error = reason;
+      if (!state.skippedNodeIds.includes(ns.nodeId)) state.skippedNodeIds.push(ns.nodeId);
+    }
+  }
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  return status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED';
 }
 
 function lookupPath(obj: unknown, path: string): unknown {

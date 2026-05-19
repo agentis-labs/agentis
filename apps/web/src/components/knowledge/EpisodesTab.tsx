@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { History } from 'lucide-react';
-import { api } from '../../lib/api';
+import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { Skeleton } from '../shared/Skeleton';
 import { EmptyState } from '../shared/EmptyState';
@@ -20,10 +20,10 @@ export function EpisodesTab() {
     setLoading(true);
     void api<{ episodes: EpisodeRowData[] }>('/v1/memory/episodes?limit=80')
       .then((data) => { if (!cancelled) setEpisodes(data.episodes ?? []); })
-      .catch((err) => { if (!cancelled) { toast.error('Failed to load episodes', String(err)); setEpisodes([]); } })
+      .catch((err) => { if (!cancelled) { toast.error('Failed to load episodes', apiErrorMessage(err)); setEpisodes([]); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [toast]);
 
   const filtered = useMemo(() => episodes.filter((episode) => filter === 'all' || episode.type === filter), [episodes, filter]);
 

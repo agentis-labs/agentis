@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, or } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 
 export interface CreateKnowledgeBaseArgs {
   workspaceId: string;
+  appId?: string | null;
   name: string;
   description?: string | null;
 }
@@ -40,19 +41,40 @@ export interface SearchKnowledgeArgs {
   topK?: number;
 }
 
+interface KnowledgeBaseScopeOptions {
+  appId?: string | null;
+  includeWorkspace?: boolean;
+}
+
 export class KnowledgeBaseService {
+  private autoLinker: { autoLink: (input: { workspaceId: string; appId?: string | null; sourceId: string; sourceKind: 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern'; sourceTitle: string; sourceContent: string; siblingHeadId?: string | null; siblingHeadKind?: 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern' | null }) => number } | null = null;
+
   constructor(private readonly db: AgentisSqliteDb) {}
 
-  listKnowledgeBases(workspaceId: string) {
+  /** Wire the auto-linker after construction (it depends on CollectiveBrainService, which is created later). */
+  setAutoLinker(linker: NonNullable<KnowledgeBaseService['autoLinker']>): void {
+    this.autoLinker = linker;
+  }
+
+  listKnowledgeBases(workspaceId: string, options?: KnowledgeBaseScopeOptions) {
+    const appId = options?.appId ?? null;
+    const includeWorkspace = options?.includeWorkspace ?? false;
     return this.db
       .select()
       .from(schema.knowledgeBases)
-      .where(eq(schema.knowledgeBases.workspaceId, workspaceId))
+      .where(and(
+        eq(schema.knowledgeBases.workspaceId, workspaceId),
+        appId
+          ? (includeWorkspace
+            ? or(eq(schema.knowledgeBases.appId, appId), isNull(schema.knowledgeBases.appId))!
+            : eq(schema.knowledgeBases.appId, appId))
+          : isNull(schema.knowledgeBases.appId),
+      ))
       .all()
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
-  getKnowledgeBase(workspaceId: string, knowledgeBaseId: string) {
+  getKnowledgeBase(workspaceId: string, knowledgeBaseId: string, options?: KnowledgeBaseScopeOptions) {
     const kb = this.db
       .select()
       .from(schema.knowledgeBases)
@@ -64,6 +86,11 @@ export class KnowledgeBaseService {
       )
       .get();
     if (!kb) throw new AgentisError('RESOURCE_NOT_FOUND', 'Knowledge base not found');
+    if (options?.appId) {
+      const includeWorkspace = options.includeWorkspace ?? false;
+      const visibleToApp = kb.appId === options.appId || (includeWorkspace && kb.appId == null);
+      if (!visibleToApp) throw new AgentisError('RESOURCE_NOT_FOUND', 'Knowledge base not found');
+    }
     return kb;
   }
 
@@ -72,6 +99,7 @@ export class KnowledgeBaseService {
     const kb = {
       id: randomUUID(),
       workspaceId: args.workspaceId,
+      appId: args.appId ?? null,
       name: args.name,
       description: args.description ?? null,
       embeddingModel: 'lexical-v1',
@@ -118,21 +146,23 @@ export class KnowledgeBaseService {
   }
 
   addDocument(args: AddKnowledgeDocumentArgs) {
-    this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
-    const content = extractText(args.content, args.mimeType ?? 'text/plain');
+    const knowledgeBase = this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
+    const mimeType = args.mimeType ?? mimeTypeFromName(args.name);
+    const content = extractText(args.content, mimeType);
     if (!content.trim()) throw new AgentisError('VALIDATION_FAILED', 'Document content is empty');
 
     return this.persistDocument({
       workspaceId: args.workspaceId,
       knowledgeBaseId: args.knowledgeBaseId,
+      appId: knowledgeBase.appId ?? null,
       name: args.name,
-      mimeType: args.mimeType ?? 'text/plain',
+      mimeType,
       content,
     });
   }
 
   async addDocumentFromBytes(args: AddKnowledgeDocumentBytesArgs) {
-    this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
+    const knowledgeBase = this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
     const mimeType = args.mimeType ?? mimeTypeFromName(args.name);
     const content = await extractTextFromBytes(args.bytes, mimeType, args.name);
     if (!content.trim()) throw new AgentisError('VALIDATION_FAILED', 'Document content is empty');
@@ -140,13 +170,14 @@ export class KnowledgeBaseService {
     return this.persistDocument({
       workspaceId: args.workspaceId,
       knowledgeBaseId: args.knowledgeBaseId,
+      appId: knowledgeBase.appId ?? null,
       name: args.name,
       mimeType,
       content,
     });
   }
 
-  private persistDocument(args: AddKnowledgeDocumentArgs & { content: string }) {
+  private persistDocument(args: AddKnowledgeDocumentArgs & { appId?: string | null; content: string }) {
     const now = new Date().toISOString();
     const documentId = randomUUID();
     const chunks = chunkText(args.content);
@@ -164,10 +195,13 @@ export class KnowledgeBaseService {
       updatedAt: now,
     };
     this.db.insert(schema.kbDocuments).values(document).run();
+    const chunkIds: string[] = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index]!;
+      const chunkId = randomUUID();
+      chunkIds.push(chunkId);
       this.db.insert(schema.kbChunks).values({
-        id: randomUUID(),
+        id: chunkId,
         documentId,
         knowledgeBaseId: args.knowledgeBaseId,
         workspaceId: args.workspaceId,
@@ -178,6 +212,27 @@ export class KnowledgeBaseService {
         createdAt: now,
       }).run();
     }
+
+    // Best-effort auto-link new chunks into the collective brain so the
+    // graph never appears as a disconnected cloud of orphans after upload.
+    if (this.autoLinker && chunkIds.length > 0) {
+      const headId = chunkIds[0]!;
+      for (let index = 0; index < chunkIds.length; index += 1) {
+        const id = chunkIds[index]!;
+        const content = chunks[index] ?? '';
+        this.autoLinker.autoLink({
+          workspaceId: args.workspaceId,
+          appId: args.appId ?? null,
+          sourceId: id,
+          sourceKind: 'kb_chunk',
+          sourceTitle: args.name,
+          sourceContent: content,
+          siblingHeadId: index === 0 ? null : headId,
+          siblingHeadKind: index === 0 ? null : 'kb_chunk',
+        });
+      }
+    }
+
     return { ...document, chunks: chunks.length };
   }
 
@@ -220,6 +275,7 @@ export class KnowledgeBaseService {
       .all();
 
     return chunks
+      .filter((chunk) => this.isDocumentActive(args.workspaceId, chunk.documentId))
       .map((chunk) => ({ chunk, score: scoreChunk(queryTokens, chunk.content) }))
       .filter((result) => result.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -233,10 +289,22 @@ export class KnowledgeBaseService {
         score,
       }));
   }
+
+  private isDocumentActive(workspaceId: string, documentId: string): boolean {
+    const document = this.db.select({ archivedAt: schema.kbDocuments.archivedAt })
+      .from(schema.kbDocuments)
+      .where(and(eq(schema.kbDocuments.workspaceId, workspaceId), eq(schema.kbDocuments.id, documentId)))
+      .get();
+    return Boolean(document && !document.archivedAt);
+  }
 }
 
 function extractText(content: string, mimeType: string): string {
-  if (mimeType.includes('json')) {
+  const normalizedType = mimeType.toLowerCase();
+  if (isHtmlDocument(normalizedType)) {
+    return htmlToText(content);
+  }
+  if (normalizedType.includes('json')) {
     try {
       return JSON.stringify(JSON.parse(content), null, 2);
     } catch {
@@ -280,9 +348,9 @@ async function extractTextFromBytes(bytes: Buffer, mimeType: string, fileName: s
 
   const text = bytes.toString('utf8');
   if (looksBinary(text)) {
-    throw new AgentisError('VALIDATION_FAILED', 'Unsupported binary document type. Upload PDF, DOCX, Markdown, text, CSV, or JSON.');
+    throw new AgentisError('VALIDATION_FAILED', 'Unsupported binary document type. Upload PDF, DOCX, HTML, Markdown, text, CSV, or JSON.');
   }
-  return extractText(text, mimeType);
+  return isHtmlDocument(mimeType, fileName) ? htmlToText(text) : extractText(text, mimeType);
 }
 
 function looksBinary(text: string): boolean {
@@ -298,8 +366,59 @@ function mimeTypeFromName(fileName: string): string {
   if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.csv')) return 'text/csv';
+  if (name.endsWith('.html') || name.endsWith('.htm')) return 'text/html';
   if (name.endsWith('.md') || name.endsWith('.markdown')) return 'text/markdown';
   return 'text/plain';
+}
+
+function isHtmlDocument(mimeType: string, fileName = ''): boolean {
+  const type = mimeType.toLowerCase();
+  const name = fileName.toLowerCase();
+  return type.includes('html') || name.endsWith('.html') || name.endsWith('.htm');
+}
+
+function htmlToText(html: string): string {
+  const withBreaks = html
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(br|hr)\b[^>]*>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<\/(p|div|section|article|header|footer|main|aside|li|ul|ol|table|thead|tbody|tr|h[1-6]|blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  return decodeHtmlEntities(withBreaks)
+    .replace(/\r/g, '\n')
+    .replace(/[ \t\f\v]+/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    nbsp: ' ',
+    quot: '"',
+  };
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]+);/gi, (match, entity: string) => {
+    const lower = entity.toLowerCase();
+    if (lower.startsWith('#x')) {
+      const code = Number.parseInt(lower.slice(2), 16);
+      return isValidCodePoint(code) ? String.fromCodePoint(code) : match;
+    }
+    if (lower.startsWith('#')) {
+      const code = Number.parseInt(lower.slice(1), 10);
+      return isValidCodePoint(code) ? String.fromCodePoint(code) : match;
+    }
+    return named[lower] ?? match;
+  });
+}
+
+function isValidCodePoint(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value <= 0x10FFFF;
 }
 
 function chunkText(content: string, maxTokens = 240, overlapTokens = 40): string[] {

@@ -2,11 +2,15 @@
  * Agentis CLI.
  *
  * Subcommands:
- *   agentis up                  — bootstrap and start Agentis on the current host. Default.
- *   agentis backup [--out DIR]  — snapshot the data dir into DIR (default: <data-dir>/backups/<ts>).
+ *   agentis up                               — bootstrap and start Agentis on the current host. Default.
+ *   agentis backup [--out DIR]               — snapshot the data dir into DIR (default: <data-dir>/backups/<ts>).
  *   agentis restore DIR [--force] [--data-dir DIR]
- *                               — restore a backup directory into the data dir.
- *   agentis help                — print this help.
+ *                                            — restore a backup directory into the data dir.
+ *   agentis bootstrap [flags]                — commission an agent through the HTTP API.
+ *   agentis bootstrap generate-config [flags]
+ *                                            — generate an agentis-config.json scaffold.
+ *   agentis export-config [flags]            — alias for bootstrap generate-config.
+ *   agentis help                             — print this help.
  *
  * The CLI deliberately keeps a tiny surface; everything serious is in
  * `@agentis/api`. Embedders that want a programmatic entrypoint should call
@@ -19,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { bootstrap } from '@agentis/api/bootstrap';
 import { createBackup, restoreBackup } from '@agentis/api/backup';
+import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
 
 // When the CLI is published to npm and run via `npx`, the bundled web SPA
 // ships at <pkg>/dist/web. We point AGENTIS_DASHBOARD_DIST at it so the
@@ -46,6 +51,12 @@ Usage:
                                           Default <dir>: <data-dir>/backups/<timestamp>.
   agentis restore <dir> [--force]         Restore a backup directory into the data dir.
                   [--data-dir <dir>]      --force overwrites an existing data.db.
+  agentis bootstrap --url <url> --api-key <key> --adapter <adapter>
+                                          Commission an orchestrator, manager, or worker through the API.
+  agentis bootstrap generate-config --from <claude_code|codex> [--output <file>]
+                                          Generate an agentis-config.json scaffold from local context.
+  agentis export-config --from <claude_code|codex> [--output <file>]
+                                          Alias for bootstrap generate-config.
   agentis help                            Show this message.
 
 Environment:
@@ -176,6 +187,14 @@ async function main() {
   }
   if (cmd === 'restore') {
     process.exitCode = await runRestoreCmd(process.argv.slice(3));
+    return;
+  }
+  if (cmd === 'bootstrap') {
+    process.exitCode = await runBootstrapCmd(process.argv.slice(3));
+    return;
+  }
+  if (cmd === 'export-config') {
+    process.exitCode = await runGenerateConfigCmd(process.argv.slice(3));
     return;
   }
   process.stderr.write(`Unknown command: ${cmd}\n${HELP}`);

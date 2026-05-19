@@ -1006,4 +1006,492 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_links_target ON knowledge_links(workspa
 CREATE INDEX IF NOT EXISTS idx_knowledge_links_agent ON knowledge_links(workspace_id, agent_id);
 `,
   },
+  {
+    version: 27,
+    name: 'app_thread_and_results',
+    sql: `
+CREATE TABLE IF NOT EXISTS app_thread_messages (
+  id TEXT PRIMARY KEY,
+  app_id TEXT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  content TEXT NOT NULL,
+  run_id TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  approval_id TEXT,
+  operator_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_thread_messages_app ON app_thread_messages(app_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_app_thread_messages_run ON app_thread_messages(run_id);
+
+CREATE TABLE IF NOT EXISTS app_results (
+  id TEXT PRIMARY KEY,
+  app_id TEXT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  output_key TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  summary TEXT,
+  triggered_by TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_results_app_created ON app_results(app_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_app_results_run ON app_results(run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_results_run_key ON app_results(run_id, output_key);
+
+-- FTS5 shadow table over (summary, content) — APP-OUTPUT-REPLAN.md §5.6.
+-- 'contentless' style: we manage the index manually via triggers.
+CREATE VIRTUAL TABLE IF NOT EXISTS app_results_fts USING fts5(
+  summary,
+  content,
+  content='app_results',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS app_results_fts_insert AFTER INSERT ON app_results BEGIN
+  INSERT INTO app_results_fts(rowid, summary, content)
+  VALUES (new.rowid, new.summary, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS app_results_fts_delete AFTER DELETE ON app_results BEGIN
+  INSERT INTO app_results_fts(app_results_fts, rowid, summary, content)
+  VALUES('delete', old.rowid, old.summary, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS app_results_fts_update AFTER UPDATE ON app_results BEGIN
+  INSERT INTO app_results_fts(app_results_fts, rowid, summary, content)
+  VALUES('delete', old.rowid, old.summary, old.content);
+  INSERT INTO app_results_fts(rowid, summary, content)
+  VALUES (new.rowid, new.summary, new.content);
+END;
+`,
+  },
+  {
+    version: 28,
+    name: 'agent_hierarchy_canvas',
+    sql: `
+ALTER TABLE agents ADD COLUMN description TEXT;
+ALTER TABLE agents ADD COLUMN space_id TEXT;
+ALTER TABLE agents ADD COLUMN canvas_position TEXT;
+CREATE INDEX IF NOT EXISTS idx_agents_reports_to ON agents(workspace_id, reports_to);
+CREATE UNIQUE INDEX IF NOT EXISTS agents_workspace_orchestrator ON agents(workspace_id) WHERE role = 'orchestrator';
+`,
+  },
+  {
+    version: 29,
+    name: 'ephemeral_workflow_runs',
+    sql: `
+PRAGMA foreign_keys = OFF;
+DROP TABLE IF EXISTS workflow_runs_next;
+CREATE TABLE workflow_runs_next (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  ambient_id      TEXT REFERENCES ambients(id) ON DELETE SET NULL,
+  workflow_id     TEXT REFERENCES workflows(id) ON DELETE CASCADE,
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  status          TEXT NOT NULL DEFAULT 'CREATED',
+  run_state       TEXT NOT NULL,
+  replan_count    INTEGER NOT NULL DEFAULT 0,
+  is_replay       INTEGER NOT NULL DEFAULT 0,
+  is_ephemeral    INTEGER NOT NULL DEFAULT 0,
+  ephemeral_title TEXT,
+  graph_snapshot  TEXT,
+  trigger_id      TEXT REFERENCES triggers(id) ON DELETE SET NULL,
+  parent_run_id   TEXT,
+  started_at      TEXT,
+  completed_at    TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO workflow_runs_next (
+  id, workspace_id, ambient_id, workflow_id, user_id, status, run_state, replan_count,
+  is_replay, is_ephemeral, ephemeral_title, graph_snapshot, trigger_id, parent_run_id,
+  started_at, completed_at, created_at, updated_at
+)
+SELECT
+  id, workspace_id, ambient_id, workflow_id, user_id, status, run_state, replan_count,
+  is_replay, 0, NULL, NULL, trigger_id, parent_run_id, started_at, completed_at, created_at, updated_at
+FROM workflow_runs;
+DROP TABLE workflow_runs;
+ALTER TABLE workflow_runs_next RENAME TO workflow_runs;
+PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS idx_runs_workflow ON workflow_runs(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON workflow_runs(workspace_id, status);
+CREATE INDEX IF NOT EXISTS idx_runs_workspace_created ON workflow_runs(workspace_id, created_at DESC);
+`,
+  },
+  {
+    version: 30,
+    name: 'platform_10x_app_model',
+    sql: `
+ALTER TABLE workflows ADD COLUMN app_id TEXT;
+ALTER TABLE app_instances ADD COLUMN deploy_target TEXT NOT NULL DEFAULT 'local';
+ALTER TABLE app_instances ADD COLUMN deploy_status TEXT NOT NULL DEFAULT 'stopped';
+ALTER TABLE app_instances ADD COLUMN api_key_hash TEXT;
+
+DROP TABLE IF EXISTS async_jobs;
+CREATE TABLE async_jobs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  priority TEXT NOT NULL DEFAULT 'normal',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  scheduled_for TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  last_error TEXT,
+  leased_at TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_async_jobs_poll ON async_jobs(status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_async_jobs_workspace ON async_jobs(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS app_data_tables (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id TEXT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  physical_name TEXT NOT NULL,
+  description TEXT,
+  schema_json TEXT NOT NULL,
+  row_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_data_tables_app_name ON app_data_tables(app_id, name);
+`,
+  },
+  {
+    version: 31,
+    name: 'intent_contracts_and_conversation_runs',
+    sql: `
+ALTER TABLE workflows ADD COLUMN intended_behavior TEXT;
+ALTER TABLE app_instances ADD COLUMN intended_behavior TEXT;
+ALTER TABLE workflow_runs ADD COLUMN conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_conversation ON workflow_runs(conversation_id, created_at DESC);
+`,
+  },
+  {
+    version: 32,
+    name: 'space_icons',
+    sql: `
+ALTER TABLE spaces ADD COLUMN icon_glyph TEXT;
+`,
+  },
+  {
+    version: 33,
+    name: 'brain_abilities_replan',
+    sql: `
+-- ── Brain & Abilities Replan — foundation (docs/BRAIN-ABILITIES-REPLAN.md) ──
+-- B5/B6: explicit atom lifecycle state + managed/protected distinction on the
+-- promotion target table. memory_episodes is what extractAndPromote writes.
+ALTER TABLE memory_episodes ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE memory_episodes ADD COLUMN managed INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE memory_episodes ADD COLUMN pinned_at TEXT;
+ALTER TABLE memory_episodes ADD COLUMN last_accessed_at TEXT;
+ALTER TABLE memory_episodes ADD COLUMN is_disputed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_episodes ADD COLUMN dispute_reason TEXT;
+
+-- Operator-authored and seeded knowledge is protected from automated decay.
+UPDATE memory_episodes SET managed = 0 WHERE source IN ('operator_write', 'seed', 'system_write');
+-- Already-archived episodes adopt the archived lifecycle state.
+UPDATE memory_episodes SET status = 'archived' WHERE archived_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_memory_episodes_status
+  ON memory_episodes(workspace_id, status, confidence);
+
+-- B4 / Appendix A: per-workspace embedding provider selection.
+-- U5: per-workspace auxiliary adapter slot for cheap background work.
+ALTER TABLE workspaces ADD COLUMN embedding_provider_type TEXT NOT NULL DEFAULT 'hashing';
+ALTER TABLE workspaces ADD COLUMN embedding_provider_config TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE workspaces ADD COLUMN auxiliary_adapter_config TEXT;
+ALTER TABLE workspaces ADD COLUMN brain_settings TEXT NOT NULL DEFAULT '{}';
+
+-- B10 / Appendix B: durable promotion queue. queueMicrotask is not a job
+-- queue — this table survives restarts, serialises per-workspace work, and
+-- carries priority so evaluator-driven corrections jump routine promotions.
+CREATE TABLE IF NOT EXISTS brain_promotion_queue (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  item_type       TEXT NOT NULL,
+  priority        TEXT NOT NULL DEFAULT 'normal',
+  payload         TEXT NOT NULL DEFAULT '{}',
+  status          TEXT NOT NULL DEFAULT 'pending',
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  fail_reason     TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bpq_pending
+  ON brain_promotion_queue(workspace_id, priority, created_at)
+  WHERE status = 'pending';
+
+-- Appendix C / Gap14: quality events — the measurable feedback gradient that
+-- distinguishes a self-regulating brain from a write-only one.
+CREATE TABLE IF NOT EXISTS brain_quality_events (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id       TEXT,
+  agent_id     TEXT,
+  event_type   TEXT NOT NULL,
+  atom_id      TEXT,
+  ability_id   TEXT,
+  run_id       TEXT,
+  delta        REAL,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bqe_workspace_type
+  ON brain_quality_events(workspace_id, event_type, created_at DESC);
+`,
+  },
+  {
+    version: 34,
+    name: 'agent_abilities_and_user_profiles',
+    sql: `
+-- ── Brain & Abilities Replan — Part IV (Agent Abilities) + B8 (User Profile) ──
+-- U4: procedural how-to knowledge — distinct from brain atoms (facts) and
+-- skills (executable code). Markdown documents an agent role refines over time.
+CREATE TABLE IF NOT EXISTS agent_abilities (
+  id                  TEXT PRIMARY KEY,
+  workspace_id        TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  agent_id            TEXT,
+  workflow_id         TEXT,
+  team_role           TEXT,
+  title               TEXT NOT NULL,
+  content             TEXT NOT NULL,
+  tags                TEXT NOT NULL DEFAULT '[]',
+  version             INTEGER NOT NULL DEFAULT 1,
+  parent_ability_id   TEXT,
+  changelog           TEXT NOT NULL DEFAULT '[]',
+  confidence          REAL NOT NULL DEFAULT 0.5,
+  reinforce_count     INTEGER NOT NULL DEFAULT 0,
+  usage_count         INTEGER NOT NULL DEFAULT 0,
+  source              TEXT NOT NULL,
+  derived_from_package TEXT,
+  derived_from_run_ids TEXT NOT NULL DEFAULT '[]',
+  assertions          TEXT NOT NULL DEFAULT '[]',
+  managed             INTEGER NOT NULL DEFAULT 1,
+  status              TEXT NOT NULL DEFAULT 'active',
+  pinned_at           TEXT,
+  last_used_at        TEXT,
+  embedding           TEXT,
+  context_atoms       TEXT,
+  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_abilities_agent
+  ON agent_abilities(agent_id, status, confidence);
+CREATE INDEX IF NOT EXISTS idx_abilities_workflow
+  ON agent_abilities(workflow_id, team_role, status);
+CREATE INDEX IF NOT EXISTS idx_abilities_lineage
+  ON agent_abilities(agent_id, title, version);
+
+-- B8: user profile layer — what agents know about the operator. Distinct from
+-- brain atoms (world facts): this is about the person.
+CREATE TABLE IF NOT EXISTS workspace_user_profiles (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id      TEXT NOT NULL,
+  content      TEXT NOT NULL DEFAULT '',
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_ws_user
+  ON workspace_user_profiles(workspace_id, user_id);
+`,
+  },
+  {
+    version: 35,
+    name: 'brain_phase3_extended_capabilities',
+    sql: `
+-- Phase 3: peer-relational memory, session-local atoms, disputes, compression, and FTS.
+ALTER TABLE memory_episodes ADD COLUMN dispute_resolved_at TEXT;
+ALTER TABLE memory_episodes ADD COLUMN dispute_snoozed_until TEXT;
+ALTER TABLE memory_episodes ADD COLUMN context_condition TEXT;
+ALTER TABLE memory_episodes ADD COLUMN compressed_from TEXT;
+ALTER TABLE memory_episodes ADD COLUMN compression_tier INTEGER;
+ALTER TABLE knowledge_links ADD COLUMN context_split INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_links ADD COLUMN resolved_at TEXT;
+ALTER TABLE brain_quality_events ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS peer_representations (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  peer_type    TEXT NOT NULL,
+  peer_id      TEXT NOT NULL,
+  summary      TEXT NOT NULL DEFAULT '',
+  embedding    TEXT,
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_peer_representations_unique
+  ON peer_representations(workspace_id, peer_type, peer_id);
+
+CREATE TABLE IF NOT EXISTS peer_representation_conclusions (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  subject_peer_id   TEXT NOT NULL,
+  observer_peer_id  TEXT NOT NULL,
+  content           TEXT NOT NULL,
+  source_session_id TEXT,
+  confidence        REAL NOT NULL DEFAULT 0.7,
+  embedding         TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_peer_conclusions_subject
+  ON peer_representation_conclusions(workspace_id, subject_peer_id, confidence DESC);
+
+CREATE TABLE IF NOT EXISTS session_atoms (
+  id           TEXT PRIMARY KEY,
+  session_id   TEXT NOT NULL,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id       TEXT,
+  content      TEXT NOT NULL,
+  confidence   REAL NOT NULL DEFAULT 0.6,
+  embedding    TEXT,
+  promoted_at  TEXT,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  expires_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_atoms_session ON session_atoms(session_id, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_session_atoms_expiry ON session_atoms(workspace_id, expires_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS ledger_events_fts USING fts5(
+  event_type,
+  payload_text
+);
+CREATE TRIGGER IF NOT EXISTS ledger_events_fts_insert AFTER INSERT ON ledger_events BEGIN
+  INSERT INTO ledger_events_fts(rowid, event_type, payload_text)
+  VALUES (
+    new.rowid,
+    new.event_type,
+    trim(
+      coalesce(json_extract(new.payload, '$.content'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.output'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.summary'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.error'), '') || ' ' ||
+      coalesce(new.payload, '')
+    )
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS ledger_events_fts_delete AFTER DELETE ON ledger_events BEGIN
+  DELETE FROM ledger_events_fts WHERE rowid = old.rowid;
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(
+  body,
+  content='conversation_messages',
+  content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS conversation_messages_fts_insert AFTER INSERT ON conversation_messages BEGIN
+  INSERT INTO conversation_messages_fts(rowid, body) VALUES (new.rowid, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS conversation_messages_fts_delete AFTER DELETE ON conversation_messages BEGIN
+  INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, body) VALUES('delete', old.rowid, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS conversation_messages_fts_update AFTER UPDATE ON conversation_messages BEGIN
+  INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, body) VALUES('delete', old.rowid, old.body);
+  INSERT INTO conversation_messages_fts(rowid, body) VALUES (new.rowid, new.body);
+END;
+`,
+  },
+  {
+    version: 36,
+    name: 'fix_ledger_events_fts_payload_text',
+    sql: `
+DROP TRIGGER IF EXISTS ledger_events_fts_insert;
+DROP TRIGGER IF EXISTS ledger_events_fts_delete;
+DROP TABLE IF EXISTS ledger_events_fts;
+CREATE VIRTUAL TABLE ledger_events_fts USING fts5(
+  event_type,
+  payload_text
+);
+INSERT INTO ledger_events_fts(rowid, event_type, payload_text)
+SELECT
+  rowid,
+  event_type,
+  trim(
+    coalesce(json_extract(payload, '$.content'), '') || ' ' ||
+    coalesce(json_extract(payload, '$.output'), '') || ' ' ||
+    coalesce(json_extract(payload, '$.summary'), '') || ' ' ||
+    coalesce(json_extract(payload, '$.error'), '') || ' ' ||
+    coalesce(payload, '')
+  )
+FROM ledger_events;
+CREATE TRIGGER ledger_events_fts_insert AFTER INSERT ON ledger_events BEGIN
+  INSERT INTO ledger_events_fts(rowid, event_type, payload_text)
+  VALUES (
+    new.rowid,
+    new.event_type,
+    trim(
+      coalesce(json_extract(new.payload, '$.content'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.output'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.summary'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.error'), '') || ' ' ||
+      coalesce(new.payload, '')
+    )
+  );
+END;
+CREATE TRIGGER ledger_events_fts_delete AFTER DELETE ON ledger_events BEGIN
+  DELETE FROM ledger_events_fts WHERE rowid = old.rowid;
+END;
+`,
+  },
+  {
+    version: 37,
+    name: 'structured_peer_cards_and_dream_pass',
+    sql: `
+ALTER TABLE peer_representations ADD COLUMN peer_card TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE peer_representations ADD COLUMN last_dream_at TEXT;
+ALTER TABLE peer_representation_conclusions ADD COLUMN conclusion_type TEXT NOT NULL DEFAULT 'deductive';
+ALTER TABLE peer_representation_conclusions ADD COLUMN volatility_class TEXT NOT NULL DEFAULT 'contextual';
+ALTER TABLE peer_representation_conclusions ADD COLUMN supporting_session_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE peer_representation_conclusions ADD COLUMN superseded_by_id TEXT;
+ALTER TABLE peer_representation_conclusions ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+CREATE INDEX IF NOT EXISTS idx_peer_conclusions_active
+  ON peer_representation_conclusions(workspace_id, subject_peer_id, status, conclusion_type);
+
+CREATE TABLE IF NOT EXISTS agent_peer_cards (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  observer_peer_id  TEXT NOT NULL,
+  subject_peer_id   TEXT NOT NULL,
+  subject_peer_type TEXT NOT NULL DEFAULT 'user',
+  summary           TEXT NOT NULL DEFAULT '',
+  peer_card         TEXT NOT NULL DEFAULT '[]',
+  embedding         TEXT,
+  last_dream_at     TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_peer_cards_unique
+  ON agent_peer_cards(workspace_id, observer_peer_id, subject_peer_id);
+`,
+  },
+  {
+    version: 38,
+    name: 'brain_forget_requests',
+    sql: `
+CREATE TABLE IF NOT EXISTS brain_forget_requests (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  requested_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  topic TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'all',
+  status TEXT NOT NULL DEFAULT 'pending',
+  matches TEXT NOT NULL DEFAULT '{}',
+  counts TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  executed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_brain_forget_requests_workspace
+  ON brain_forget_requests(workspace_id, status, created_at DESC);
+`,
+  },
 ];

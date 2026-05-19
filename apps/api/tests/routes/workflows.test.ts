@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import type { WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildWorkflowRoutes } from '../../src/routes/workflows.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -51,7 +52,7 @@ function trivialGraph() {
   };
 }
 
-function seedWorkflow(graph: ReturnType<typeof trivialGraph> | { version: 1; nodes: []; edges: []; viewport: { x: 0; y: 0; zoom: 1 } } = trivialGraph()) {
+function seedWorkflow(graph: WorkflowGraph = trivialGraph()) {
   const id = randomUUID();
   ctx.db
     .insert(schema.workflows)
@@ -136,6 +137,212 @@ describe('PATCH /v1/workflows/:id', () => {
       body: JSON.stringify({ title: 'Renamed' }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+/** Insert a workflow_run row directly so the Runs/Output tabs have data. */
+function seedRun(
+  workflowId: string,
+  opts: {
+    status?: 'CREATED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    startedAt?: string;
+    completedAt?: string | null;
+    completedNodeIds?: string[];
+    nodeStates?: Record<string, unknown>;
+  } = {},
+) {
+  const id = randomUUID();
+  const status = opts.status ?? 'COMPLETED';
+  ctx.db
+    .insert(schema.workflowRuns)
+    .values({
+      id,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId,
+      userId: ctx.user.id,
+      status,
+      runState: {
+        runId: id,
+        workflowId,
+        status,
+        readyQueue: [],
+        waitingInputs: {},
+        nodeStates: opts.nodeStates ?? {},
+        activeExecutions: {},
+        completedNodeIds: opts.completedNodeIds ?? [],
+        failedNodeIds: [],
+        skippedNodeIds: [],
+        graphRevision: 0,
+        replanCount: 0,
+        lastLedgerSequence: 0,
+      },
+      startedAt: opts.startedAt ?? new Date().toISOString(),
+      completedAt: opts.completedAt === undefined ? new Date().toISOString() : opts.completedAt,
+    })
+    .run();
+  return id;
+}
+
+describe('GET /v1/workflows/:id/runs', () => {
+  it('returns runs scoped to the workflow, newest-first', async () => {
+    const id = seedWorkflow();
+    seedRun(id, { status: 'COMPLETED' });
+    seedRun(id, { status: 'FAILED' });
+    const res = await app().request(`/v1/workflows/${id}/runs`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      runs: Array<{ id: string; status: string; triggeredBy: string; durationMs: number | null }>;
+    };
+    expect(body.runs).toHaveLength(2);
+    expect(body.runs[0]!.triggeredBy).toBe('manual');
+    expect(['completed', 'failed']).toContain(body.runs[0]!.status);
+  });
+
+  it('returns 404 for an unknown workflow', async () => {
+    const res = await app().request(`/v1/workflows/${randomUUID()}/runs`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /v1/workflows/:id/output', () => {
+  it('returns null when no completed run exists', async () => {
+    const id = seedWorkflow();
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { lastRun: unknown; outputs: unknown[] };
+    expect(body.lastRun).toBeNull();
+    expect(body.outputs).toEqual([]);
+  });
+
+  it('surfaces sink node outputs of the latest completed run', async () => {
+    const id = seedWorkflow();
+    seedRun(id, {
+      status: 'COMPLETED',
+      completedNodeIds: ['start'],
+      nodeStates: {
+        start: {
+          nodeId: 'start',
+          status: 'COMPLETED',
+          completedAt: new Date().toISOString(),
+          outputData: { text: 'hello world' },
+        },
+      },
+    });
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      lastRun: { status: string };
+      outputs: Array<{ nodeId: string; value: { text: string } }>;
+    };
+    expect(body.lastRun.status).toBe('completed');
+    expect(body.outputs).toHaveLength(1);
+    expect(body.outputs[0]!.nodeId).toBe('start');
+    expect(body.outputs[0]!.value.text).toBe('hello world');
+  });
+
+  it('returns all completed sink outputs newest-first when no nodes are declared outputs', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        { id: 'start', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'draft', type: 'agent_task', title: 'Draft', position: { x: 100, y: -80 }, config: { kind: 'agent_task', prompt: 'Draft', capabilityTags: [], inputKeys: [], outputKeys: [] } },
+        { id: 'summary', type: 'agent_task', title: 'Summary', position: { x: 100, y: 80 }, config: { kind: 'agent_task', prompt: 'Summarize', capabilityTags: [], inputKeys: [], outputKeys: [] } },
+      ],
+      edges: [
+        { id: 'e1', source: 'start', target: 'draft' },
+        { id: 'e2', source: 'start', target: 'summary' },
+      ],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const id = seedWorkflow(graph);
+    seedRun(id, {
+      status: 'COMPLETED',
+      completedNodeIds: ['start', 'draft', 'summary'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED', completedAt: '2026-01-01T10:00:00.000Z', outputData: { text: 'start' } },
+        draft: { nodeId: 'draft', status: 'COMPLETED', completedAt: '2026-01-01T10:01:00.000Z', outputData: { text: 'draft' } },
+        summary: { nodeId: 'summary', status: 'COMPLETED', completedAt: '2026-01-01T10:02:00.000Z', outputData: { text: 'summary' } },
+      },
+    });
+
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { outputs: Array<{ nodeId: string }> };
+    expect(body.outputs.map((output) => output.nodeId)).toEqual(['summary', 'draft']);
+  });
+
+  it('uses declared output nodes instead of sink fallback when any are marked', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        { id: 'start', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'draft', type: 'agent_task', title: 'Draft', position: { x: 100, y: -80 }, config: { kind: 'agent_task', prompt: 'Draft', capabilityTags: [], inputKeys: [], outputKeys: [], isOutput: true } },
+        { id: 'summary', type: 'agent_task', title: 'Summary', position: { x: 100, y: 80 }, config: { kind: 'agent_task', prompt: 'Summarize', capabilityTags: [], inputKeys: [], outputKeys: [] } },
+      ],
+      edges: [
+        { id: 'e1', source: 'start', target: 'draft' },
+        { id: 'e2', source: 'start', target: 'summary' },
+      ],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const id = seedWorkflow(graph);
+    seedRun(id, {
+      status: 'COMPLETED',
+      completedNodeIds: ['start', 'draft', 'summary'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED', completedAt: '2026-01-01T10:00:00.000Z', outputData: { text: 'start' } },
+        draft: { nodeId: 'draft', status: 'COMPLETED', completedAt: '2026-01-01T10:01:00.000Z', outputData: { text: 'draft' } },
+        summary: { nodeId: 'summary', status: 'COMPLETED', completedAt: '2026-01-01T10:02:00.000Z', outputData: { text: 'summary' } },
+      },
+    });
+
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { outputs: Array<{ nodeId: string; value: { text: string } }> };
+    expect(body.outputs).toHaveLength(1);
+    expect(body.outputs[0]!.nodeId).toBe('draft');
+    expect(body.outputs[0]!.value.text).toBe('draft');
+  });
+
+  it('does not fall back to sink outputs when declared output nodes did not complete', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        { id: 'start', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'draft', type: 'agent_task', title: 'Draft', position: { x: 100, y: -80 }, config: { kind: 'agent_task', prompt: 'Draft', capabilityTags: [], inputKeys: [], outputKeys: [], isOutput: true } },
+        { id: 'summary', type: 'agent_task', title: 'Summary', position: { x: 100, y: 80 }, config: { kind: 'agent_task', prompt: 'Summarize', capabilityTags: [], inputKeys: [], outputKeys: [] } },
+      ],
+      edges: [
+        { id: 'e1', source: 'start', target: 'draft' },
+        { id: 'e2', source: 'start', target: 'summary' },
+      ],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const id = seedWorkflow(graph);
+    seedRun(id, {
+      status: 'COMPLETED',
+      completedNodeIds: ['start', 'summary'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED', completedAt: '2026-01-01T10:00:00.000Z', outputData: { text: 'start' } },
+        summary: { nodeId: 'summary', status: 'COMPLETED', completedAt: '2026-01-01T10:02:00.000Z', outputData: { text: 'summary' } },
+      },
+    });
+
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { outputs: Array<{ nodeId: string }> };
+    expect(body.outputs).toEqual([]);
+  });
+});
+
+describe('GET /v1/workflows/:id/records', () => {
+  it('returns an empty table list when the graph has no data_write nodes', async () => {
+    const id = seedWorkflow();
+    const res = await app().request(`/v1/workflows/${id}/records`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tables: unknown[] };
+    expect(body.tables).toEqual([]);
   });
 });
 

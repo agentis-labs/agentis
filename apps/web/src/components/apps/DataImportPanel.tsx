@@ -47,6 +47,7 @@ interface ProgressSnapshot {
   totalItems: number;
   currentPhase: string;
   progressMessage?: string | null;
+  errorMessage?: string | null;
   percentComplete: number;
   errorCount: number;
   chunkCount?: number;
@@ -257,12 +258,13 @@ function DatasetImportRow({
           <button
             type="button"
             onClick={() => void remove()}
-            disabled={busy || dataset.status !== 'imported'}
-            className="rounded-md p-2 text-text-muted transition hover:bg-surface-2 hover:text-danger disabled:opacity-40"
-            title="Remove dataset"
-            aria-label="Remove dataset"
+            disabled={busy || (!latestJob && dataset.status !== 'imported')}
+            className="inline-flex h-8 items-center gap-1 rounded-md border border-line bg-canvas px-2.5 text-xs text-text-muted transition hover:border-danger/40 hover:text-danger disabled:opacity-40"
+            title="Clear source"
+            aria-label="Clear source"
           >
             <Trash2 size={13} />
+            Clear
           </button>
         </div>
       </div>
@@ -279,7 +281,11 @@ function DatasetImportRow({
             <span>{shownProgress.processedItems}/{shownProgress.totalItems} records</span>
             <span>{shownProgress.chunkCount ?? 0} chunks</span>
             <span>{shownProgress.embeddingCount ?? 0} embeddings</span>
+            {shownProgress.errorCount > 0 && <span className="text-danger">{shownProgress.errorCount} errors</span>}
           </div>
+          {shownProgress.errorCount > 0 && shownProgress.errorMessage && (
+            <div className="mt-2 text-[11px] text-danger">{shownProgress.errorMessage}</div>
+          )}
         </div>
       )}
       {dragActive && (
@@ -329,6 +335,7 @@ function progressFromJob(job: IngestionJob): ProgressSnapshot {
     totalItems: job.totalItems,
     currentPhase: job.currentPhase ?? job.status,
     progressMessage: job.progressMessage,
+    errorMessage: job.errorMessage,
     percentComplete: job.totalItems > 0 ? Math.round((job.processedItems / job.totalItems) * 100) : 0,
     errorCount: job.errorItems,
     chunkCount: job.chunkCount,

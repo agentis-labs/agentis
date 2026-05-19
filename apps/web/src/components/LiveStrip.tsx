@@ -1,16 +1,7 @@
 /**
  * Bottom live strip — sticky operator situational awareness.
  *
- * V1-SPEC §13.2 calls for a permanent "what is happening right now" bar at
- * the bottom of the shell so the operator never has to leave their current
- * page to know:
- *
- *   - Active runs count (with quick link to /runs?status=active)
- *   - Pending approvals (with badge + link to /approvals)
- *   - Gateway reconnect indicator (loud only when at least one is degraded)
- *   - Recent activity tail (last summary, click to /activity)
- *
- * Refreshed on every relevant realtime event; no polling.
+ * Active runs · pending approvals · gateway health · latest activity.
  */
 
 import { Link } from 'react-router-dom';

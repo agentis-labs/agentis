@@ -2,20 +2,36 @@
  * AgentConfigPanel — Config tab content for AgentDetailPage.
  *
  * Two sections:
- *   1. Runtime — RuntimePicker in editing mode (adapter locked, config editable)
- *   2. Identity & budget — name, role, glyph, color, tags, budget, paused, reportsTo
+ *   1. Runtime — adapter locked, model picker first, advanced config collapsed
+ *   2. Operations — budget, standby, reporting chain
+ *
+ * Identity (name, role, appearance, tags) is managed on the Identity tab.
+ * Instructions (playbook) is managed on the Instructions tab.
  */
 
-import { useState } from 'react';
-import { api } from '../../lib/api';
+import { useEffect, useRef, useState } from 'react';
+import { Check, Download, Loader2 } from 'lucide-react';
+import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
+import { startBackgroundInstall, type InstallSession } from '../../lib/backgroundInstall';
+import { useAgentInstallSession } from '../../hooks/useBackgroundInstall';
 import { RuntimePicker, configToRuntimeConfig, isV1AdapterType, runtimeConfigToAdapterConfig, runtimeModelFor } from './RuntimePicker';
-import type { AdapterType, RuntimeConfig } from './RuntimePicker';
+import type { AdapterType, HarnessDetectionResult, RuntimeConfig } from './RuntimePicker';
 import type { CommandAgent } from './AgentCard';
 
 interface HarnessTestResult {
   status: 'pass' | 'warn' | 'fail';
   checks: Array<{ level: 'info' | 'warn' | 'error'; message: string; detail?: string }>;
+}
+
+interface DetectResponse {
+  adapters?: HarnessDetectionResult[];
+  harnesses?: HarnessDetectionResult[];
+}
+
+interface RuntimeRepairState {
+  phase: 'idle' | 'checking' | 'connected' | 'missing' | 'installing' | 'failed';
+  message?: string;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -40,29 +56,140 @@ export function AgentConfigPanel({
   const [savingRuntime, setSavingRuntime] = useState(false);
   const [testingRuntime, setTestingRuntime] = useState(false);
   const [testResult, setTestResult] = useState<HarnessTestResult | null>(null);
+  const [runtimeRepair, setRuntimeRepair] = useState<RuntimeRepairState>({ phase: 'idle' });
+  const installSession = useAgentInstallSession(agent.id);
+  const autoConnectStartedRef = useRef('');
+  const handledInstallPhaseRef = useRef('');
 
-  // Identity section state
-  const [name, setName] = useState(agent.name);
-  const [role, setRole] = useState(agent.role ?? '');
-  const [avatarGlyph, setAvatarGlyph] = useState(agent.avatarGlyph ?? '');
-  const [colorHex, setColorHex] = useState(agent.colorHex ?? '#6366f1');
-  const [tagsInput, setTagsInput] = useState((agent.capabilityTags ?? []).join(', '));
+  // Operations section state
   const [budget, setBudget] = useState(agent.monthlyBudgetCents != null ? String(agent.monthlyBudgetCents / 100) : '');
   const [isPaused, setIsPaused] = useState(agent.isPaused ?? false);
   const [reportsTo, setReportsTo] = useState(agent.reportsTo ?? '');
-  const [savingIdentity, setSavingIdentity] = useState(false);
+  const [savingOperations, setSavingOperations] = useState(false);
+
+  useEffect(() => {
+    setRuntimeConfig(configToRuntimeConfig(adapterType, storedConfig));
+    setTestResult(null);
+    setRuntimeRepair({ phase: 'idle' });
+    autoConnectStartedRef.current = '';
+    handledInstallPhaseRef.current = '';
+  }, [agent.id, adapterType]);
+
+  useEffect(() => {
+    if (installSession?.phase === 'installing' || installSession?.phase === 'verifying') return;
+    const connectKey = `${agent.id}:${adapterType}`;
+    if (autoConnectStartedRef.current === connectKey) return;
+    autoConnectStartedRef.current = connectKey;
+    void connectRuntime('auto');
+  }, [agent.id, adapterType, installSession?.phase]);
+
+  useEffect(() => {
+    if (!installSession) return;
+    const phaseKey = `${installSession.phase}:${installSession.completedAt ?? ''}:${installSession.error ?? ''}`;
+    if (handledInstallPhaseRef.current === phaseKey) return;
+    handledInstallPhaseRef.current = phaseKey;
+
+    if (installSession.phase === 'complete') {
+      if (installSession.result?.binaryPath) {
+        setRuntimeConfig((current) => setRuntimeBinaryPath(current, adapterType, installSession.result?.binaryPath ?? ''));
+      }
+      setRuntimeRepair({ phase: 'connected', message: `${runtimeDisplayName(adapterType)} is connected.` });
+      onSaved();
+    }
+    if (installSession.phase === 'error') {
+      setRuntimeRepair({ phase: 'failed', message: installSession.error ?? `${runtimeDisplayName(adapterType)} setup failed.` });
+    }
+  }, [adapterType, installSession, onSaved]);
+
+  async function persistRuntime(nextRuntimeConfig: RuntimeConfig, status?: 'online' | 'setting_up' | 'error') {
+    const config = runtimeConfigToAdapterConfig(adapterType, nextRuntimeConfig);
+    await api(`/v1/agents/${agent.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        config,
+        runtimeModel: runtimeModelFor(adapterType, nextRuntimeConfig),
+        ...(status ? { status } : {}),
+      }),
+    });
+  }
 
   async function saveRuntime() {
     setSavingRuntime(true);
     try {
-      const config = runtimeConfigToAdapterConfig(adapterType, runtimeConfig);
-      await api(`/v1/agents/${agent.id}`, { method: 'PATCH', body: JSON.stringify({ config, runtimeModel: runtimeModelFor(adapterType, runtimeConfig) }) });
+      await persistRuntime(runtimeConfig);
       toast.success('Runtime saved', 'Adapter config updated.');
       onSaved();
     } catch (err) {
-      toast.error('Save failed', err instanceof Error ? err.message : 'Could not save runtime config.');
+      toast.error('Save failed', apiErrorMessage(err));
     } finally {
       setSavingRuntime(false);
+    }
+  }
+
+  async function connectRuntime(trigger: 'auto' | 'manual'): Promise<boolean> {
+    const runtimeName = runtimeDisplayName(adapterType);
+    setRuntimeRepair({ phase: 'checking', message: `Checking this machine for ${runtimeName}...` });
+    try {
+      const response = await api<DetectResponse>('/v1/harness/detect');
+      const detections = response.adapters ?? response.harnesses ?? [];
+      const detection = detections.find((entry) => entry.adapterType === adapterType);
+
+      if (detection?.status === 'found') {
+        const nextRuntimeConfig = runtimeConfigFromDetection(runtimeConfig, adapterType, detection);
+        setRuntimeConfig(nextRuntimeConfig);
+        await persistRuntime(nextRuntimeConfig, 'online');
+        setRuntimeRepair({ phase: 'connected', message: `${runtimeName} was found and connected automatically.` });
+        if (trigger === 'manual') toast.success('Runtime connected', `${runtimeName} is ready for this agent.`);
+        onSaved();
+        return true;
+      }
+
+      if (hasConnectableRuntimeConfig(adapterType, runtimeConfig)) {
+        await persistRuntime(runtimeConfig, 'online');
+        const result = await api<HarnessTestResult>(`/v1/agents/${agent.id}/test-harness`, { method: 'POST' });
+        setTestResult(result);
+        if (result.status !== 'fail') {
+          setRuntimeRepair({ phase: 'connected', message: `${runtimeName} was reconnected from saved settings.` });
+          if (trigger === 'manual') toast.success('Runtime connected', `${runtimeName} is ready for this agent.`);
+          onSaved();
+          return true;
+        }
+      }
+
+      const message = missingRuntimeMessage(adapterType, detection);
+      setRuntimeRepair({ phase: 'missing', message });
+      if (trigger === 'manual') toast.warn('Runtime not found', message);
+      return false;
+    } catch (error) {
+      setRuntimeRepair({ phase: 'failed', message: apiErrorMessage(error) });
+      if (trigger === 'manual') toast.error('Runtime check failed', apiErrorMessage(error));
+      return false;
+    }
+  }
+
+  async function startRuntimeInstall() {
+    if (!isAutoInstallableAdapter(adapterType)) return;
+    if (installSession?.phase === 'installing' || installSession?.phase === 'verifying') return;
+
+    const runtimeName = runtimeDisplayName(adapterType);
+    setRuntimeRepair({ phase: 'installing', message: `${runtimeName} setup is starting...` });
+    try {
+      await api(`/v1/agents/${agent.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'setting_up' }),
+      });
+      startBackgroundInstall({
+        agentId: agent.id,
+        agentName: agent.name,
+        adapterType,
+        adapterConfig: runtimeConfigToAdapterConfig(adapterType, runtimeConfig),
+        runtimeModel: runtimeModelFor(adapterType, runtimeConfig),
+      });
+      toast.success('Runtime setup started', `${runtimeName} is setting up in the background.`);
+      onSaved();
+    } catch (error) {
+      setRuntimeRepair({ phase: 'failed', message: apiErrorMessage(error) });
+      toast.error('Runtime setup failed', apiErrorMessage(error));
     }
   }
 
@@ -74,41 +201,34 @@ export function AgentConfigPanel({
       setTestResult(result);
       if (result.status === 'pass') toast.success('Connection verified');
       else if (result.status === 'warn') toast.success('Connected with caveats');
+      else if (await connectRuntime('manual')) return;
       else toast.error('Connection failed', result.checks.find((check) => check.level === 'error')?.message ?? 'Harness check failed.');
     } catch (err) {
-      toast.error('Test failed', err instanceof Error ? err.message : 'Could not test harness.');
+      if (await connectRuntime('manual')) return;
+      toast.error('Test failed', apiErrorMessage(err));
     } finally {
       setTestingRuntime(false);
     }
   }
 
-  async function saveIdentity() {
-    setSavingIdentity(true);
+  async function saveOperations() {
+    setSavingOperations(true);
     try {
-      const capabilityTags = tagsInput
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean);
       const monthlyBudgetCents = budget ? Math.round(parseFloat(budget) * 100) : null;
       await api(`/v1/agents/${agent.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          name: name.trim() || undefined,
-          role: role.trim() || undefined,
-          avatarGlyph: avatarGlyph.trim() || undefined,
-          colorHex: colorHex || undefined,
-          capabilityTags,
           monthlyBudgetCents,
           isPaused,
           reportsTo: reportsTo || null,
         }),
       });
-      toast.success('Identity saved');
+      toast.success('Operations saved');
       onSaved();
     } catch (err) {
-      toast.error('Save failed', err instanceof Error ? err.message : 'Could not save identity.');
+      toast.error('Save failed', err instanceof Error ? err.message : 'Could not save operations.');
     } finally {
-      setSavingIdentity(false);
+      setSavingOperations(false);
     }
   }
 
@@ -118,8 +238,8 @@ export function AgentConfigPanel({
       <section className="rounded-xl border border-line bg-surface p-5">
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <div className="text-sm font-medium">Runtime config</div>
-            <div className="mt-0.5 text-xs text-text-muted">Adapter endpoint, credentials, and model settings.</div>
+            <div className="text-sm font-medium">Runtime</div>
+            <div className="mt-0.5 text-xs text-text-muted">Model first. Connection details stay tucked away until you need them.</div>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -138,6 +258,13 @@ export function AgentConfigPanel({
             </button>
           </div>
         </div>
+        <RuntimeConnectPanel
+          adapterType={adapterType}
+          state={runtimeRepair}
+          session={installSession}
+          onConnect={() => void connectRuntime('manual')}
+          onInstall={isAutoInstallableAdapter(adapterType) ? () => void startRuntimeInstall() : undefined}
+        />
         <RuntimePicker
           adapterType={adapterType}
           runtimeConfig={runtimeConfig}
@@ -162,46 +289,31 @@ export function AgentConfigPanel({
         )}
       </section>
 
-      {/* ── Identity & budget ───────────────────────────────────────── */}
+      {/* ── Operations ──────────────────────────────────────────────── */}
       <section className="rounded-xl border border-line bg-surface p-5">
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <div className="text-sm font-medium">Identity &amp; budget</div>
-            <div className="mt-0.5 text-xs text-text-muted">Name, role, appearance, budget limits.</div>
+            <div className="text-sm font-medium">Operations</div>
+            <div className="mt-0.5 text-xs text-text-muted">Budget, standby state, and hierarchy reporting.</div>
           </div>
           <button
-            onClick={() => void saveIdentity()}
-            disabled={savingIdentity}
+            onClick={() => void saveOperations()}
+            disabled={savingOperations}
             className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-canvas disabled:opacity-50"
           >
-            {savingIdentity ? 'Saving…' : 'Save identity'}
+            {savingOperations ? 'Saving…' : 'Save operations'}
           </button>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <Field label="Name">
-            <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
-          </Field>
-          <Field label="Role">
-            <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="e.g. Software Engineer" className={inputCls} />
-          </Field>
-          <Field label="Avatar glyph">
-            <input value={avatarGlyph} onChange={(e) => setAvatarGlyph(e.target.value)} placeholder="◈" maxLength={8} className={inputCls} />
-          </Field>
-          <Field label="Color">
-            <div className="flex items-center gap-2">
-              <input type="color" value={colorHex} onChange={(e) => setColorHex(e.target.value)} className="h-9 w-12 cursor-pointer rounded border border-line bg-canvas p-0.5" />
-              <input value={colorHex} onChange={(e) => setColorHex(e.target.value)} className={`${inputCls} font-mono`} />
-            </div>
-          </Field>
-          <Field label="Capability tags" hint="Comma-separated">
-            <input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="coding, review, research" className={inputCls} />
-          </Field>
           <Field label="Monthly budget (USD)">
             <input value={budget} onChange={(e) => setBudget(e.target.value)} inputMode="decimal" placeholder="No limit" className={inputCls} />
           </Field>
+          <Field label="Current spend">
+            <input value={`$${((agent.currentMonthSpendCents ?? 0) / 100).toFixed(2)}`} readOnly className={`${inputCls} text-text-muted`} />
+          </Field>
           <Field label="Reports to">
             <select value={reportsTo} onChange={(e) => setReportsTo(e.target.value)} className={inputCls}>
-              <option value="">— None —</option>
+              <option value="">None</option>
               {allAgents
                 .filter((a) => a.id !== agent.id)
                 .map((a) => (
@@ -243,6 +355,152 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
     </label>
   );
+}
+
+function RuntimeConnectPanel({
+  adapterType,
+  state,
+  session,
+  onConnect,
+  onInstall,
+}: {
+  adapterType: AdapterType;
+  state: RuntimeRepairState;
+  session?: InstallSession;
+  onConnect: () => void;
+  onInstall?: () => void;
+}) {
+  const runtimeName = runtimeDisplayName(adapterType);
+  const phase = session?.phase;
+  const installing = phase === 'installing' || phase === 'verifying' || state.phase === 'checking' || state.phase === 'installing';
+  const complete = phase === 'complete' || state.phase === 'connected';
+  const failed = phase === 'error' || state.phase === 'failed';
+  const missing = state.phase === 'missing';
+  const completedSteps = session?.steps.filter((step) => step.status === 'done').length ?? 0;
+  const totalSteps = 4;
+  const progress = complete ? 100 : Math.min(100, Math.round((completedSteps / totalSteps) * 100));
+  const activeStep = session?.steps.find((step) => step.status === 'running');
+  const message = failed
+    ? (session?.error ?? state.message ?? `${runtimeName} setup failed.`)
+    : complete
+      ? (state.message ?? `${runtimeName} is connected.`)
+      : activeStep?.label ?? state.message ?? `Agentis can search this machine and connect ${runtimeName} if it is already available.`;
+
+  const canAct = !installing && !complete;
+
+  return (
+    <div className="mb-4 rounded-lg border border-line bg-surface-2 px-3 py-3 text-xs">
+      <div className="flex items-center gap-2">
+        {complete ? <Check size={13} className="text-accent" /> : failed ? <span className="text-danger">!</span> : installing ? <Loader2 size={13} className="animate-spin text-accent" /> : <Download size={13} className="text-text-muted" />}
+        <span className={failed ? 'text-danger' : complete ? 'text-accent' : missing ? 'text-text-secondary' : 'text-text-primary'}>{message}</span>
+        {canAct && (
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <button type="button" onClick={onConnect} className="rounded-btn border border-line bg-canvas px-2 py-1 text-[11px] text-text-secondary hover:bg-surface-3 hover:text-text-primary">
+              Find and connect
+            </button>
+            {onInstall && (
+              <button type="button" onClick={onInstall} className="rounded-btn bg-accent px-2 py-1 text-[11px] font-medium text-canvas hover:bg-accent-hover">
+                Install
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {(installing || complete || failed) && session && (
+        <div className="mt-2 space-y-2">
+          <div className="flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-canvas">
+              <div className={`h-full rounded-full transition-all duration-500 ${failed ? 'bg-danger' : complete ? 'bg-accent' : 'bg-cyan-500'}`} style={{ width: `${progress}%` }} />
+            </div>
+            <span className="text-[10px] tabular-nums text-text-muted">{progress}%</span>
+          </div>
+          {session.logs.length > 0 && (
+            <div className="max-h-24 overflow-y-auto rounded-md bg-canvas p-2 font-mono text-[10px] leading-relaxed text-text-muted">
+              {session.logs.slice(-20).map((line, index) => <div key={`${line}-${index}`} className="break-all">{line}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isAutoInstallableAdapter(adapterType: AdapterType): adapterType is 'claude_code' | 'codex' {
+  return adapterType === 'claude_code' || adapterType === 'codex';
+}
+
+function runtimeDisplayName(adapterType: AdapterType): string {
+  if (adapterType === 'codex') return 'Codex';
+  if (adapterType === 'claude_code') return 'Claude Code';
+  if (adapterType === 'cursor') return 'Cursor';
+  if (adapterType === 'hermes_agent') return 'Hermes Agent';
+  if (adapterType === 'openclaw') return 'OpenClaw';
+  return 'HTTP';
+}
+
+function runtimeConfigFromDetection(config: RuntimeConfig, adapterType: AdapterType, detection: HarnessDetectionResult): RuntimeConfig {
+  let next = config;
+  if (adapterType === 'openclaw') {
+    const gatewayUrl = detectionConfigString(detection, 'gatewayUrl');
+    const gatewayId = detectionConfigString(detection, 'gatewayId');
+    const model = detectionConfigString(detection, 'model') || detection.detectedModel;
+    if (gatewayUrl) next = { ...next, openclawGatewayUrl: gatewayUrl };
+    if (gatewayId) next = { ...next, openclawGatewayId: gatewayId };
+    if (model) next = { ...next, openclawModel: next.openclawModel || model };
+    return next;
+  }
+  if (adapterType === 'http') {
+    const baseUrl = detectionConfigString(detection, 'baseUrl');
+    const dispatchPath = detectionConfigString(detection, 'dispatchPath');
+    const healthPath = detectionConfigString(detection, 'healthPath');
+    if (baseUrl) next = { ...next, httpBaseUrl: baseUrl };
+    if (dispatchPath) next = { ...next, httpDispatchPath: dispatchPath };
+    if (healthPath) next = { ...next, httpHealthPath: healthPath };
+    return next;
+  }
+  if (detection.binaryPath) next = setRuntimeBinaryPath(next, adapterType, detection.binaryPath);
+  if (detection.detectedModel) next = setRuntimeModel(next, adapterType, detection.detectedModel);
+  return next;
+}
+
+function setRuntimeBinaryPath(config: RuntimeConfig, adapterType: AdapterType, binaryPath: string): RuntimeConfig {
+  if (adapterType === 'claude_code') return { ...config, claudeBinaryPath: binaryPath };
+  if (adapterType === 'codex') return { ...config, codexBinaryPath: binaryPath };
+  if (adapterType === 'cursor') return { ...config, cursorBinaryPath: binaryPath };
+  if (adapterType === 'hermes_agent') return { ...config, hermesBinaryPath: binaryPath };
+  return config;
+}
+
+function setRuntimeModel(config: RuntimeConfig, adapterType: AdapterType, model: string): RuntimeConfig {
+  if (adapterType === 'openclaw') return { ...config, openclawModel: config.openclawModel || model };
+  if (adapterType === 'claude_code') return { ...config, claudeModel: config.claudeModel || model };
+  if (adapterType === 'codex') return { ...config, codexModel: config.codexModel || model };
+  if (adapterType === 'cursor') return { ...config, cursorModel: config.cursorModel || model };
+  if (adapterType === 'hermes_agent') return { ...config, hermesModel: config.hermesModel || model };
+  return config;
+}
+
+function detectionConfigString(detection: HarnessDetectionResult, key: string): string {
+  const value = detection.config?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function missingRuntimeMessage(adapterType: AdapterType, detection?: HarnessDetectionResult): string {
+  if (adapterType === 'openclaw') return detection?.detail ?? 'No OpenClaw gateway was discovered. Connect a gateway URL or configure OPENCLAW_GATEWAY_URL, then run detection again.';
+  if (adapterType === 'http') return detection?.detail ?? 'No HTTP endpoint was discovered. Add the endpoint URL in connection settings, then save and test the runtime.';
+  const runtimeName = runtimeDisplayName(adapterType);
+  return detection?.detail ?? `${runtimeName} was not found on PATH. Install it or set its binary path, then run detection again.`;
+}
+
+function hasConnectableRuntimeConfig(adapterType: AdapterType, config: RuntimeConfig): boolean {
+  if (adapterType === 'openclaw') return Boolean(config.openclawGatewayUrl.trim());
+  if (adapterType === 'http') return Boolean(config.httpBaseUrl.trim());
+  if (adapterType === 'claude_code') return Boolean(config.claudeBinaryPath.trim());
+  if (adapterType === 'codex') return Boolean(config.codexBinaryPath.trim());
+  if (adapterType === 'cursor') return Boolean(config.cursorBinaryPath.trim());
+  if (adapterType === 'hermes_agent') return Boolean(config.hermesBinaryPath.trim());
+  return false;
 }
 
 const inputCls = 'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm outline-none focus:border-accent';

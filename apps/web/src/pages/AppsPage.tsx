@@ -7,7 +7,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { AppWindow, ArrowRight, SearchX, Plus, Sparkles, X } from 'lucide-react';
+import { AppWindow, ArrowRight, SearchX, Plus } from 'lucide-react';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe } from '../lib/realtime';
 import { Button } from '../components/shared/Button';
@@ -16,7 +16,6 @@ import { FilterBar } from '../components/shared/FilterBar';
 import { Skeleton } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
 import { StatusBadge } from '../components/shared/StatusBadge';
-import { useToast } from '../components/shared/Toast';
 
 interface App {
   id: string;
@@ -24,12 +23,15 @@ interface App {
   name: string;
   version?: string;
   status?: 'active' | 'paused' | 'setup_needed' | 'error';
+  deployStatus?: 'running' | 'stopped' | 'error' | 'deploying' | string;
   spaceId?: string;
   spaceName?: string;
   primaryMetric?: { label: string; value: string | number; window?: string };
   setupBlocker?: string;
   iconGlyph?: string;
   iconColor?: string;
+  iconUrl?: string | null;
+  coverImage?: string | null;
   description?: string;
   category?: string;
 }
@@ -40,7 +42,7 @@ type FilterValue = 'all' | 'active' | 'setup_needed' | 'paused' | 'error';
 
 const FILTERS = [
   { value: 'all',           label: 'All' },
-  { value: 'active',        label: 'Active' },
+  { value: 'active',        label: 'Enabled' },
   { value: 'setup_needed',  label: 'Setup needed' },
   { value: 'paused',        label: 'Paused' },
   { value: 'error',         label: 'Error' },
@@ -48,7 +50,6 @@ const FILTERS = [
 
 export function AppsPage() {
   const nav = useNavigate();
-  const toast = useToast();
   const [searchParams] = useSearchParams();
   const spaceFilter = searchParams.get('space');
 
@@ -57,7 +58,10 @@ export function AppsPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
-  const [creating, setCreating] = useState(false);
+
+  function startAppCreation() {
+    nav('/apps/new');
+  }
 
   async function refresh() {
     setLoading(true);
@@ -122,7 +126,7 @@ export function AppsPage() {
           <div className="mt-0.5 text-[12px] text-text-muted">Your deployed AI applications</div>
         </div>
         <div className="ml-auto">
-          <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreating(true)}>
+          <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={startAppCreation}>
             New app
           </Button>
         </div>
@@ -142,7 +146,7 @@ export function AppsPage() {
               icon={<AppWindow size={48} />}
               title="No apps yet"
               body="Create the first app for this workspace."
-              primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreating(true)}>New app</Button>}
+              primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={startAppCreation}>New app</Button>}
               variant="page"
             />
           ) : (
@@ -179,21 +183,13 @@ export function AppsPage() {
         )}
       </div>
 
-      <GuidedAppCreateDialog
-        open={creating}
-        onClose={() => setCreating(false)}
-        onCreated={(path) => {
-          setCreating(false);
-          toast.success('App created');
-          nav(path);
-        }}
-      />
     </div>
   );
 }
 
 function AppCard({ a, onOpen }: { a: App; onOpen: () => void }) {
   const setupNeeded = a.status === 'setup_needed';
+  const displayStatus = appDisplayStatus(a);
   return (
     <div
       onClick={onOpen}
@@ -201,18 +197,18 @@ function AppCard({ a, onOpen }: { a: App; onOpen: () => void }) {
     >
       <div className="flex items-start gap-3">
         <span
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card text-[16px] font-bold"
+          className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-card text-[16px] font-bold"
           style={{
             backgroundColor: a.iconColor ?? 'var(--tw-color-surface-2, #15171c)',
             color: 'var(--tw-color-text-primary, #e8eaee)',
           }}
         >
-          {a.iconGlyph ?? '◈'}
+          {a.iconUrl ? <img src={a.iconUrl} alt="" className="h-full w-full object-cover" /> : (a.iconGlyph ?? '◈')}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-subheading text-text-primary">{a.name}</span>
-            <StatusBadge status={a.status ?? 'idle'} size="sm" />
+            <StatusBadge status={displayStatus.status} label={displayStatus.label} size="sm" />
           </div>
           {a.description ? (
             <p className="mt-0.5 line-clamp-2 text-[12px] text-text-secondary">{a.description}</p>
@@ -251,168 +247,10 @@ function AppCard({ a, onOpen }: { a: App; onOpen: () => void }) {
   );
 }
 
-type GuidedAppKind = 'automation' | 'assistant' | 'research' | 'support' | 'sales' | 'operations' | 'custom';
-
-const APP_KIND_OPTIONS: Array<{ value: GuidedAppKind; label: string; description: string }> = [
-  { value: 'automation', label: 'Automation', description: 'Runs a repeatable workflow' },
-  { value: 'assistant', label: 'Assistant', description: 'Helps an operator decide or draft' },
-  { value: 'research', label: 'Research', description: 'Reads, compares, and summarizes' },
-  { value: 'support', label: 'Support', description: 'Handles tickets or requests' },
-  { value: 'sales', label: 'Sales', description: 'Qualifies leads or moves deals' },
-  { value: 'operations', label: 'Operations', description: 'Coordinates internal work' },
-  { value: 'custom', label: 'Custom', description: 'Something more specific' },
-];
-
-function GuidedAppCreateDialog({
-  open, onClose, onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreated: (path: string) => void;
-}) {
-  const toast = useToast();
-  const [step, setStep] = useState<1 | 2>(1);
-  const [goal, setGoal] = useState('');
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [coverImage, setCoverImage] = useState('');
-  const [appKind, setAppKind] = useState<GuidedAppKind>('automation');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    setStep(1);
-    setGoal('');
-    setName('');
-    setDescription('');
-    setCoverImage('');
-    setAppKind('automation');
-    setBusy(false);
-  }, [open]);
-
-  if (!open) return null;
-
-  const canContinue = goal.trim().length > 0 && name.trim().length > 0 && description.trim().length > 0;
-
-  async function createApp() {
-    if (!canContinue || busy) return;
-    setBusy(true);
-    try {
-      const created = await api<{ app: { slug: string; path?: string } }>('/v1/apps', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: name.trim(),
-          description: description.trim(),
-          goal: goal.trim(),
-          appKind,
-          coverImage: coverImage.trim() || undefined,
-        }),
-      });
-      onCreated(created.app.path ?? `/apps/${created.app.slug}?layer=canvas&new=1`);
-    } catch (e) {
-      toast.error('Could not create app', String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
-      <div className="animate-scale-in w-full max-w-2xl overflow-hidden rounded-modal border border-line bg-surface shadow-modal">
-        <header className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div>
-            <h2 className="text-heading text-text-primary">New app</h2>
-            <div className="mt-0.5 text-[12px] text-text-muted">Step {step} of 2</div>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
-            <X size={16} />
-          </button>
-        </header>
-
-        {step === 1 ? (
-          <div className="space-y-4 px-5 py-5">
-            <label className="block space-y-1.5">
-              <span className="text-[12px] font-medium text-text-secondary">What does it do?</span>
-              <textarea
-                autoFocus
-                rows={4}
-                value={goal}
-                onChange={(e) => setGoal(e.target.value)}
-                placeholder="Example: qualify inbound leads, enrich them from CRM data, and prepare a handoff summary."
-                className="w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-              />
-            </label>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <label className="block space-y-1.5">
-                <span className="text-[12px] font-medium text-text-secondary">Name</span>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Lead qualification app"
-                  className="h-9 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-                />
-              </label>
-              <label className="block space-y-1.5">
-                <span className="text-[12px] font-medium text-text-secondary">Cover image URL</span>
-                <input
-                  type="url"
-                  value={coverImage}
-                  onChange={(e) => setCoverImage(e.target.value)}
-                  placeholder="Optional"
-                  className="h-9 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-                />
-              </label>
-            </div>
-            <label className="block space-y-1.5">
-              <span className="text-[12px] font-medium text-text-secondary">One-line description</span>
-              <input
-                type="text"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                maxLength={140}
-                placeholder="Qualifies inbound leads and prepares sales handoffs."
-                className="h-9 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-              />
-            </label>
-          </div>
-        ) : (
-          <div className="px-5 py-5">
-            <div className="mb-3 text-[12px] font-medium text-text-secondary">What kind of app is it?</div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {APP_KIND_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setAppKind(option.value)}
-                  className={`rounded-card border px-3 py-3 text-left transition-colors ${appKind === option.value ? 'border-accent bg-accent-soft' : 'border-line bg-surface-2 hover:border-line-strong'}`}
-                >
-                  <span className="flex items-center gap-2 text-[13px] font-semibold text-text-primary">
-                    <Sparkles size={13} className={appKind === option.value ? 'text-accent' : 'text-text-muted'} />
-                    {option.label}
-                  </span>
-                  <span className="mt-1 block text-[11px] text-text-muted">{option.description}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <footer className="flex items-center justify-between border-t border-line bg-surface-2 px-5 py-3">
-          <Button variant="ghost" size="sm" onClick={step === 1 ? onClose : () => setStep(1)}>
-            {step === 1 ? 'Cancel' : 'Back'}
-          </Button>
-          {step === 1 ? (
-            <Button variant="primary" size="sm" onClick={() => setStep(2)} disabled={!canContinue}>
-              Continue
-            </Button>
-          ) : (
-            <Button variant="primary" size="sm" onClick={() => void createApp()} disabled={!canContinue || busy}>
-              {busy ? 'Creating...' : 'Create app'}
-            </Button>
-          )}
-        </footer>
-      </div>
-    </div>
-  );
+function appDisplayStatus(app: App): { status: string; label: string } {
+  if (app.status === 'setup_needed') return { status: 'setup_needed', label: 'Setup needed' };
+  if (app.status === 'paused') return { status: 'paused', label: 'Paused' };
+  if (app.status === 'error' || app.deployStatus === 'error') return { status: 'error', label: 'Error' };
+  if (app.deployStatus === 'running') return { status: 'live', label: 'Live' };
+  return { status: 'stopped', label: 'Stopped' };
 }

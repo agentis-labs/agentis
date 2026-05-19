@@ -1,10 +1,44 @@
-import { Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Pencil, Save, Trash2, X } from 'lucide-react';
 import { Button } from '../shared/Button';
 import type { MemoryEntryRowData } from './types';
 
-export function MemoryEntryRow({ entry, onArchive }: { entry: MemoryEntryRowData; onArchive?: (id: string) => void }) {
+export function MemoryEntryRow({
+  entry,
+  onArchive,
+  onSave,
+}: {
+  entry: MemoryEntryRowData;
+  onArchive?: (id: string) => void;
+  onSave?: (id: string, patch: { title?: string; content?: string }) => Promise<void> | void;
+}) {
   const kind = entry.kind ?? entry.type ?? 'memory';
   const trust = entry.trust ?? entry.confidence ?? 1;
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(entry.title ?? '');
+  const [draftContent, setDraftContent] = useState(entry.content);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDraftTitle(entry.title ?? '');
+    setDraftContent(entry.content);
+    setEditing(false);
+  }, [entry.id, entry.title, entry.content]);
+
+  async function saveEdit() {
+    if (!onSave || !draftContent.trim()) return;
+    setSaving(true);
+    try {
+      await onSave(entry.id, {
+        title: draftTitle.trim() || undefined,
+        content: draftContent.trim(),
+      });
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <article className="rounded-card border border-line bg-surface p-4">
       <div className="flex items-start gap-3">
@@ -14,18 +48,47 @@ export function MemoryEntryRow({ entry, onArchive }: { entry: MemoryEntryRowData
             <SourceBadge source={entry.sourceType ?? entry.source ?? 'operator'} />
             {entry.createdAt && <span className="ml-auto">{relativeTime(entry.createdAt)}</span>}
           </div>
-          {entry.title && <h3 className="mt-2 text-subheading text-text-primary">{entry.title}</h3>}
-          <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary">{entry.content}</p>
+          {editing ? (
+            <div className="mt-3 space-y-2">
+              <input
+                value={draftTitle}
+                onChange={(event) => setDraftTitle(event.target.value)}
+                placeholder="Memory title"
+                className="h-9 w-full rounded-input border border-line bg-canvas px-3 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+              />
+              <textarea
+                value={draftContent}
+                onChange={(event) => setDraftContent(event.target.value)}
+                rows={4}
+                className="w-full resize-y rounded-input border border-line bg-canvas px-3 py-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+              />
+            </div>
+          ) : (
+            <>
+              {entry.title && <h3 className="mt-2 text-subheading text-text-primary">{entry.title}</h3>}
+              <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary">{entry.content}</p>
+            </>
+          )}
           <div className="mt-3 flex items-center gap-3">
             <TrustBar value={trust} />
             {entry.importance != null && <span className="text-[10px] uppercase tracking-wider text-text-muted">importance {entry.importance}</span>}
           </div>
         </div>
-        {onArchive && (
-          <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => onArchive(entry.id)}>
-            Archive
-          </Button>
-        )}
+        <div className="flex shrink-0 items-center gap-1">
+          {onSave && editing ? (
+            <>
+              <Button variant="ghost" size="sm" iconLeft={<X size={12} />} onClick={() => setEditing(false)}>Cancel</Button>
+              <Button variant="secondary" size="sm" iconLeft={<Save size={12} />} loading={saving} onClick={() => void saveEdit()}>Save</Button>
+            </>
+          ) : onSave ? (
+            <Button variant="ghost" size="sm" iconLeft={<Pencil size={12} />} onClick={() => setEditing(true)}>Edit</Button>
+          ) : null}
+          {onArchive && !editing && (
+            <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => onArchive(entry.id)}>
+              Archive
+            </Button>
+          )}
+        </div>
       </div>
     </article>
   );

@@ -1,5 +1,5 @@
 /**
- * AgentsPage — agent list with Grid/Table toggle, search, filters, space grouping.
+ * AgentsPage — hierarchy canvas with table fallback, search, filters, space grouping.
  *
  * The constellation view is killed (per UIUX-REPLAN §7.2). Grid mode
  * shows agent cards; Table mode shows a sortable list. Both group by
@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Grid3x3, List as ListIcon, MessageCircle, Settings as SettingsIcon, SearchX } from 'lucide-react';
+import { Bot, Plus, Network, List as ListIcon, MessageCircle, Settings as SettingsIcon, SearchX } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
@@ -19,6 +19,8 @@ import { StatusBadge } from '../components/shared/StatusBadge';
 import { Skeleton, SkeletonCard } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
 import { AgentCreateWizard } from '../components/agents/AgentCreateWizard';
+import { AgentHierarchyCanvas } from '../components/agents/AgentHierarchyCanvas';
+import type { AgentHierarchyCreatePreset } from '../components/agents/AgentHierarchyCanvas';
 import { REALTIME_EVENTS } from '@agentis/core';
 
 interface AgentRow {
@@ -33,12 +35,30 @@ interface AgentRow {
   adapter?: { type?: string; model?: string };
   avatarUrl?: string | null;
   currentTask?: string;
+  currentTaskId?: string | null;
   lastActiveAt?: string;
+  lastHeartbeatAt?: string | null;
+  role?: string | null;
+  reportsTo?: string | null;
+  avatarGlyph?: string | null;
+  colorHex?: string | null;
+  isPaused?: boolean | null;
+  monthlyBudgetCents?: number | null;
+  currentMonthSpendCents?: number | null;
+  canvasPosition?: { x: number; y: number } | null;
+  runsToday?: number | null;
+  spendTodayCents?: number | null;
+  pendingApprovals?: number | null;
+  connectionCounts?: {
+    apps: number;
+    workflows: number;
+    memoryPlanes: number;
+  } | null;
 }
 
 interface Space { id: string; name: string; colorHex?: string; }
 
-type View = 'grid' | 'table';
+type View = 'fleet' | 'table';
 type FilterValue = 'all' | 'active' | 'idle' | 'setup_needed';
 
 const FILTERS = [
@@ -84,15 +104,29 @@ export function AgentsPage() {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<View>(() => {
-    try { return (localStorage.getItem('agentis.agents.view') as View) || 'grid'; } catch { return 'grid'; }
+    try {
+      // Legacy value 'canvas' migrates to 'fleet' (AGENTS-PAGE-REDESIGN.md §1.1).
+      const stored = localStorage.getItem('agentis.agents.view');
+      return stored === 'table' ? 'table' : 'fleet';
+    } catch { return 'fleet'; }
   });
   const [creating, setCreating] = useState(false);
+  const [creatingPreset, setCreatingPreset] = useState<AgentHierarchyCreatePreset | undefined>(undefined);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
+  const [selectedAgent, setSelectedAgent] = useState<AgentRow | null>(null);
 
   useEffect(() => {
     try { localStorage.setItem('agentis.agents.view', view); } catch { /* ignore */ }
   }, [view]);
+
+  useEffect(() => {
+    if (view !== 'fleet') setSelectedAgent(null);
+  }, [view]);
+
+  useEffect(() => {
+    setSelectedAgent((current) => current ? agents.find((agent) => agent.id === current.id) ?? current : null);
+  }, [agents]);
 
   async function refresh() {
     setLoading(true);
@@ -125,9 +159,14 @@ export function AgentsPage() {
     () => { void refresh(); },
   );
 
-  // Filter + group
-  const grouped = useMemo(() => {
-    const filtered = agents.filter((a) => {
+  useEffect(() => {
+    const onBackgroundInstallUpdate = () => { void refresh(); };
+    window.addEventListener('agentis:background-install-updated', onBackgroundInstallUpdate);
+    return () => window.removeEventListener('agentis:background-install-updated', onBackgroundInstallUpdate);
+  }, []);
+
+  const filteredAgents = useMemo(() => {
+    return agents.filter((a) => {
       if (!passesFilter(a, filter)) return false;
       if (search.trim()) {
         const q = search.toLowerCase();
@@ -135,14 +174,18 @@ export function AgentsPage() {
       }
       return true;
     });
+  }, [agents, filter, search]);
+
+  // Filter + group
+  const grouped = useMemo(() => {
     const bySpace = new Map<string, AgentRow[]>();
-    for (const a of filtered) {
+    for (const a of filteredAgents) {
       const k = a.spaceId ?? '__ungrouped__';
       if (!bySpace.has(k)) bySpace.set(k, []);
       bySpace.get(k)!.push(a);
     }
     return bySpace;
-  }, [agents, filter, search]);
+  }, [filteredAgents]);
 
   const total = agents.length;
   const filteredCount = Array.from(grouped.values()).reduce((s, arr) => s + arr.length, 0);
@@ -173,14 +216,14 @@ export function AgentsPage() {
           <div className="flex h-9 items-center gap-0.5 rounded-btn border border-line bg-surface-2 p-0.5">
             <button
               type="button"
-              onClick={() => setView('grid')}
-              aria-label="Grid view"
+              onClick={() => setView('fleet')}
+              aria-label="Fleet view"
               className={clsx(
                 'inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors',
-                view === 'grid' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
+                view === 'fleet' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
               )}
             >
-              <Grid3x3 size={12} /> Grid
+              <Network size={12} /> Fleet
             </button>
             <button
               type="button"
@@ -229,7 +272,17 @@ export function AgentsPage() {
             />
           )
         ) : (
-          Array.from(grouped.entries()).map(([spaceKey, list]) => {
+          view === 'fleet' ? (
+            <AgentHierarchyCanvas
+              agents={filteredAgents}
+              onChanged={() => void refresh()}
+              onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
+              selectedAgent={selectedAgent}
+              onCloseSelection={() => setSelectedAgent(null)}
+              onCreate={() => setCreating(true)}
+              onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
+            />
+          ) : Array.from(grouped.entries()).map(([spaceKey, list]) => {
             const space = spaces.find((s) => s.id === spaceKey);
             const groupLabel = space?.name ?? (spaceKey === '__ungrouped__' ? 'Ungrouped' : 'Other');
             return (
@@ -239,13 +292,7 @@ export function AgentsPage() {
                   {groupLabel}
                   <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">· {list.length}</span>
                 </div>
-                {view === 'grid' ? (
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {list.map((a) => <AgentGridCard key={a.id} a={a} />)}
-                  </div>
-                ) : (
-                  <AgentTable rows={list} onSelect={(id) => nav(`/agents/${id}`)} />
-                )}
+                <AgentTable rows={list} onSelect={(id) => nav(`/agents/${id}`)} />
               </div>
             );
           })
@@ -254,8 +301,21 @@ export function AgentsPage() {
 
       <AgentCreateWizard
         open={creating}
-        onClose={() => setCreating(false)}
-        onCreated={(agent) => { setCreating(false); nav(`/agents/${agent.id}`); }}
+        onClose={() => { setCreating(false); setCreatingPreset(undefined); }}
+        onCreated={(agent) => {
+          setCreating(false);
+          setCreatingPreset(undefined);
+          // Stay on fleet canvas so users can see the "setting up" card + progress.
+          // Refresh immediately so the new agent appears.
+          void refresh();
+          // Auto-select the newly created agent for the quick-detail panel
+          setTimeout(() => {
+            setSelectedAgent((current) => current ?? agents.find((a) => a.id === agent.id) ?? { id: agent.id, name: agent.name } as AgentRow);
+          }, 300);
+        }}
+        initialRole={creatingPreset?.role}
+        initialSpaceId={creatingPreset?.spaceId}
+        lockInitialRole={Boolean(creatingPreset?.role)}
       />
     </div>
   );

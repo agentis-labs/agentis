@@ -22,6 +22,8 @@ interface Props {
     label: string;
     active: boolean;
   };
+  initialText?: string;
+  placeholder?: string;
 }
 
 interface Suggestion {
@@ -50,8 +52,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
 const TRIGGERS = ['/', '@', '#'] as const;
 type Trigger = (typeof TRIGGERS)[number];
 
-export function Composer({ onSend, awareness }: Props) {
-  const [text, setText] = useState('');
+export function Composer({ onSend, awareness, initialText, placeholder }: Props) {
+  const [text, setText] = useState(initialText ?? '');
   const [active, setActive] = useState<{ trigger: Trigger; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [useViewportContext, setUseViewportContext] = useState(true);
@@ -105,6 +107,12 @@ export function Composer({ onSend, awareness }: Props) {
   useEffect(() => {
     setHighlight(0);
   }, [active?.query]);
+
+  useEffect(() => {
+    setText(initialText ?? '');
+    setActive(null);
+    setHighlight(0);
+  }, [initialText]);
 
   function detectTrigger(value: string, caret: number): { trigger: Trigger; query: string } | null {
     // Walk backwards from caret to find the nearest trigger char that is
@@ -250,7 +258,7 @@ export function Composer({ onSend, awareness }: Props) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           rows={1}
-          placeholder="Message · / for commands · @ for agents · # for refs"
+          placeholder={placeholder ?? 'Message · / for commands · @ for agents · # for refs'}
           className="max-h-32 min-h-[36px] flex-1 resize-none rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-text-primary outline-none focus:border-accent"
         />
         <button

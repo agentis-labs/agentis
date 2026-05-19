@@ -82,6 +82,11 @@ export const REALTIME_EVENTS = {
   APPROVAL_REQUESTED: 'approval.requested',
   APPROVAL_RESOLVED: 'approval.resolved',
 
+  // App Output surface (APP-OUTPUT-REPLAN.md §5.4)
+  APP_THREAD_MESSAGE_APPENDED: 'app.thread.message_appended',
+  APP_RESULT_CREATED: 'app.result.created',
+  APP_CANVAS_UPDATED: 'app.canvas.updated',
+
   // Artifacts
   ARTIFACT_CREATED: 'artifact.created',
   ARTIFACT_UPDATED: 'artifact.updated',
@@ -105,6 +110,24 @@ export const REALTIME_EVENTS = {
   BRAIN_ATOM_CREATED: 'brain.atom.created',
   BRAIN_ATOM_REINFORCED: 'brain.atom.reinforced',
   BRAIN_LINK_CREATED: 'brain.link.created',
+  BRAIN_REFRESH_TRIGGERED: 'brain.refresh.triggered',
+  BRAIN_CONTEXT_INJECTED: 'brain.context.injected',
+  BRAIN_DIALECTIC_SYNTHESIZED: 'brain.dialectic.synthesized',
+  BRAIN_DISPUTE_FLAGGED: 'brain.dispute.flagged',
+  BRAIN_DISPUTE_RESOLVED: 'brain.dispute.resolved',
+  BRAIN_DISPUTE_AUTO_RESOLVED: 'brain.dispute.auto_resolved',
+  BRAIN_MAINTENANCE_COMPLETED: 'brain.maintenance.completed',
+  BRAIN_PEER_UPDATED: 'brain.peer.updated',
+  BRAIN_DREAM_PASS_COMPLETED: 'brain.dream_pass.completed',
+  BRAIN_BELIEF_CONTRADICTION: 'brain.belief_contradiction',
+  BRAIN_FORGET_COMPLETED: 'brain.forget.completed',
+  BRAIN_CONFIG_DEGRADED: 'brain.config.degraded',
+  BRAIN_EMBEDDING_MIGRATION_STARTED: 'brain.embedding_migration.started',
+  BRAIN_EMBEDDING_MIGRATION_COMPLETED: 'brain.embedding_migration.completed',
+  // Agent Abilities (BRAIN-ABILITIES-REPLAN.md Part IV + Gap16 ambient feed)
+  ABILITY_CREATED: 'ability.created',
+  ABILITY_REINFORCED: 'ability.reinforced',
+  ABILITY_UPDATED: 'ability.updated',
   LEDGER_EVENT: 'ledger.event',
   COMMAND_INDEX_UPDATED: 'command.index.updated',
 
@@ -144,6 +167,15 @@ export const REALTIME_EVENTS = {
   CANVAS_NODE_PLACED: 'canvas.node.placed',
   CANVAS_EDGE_CONNECTED: 'canvas.edge.connected',
   CANVAS_BUILD_COMPLETE: 'canvas.build.complete',
+
+  // App Data layer (AGENTIS-PLATFORM-10X §Layer 3 / §A1-A3)
+  DATA_RECORD_CHANGED: 'data.record.changed',
+  APP_WORKFLOW_COMPLETED: 'app.workflow.completed',
+  APP_WORKFLOW_FAILED: 'app.workflow.failed',
+
+  // App deployment (AGENTIS-PLATFORM-10X §Layer 5)
+  APP_DEPLOY_STATUS_CHANGED: 'app.deploy.status_changed',
+  APP_API_REQUEST: 'app.api.request',
 } as const;
 
 export type RealtimeEventName = (typeof REALTIME_EVENTS)[keyof typeof REALTIME_EVENTS];
@@ -157,6 +189,8 @@ export const REALTIME_ROOMS = {
   agent: (agentId: string) => `agent:${agentId}`,
   conversation: (agentId: string) => `conversation:${agentId}`,
   room: (roomId: string) => `room:${roomId}`,
+  /** Per-app room — Data layer + deploy + workflow-chain events. */
+  app: (appId: string) => `app:${appId}`,
 } as const;
 
 export interface RealtimeEnvelope<TName extends RealtimeEventName = RealtimeEventName> {

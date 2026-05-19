@@ -10,7 +10,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { REALTIME_EVENTS } from '@agentis/core';
 import {
   Handle,
   Position,
@@ -23,10 +24,11 @@ import {
 import {
   ArrowLeft, Undo2, Redo2, Play, Upload, Map as MapIcon, MapPinOff,
   ChevronDown, X, Variable, Trash2, Webhook, Clock as ClockIcon, Copy,
-  BookOpen,
+  BookOpen, ExternalLink,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { api } from '../lib/api';
+import { api, workspace as workspaceStore } from '../lib/api';
+import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
 import { NodePalette } from '../components/canvas/NodePalette';
 import { ContextInspector, type InspectorSelection } from '../components/canvas/ContextInspector';
 import { RunDrawer } from '../components/canvas/RunDrawer';
@@ -34,13 +36,17 @@ import { CanvasEngine } from '../components/canvas/CanvasEngine';
 import { AgentFocusOverlayManager } from '../components/canvas/AgentFocusOverlayManager';
 import { Typewriter } from '../components/shared/Typewriter';
 import { Button } from '../components/shared/Button';
+import { SegmentedControl } from '../components/shared/SegmentedControl';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
+import { WorkflowRunsTab } from '../components/workflows/WorkflowRunsTab';
+import { WorkflowOutputTab } from '../components/workflows/WorkflowOutputTab';
 
 interface WorkflowDetail {
   id: string;
   title: string;
   summary: string | null;
+  intendedBehavior?: string | null;
   graph: {
     version: 1;
     nodes: Array<{
@@ -56,6 +62,13 @@ interface WorkflowDetail {
   variables?: Array<{ name: string; type: string; default?: unknown; label?: string }>;
   isReusable?: boolean;
   isInLibrary?: boolean;
+  appId?: string | null;
+}
+
+interface AppOutputOwner {
+  id: string;
+  slug: string;
+  name: string;
 }
 
 interface SkillRow { id: string; slug: string; name: string; runtime: string; }
@@ -67,13 +80,41 @@ const NODE_GLYPH: Record<string, string> = {
 
 type SaveState = 'saved' | 'saving' | 'dirty' | 'error';
 
+/** Three-tab model — WORKFLOW-PAGE-REDESIGN.md. */
+type WorkflowTab = 'canvas' | 'runs' | 'output';
+
 const MINIMAP_KEY = 'agentis.canvas.minimap';
+const WORKFLOW_TAB_SEGMENTS = [
+  { value: 'canvas' as WorkflowTab, label: 'Canvas' },
+  { value: 'runs' as WorkflowTab, label: 'Runs' },
+  { value: 'output' as WorkflowTab, label: 'Output' },
+] as const;
 
 export function WorkflowCanvasPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
+
+  // Three-tab model: ?tab=canvas|runs|output. Canvas is the default and
+  // omits the param to keep the editor URL clean.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const tab: WorkflowTab = tabParam === 'runs' || tabParam === 'output' ? tabParam : 'canvas';
+  const setTab = useCallback(
+    (v: WorkflowTab) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (v === 'canvas') next.delete('tab');
+          else next.set('tab', v);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   const [wf, setWf] = useState<WorkflowDetail | null>(null);
   const [skills, setSkills] = useState<SkillRow[]>([]);
@@ -86,6 +127,9 @@ export function WorkflowCanvasPage() {
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [variablesOpen, setVariablesOpen] = useState(false);
+  const [intentOpen, setIntentOpen] = useState(false);
+  const [intentDraft, setIntentDraft] = useState('');
+  const [savingIntent, setSavingIntent] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>('saved');
   const [knowledgeBaseCount, setKnowledgeBaseCount] = useState<number | null>(null);
   const [showMinimap, setShowMinimap] = useState<boolean>(() => {
@@ -113,6 +157,7 @@ export function WorkflowCanvasPage() {
     void api<{ workflow: WorkflowDetail }>(`/v1/workflows/${id}`).then((d) => {
       setWf(d.workflow);
       setTitleDraft(d.workflow.title);
+      setIntentDraft(d.workflow.intendedBehavior ?? '');
       lastSavedFingerprintRef.current = graphFingerprint(d.workflow.graph, d.workflow.title);
     });
     void api<{ skills: SkillRow[] }>('/v1/skills').then((d) => setSkills(d.skills));
@@ -120,6 +165,28 @@ export function WorkflowCanvasPage() {
   }, [id]);
 
   const hasKnowledgeNode = useMemo(() => wf?.graph.nodes.some((n) => n.config.kind === 'knowledge' || n.type === 'knowledge') ?? false, [wf]);
+
+  // Keep the workspace room subscription alive while editing so run
+  // lifecycle events reach the Runs/Output tabs and drive the post-run
+  // hand-off (live drawer → Output tab) without a page navigation.
+  useEffect(() => {
+    const ws = workspaceStore.get();
+    if (!ws) return;
+    return rtSubscribe('workspace', { workspaceId: ws });
+  }, []);
+
+  const runEndEvents = useMemo(
+    () => [REALTIME_EVENTS.RUN_COMPLETED, REALTIME_EVENTS.RUN_FAILED],
+    [],
+  );
+  useRealtime(runEndEvents, (env: RealtimeEnvelope) => {
+    const payload = (env.payload ?? {}) as { runId?: string };
+    if (!activeRunId || payload.runId !== activeRunId) return;
+    // Run finished — close the live drawer and surface the result on the
+    // Output tab without leaving /workflows/:id (§Run Button Behavior).
+    setDrawerOpen(false);
+    setTab('output');
+  });
 
   useEffect(() => {
     try { localStorage.setItem(MINIMAP_KEY, showMinimap ? '1' : '0'); } catch { /* ignore */ }
@@ -332,6 +399,25 @@ export function WorkflowCanvasPage() {
     await saveNow(undefined, next);
   }
 
+  async function saveIntent() {
+    if (!wf) return;
+    setSavingIntent(true);
+    try {
+      const nextIntent = intentDraft.trim();
+      await api(`/v1/workflows/${wf.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ intendedBehavior: nextIntent || null }),
+      });
+      setWf({ ...wf, intendedBehavior: nextIntent || null });
+      setIntentOpen(false);
+      toast.success('Intent saved');
+    } catch (error) {
+      toast.error('Failed to save intent', String(error));
+    } finally {
+      setSavingIntent(false);
+    }
+  }
+
   async function runWorkflow(inputs: Record<string, unknown>) {
     if (!wf) return;
     setRunning(true);
@@ -343,8 +429,11 @@ export function WorkflowCanvasPage() {
       setActiveRunId(res.runId);
       setDrawerOpen(true);
       setRunDialogOpen(false);
+      setTab('canvas');
       toast.success('Run started');
-      nav(`/runs/${res.runId}`);
+      // §Run Button Behavior: stay on the canvas with the live RunDrawer.
+      // When RUN_COMPLETED/RUN_FAILED arrives, the realtime listener closes
+      // the drawer and switches to the Output tab — no page hop.
     } catch (e) {
       toast.error('Failed to start run', String(e));
     } finally {
@@ -379,7 +468,7 @@ export function WorkflowCanvasPage() {
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line bg-surface px-4">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-4 py-3">
         <button
           onClick={() => nav('/workflows')}
           className="inline-flex items-center gap-1 text-[12px] text-text-muted transition-colors hover:text-text-primary"
@@ -410,7 +499,16 @@ export function WorkflowCanvasPage() {
         )}
         <SaveIndicator state={saveState} />
 
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
+          <div className="max-w-full overflow-x-auto pb-1">
+            <SegmentedControl
+              segments={WORKFLOW_TAB_SEGMENTS}
+              value={tab}
+              onChange={setTab}
+              size="sm"
+              className="whitespace-nowrap"
+            />
+          </div>
           <Button variant="ghost" size="sm" aria-label="Undo" disabled><Undo2 size={12} /></Button>
           <Button variant="ghost" size="sm" aria-label="Redo" disabled><Redo2 size={12} /></Button>
           <div className="mx-1 h-4 w-px bg-line" />
@@ -428,6 +526,9 @@ export function WorkflowCanvasPage() {
           </button>
           <Button variant="secondary" size="sm" iconLeft={<Variable size={12} />} onClick={() => setVariablesOpen(true)}>
             Inputs
+          </Button>
+          <Button variant="secondary" size="sm" iconLeft={<BookOpen size={12} />} onClick={() => { setIntentDraft(wf.intendedBehavior ?? ''); setIntentOpen(true); }}>
+            Intent
           </Button>
           <Button variant="secondary" size="sm" iconLeft={<Play size={12} />} onClick={() => setRunDialogOpen(true)} disabled={running}>
             Test run
@@ -453,8 +554,9 @@ export function WorkflowCanvasPage() {
         </div>
       </div>
 
-      {/* Canvas + side panels */}
-      <div className="flex min-h-0 flex-1">
+      {/* Canvas + side panels — kept mounted across tab switches so React
+          Flow state and the agent-focus overlay survive. */}
+      <div className={clsx('flex min-h-0 flex-1 overflow-hidden', tab !== 'canvas' && 'hidden')}>
         <NodePalette />
         <div ref={overlayHostRef} className="relative min-h-0 flex-1">
           <CanvasEngine
@@ -580,12 +682,36 @@ export function WorkflowCanvasPage() {
         />
       </div>
 
+      {tab === 'runs' && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+          <WorkflowRunsTab workflowId={wf.id} onRun={() => setRunDialogOpen(true)} />
+        </div>
+      )}
+      {tab === 'output' && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+          {wf.appId ? (
+            <WorkflowAppOutputRedirect appId={wf.appId} />
+          ) : (
+            <WorkflowOutputTab workflowId={wf.id} onRun={() => setRunDialogOpen(true)} />
+          )}
+        </div>
+      )}
+
       <RunInputDialog
         open={runDialogOpen}
         onClose={() => setRunDialogOpen(false)}
         variables={wf.variables ?? []}
         onRun={(inputs) => void runWorkflow(inputs)}
         running={running}
+      />
+
+      <WorkflowIntentDialog
+        open={intentOpen}
+        value={intentDraft}
+        saving={savingIntent}
+        onChange={setIntentDraft}
+        onClose={() => setIntentOpen(false)}
+        onSave={() => void saveIntent()}
       />
 
       <VariablesDialog
@@ -605,6 +731,50 @@ export function WorkflowCanvasPage() {
           } catch (e) { toast.error('Failed to save inputs', String(e)); }
         }}
       />
+    </div>
+  );
+}
+
+function WorkflowAppOutputRedirect({ appId }: { appId: string }) {
+  const [app, setApp] = useState<AppOutputOwner | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api<{ app: AppOutputOwner }>(`/v1/apps/${appId}`)
+      .then((data) => {
+        if (!cancelled) setApp(data.app);
+      })
+      .catch(() => {
+        if (!cancelled) setApp(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId]);
+
+  const appName = app?.name ?? 'its app';
+  const appPath = `/apps/${app?.slug ?? appId}?layer=output`;
+
+  return (
+    <div className="mx-auto flex w-full max-w-3xl flex-1 items-center px-6 py-10">
+      <div className="w-full rounded-card border border-line bg-surface p-6 shadow-sm">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          Output surface transferred
+        </div>
+        <h2 className="text-[18px] font-semibold text-text-primary">
+          This workflow is part of {appName}
+        </h2>
+        <p className="mt-2 max-w-2xl text-[13px] leading-relaxed text-text-secondary">
+          App-connected workflows defer their output surface to the app, so operators see one canonical place for results, history, and generated artifacts.
+        </p>
+        <Link
+          to={appPath}
+          className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover"
+        >
+          View outputs in {appName}
+          <ExternalLink size={12} />
+        </Link>
+      </div>
     </div>
   );
 }
@@ -708,6 +878,58 @@ function RunInputDialog({
           >{running ? 'Starting…' : 'Run'}</button>
         </footer>
       </form>
+    </div>
+  );
+}
+
+function WorkflowIntentDialog({
+  open,
+  value,
+  saving,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  value: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+      <div className="animate-scale-in w-full max-w-xl rounded-modal border border-line bg-surface shadow-modal">
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <h3 className="text-heading text-text-primary">Workflow intent</h3>
+          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="px-5 py-5">
+          <label className="text-[12px] font-medium text-text-secondary">Intended behavior</label>
+          <textarea
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            rows={10}
+            className="mt-1.5 min-h-[220px] w-full resize-y rounded-input border border-line bg-surface-2 px-3 py-2.5 text-[13px] leading-relaxed text-text-primary focus:border-accent focus:outline-none"
+          />
+        </div>
+        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center justify-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+          >Cancel</button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving}
+            className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
+          >{saving ? 'Saving...' : 'Save intent'}</button>
+        </footer>
+      </div>
     </div>
   );
 }

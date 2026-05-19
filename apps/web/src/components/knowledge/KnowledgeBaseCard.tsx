@@ -1,4 +1,4 @@
-import { BookOpen, Trash2 } from 'lucide-react';
+import { ArrowUpFromLine, BookOpen, Trash2 } from 'lucide-react';
 import { Button } from '../shared/Button';
 import type { KnowledgeBaseRow } from './types';
 
@@ -7,11 +7,13 @@ export function KnowledgeBaseCard({
   documentCount,
   onOpen,
   onDelete,
+  onPackage,
 }: {
   base: KnowledgeBaseRow;
   documentCount?: number;
   onOpen: (base: KnowledgeBaseRow) => void;
   onDelete?: (base: KnowledgeBaseRow) => void;
+  onPackage?: (base: KnowledgeBaseRow) => void;
 }) {
   return (
     <article className="rounded-card border border-line bg-surface p-4">
@@ -27,6 +29,7 @@ export function KnowledgeBaseCard({
       </div>
       <div className="mt-4 flex justify-end gap-2">
         {onDelete && <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => onDelete(base)}>Delete</Button>}
+        {onPackage && <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => onPackage(base)}>Package</Button>}
         <Button variant="secondary" size="sm" onClick={() => onOpen(base)}>Open</Button>
       </div>
     </article>

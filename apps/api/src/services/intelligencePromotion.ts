@@ -323,7 +323,7 @@ export class IntelligencePromotion {
     });
     const existing = candidates.find((m) => m.title === mirroredTitle);
     if (existing) {
-      this.memory.update(pattern.workspaceId, existing.id, {
+      this.memory.update(pattern.workspaceId, pattern.appId, existing.id, {
         title: mirroredTitle,
         content: pattern.summary,
         trust: pattern.trust,

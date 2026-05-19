@@ -65,11 +65,62 @@ test.describe('/v1/conversations', () => {
     const res = await request.post(`/v1/conversations/${FAKE}/read`, { headers: ctx.headers });
     expect(res.status()).toBe(404);
   });
+
+  test('orchestrator routes return 404 when the workspace has no orchestrator', async ({ request }) => {
+    const fresh = await apiAuth(request);
+    const res = await request.get('/v1/conversations/orchestrator', { headers: fresh.headers });
+    expect(res.status()).toBe(404);
+  });
+
+  test('orchestrator routes resolve the workspace orchestrator thread', async ({ request }) => {
+    const fresh = await apiAuth(request);
+    const createRes = await request.post('/v1/agents', {
+      headers: fresh.headers,
+      data: { name: 'Workspace Orchestrator', adapterType: 'http', role: 'orchestrator' },
+    });
+    expect(createRes.ok()).toBeTruthy();
+
+    const getRes = await request.get('/v1/conversations/orchestrator', { headers: fresh.headers });
+    expect(getRes.ok()).toBeTruthy();
+    const body = await getRes.json();
+    expect(body.agent.name).toContain('Orchestrator');
+    expect(body.conversation.agentId).toBe(body.agent.id);
+    expect(Array.isArray(body.messages)).toBe(true);
+
+    const readRes = await request.post('/v1/conversations/orchestrator/read', { headers: fresh.headers });
+    expect(readRes.ok()).toBeTruthy();
+  });
+
+  test('orchestrator SSE send streams the fallback reply when no chat harness is connected', async ({ request }) => {
+    const fresh = await apiAuth(request);
+    const createRes = await request.post('/v1/agents', {
+      headers: fresh.headers,
+      data: { name: 'Primary Orchestrator', adapterType: 'http', role: 'orchestrator' },
+    });
+    expect(createRes.ok()).toBeTruthy();
+
+    const res = await request.post('/v1/conversations/orchestrator/send', {
+      headers: { ...fresh.headers, accept: 'text/event-stream' },
+      data: { body: 'hello orchestrator' },
+    });
+    expect(res.status()).toBe(200);
+    expect(res.headers()['content-type'] ?? '').toMatch(/text\/event-stream/);
+    const text = await res.text();
+    expect(text).toContain('event: delta');
+    expect(text).toContain('This agent is not connected to an interactive chat harness yet');
+    expect(text).toContain('event: message');
+  });
 });
 
 test.describe('/v1/agents/:agentId/terminal', () => {
+  let terminalCtx: ApiAuthCtx;
+
+  test.beforeEach(async ({ request }) => {
+    terminalCtx = await apiAuth(request);
+  });
+
   test('GET on unknown agent returns 404', async ({ request }) => {
-    const res = await request.get(`/v1/agents/${FAKE}/terminal`, { headers: ctx.headers });
+    const res = await request.get(`/v1/agents/${FAKE}/terminal`, { headers: terminalCtx.headers });
     expect(res.status()).toBe(404);
   });
 
@@ -79,7 +130,7 @@ test.describe('/v1/agents/:agentId/terminal', () => {
   });
 
   test('GET respects the limit query parameter cap', async ({ request }) => {
-    const res = await request.get(`/v1/agents/${FAKE}/terminal?limit=99999`, { headers: ctx.headers });
+    const res = await request.get(`/v1/agents/${FAKE}/terminal?limit=99999`, { headers: terminalCtx.headers });
     expect(res.status()).toBeGreaterThanOrEqual(400);
   });
 });

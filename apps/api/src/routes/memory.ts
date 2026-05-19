@@ -328,7 +328,7 @@ export function buildMemoryRoutes(deps: MemoryRoutesDeps) {
     return c.json({ memory: rows, count: rows.length });
   });
 
-  app.get('/:id', (c) => {
+  app.get('/:id{[0-9a-fA-F-]{36}}', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const entry = deps.db
@@ -340,7 +340,7 @@ export function buildMemoryRoutes(deps: MemoryRoutesDeps) {
     return c.json({ memory: entry });
   });
 
-  app.patch('/:id', async (c) => {
+  app.patch('/:id{[0-9a-fA-F-]{36}}', async (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const body = patchEntrySchema.parse(await c.req.json());
@@ -366,7 +366,7 @@ export function buildMemoryRoutes(deps: MemoryRoutesDeps) {
     return c.json({ memory: updated });
   });
 
-  app.delete('/:id', (c) => {
+  app.delete('/:id{[0-9a-fA-F-]{36}}', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const existing = deps.db

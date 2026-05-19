@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Search, Trash2 } from 'lucide-react';
+import { ArrowLeft, ArrowUpFromLine, Search, Trash2 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
@@ -31,6 +31,7 @@ export function KnowledgeBasePage() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
+  const [packaging, setPackaging] = useState(false);
 
   async function refresh() {
     if (!knowledgeBaseId) return;
@@ -76,6 +77,26 @@ export function KnowledgeBasePage() {
     await refresh();
   }
 
+  async function packageBase() {
+    if (!base || packaging) return;
+    setPackaging(true);
+    try {
+      await api(`/v1/packages/pack/knowledge/${base.id}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: base.name,
+          description: base.description ?? undefined,
+          tags: ['knowledge'],
+        }),
+      });
+      toast.success('Knowledge package created', base.name);
+    } catch (err) {
+      toast.error('Package failed', String(err));
+    } finally {
+      setPackaging(false);
+    }
+  }
+
   async function search() {
     if (!base || !query.trim()) return;
     setSearching(true);
@@ -108,6 +129,7 @@ export function KnowledgeBasePage() {
             <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" className="mt-1 w-full bg-transparent text-[13px] text-text-muted placeholder:text-text-muted focus:outline-none" />
           </div>
           <Button variant="secondary" size="sm" onClick={() => void saveDetails()}>Save details</Button>
+          <Button variant="secondary" size="sm" loading={packaging} iconLeft={<ArrowUpFromLine size={12} />} onClick={() => void packageBase()}>Package</Button>
           <Button variant="danger" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => void deleteBase()}>Delete</Button>
         </div>
       </header>

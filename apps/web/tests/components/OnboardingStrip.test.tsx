@@ -1,116 +1,110 @@
-/**
- * OnboardingStrip — RTL component test (V1-SPEC §3.2).
- */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { OnboardingStrip } from '../../src/components/OnboardingStrip';
 
-const DISMISSED_KEY = 'agentis.onboarding.dismissed';
+const mocks = vi.hoisted(() => ({
+  useWorkspaceData: vi.fn(),
+  refreshWorkspaceSnapshot: vi.fn(),
+}));
 
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
+vi.mock('../../src/lib/workspaceData', async () => {
+  const actual = await vi.importActual<typeof import('../../src/lib/workspaceData')>('../../src/lib/workspaceData');
+  return {
+    ...actual,
+    useWorkspaceData: mocks.useWorkspaceData,
+    refreshWorkspaceSnapshot: mocks.refreshWorkspaceSnapshot,
+  };
+});
+
+vi.mock('../../src/components/agents/AgentCreateWizard', () => ({
+  AgentCreateWizard: ({ open, initialRole, initialSpaceId, heading }: { open: boolean; initialRole?: string; initialSpaceId?: string; heading?: string }) => (
+    open ? <div data-testid="agent-create-wizard">{heading ?? initialRole}:{initialRole}:{initialSpaceId ?? 'none'}</div> : null
+  ),
+}));
+
+function snapshot(overrides: Partial<ReturnType<typeof baseSnapshot>> = {}) {
+  return {
+    ...baseSnapshot(),
+    ...overrides,
+  };
 }
 
-function stubFleet(snap: {
-  agents?: number;
-  gateways?: number;
-  runs?: number;
-}) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () =>
-      jsonResponse({
-        agents: { total: snap.agents ?? 0 },
-        gateways: { total: snap.gateways ?? 0 },
-        runs: { total: snap.runs ?? 0 },
-      }),
-    ),
-  );
+function baseSnapshot() {
+  return {
+    workspaceId: 'ws-1',
+    loading: false,
+    me: { name: 'Operator' },
+    agents: [],
+    approvals: [],
+    activeRuns: [],
+    failedRuns: [],
+    artifacts: [],
+    spaces: [],
+    fleet: { runs: { active: 0 }, gateways: { total: 1, connected: 1 }, approvals: { pending: 0 } },
+    latestActivity: null,
+    notifications: [],
+    counts: { liveAgents: 0, activeRuns: 0 },
+    updatedAt: Date.now(),
+  };
 }
 
 describe('<OnboardingStrip />', () => {
   beforeEach(() => {
-    localStorage.clear();
-    localStorage.setItem('agentis.access', 'a.b.c');
-    localStorage.setItem('agentis.workspace', 'ws-1');
-  });
-  afterEach(() => {
-    cleanup();
-    vi.unstubAllGlobals();
+    vi.clearAllMocks();
     localStorage.clear();
   });
 
-  it('renders three onboarding steps when no progress made', async () => {
-    stubFleet({});
+  it('stays closed until a commission event is dispatched', () => {
+    mocks.useWorkspaceData.mockReturnValue(snapshot());
+
     render(
       <MemoryRouter>
         <OnboardingStrip />
       </MemoryRouter>,
     );
-    await waitFor(() => {
-      expect(screen.getByText(/Connect a Gateway/i)).toBeInTheDocument();
-    });
-    expect(screen.getByText(/Register an agent/i)).toBeInTheDocument();
-    expect(screen.getByText(/Run a workflow/i)).toBeInTheDocument();
+
+    expect(screen.queryByTestId('agent-create-wizard')).toBeNull();
   });
 
-  it('marks completed steps with a check', async () => {
-    stubFleet({ gateways: 1, agents: 0, runs: 0 });
+  it('opens the orchestrator wizard on agentis:commission-orchestrator', async () => {
+    mocks.useWorkspaceData.mockReturnValue(snapshot({
+      spaces: [{ id: 'space-1', name: 'Marketing', slug: 'marketing' }],
+    }));
+
     render(
       <MemoryRouter>
         <OnboardingStrip />
       </MemoryRouter>,
     );
-    await waitFor(() => {
-      expect(screen.getByText(/Connect a Gateway/i)).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('agentis:commission-orchestrator'));
     });
-    // The gateway step shows a ✓ glyph; raw count step icons render the index "2" / "3".
-    expect(screen.getByText('✓')).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument();
-    expect(screen.getByText('3')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('agent-create-wizard')).toHaveTextContent('Commission your orchestrator:orchestrator:none');
+    });
   });
 
-  it('does not render once previously dismissed', async () => {
-    localStorage.setItem(DISMISSED_KEY, 'true');
-    stubFleet({});
-    const { container } = render(
-      <MemoryRouter>
-        <OnboardingStrip />
-      </MemoryRouter>,
-    );
-    // Nothing rendered, no fetch issued.
-    expect(container.textContent).toBe('');
-  });
+  it('opens the manager wizard with the space preset on agentis:commission-manager', async () => {
+    mocks.useWorkspaceData.mockReturnValue(snapshot({
+      agents: [{ id: 'orch-1', name: 'Brain', role: 'orchestrator', status: 'online' }],
+      spaces: [{ id: 'space-1', name: 'Marketing', slug: 'marketing' }],
+    }));
 
-  it('persists the dismissed flag when the close button is clicked', async () => {
-    stubFleet({});
     render(
       <MemoryRouter>
         <OnboardingStrip />
       </MemoryRouter>,
     );
-    const button = await screen.findByRole('button', { name: /dismiss onboarding/i });
-    fireEvent.click(button);
-    expect(localStorage.getItem(DISMISSED_KEY)).toBe('true');
-    await waitFor(() => {
-      expect(screen.queryByText(/Connect a Gateway/i)).toBeNull();
-    });
-  });
 
-  it('auto-dismisses permanently when all milestones are met', async () => {
-    stubFleet({ gateways: 1, agents: 1, runs: 1 });
-    render(
-      <MemoryRouter>
-        <OnboardingStrip />
-      </MemoryRouter>,
-    );
-    await waitFor(() => {
-      expect(localStorage.getItem(DISMISSED_KEY)).toBe('true');
+    act(() => {
+      window.dispatchEvent(new CustomEvent('agentis:commission-manager', { detail: { spaceId: 'space-1' } }));
     });
-    expect(screen.queryByText(/Connect a Gateway/i)).toBeNull();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('agent-create-wizard')).toHaveTextContent('Assign a manager for Marketing:manager:space-1');
+    });
   });
 });

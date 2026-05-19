@@ -5,7 +5,7 @@
  * undo variant with action button + countdown for destructive operations.
  */
 
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { CheckCircle2, AlertTriangle, XCircle, Info, Undo2, X } from 'lucide-react';
 
@@ -74,7 +74,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [dismiss],
   );
 
-  const api: ToastApi = {
+  const api = useMemo<ToastApi>(() => ({
     push,
     dismiss,
     success: (title, body) => push({ title, body, tone: 'success' }),
@@ -83,7 +83,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     info:    (title, body) => push({ title, body, tone: 'info' }),
     undo:    (title, onUndo, body) =>
       push({ title, body, tone: 'undo', action: { label: 'Undo', onClick: onUndo } }),
-  };
+  }), [dismiss, push]);
 
   return (
     <ToastCtx.Provider value={api}>

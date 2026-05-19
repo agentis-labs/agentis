@@ -22,7 +22,13 @@ export interface ActiveTrigger {
   workspaceId: string;
   ambientId: string | null;
   userId: string;
-  triggerType: 'manual' | 'cron' | 'webhook' | 'persistent_listener';
+  triggerType:
+    | 'manual'
+    | 'cron'
+    | 'webhook'
+    | 'persistent_listener'
+    | 'data_event'
+    | 'workflow_completed';
   config: Record<string, unknown>;
 }
 

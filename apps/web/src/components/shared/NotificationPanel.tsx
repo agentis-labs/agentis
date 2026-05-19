@@ -9,13 +9,14 @@ import { useEffect, useRef, useState } from 'react';
 import { Bell, Check, X, Eye, RotateCcw, AlertTriangle, XCircle, Clock } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
+import { ManagerGlyph, OrchestratorGlyph } from '../agents/AgentRoleGlyphs';
 import { api } from '../../lib/api';
 import { refreshWorkspaceSnapshot, useWorkspaceData } from '../../lib/workspaceData';
 import { useToast } from './Toast';
 
 export interface AgentisNotification {
   id: string;
-  type: 'approval' | 'failure' | 'completion' | 'info';
+  type: 'approval' | 'failure' | 'completion' | 'info' | 'setup';
   title: string;
   context: string;
   timestamp: string;
@@ -24,6 +25,9 @@ export interface AgentisNotification {
   runId?: string;
   agentName?: string;
   approvalId?: string;
+  actionLabel?: string;
+  actionEvent?: string;
+  actionPayload?: Record<string, unknown>;
 }
 
 function relativeTime(iso: string): string {
@@ -65,9 +69,9 @@ export function NotificationPanel() {
   async function handleApprove(n: AgentisNotification) {
     if (!n.approvalId) return;
     try {
-      await api(`/v1/approvals/${n.approvalId}/decide`, {
+      await api(`/v1/approvals/${n.approvalId}/resolve`, {
         method: 'POST',
-        body: JSON.stringify({ decision: 'approved' }),
+        body: JSON.stringify({ decision: 'approve' }),
       });
       toast.success('Approved');
       void refreshWorkspaceSnapshot();
@@ -79,9 +83,9 @@ export function NotificationPanel() {
   async function handleReject(n: AgentisNotification) {
     if (!n.approvalId) return;
     try {
-      await api(`/v1/approvals/${n.approvalId}/decide`, {
+      await api(`/v1/approvals/${n.approvalId}/resolve`, {
         method: 'POST',
-        body: JSON.stringify({ decision: 'rejected' }),
+        body: JSON.stringify({ decision: 'reject' }),
       });
       toast.success('Rejected');
       void refreshWorkspaceSnapshot();
@@ -124,7 +128,7 @@ export function NotificationPanel() {
 
       {open && (
         <div
-          className="animate-fade-in absolute right-0 top-full z-40 mt-2 w-[380px] max-w-[calc(100vw-2rem)] rounded-card border border-line bg-surface shadow-dropdown"
+          className="animate-fade-in absolute right-0 top-full z-[70] mt-2 w-[380px] max-w-[calc(100vw-2rem)] rounded-card border border-line bg-surface shadow-dropdown"
           role="dialog"
           aria-label="Notifications"
         >
@@ -132,7 +136,7 @@ export function NotificationPanel() {
             <span className="text-subheading text-text-primary">Notifications</span>
             <button
               type="button"
-              onClick={() => { setOpen(false); nav('/history'); }}
+              onClick={() => { setOpen(false); nav('/home'); }}
               className="text-[12px] text-text-muted hover:text-text-primary"
             >
               View all
@@ -158,6 +162,8 @@ export function NotificationPanel() {
                   {n.type === 'failure' && <XCircle size={16} className="mt-0.5 shrink-0 text-danger" />}
                   {n.type === 'completion' && <Check size={16} className="mt-0.5 shrink-0 text-accent" />}
                   {n.type === 'info' && <Clock size={16} className="mt-0.5 shrink-0 text-info" />}
+                  {n.type === 'setup' && n.id === 'setup-orchestrator' && <OrchestratorGlyph size={16} />}
+                  {n.type === 'setup' && n.id === 'setup-managers' && <ManagerGlyph size={16} />}
                   <div className="min-w-0 flex-1">
                     <div className="text-subheading text-text-primary">{n.title}</div>
                     <div className="mt-0.5 text-[12px] text-text-secondary">{n.context}</div>
@@ -200,6 +206,20 @@ export function NotificationPanel() {
                             <RotateCcw size={11} /> Retry
                           </button>
                         </>
+                      )}
+                      {n.type === 'setup' && n.actionEvent && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpen(false);
+                            window.dispatchEvent(new CustomEvent(n.actionEvent!, { detail: n.actionPayload ?? {} }));
+                          }}
+                          className="inline-flex h-7 items-center gap-1 rounded-btn bg-accent px-2.5 text-[11px] font-semibold text-canvas transition-colors hover:bg-accent-hover"
+                        >
+                          {n.id === 'setup-orchestrator' && <OrchestratorGlyph size={11} />}
+                          {n.id === 'setup-managers' && <ManagerGlyph size={11} />}
+                          {n.actionLabel ?? 'Set up'}
+                        </button>
                       )}
                     </div>
                   </div>

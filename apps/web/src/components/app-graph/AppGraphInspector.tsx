@@ -35,6 +35,7 @@ export function AppGraphInspector({ node, references, onChange, onDelete }: Insp
   const [creatingEntry, setCreatingEntry] = useState(false);
   const [inlineWorkflowId, setInlineWorkflowId] = useState<string | null>(null);
   const cfg = node?.config as AppGraphNodeConfig | undefined;
+  const preview = useMemo(() => (node ? resolvePreview(node, references) : null), [node, references]);
 
   if (!node || !cfg) {
     return (
@@ -118,6 +119,8 @@ export function AppGraphInspector({ node, references, onChange, onDelete }: Insp
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        {preview && <ReferencePreviewCard preview={preview} />}
+
         <Field label="Title">
           <input
             type="text"
@@ -313,7 +316,7 @@ export function AppGraphInspector({ node, references, onChange, onDelete }: Insp
             <Field label="Artifact type" hint="What kind of result is produced — drives how it's rendered.">
               <select
                 value={cfg.artifactType ?? ''}
-                onChange={(e) => updateConfig({ artifactType: (e.target.value || undefined) as 'document' | 'metric' | 'chart' | 'list' | 'file' | 'decision' | 'custom' | undefined })}
+                onChange={(e) => updateConfig({ artifactType: (e.target.value || undefined) as 'document' | 'metric' | 'chart' | 'list' | 'table' | 'link' | 'file' | 'decision' | 'custom' | undefined })}
                 className="w-full rounded-md border border-line bg-bg-base px-2.5 py-1.5 text-[13px] text-text-primary outline-none focus:border-accent"
               >
                 <option value="">— choose —</option>
@@ -321,6 +324,8 @@ export function AppGraphInspector({ node, references, onChange, onDelete }: Insp
                 <option value="metric">Metric (single number / KPI)</option>
                 <option value="chart">Chart (visualisation)</option>
                 <option value="list">List (rows of records)</option>
+                <option value="table">Table (structured rows)</option>
+                <option value="link">Link (URL, source, reference)</option>
                 <option value="file">File (PDF, image, attachment)</option>
                 <option value="decision">Decision (yes/no, approval)</option>
                 <option value="custom">Custom</option>
@@ -456,6 +461,79 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+interface ReferencePreview {
+  label: string;
+  title: string;
+  detail: string;
+  tone: 'accent' | 'muted';
+}
+
+function ReferencePreviewCard({ preview }: { preview: ReferencePreview }) {
+  return (
+    <div className={[
+      'rounded-md border px-3 py-3',
+      preview.tone === 'accent' ? 'border-accent/20 bg-accent-soft/10' : 'border-line bg-bg-base',
+    ].join(' ')}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{preview.label}</div>
+      <div className="mt-1 text-[13px] font-medium text-text-primary">{preview.title}</div>
+      <div className="mt-1 text-[12px] leading-relaxed text-text-secondary">{preview.detail}</div>
+    </div>
+  );
+}
+
+function resolvePreview(node: AppGraphNode, references: AppGraphReferenceScope): ReferencePreview | null {
+  const cfg = node.config as AppGraphNodeConfig;
+  if (cfg.kind === 'app_core') {
+    const workflow = references.workflows.find((item) => item.id === cfg.entryWorkflowId);
+    return workflow
+      ? {
+          label: 'Connected trigger',
+          title: workflow.title,
+          detail: 'This workflow runs first when someone starts the app.',
+          tone: 'accent',
+        }
+      : {
+          label: 'Connected trigger',
+          title: 'No trigger connected yet',
+          detail: 'Pick or create a workflow so the app knows how to start.',
+          tone: 'muted',
+        };
+  }
+  if (cfg.kind === 'entry_workflow' || cfg.kind === 'workflow_module') {
+    const workflow = references.workflows.find((item) => item.id === cfg.workflowId);
+    return workflow
+      ? {
+          label: 'Connected workflow',
+          title: workflow.title,
+          detail: cfg.kind === 'entry_workflow' ? 'This is the workflow that starts the app.' : 'This workflow is connected to the app graph.',
+          tone: 'accent',
+        }
+      : {
+          label: 'Connected workflow',
+          title: 'No workflow connected yet',
+          detail: 'Choose a workflow below or create one directly from this panel.',
+          tone: 'muted',
+        };
+  }
+  if (cfg.kind === 'agent_group') {
+    const selectedAgents = references.agents.filter((agent) => (cfg.agentIds ?? []).includes(agent.id));
+    return selectedAgents.length > 0
+      ? {
+          label: 'Connected team',
+          title: selectedAgents.length === 1 ? (selectedAgents[0]?.name ?? '1 agent connected') : `${selectedAgents.length} agents connected`,
+          detail: selectedAgents.map((agent) => agent.name).join(' · '),
+          tone: 'accent',
+        }
+      : {
+          label: 'Connected team',
+          title: 'No agents selected yet',
+          detail: 'Pick the agents that should do this work for the app.',
+          tone: 'muted',
+        };
+  }
+  return null;
+}
+
 function WorkflowSelect({
   value, workflows, onChange,
 }: {
@@ -463,17 +541,56 @@ function WorkflowSelect({
   workflows: Array<{ id: string; title: string }>;
   onChange: (v: string | undefined) => void;
 }) {
+  const [query, setQuery] = useState('');
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return workflows;
+    return workflows.filter((workflow) => workflow.title.toLowerCase().includes(needle));
+  }, [query, workflows]);
+
+  if (workflows.length === 0) {
+    return (
+      <div className="rounded-md border border-line bg-bg-base px-2.5 py-1.5 text-[12px] text-text-muted">
+        No workflows are available yet.
+      </div>
+    );
+  }
+
   return (
-    <select
-      value={value ?? ''}
-      onChange={(e) => onChange(e.target.value || undefined)}
-      className="w-full rounded-md border border-line bg-bg-base px-2.5 py-1.5 text-[13px] text-text-primary outline-none focus:border-accent"
-    >
-      <option value="">— select a workflow —</option>
-      {workflows.map((w) => (
-        <option key={w.id} value={w.id}>{w.title}</option>
-      ))}
-    </select>
+    <div className="space-y-2">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search workflows"
+        className="w-full rounded-md border border-line bg-bg-base px-2.5 py-1.5 text-[13px] text-text-primary outline-none focus:border-accent"
+      />
+      <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-bg-base">
+        {filtered.length === 0 ? (
+          <div className="px-2.5 py-2 text-[12px] text-text-muted">No workflows match that search.</div>
+        ) : (
+          filtered.map((workflow) => (
+            <button
+              key={workflow.id}
+              type="button"
+              onClick={() => onChange(workflow.id)}
+              className={[
+                'flex w-full items-center justify-between gap-3 px-2.5 py-2 text-left text-[12px] transition-colors',
+                value === workflow.id ? 'bg-accent-soft/10 text-text-primary' : 'text-text-primary hover:bg-surface-2',
+              ].join(' ')}
+            >
+              <span className="truncate">{workflow.title}</span>
+              {value === workflow.id && <span className="text-[10px] font-semibold uppercase tracking-wider text-accent">Connected</span>}
+            </button>
+          ))
+        )}
+      </div>
+      {value && (
+        <button type="button" onClick={() => onChange(undefined)} className="text-[11px] font-medium text-text-muted hover:text-text-primary">
+          Clear selection
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -484,7 +601,14 @@ function MultiSelect({
   options: Array<{ id: string; label: string }>;
   onChange: (next: string[]) => void;
 }) {
+  const [query, setQuery] = useState('');
   const set = useMemo(() => new Set(value), [value]);
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return options;
+    return options.filter((option) => option.label.toLowerCase().includes(needle));
+  }, [options, query]);
+
   function toggle(id: string) {
     const next = new Set(set);
     if (next.has(id)) next.delete(id);
@@ -499,25 +623,51 @@ function MultiSelect({
     );
   }
   return (
-    <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-bg-base">
-      {options.map((o) => (
-        <label
-          key={o.id}
-          className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-[12px] text-text-primary hover:bg-surface-2"
-        >
-          <input
-            type="checkbox"
-            checked={set.has(o.id)}
-            onChange={() => toggle(o.id)}
-            className="rounded border-line accent-accent"
-          />
-          <span className="truncate">{o.label}</span>
-        </label>
-      ))}
+    <div className="space-y-2">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search agents"
+        className="w-full rounded-md border border-line bg-bg-base px-2.5 py-1.5 text-[13px] text-text-primary outline-none focus:border-accent"
+      />
+      <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-bg-base">
+        {filtered.length === 0 ? (
+          <div className="px-2.5 py-2 text-[12px] text-text-muted">No agents match that search.</div>
+        ) : (
+          filtered.map((o) => (
+            <label
+              key={o.id}
+              className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-[12px] text-text-primary hover:bg-surface-2"
+            >
+              <input
+                type="checkbox"
+                checked={set.has(o.id)}
+                onChange={() => toggle(o.id)}
+                className="rounded border-line accent-accent"
+              />
+              <span className="truncate">{o.label}</span>
+            </label>
+          ))
+        )}
+      </div>
     </div>
   );
 }
 
 function humanType(t: AppGraphNodeType): string {
-  return t.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  switch (t) {
+    case 'app_core': return 'App core';
+    case 'entry_workflow': return 'Trigger';
+    case 'workflow_module': return 'Workflow';
+    case 'agent_group': return 'Team';
+    case 'knowledge_source': return 'Knowledge';
+    case 'memory_surface': return 'Memory';
+    case 'integration_surface': return 'Connection';
+    case 'approval_surface': return 'Checkpoint';
+    case 'output_surface': return 'Output';
+    case 'scheduler': return 'Schedule';
+    case 'channel_surface': return 'Channel';
+    case 'brain_surface': return 'Brain';
+  }
 }

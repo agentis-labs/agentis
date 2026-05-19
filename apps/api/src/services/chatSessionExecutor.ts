@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, ChatDelta, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { CHAT_TOOL_CATALOG } from './chatToolCatalog.js';
 import { ChatToolExecutor } from './chatToolExecutor.js';
 import { buildOrchestratorSystemPrompt } from './orchestratorPrompt.js';
@@ -22,10 +23,27 @@ export interface ChatTurnOptions {
   viewport?: ViewportContext | null;
   maxTurns?: number;
   maxToolCalls?: number;
+  systemAddendum?: string;
 }
+
+interface PendingChatConfirmation {
+  turnId: string;
+  call: ChatToolCall;
+  context: ChatTurnContext;
+  messages: ChatMessage[];
+  tools: ToolDefinition[];
+  maxTurns: number;
+  maxToolCalls: number;
+  toolCallCount: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
+const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 
 export class ChatSessionExecutor {
   static #deps: ChatSessionExecutorDeps = {};
+  static #pendingConfirmations = new Map<string, PendingChatConfirmation>();
 
   static configure(deps: ChatSessionExecutorDeps): void {
     this.#deps = deps;
@@ -50,26 +68,111 @@ export class ChatSessionExecutor {
       return;
     }
 
-    const systemPrompt = buildOrchestratorSystemPrompt({
+    const baseSystemPrompt = buildOrchestratorSystemPrompt({
       context: { ...ctx, viewport },
       viewport,
       ...this.#loadPromptContext(ctx),
       ...this.#extractInlineContext(userMessage, ctx),
     });
+    const systemPrompt = options.systemAddendum?.trim()
+      ? `${baseSystemPrompt}\n\n${options.systemAddendum.trim()}`
+      : baseSystemPrompt;
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...trimHistory(history),
       { role: 'user', content: expandUserMessage(userMessage) },
     ];
 
-    let toolCallCount = 0;
-    for (let turn = 0; turn < maxTurns; turn += 1) {
+    yield* this.#executeLoop(adapter, messages, { ...ctx, viewport }, {
+      tools,
+      maxTurns,
+      maxToolCalls,
+      startedAt,
+      toolCallCount: 0,
+    });
+  }
+
+  static async *confirm(
+    adapter: AgentAdapter,
+    turnId: string,
+    confirmed: boolean,
+    guard: { workspaceId: string; userId: string; conversationId: string },
+  ): AsyncIterable<ChatDelta> {
+    this.#cleanupPendingConfirmations();
+    const pending = this.#pendingConfirmations.get(turnId);
+    if (!pending) {
+      yield { type: 'text', delta: 'That action is no longer waiting for confirmation. Please send the request again.' };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
+    if (
+      pending.context.workspaceId !== guard.workspaceId ||
+      pending.context.userId !== guard.userId ||
+      pending.context.conversationId !== guard.conversationId
+    ) {
+      yield { type: 'text', delta: 'That confirmation belongs to a different conversation.' };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
+
+    this.#pendingConfirmations.delete(turnId);
+
+    if (!confirmed) {
+      yield { type: 'text', delta: `Canceled. I did not run ${pending.call.name}.` };
+      yield { type: 'done', finishReason: 'stop' };
+      return;
+    }
+
+    if (!adapter.chat) {
+      yield { type: 'text', delta: 'This agent cannot resume the confirmed action because its adapter does not expose interactive chat.' };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
+
+    yield { type: 'tool_call', id: pending.call.id, name: pending.call.name, args: pending.call.arguments };
+    const executed = await this.#executeToolCall(pending.call, pending.context);
+    yield executed.delta;
+
+    const messages = [
+      ...pending.messages,
+      {
+        role: 'tool' as const,
+        toolCallId: pending.call.id,
+        content: executed.result.error
+          ? JSON.stringify({ error: executed.result.error })
+          : JSON.stringify(executed.summarized),
+      },
+    ];
+
+    yield* this.#executeLoop(adapter, messages, pending.context, {
+      tools: pending.tools,
+      maxTurns: pending.maxTurns,
+      maxToolCalls: pending.maxToolCalls,
+      startedAt: Date.now(),
+      toolCallCount: pending.toolCallCount + 1,
+    });
+  }
+
+  static async *#executeLoop(
+    adapter: AgentAdapter,
+    messages: ChatMessage[],
+    ctx: ChatTurnContext,
+    options: {
+      tools: ToolDefinition[];
+      maxTurns: number;
+      maxToolCalls: number;
+      startedAt: number;
+      toolCallCount: number;
+    },
+  ): AsyncIterable<ChatDelta> {
+    let toolCallCount = options.toolCallCount;
+    for (let turn = 0; turn < options.maxTurns; turn += 1) {
       const toolCalls: ChatToolCall[] = [];
       let assistantText = '';
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
 
       try {
-        for await (const delta of adapter.chat(messages, tools)) {
+        for await (const delta of adapter.chat!(messages, options.tools)) {
           if (delta.type === 'text') assistantText += delta.delta;
           if (delta.type === 'tool_call') toolCalls.push({ id: delta.id, name: delta.name, arguments: delta.args });
           if (delta.type === 'done') {
@@ -87,7 +190,7 @@ export class ChatSessionExecutor {
       }
 
       if (toolCalls.length === 0 || finishReason !== 'tool_calls') {
-        this.#logTurn(ctx, startedAt, toolCallCount, finishReason);
+        this.#logTurn(ctx, options.startedAt, toolCallCount, finishReason);
         yield { type: 'done', finishReason };
         return;
       }
@@ -95,43 +198,50 @@ export class ChatSessionExecutor {
       messages.push({ role: 'assistant', content: assistantText, toolCalls });
 
       // Cap batch to remaining budget before kicking off parallel execution.
-      const remaining = maxToolCalls - toolCallCount;
+      const remaining = options.maxToolCalls - toolCallCount;
       const batch = toolCalls.slice(0, remaining);
       if (batch.length < toolCalls.length) {
         yield { type: 'done', finishReason: 'max_turns' };
         return;
       }
+
+      const confirmationCall = batch.find((call) => ChatToolExecutor.requiresConfirmation(call.name));
+      if (confirmationCall) {
+        const turnId = randomUUID();
+        const now = Date.now();
+        const assistantForConfirmation: ChatMessage = {
+          role: 'assistant',
+          content: assistantText,
+          toolCalls: [confirmationCall],
+        };
+        this.#pendingConfirmations.set(turnId, {
+          turnId,
+          call: confirmationCall,
+          context: ctx,
+          messages: [...messages.slice(0, -1), assistantForConfirmation],
+          tools: options.tools,
+          maxTurns: options.maxTurns,
+          maxToolCalls: options.maxToolCalls,
+          toolCallCount,
+          createdAt: now,
+          expiresAt: now + CONFIRMATION_TTL_MS,
+        });
+        yield this.#buildConfirmationDelta(turnId, confirmationCall, now + CONFIRMATION_TTL_MS);
+        this.#logTurn(ctx, options.startedAt, toolCallCount, 'confirmation_required');
+        yield { type: 'done', finishReason: 'stop' };
+        return;
+      }
+
       toolCallCount += batch.length;
 
       // Execute all tool calls in parallel — SQLite builtins are sub-ms, HTTP
       // tools can take hundreds of ms. Parallel execution is the spec §6.2 design.
-      const callCtx = { ...ctx, viewport };
       const settled = await Promise.all(
-        batch.map(async (call) => {
-          const toolStartedAt = Date.now();
-          const result = await ChatToolExecutor.run(call.name, call.arguments, callCtx);
-          return { call, result, durationMs: Date.now() - toolStartedAt };
-        }),
+        batch.map((call) => this.#executeToolCall(call, ctx)),
       );
 
-      for (const { call, result, durationMs } of settled) {
-        const summarized = summarizeToolResult(result.data ?? result.error ?? null);
-        const ok = !result.error;
-        recordToolCall(call.name, durationMs, ok);
-        this.#deps.logger?.info('chat.tool_call', {
-          workspaceId: ctx.workspaceId,
-          agentId: ctx.agentId,
-          tool: call.name,
-          ok,
-          durationMs,
-        });
-        yield {
-          type: 'tool_result',
-          id: call.id,
-          name: call.name,
-          result: summarized,
-          ...(result.error ? { error: result.error } : {}),
-        };
+      for (const { call, result, summarized, delta } of settled) {
+        yield delta;
         messages.push({
           role: 'tool',
           toolCallId: call.id,
@@ -142,8 +252,61 @@ export class ChatSessionExecutor {
       }
     }
 
-    this.#logTurn(ctx, startedAt, toolCallCount, 'max_turns');
+    this.#logTurn(ctx, options.startedAt, toolCallCount, 'max_turns');
     yield { type: 'done', finishReason: 'max_turns' };
+  }
+
+  static async #executeToolCall(call: ChatToolCall, ctx: ChatTurnContext) {
+    const toolStartedAt = Date.now();
+    const result = await ChatToolExecutor.run(call.name, call.arguments, ctx);
+    const durationMs = Date.now() - toolStartedAt;
+    const summarized = summarizeToolResult(result.data ?? result.error ?? null);
+    const ok = !result.error;
+    recordToolCall(call.name, durationMs, ok);
+    this.#deps.logger?.info('chat.tool_call', {
+      workspaceId: ctx.workspaceId,
+      agentId: ctx.agentId,
+      tool: call.name,
+      ok,
+      durationMs,
+    });
+    return {
+      call,
+      result,
+      summarized,
+      durationMs,
+      delta: {
+        type: 'tool_result' as const,
+        id: call.id,
+        name: call.name,
+        result: summarized,
+        ...(result.error ? { error: result.error } : {}),
+      },
+    };
+  }
+
+  static #buildConfirmationDelta(turnId: string, call: ChatToolCall, expiresAt: number): Extract<ChatDelta, { type: 'confirmation_required' }> {
+    const title = confirmationTitle(call.name);
+    const definition = ChatToolExecutor.definition(call.name);
+    const args = safeJson(call.arguments);
+    const clippedArgs = args.length > 900 ? `${args.slice(0, 900)}...` : args;
+    return {
+      type: 'confirmation_required',
+      turnId,
+      toolCall: { id: call.id, name: call.name, args: call.arguments },
+      title,
+      body: `${definition?.description ?? 'This action changes platform state.'}\n\nArguments:\n${clippedArgs}`,
+      confirmLabel: confirmationConfirmLabel(call.name),
+      cancelLabel: 'Cancel',
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+  }
+
+  static #cleanupPendingConfirmations(): void {
+    const now = Date.now();
+    for (const [turnId, pending] of this.#pendingConfirmations) {
+      if (pending.expiresAt <= now) this.#pendingConfirmations.delete(turnId);
+    }
   }
 
   static #loadPromptContext(ctx: ChatTurnContext) {
@@ -154,10 +317,10 @@ export class ChatSessionExecutor {
     const agentInventory = db.select().from(schema.agents).where(eq(schema.agents.workspaceId, ctx.workspaceId)).all()
       .map((row) => ({ id: row.id, name: row.name, status: row.status, adapterType: row.adapterType }));
     const activeRuns = db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.workspaceId, ctx.workspaceId)).all()
-      .filter((run) => ['CREATED', 'RUNNING', 'WAITING', 'PAUSED_FOR_APPROVAL'].includes(run.status))
+      .filter((run) => run.status === 'RUNNING')
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 10)
-      .map((run) => ({ id: run.id, workflowId: run.workflowId, status: run.status, createdAt: run.createdAt }));
+      .map((run) => ({ id: run.id, workflowId: run.workflowId ?? `ephemeral:${run.id}`, status: run.status, createdAt: run.createdAt }));
     const pendingApprovals = db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.workspaceId, ctx.workspaceId)).all()
       .filter((approval) => approval.status === 'pending')
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -236,7 +399,7 @@ export class ChatSessionExecutor {
         referencedResources.push({
           kind: 'run',
           id: run.id,
-          name: run.workflowId,
+          name: run.workflowId ?? run.ephemeralTitle ?? `ephemeral:${run.id}`,
           detail: `status=${run.status} createdAt=${run.createdAt}`,
         });
         continue;
@@ -287,6 +450,7 @@ function expandUserMessage(message: string): string {
     approve: `The operator used /approve. List pending approvals, identify the intended approval, and only resolve it if the instruction is explicit. Request: ${rest}`,
     status: `The operator used /status. Summarize current runs, agents, gateways, and approvals using tools. Request: ${rest}`,
     history: `The operator used /history. Query recent runs and audit trails relevant to: ${rest}`,
+    newapp: `The operator used /newapp from the Apps page. They want to create a new Agentis app through chat. Ask what the app should do if the request is empty. If the goal is clear, propose a short app plan with name, entry workflow, expected output, and any missing connections. Only after the operator confirms, call agentis.app.create. Request: ${rest}`,
     help: 'The operator used /help. Briefly explain what the Agentis orchestrator can do through chat.',
   };
   return mapping[command?.toLowerCase() ?? ''] ?? message;
@@ -300,6 +464,30 @@ function summarizeToolResult(value: unknown): unknown {
     truncated: true,
     originalLength: text.length,
   };
+}
+
+function confirmationTitle(toolName: string): string {
+  const titles: Record<string, string> = {
+    'agentis.workflow.run': 'Run workflow?',
+    'agentis.run.cancel': 'Cancel run?',
+    'agentis.approval.resolve': 'Resolve approval?',
+    'agentis.app.thread.append': 'Update app thread?',
+    'agentis.app.create': 'Create app?',
+    'agentis.ephemeral.run': 'Run ephemeral workflow?',
+  };
+  return titles[toolName] ?? 'Confirm platform action?';
+}
+
+function confirmationConfirmLabel(toolName: string): string {
+  const labels: Record<string, string> = {
+    'agentis.workflow.run': 'Run workflow',
+    'agentis.run.cancel': 'Cancel run',
+    'agentis.approval.resolve': 'Resolve approval',
+    'agentis.app.thread.append': 'Update thread',
+    'agentis.app.create': 'Create app',
+    'agentis.ephemeral.run': 'Run once',
+  };
+  return labels[toolName] ?? 'Confirm';
 }
 
 function safeJson(value: unknown): string {

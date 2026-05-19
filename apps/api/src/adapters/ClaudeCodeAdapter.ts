@@ -19,6 +19,7 @@ import type {
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
+import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 
 export interface ClaudeCodeAdapterOptions {
   agentId: string;
@@ -75,9 +76,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     let terminalEventEmitted = false;
     let timeout: NodeJS.Timeout | undefined;
     try {
-      child = spawn(bin, args, {
+      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
+      const target = resolveSpawnTarget(bin, args, this.opts.cwd ?? process.cwd(), env);
+      child = spawn(target.command, target.args, {
         cwd: this.opts.cwd,
-        env: { ...process.env, ...(this.opts.env ?? {}) },
+        env,
+        windowsHide: true,
         signal: ctrl.signal,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

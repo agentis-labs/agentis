@@ -3,7 +3,7 @@ import { Button } from '../shared/Button';
 
 export function EmptyBrainStage({
   scope = 'app',
-  actionLabel = 'Go to Manage',
+  actionLabel = 'Add knowledge',
   onAction,
 }: {
   scope?: 'app' | 'workspace';
@@ -13,7 +13,7 @@ export function EmptyBrainStage({
   const title = scope === 'workspace' ? 'The workspace brain is empty.' : "This app's intelligence is empty.";
   const body = scope === 'workspace'
     ? 'Import documents, add knowledge bases, or run workflows to start accumulating shared intelligence.'
-    : 'Import business data, add memory entries, and provide evaluator examples to calibrate this app.';
+    : 'Upload reference documents, save memory entries, and provide evaluator examples to give this app usable context.';
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-canvas/70 p-6">
       <div className="max-w-md rounded-card border border-dashed border-line bg-surface px-8 py-10 text-center">

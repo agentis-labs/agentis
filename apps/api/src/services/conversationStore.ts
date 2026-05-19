@@ -174,6 +174,7 @@ export class ConversationStore {
     sessionMessageId: string;
     body: string;
     authorType: 'agent' | 'system';
+    metadata?: Record<string, unknown>;
   }) {
     return this.#append({
       conversationId: args.conversationId,
@@ -182,7 +183,30 @@ export class ConversationStore {
       authorId: null,
       sessionMessageId: args.sessionMessageId,
       body: args.body,
+      metadata: args.metadata,
       deliveryStatus: 'mirrored',
+      eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
+    });
+  }
+
+  /** Append a platform-authored system message to an existing thread. */
+  appendSystem(args: {
+    workspaceId: string;
+    conversationId: string;
+    body: string;
+    metadata?: Record<string, unknown>;
+    sessionMessageId?: string | null;
+    deliveryStatus?: 'delivered' | 'mirrored';
+  }) {
+    return this.#append({
+      conversationId: args.conversationId,
+      workspaceId: args.workspaceId,
+      authorType: 'system',
+      authorId: null,
+      sessionMessageId: args.sessionMessageId ?? null,
+      body: args.body,
+      metadata: args.metadata,
+      deliveryStatus: args.deliveryStatus ?? 'delivered',
       eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
     });
   }
@@ -207,6 +231,7 @@ export class ConversationStore {
     authorId: string | null;
     sessionMessageId: string | null;
     body: string;
+    metadata?: Record<string, unknown>;
     deliveryStatus: 'sent' | 'delivered' | 'failed' | 'mirrored';
     eventName: RealtimeEventName;
   }) {
@@ -245,7 +270,7 @@ export class ConversationStore {
       authorId: args.authorId,
       sessionMessageId: args.sessionMessageId,
       body: args.body,
-      metadata: {},
+      metadata: args.metadata ?? {},
       deliveryStatus: args.deliveryStatus,
       createdAt: now,
     };

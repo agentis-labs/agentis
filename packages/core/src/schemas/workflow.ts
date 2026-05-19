@@ -4,13 +4,19 @@ import { z } from 'zod';
 // Node configs
 // ────────────────────────────────────────────────────────────
 
+const outputConfigFields = {
+  isOutput: z.boolean().optional(),
+};
+
 const triggerConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('trigger'),
   triggerType: z.enum(['manual', 'cron', 'webhook', 'persistent_listener']),
   triggerId: z.string().uuid().optional(),
 });
 
 const agentTaskConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('agent_task'),
   agentId: z.string().uuid().optional(),
   agentPackageRef: z.string().optional(),
@@ -21,6 +27,7 @@ const agentTaskConfigSchema = z.object({
 });
 
 const skillTaskConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('skill_task'),
   skillId: z.string().min(1),
   inputMapping: z.record(z.string(), z.string()).default({}),
@@ -28,6 +35,7 @@ const skillTaskConfigSchema = z.object({
 });
 
 const knowledgeConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('knowledge'),
   knowledgeBaseId: z.string().optional(),
   queryMode: z.enum(['static', 'dynamic']).default('static'),
@@ -39,6 +47,7 @@ const knowledgeConfigSchema = z.object({
 });
 
 const routerConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('router'),
   routingMode: z.enum(['first_match', 'all_matching', 'llm_route']),
   branches: z
@@ -53,17 +62,20 @@ const routerConfigSchema = z.object({
 });
 
 const mergeConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('merge'),
   requiredInputs: z.union([z.literal('all'), z.literal('any'), z.array(z.string())]),
 });
 
 const checkpointConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('checkpoint'),
   approvalMode: z.enum(['manual', 'auto_after_timeout']),
   timeoutMs: z.number().int().positive().optional(),
 });
 
 const subflowConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('subflow'),
   workflowId: z.string().uuid(),
   inputMapping: z.record(z.string(), z.string()).default({}),
@@ -71,6 +83,7 @@ const subflowConfigSchema = z.object({
 });
 
 const scratchpadConfigSchema = z.object({
+  ...outputConfigFields,
   kind: z.literal('scratchpad'),
   operation: z.enum(['read', 'write', 'append', 'delete']),
   key: z.string().min(1),
@@ -82,7 +95,23 @@ const scratchpadConfigSchema = z.object({
 // runs — at edit-time we don't want to reject draft workflows that still have
 // incomplete or non-canonical config (e.g., a freshly dragged "approval" node
 // with no fields yet, or legacy `variables` nodes from older versions).
-const fallbackConfigSchema = z.object({ kind: z.string().min(1) }).passthrough();
+const fallbackConfigSchema = z
+  .object({ kind: z.string().min(1), ...outputConfigFields })
+  .passthrough()
+  .superRefine((config, ctx) => {
+    // If a draft config includes known strict fields, keep their validation
+    // failures meaningful instead of letting malformed known configs pass as
+    // arbitrary passthrough objects.
+    if (config.kind === 'agent_task' && 'prompt' in config && !String(config.prompt ?? '').trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: 'Required' });
+    }
+    if (config.kind === 'router' && 'branches' in config && (!Array.isArray(config.branches) || config.branches.length === 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['branches'], message: 'Expected at least one branch' });
+    }
+    if (config.kind === 'scratchpad' && 'key' in config && !String(config.key ?? '').trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['key'], message: 'Required' });
+    }
+  });
 
 export const workflowNodeConfigSchema = z.union([
   triggerConfigSchema,
@@ -131,6 +160,7 @@ export const createWorkflowSchema = z.object({
   ambientId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(255),
   summary: z.string().max(2000).optional(),
+  intendedBehavior: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
   settings: z.record(z.string(), z.unknown()).default({}),
 });
@@ -138,6 +168,7 @@ export const createWorkflowSchema = z.object({
 export const updateWorkflowSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
   summary: z.string().max(2000).nullable().optional(),
+  intendedBehavior: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
 });

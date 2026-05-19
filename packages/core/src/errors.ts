@@ -17,6 +17,7 @@ export type AgentisErrorCode =
   // Resources
   | 'RESOURCE_NOT_FOUND'
   | 'RESOURCE_CONFLICT'
+  | 'WORKSPACE_ORCHESTRATOR_EXISTS'
   // Engine
   | 'WORKFLOW_GRAPH_INVALID'
   | 'WORKFLOW_RUN_NOT_FOUND'
@@ -125,6 +126,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'PACKAGE_NOT_FOUND':
       return 404;
     case 'RESOURCE_CONFLICT':
+    case 'WORKSPACE_ORCHESTRATOR_EXISTS':
     case 'WORKFLOW_RUN_INVALID_STATE':
     case 'GRAPH_REVISION_CONFLICT':
     case 'PACKAGE_SLUG_CONFLICT':

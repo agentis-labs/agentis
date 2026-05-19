@@ -19,9 +19,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, isNull } from 'drizzle-orm';
+import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
+import { safeJson, scoreText, tokenize } from '../brainText.js';
 
 export function registerDataTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -283,6 +285,243 @@ export function registerDataTools(registry: AgentisToolRegistry, deps: ToolHandl
     // ── App memory (Class 1 + Class 4) ────────────────────────────
     {
       definition: {
+        id: 'agentis.brain.search',
+        family: 'data',
+        description: 'Search durable Brain atoms by semantic query.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            scope: { type: 'string', enum: ['workspace', 'app', 'both'] },
+            appId: { type: 'string' },
+            limit: { type: 'number' },
+          },
+          required: ['query'],
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.collectiveBrain) return { query: args.query, count: 0, atoms: [], note: 'CollectiveBrainService not wired' };
+        const appId = args.appId ? String(args.appId) : appIdFromContext(ctx);
+        const atoms = await deps.collectiveBrain.searchAtoms({
+          workspaceId: ctx.workspaceId,
+          appId,
+          query: String(args.query ?? ''),
+          scope: args.scope === 'workspace' || args.scope === 'app' || args.scope === 'both' ? args.scope : 'both',
+          limit: clampNumber(args.limit, 5, 1, 20),
+        });
+        return { query: args.query, count: atoms.length, atoms };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.brain.add',
+        family: 'data',
+        description: 'Add a durable fact or pattern to the Brain and make it available to the current session.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            title: { type: 'string' },
+            kind: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+            appId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['content'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const content = stringArg(args.content).trim();
+        if (!content) throw new Error('brain.add requires content');
+        const appId = args.appId ? String(args.appId) : appIdFromContext(ctx);
+        const sessionId = ctx.conversationId ?? `chat:${ctx.agentId}`;
+        const sessionAtom = deps.sessionAtoms?.add({
+          workspaceId: ctx.workspaceId,
+          sessionId,
+          appId,
+          content,
+          confidence: typeof args.confidence === 'number' ? args.confidence : 0.72,
+        }) ?? null;
+        const queueId = deps.brainQueue?.enqueue({
+          workspaceId: ctx.workspaceId,
+          itemType: 'atom_promotion',
+          priority: 'normal',
+          payload: {
+            workspaceId: ctx.workspaceId,
+            appId,
+            agentId: ctx.agentId,
+            taskInput: { source: 'agentis.brain.add', sessionId },
+            taskOutput: { summary: content },
+          },
+        }) ?? null;
+        const atom = !queueId && deps.collectiveBrain
+          ? await deps.collectiveBrain.addAtom({
+              workspaceId: ctx.workspaceId,
+              appId,
+              agentId: ctx.agentId,
+              content,
+              title: typeof args.title === 'string' ? args.title : undefined,
+              tags: parseStringArray(args.tags),
+              confidence: typeof args.confidence === 'number' ? args.confidence : 0.72,
+              source: 'agent_write',
+              managed: true,
+              metadata: { source: 'agentis.brain.add', sessionId, kind: args.kind ?? null },
+            })
+          : null;
+        return { status: queueId ? 'queued' : 'created', queueId, atom, sessionAtom };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.brain.summarize',
+        family: 'data',
+        description: 'Return Brain health and capacity summary for the current workspace/app/session.',
+        inputSchema: {
+          type: 'object',
+          properties: { appId: { type: 'string' } },
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.collectiveBrain) return { note: 'CollectiveBrainService not wired' };
+        return deps.collectiveBrain.summarize({
+          workspaceId: ctx.workspaceId,
+          appId: args.appId ? String(args.appId) : appIdFromContext(ctx),
+          sessionId: ctx.conversationId ?? null,
+        });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.brain.refresh',
+        family: 'data',
+        description: 'Reload Brain context for the current conversation topic after a topic shift.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            query: { type: 'string' },
+            appId: { type: 'string' },
+          },
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.collectiveBrain) return { freshAtoms: [], sessionAtoms: [], header: 'BRAIN REFRESH unavailable' };
+        const appId = args.appId ? String(args.appId) : appIdFromContext(ctx);
+        const query = String(args.query ?? args.reason ?? 'current conversation topic');
+        const freshAtoms = await deps.collectiveBrain.searchAtoms({
+          workspaceId: ctx.workspaceId,
+          appId,
+          query,
+          scope: 'both',
+          limit: 5,
+        });
+        const sessionAtoms = deps.sessionAtoms?.query({
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.conversationId ?? `chat:${ctx.agentId}`,
+          query,
+          limit: 10,
+        }) ?? [];
+        deps.sessionAtoms?.emitRefresh({
+          workspaceId: ctx.workspaceId,
+          appId,
+          reason: typeof args.reason === 'string' ? args.reason : null,
+          atomCount: freshAtoms.length,
+          sessionAtomCount: sessionAtoms.length,
+        });
+        return {
+          freshAtoms,
+          sessionAtoms,
+          header: `BRAIN REFRESHED [${freshAtoms.length} atoms | ${sessionAtoms.length} session-local | topic: ${query.slice(0, 80)}]`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.brain.preload',
+        family: 'data',
+        description: 'Proactively surface Brain context most relevant to an upcoming task before work starts.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            taskDescription: { type: 'string' },
+            peerId: { type: 'string' },
+            appId: { type: 'string' },
+            limit: { type: 'number' },
+          },
+          required: ['taskDescription'],
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        return runBrainPreload(deps, ctx, {
+          taskDescription: String(args.taskDescription ?? ''),
+          peerId: typeof args.peerId === 'string' ? args.peerId : ctx.userId ?? undefined,
+          appId: typeof args.appId === 'string' ? args.appId : appIdFromContext(ctx) ?? undefined,
+          limit: clampNumber(args.limit, 5, 1, 10),
+        });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.brain.forget',
+        family: 'data',
+        description: 'Dry-run or execute a selective forgetting cascade across Brain atoms, peer memory, and abilities.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            topic: { type: 'string' },
+            scope: { type: 'string', enum: ['atoms', 'peer_conclusions', 'abilities', 'all'] },
+            dryRun: { type: 'boolean' },
+            confirmRequestId: { type: 'string' },
+            limit: { type: 'number' },
+          },
+          required: ['topic'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        return runBrainForget(deps, ctx, {
+          topic: String(args.topic ?? ''),
+          scope: args.scope === 'atoms' || args.scope === 'peer_conclusions' || args.scope === 'abilities' || args.scope === 'all'
+            ? args.scope
+            : 'all',
+          dryRun: args.dryRun !== false,
+          confirmRequestId: typeof args.confirmRequestId === 'string' ? args.confirmRequestId : null,
+          limit: clampNumber(args.limit, 25, 1, 200),
+        });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.session.search',
+        family: 'data',
+        description: 'Search prior workflow ledger events and conversation messages.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            limit: { type: 'number' },
+          },
+          required: ['query'],
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.sessionSearch) return { query: args.query, count: 0, hits: [], note: 'SessionSearchService not wired' };
+        const hits = deps.sessionSearch.search({
+          workspaceId: ctx.workspaceId,
+          query: String(args.query ?? ''),
+          limit: clampNumber(args.limit, 10, 1, 50),
+        });
+        return { query: args.query, count: hits.length, hits };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.app.memory.recall',
         family: 'data',
         description: 'Recall app memory — facts, preferences, rules, patterns, lessons.',
@@ -524,18 +763,366 @@ function parseStringArray(value: unknown): string[] {
   }
 }
 
-function tokenize(input: string): string[] {
-  return input.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
+function appIdFromContext(ctx: { viewport?: { resourceKind?: string; resourceId?: string | null } | null }): string | null {
+  return ctx.viewport?.resourceKind === 'app' && ctx.viewport.resourceId
+    ? ctx.viewport.resourceId
+    : null;
 }
 
-function scoreText(queryTokens: Set<string>, text: string): number {
-  if (queryTokens.size === 0) return 0;
-  const contentTokens = new Set(tokenize(text));
-  let hits = 0;
-  for (const token of queryTokens) {
-    if (contentTokens.has(token)) hits += 1;
+async function runBrainPreload(
+  deps: ToolHandlerDeps,
+  ctx: { workspaceId: string; agentId?: string | null; userId?: string | null },
+  args: { taskDescription: string; peerId?: string; appId?: string; limit: number },
+) {
+  const taskDescription = args.taskDescription.trim();
+  if (!taskDescription) throw new Error('brain.preload requires taskDescription');
+  const relevantAtoms = deps.collectiveBrain
+    ? await deps.collectiveBrain.searchAtoms({
+        workspaceId: ctx.workspaceId,
+        appId: args.appId ?? null,
+        query: taskDescription,
+        scope: args.appId ? 'both' : 'workspace',
+        limit: args.limit,
+        minConfidence: 0.45,
+      })
+    : [];
+  const peerId = args.peerId ?? ctx.userId ?? null;
+  const observerScope = ctx.agentId ?? 'global';
+  const peerContext = peerId && deps.peerRepresentations
+    ? [
+        deps.peerRepresentations.renderSystemInstructions(ctx.workspaceId, 'user', peerId, observerScope),
+        ...deps.peerRepresentations.renderContextFacts(ctx.workspaceId, 'user', peerId, observerScope),
+      ].filter(Boolean).join('\n')
+    : null;
+  const suggestedAbilities = deps.abilities && ctx.agentId
+    ? rankAbilities(
+        deps.abilities.list(ctx.workspaceId, { agentId: ctx.agentId }).filter((ability) => ability.status === 'active'),
+        taskDescription,
+        5,
+      )
+    : [];
+  const unknownGaps = peerContext && /\bBELIEF:/i.test(peerContext)
+    ? ['Peer belief facts are present; verify them against current workspace atoms before correcting the operator.']
+    : [];
+  return {
+    taskDescription,
+    relevantAtoms,
+    peerContext,
+    suggestedAbilities,
+    unknownGaps,
+    summary: [
+      `BRAIN PRELOAD [${relevantAtoms.length} atoms`,
+      `${suggestedAbilities.length} abilities`,
+      peerContext ? 'peer context loaded]' : 'no peer context]',
+    ].join(' | '),
+  };
+}
+
+function runBrainForget(
+  deps: ToolHandlerDeps,
+  ctx: { workspaceId: string; userId?: string | null },
+  args: { topic: string; scope: 'atoms' | 'peer_conclusions' | 'abilities' | 'all'; dryRun: boolean; confirmRequestId: string | null; limit: number },
+) {
+  const topic = args.topic.trim();
+  if (!topic) throw new Error('brain.forget requires topic');
+  const now = new Date().toISOString();
+  if (!args.dryRun) {
+    if (!args.confirmRequestId) {
+      throw new Error('brain.forget requires confirmRequestId from a prior dry run before executing deletion.');
+    }
+    return executeBrainForgetRequest(deps, ctx.workspaceId, args.confirmRequestId, now);
   }
-  return hits / queryTokens.size;
+
+  const matches = computeForgetMatches(deps, ctx.workspaceId, topic, args.scope, args.limit);
+  const auditEventId = randomUUID();
+  deps.db.insert(schema.brainForgetRequests).values({
+    id: auditEventId,
+    workspaceId: ctx.workspaceId,
+    requestedByUserId: ctx.userId ?? null,
+    topic,
+    scope: args.scope,
+    status: 'pending',
+    matches,
+    counts: forgetCounts(matches, deps, ctx.workspaceId),
+    createdAt: now,
+    executedAt: null,
+  }).run();
+
+  return {
+    dryRun: true,
+    topic,
+    scope: args.scope,
+    confirmRequestId: auditEventId,
+    matches,
+    ...forgetCounts(matches, deps, ctx.workspaceId),
+    auditEventId: null,
+  };
+}
+
+function computeForgetMatches(
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+  topic: string,
+  scope: 'atoms' | 'peer_conclusions' | 'abilities' | 'all',
+  limit: number,
+) {
+  const tokens = new Set(tokenize(topic));
+  const include = (candidate: string) => scope === 'all' || scope === candidate;
+
+  const atoms = include('atoms')
+    ? deps.db.select().from(schema.memoryEpisodes)
+        .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), isNull(schema.memoryEpisodes.archivedAt)))
+        .all()
+        .filter((row) => row.status !== 'archived')
+        .map((row) => ({ id: row.id, title: row.title, summary: row.summary, score: scoreText(tokens, `${row.title} ${row.summary}`) }))
+        .filter((row) => row.score >= 0.35)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+    : [];
+  const conclusions = include('peer_conclusions')
+    ? deps.db.select().from(schema.peerRepresentationConclusions)
+        .where(and(eq(schema.peerRepresentationConclusions.workspaceId, workspaceId), eq(schema.peerRepresentationConclusions.status, 'active')))
+        .all()
+        .map((row) => ({ id: row.id, peerId: row.subjectPeerId, content: row.content, score: scoreText(tokens, row.content) }))
+        .filter((row) => row.score >= 0.35)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+    : [];
+  const abilities = include('abilities')
+    ? deps.db.select().from(schema.agentAbilities)
+        .where(and(eq(schema.agentAbilities.workspaceId, workspaceId), eq(schema.agentAbilities.status, 'active')))
+        .all()
+        .map((row) => ({ id: row.id, title: row.title, content: row.content, score: scoreText(tokens, `${row.title} ${row.content}`) }))
+        .filter((row) => row.score >= 0.35)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+    : [];
+  const peerCardPreview = include('peer_conclusions') ? previewPeerCardRemovals(deps, workspaceId, tokens) : { global: [], directional: [] };
+
+  return { atoms, peerConclusions: conclusions, abilities, peerCardFacts: peerCardPreview };
+}
+
+function executeBrainForgetRequest(deps: ToolHandlerDeps, workspaceId: string, requestId: string, now: string) {
+  const request = deps.db.select().from(schema.brainForgetRequests)
+    .where(and(
+      eq(schema.brainForgetRequests.workspaceId, workspaceId),
+      eq(schema.brainForgetRequests.id, requestId),
+      eq(schema.brainForgetRequests.status, 'pending'),
+    ))
+    .get();
+  if (!request) throw new Error('brain.forget confirmation request was not found or was already executed.');
+
+  const matches = parseForgetMatches(request.matches);
+  const counts = forgetCounts(matches, deps, workspaceId);
+  let linksRemoved = 0;
+  let peerCardFactsRemoved = 0;
+
+  deps.db.transaction((tx) => {
+    for (const atom of matches.atoms) {
+      tx.update(schema.memoryEpisodes)
+        .set({ status: 'archived', archivedAt: now, updatedAt: now })
+        .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, atom.id)))
+        .run();
+    }
+    for (const atom of matches.atoms) {
+      linksRemoved += tx.update(schema.knowledgeLinks)
+        .set({ confidence: 0, relation: 'forgotten', updatedAt: now })
+        .where(and(eq(schema.knowledgeLinks.workspaceId, workspaceId), eq(schema.knowledgeLinks.sourceId, atom.id)))
+        .run().changes;
+      linksRemoved += tx.update(schema.knowledgeLinks)
+        .set({ confidence: 0, relation: 'forgotten', updatedAt: now })
+        .where(and(eq(schema.knowledgeLinks.workspaceId, workspaceId), eq(schema.knowledgeLinks.targetId, atom.id)))
+        .run().changes;
+    }
+    for (const conclusion of matches.peerConclusions) {
+      tx.update(schema.peerRepresentationConclusions)
+        .set({ status: 'archived', updatedAt: now })
+        .where(and(eq(schema.peerRepresentationConclusions.workspaceId, workspaceId), eq(schema.peerRepresentationConclusions.id, conclusion.id)))
+        .run();
+    }
+    peerCardFactsRemoved = removePeerCardFacts({ db: tx } as unknown as ToolHandlerDeps, workspaceId, matches.peerCardFacts);
+    for (const ability of matches.abilities) {
+      tx.update(schema.agentAbilities)
+        .set({ status: 'archived', updatedAt: now })
+        .where(and(eq(schema.agentAbilities.workspaceId, workspaceId), eq(schema.agentAbilities.id, ability.id)))
+        .run();
+    }
+    tx.update(schema.brainForgetRequests)
+      .set({ status: 'executed', executedAt: now, counts: { ...counts, peerCardFactsRemoved, knowledgeLinksRemoved: linksRemoved } })
+      .where(eq(schema.brainForgetRequests.id, requestId))
+      .run();
+    tx.insert(schema.brainQualityEvents).values({
+      id: requestId,
+      workspaceId,
+      appId: null,
+      agentId: null,
+      eventType: 'brain_forget_completed',
+      atomId: null,
+      abilityId: null,
+      runId: null,
+      delta: null,
+      metadata: { topic: request.topic, scope: request.scope, requestId, matches, counts: { ...counts, peerCardFactsRemoved, knowledgeLinksRemoved: linksRemoved } },
+      createdAt: now,
+    }).run();
+  });
+
+  const result = {
+    dryRun: false,
+    topic: request.topic,
+    scope: request.scope,
+    atomsArchived: matches.atoms.length,
+    peerConclusionsArchived: matches.peerConclusions.length,
+    peerCardFactsRemoved,
+    abilitiesArchived: matches.abilities.length,
+    knowledgeLinksRemoved: linksRemoved,
+    auditEventId: requestId,
+  };
+  deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.BRAIN_FORGET_COMPLETED, { workspaceId, ...result });
+  return result;
+}
+
+function rankAbilities(abilities: Array<{ id: string; title: string; content: string; confidence: number; usageCount: number }>, query: string, limit: number) {
+  const tokens = new Set(tokenize(query));
+  return abilities
+    .map((ability) => ({ ...ability, score: scoreText(tokens, `${ability.title} ${ability.content}`) + ability.confidence * 0.1 }))
+    .filter((ability) => ability.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+function estimateKnowledgeLinks(deps: ToolHandlerDeps, workspaceId: string, atomIds: string[]): number {
+  if (atomIds.length === 0) return 0;
+  const idSet = new Set(atomIds);
+  return deps.db.select().from(schema.knowledgeLinks)
+    .where(eq(schema.knowledgeLinks.workspaceId, workspaceId))
+    .all()
+    .filter((link) => idSet.has(link.sourceId) || idSet.has(link.targetId)).length;
+}
+
+function forgetCounts(
+  matches: ReturnType<typeof computeForgetMatches>,
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+) {
+  return {
+    atomsArchived: matches.atoms.length,
+    peerConclusionsArchived: matches.peerConclusions.length,
+    peerCardFactsRemoved: matches.peerCardFacts.global.length + matches.peerCardFacts.directional.length,
+    abilitiesArchived: matches.abilities.length,
+    knowledgeLinksRemoved: estimateKnowledgeLinks(deps, workspaceId, matches.atoms.map((atom) => atom.id)),
+  };
+}
+
+function parseForgetMatches(raw: unknown): ReturnType<typeof computeForgetMatches> {
+  const value = typeof raw === 'string' ? safeJson(raw) : raw;
+  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const array = (key: string) => Array.isArray(record[key]) ? record[key] as Array<Record<string, unknown>> : [];
+  const peerCardRaw = record.peerCardFacts && typeof record.peerCardFacts === 'object' && !Array.isArray(record.peerCardFacts)
+    ? record.peerCardFacts as Record<string, unknown>
+    : {};
+  return {
+    atoms: array('atoms').map((item) => ({
+      id: String(item.id ?? ''),
+      title: String(item.title ?? ''),
+      summary: String(item.summary ?? ''),
+      score: Number(item.score ?? 0),
+    })).filter((item) => item.id),
+    peerConclusions: array('peerConclusions').map((item) => ({
+      id: String(item.id ?? ''),
+      peerId: String(item.peerId ?? ''),
+      content: String(item.content ?? ''),
+      score: Number(item.score ?? 0),
+    })).filter((item) => item.id),
+    abilities: array('abilities').map((item) => ({
+      id: String(item.id ?? ''),
+      title: String(item.title ?? ''),
+      content: String(item.content ?? ''),
+      score: Number(item.score ?? 0),
+    })).filter((item) => item.id),
+    peerCardFacts: {
+      global: (Array.isArray(peerCardRaw.global) ? peerCardRaw.global as Array<Record<string, unknown>> : [])
+        .map((item) => ({ peerId: String(item.peerId ?? ''), category: String(item.category ?? ''), content: String(item.content ?? '') }))
+        .filter((item) => item.peerId && item.content),
+      directional: (Array.isArray(peerCardRaw.directional) ? peerCardRaw.directional as Array<Record<string, unknown>> : [])
+        .map((item) => ({
+          observerPeerId: String(item.observerPeerId ?? ''),
+          subjectPeerId: String(item.subjectPeerId ?? ''),
+          category: String(item.category ?? ''),
+          content: String(item.content ?? ''),
+        }))
+        .filter((item) => item.observerPeerId && item.subjectPeerId && item.content),
+    },
+  };
+}
+
+function previewPeerCardRemovals(deps: ToolHandlerDeps, workspaceId: string, tokens: Set<string>) {
+  const global = deps.db.select().from(schema.peerRepresentations)
+    .where(eq(schema.peerRepresentations.workspaceId, workspaceId))
+    .all()
+    .flatMap((row) => peerCardFacts(row.peerCard)
+      .filter((fact) => scoreText(tokens, fact.content) >= 0.35)
+      .map((fact) => ({ peerId: row.peerId, category: fact.category, content: fact.content })));
+  const directional = deps.db.select().from(schema.agentPeerCards)
+    .where(eq(schema.agentPeerCards.workspaceId, workspaceId))
+    .all()
+    .flatMap((row) => peerCardFacts(row.peerCard)
+      .filter((fact) => scoreText(tokens, fact.content) >= 0.35)
+      .map((fact) => ({ observerPeerId: row.observerPeerId, subjectPeerId: row.subjectPeerId, category: fact.category, content: fact.content })));
+  return { global, directional };
+}
+
+function removePeerCardFacts(deps: ToolHandlerDeps, workspaceId: string, matches: ReturnType<typeof computeForgetMatches>['peerCardFacts']): number {
+  let removed = 0;
+  const now = new Date().toISOString();
+  const globalTargets = new Map<string, Set<string>>();
+  for (const item of matches.global) {
+    const set = globalTargets.get(item.peerId) ?? new Set<string>();
+    set.add(`${item.category}:${item.content}`);
+    globalTargets.set(item.peerId, set);
+  }
+  const directionalTargets = new Map<string, Set<string>>();
+  for (const item of matches.directional) {
+    const key = `${item.observerPeerId}:${item.subjectPeerId}`;
+    const set = directionalTargets.get(key) ?? new Set<string>();
+    set.add(`${item.category}:${item.content}`);
+    directionalTargets.set(key, set);
+  }
+  for (const row of deps.db.select().from(schema.peerRepresentations).where(eq(schema.peerRepresentations.workspaceId, workspaceId)).all()) {
+    const targets = globalTargets.get(row.peerId);
+    if (!targets) continue;
+    const facts = peerCardFacts(row.peerCard);
+    const kept = facts.filter((fact) => !targets.has(`${fact.category}:${fact.content}`));
+    if (kept.length === facts.length) continue;
+    removed += facts.length - kept.length;
+    deps.db.update(schema.peerRepresentations)
+      .set({ peerCard: kept, updatedAt: now })
+      .where(eq(schema.peerRepresentations.id, row.id))
+      .run();
+  }
+  for (const row of deps.db.select().from(schema.agentPeerCards).where(eq(schema.agentPeerCards.workspaceId, workspaceId)).all()) {
+    const targets = directionalTargets.get(`${row.observerPeerId}:${row.subjectPeerId}`);
+    if (!targets) continue;
+    const facts = peerCardFacts(row.peerCard);
+    const kept = facts.filter((fact) => !targets.has(`${fact.category}:${fact.content}`));
+    if (kept.length === facts.length) continue;
+    removed += facts.length - kept.length;
+    deps.db.update(schema.agentPeerCards)
+      .set({ peerCard: kept, updatedAt: now })
+      .where(eq(schema.agentPeerCards.id, row.id))
+      .run();
+  }
+  return removed;
+}
+
+function peerCardFacts(raw: unknown): Array<{ category: string; content: string }> {
+  const value = typeof raw === 'string' ? safeJson(raw) : raw;
+  return Array.isArray(value)
+    ? value
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => item as Record<string, unknown>)
+        .filter((item) => typeof item.content === 'string')
+        .map((item) => ({ category: String(item.category ?? 'CONTEXT'), content: String(item.content) }))
+    : [];
 }
 
 function searchWorkspaceKnowledge(

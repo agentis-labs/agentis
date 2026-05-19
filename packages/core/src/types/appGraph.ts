@@ -122,7 +122,7 @@ export interface OutputSurfaceConfig {
    * Artifact-first kind (10.10): describes WHAT the operator will see, not
    * just a number format. Drives the rendering surface in the runtime.
    */
-  artifactType?: 'document' | 'metric' | 'chart' | 'list' | 'file' | 'decision' | 'custom';
+  artifactType?: 'document' | 'metric' | 'chart' | 'list' | 'table' | 'link' | 'file' | 'decision' | 'custom';
   /** Optional unit/format hint shown in the inspector (legacy). */
   format?: 'number' | 'currency' | 'percent' | 'text';
 }
@@ -194,11 +194,34 @@ export interface AppGraphViewport {
   zoom: number;
 }
 
+/**
+ * A domain group — a macro-level cluster of related workflows shown as a
+ * single card in the domain (macro) zoom of the canvas
+ * (AGENTIS-PLATFORM-10X §Layer 2 / §A7).
+ */
+export interface AppDomain {
+  id: string;
+  name: string;
+  description?: string;
+  /** Zone color used for the macro-view card. */
+  color?: string;
+  /** Concrete workflow ids belonging to this domain. */
+  workflowIds: string[];
+  position: { x: number; y: number };
+  /** Macro view: whether the domain card is expanded inline. */
+  expanded?: boolean;
+}
+
 export interface AppGraph {
   version: 1;
   nodes: AppGraphNode[];
   edges: AppGraphEdge[];
   viewport: AppGraphViewport;
+  /**
+   * Optional domain groups. When non-empty the canvas renders the macro
+   * (domain) view; otherwise it renders the flat node view.
+   */
+  domains?: AppDomain[];
 }
 
 // ────────────────────────────────────────────────────────────

@@ -19,6 +19,85 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+body.agentis-canvas-fullscreen {
+  overflow: hidden;
+}
+
+body.agentis-canvas-fullscreen [data-agentis-shell-header],
+body.agentis-canvas-fullscreen [data-agentis-sidebar],
+body.agentis-canvas-fullscreen [data-agentis-onboarding-strip],
+body.agentis-canvas-fullscreen [data-agentis-live-strip] {
+  display: none !important;
+}
+
+body.agentis-canvas-fullscreen [data-agentis-shell],
+body.agentis-canvas-fullscreen [data-agentis-shell-layout],
+body.agentis-canvas-fullscreen [data-agentis-shell-main] {
+  height: 100vh;
+  min-height: 100vh;
+}
+
+body.agentis-canvas-fullscreen [data-agentis-shell-main] {
+  overflow: hidden !important;
+}
+
+body.agentis-canvas-fullscreen aside[aria-label="Chat panel"] {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  bottom: 6.75rem;
+  z-index: 10020;
+  max-height: calc(100vh - 8rem);
+  overflow: hidden;
+  border: 1px solid rgba(46, 51, 60, 0.9);
+  border-radius: 1.25rem;
+  background: rgba(12, 14, 18, 0.94);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(18px);
+}
+
+body.agentis-canvas-fullscreen aside[aria-label="Chat panel"] > header {
+  height: 2.75rem;
+}
+
+body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  height: 100vh;
+  width: 100vw;
+}
+
+@media (max-width: 720px) {
+  [data-agentis-shell-header] {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    gap: 0.5rem;
+  }
+
+  [data-agentis-shell-header] button[title^="Search"] {
+    width: 2.25rem;
+    padding-left: 0;
+    padding-right: 0;
+    justify-content: center;
+    overflow: hidden;
+    color: transparent;
+  }
+
+  [data-agentis-shell-header] button[title^="Search"] svg {
+    color: var(--text-muted);
+  }
+
+  [data-agentis-sidebar],
+  [data-agentis-live-strip] {
+    display: none;
+  }
+
+  [data-agentis-shell-main] {
+    min-width: 0;
+  }
+}
+
 /* React Flow tweaks */
 .react-flow {
   background: var(--rf-canvas, #08090b);

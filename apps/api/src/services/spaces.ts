@@ -15,6 +15,7 @@ export interface SpaceDto {
   workspaceId: string;
   name: string;
   color: string | null;
+  iconGlyph: string | null;
   teamId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -58,6 +59,7 @@ export class SpaceService {
         workspaceId: row.workspaceId,
         name: row.name,
         color: row.color,
+        iconGlyph: row.iconGlyph,
         teamId: row.teamId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
@@ -80,7 +82,7 @@ export class SpaceService {
     return { ...row, appCount } as SpaceDto;
   }
 
-  create(scope: SpaceScope, params: { name: string; color?: string | null; teamId?: string | null }): SpaceDto {
+  create(scope: SpaceScope, params: { name: string; color?: string | null; iconGlyph?: string | null; teamId?: string | null }): SpaceDto {
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db
@@ -91,6 +93,7 @@ export class SpaceService {
         userId: scope.userId,
         name: params.name.trim(),
         color: params.color ?? null,
+        iconGlyph: params.iconGlyph ?? null,
         teamId: params.teamId ?? null,
         createdAt: now,
         updatedAt: now,
@@ -102,7 +105,7 @@ export class SpaceService {
   update(
     scope: SpaceScope,
     id: string,
-    patch: { name?: string; color?: string | null; teamId?: string | null },
+    patch: { name?: string; color?: string | null; iconGlyph?: string | null; teamId?: string | null },
   ): SpaceDto {
     const existing = this.get(scope.workspaceId, id);
     const now = new Date().toISOString();
@@ -111,6 +114,7 @@ export class SpaceService {
       .set({
         name: patch.name?.trim() ?? existing.name,
         color: patch.color === undefined ? existing.color : patch.color,
+        iconGlyph: patch.iconGlyph === undefined ? existing.iconGlyph : patch.iconGlyph,
         teamId: patch.teamId === undefined ? existing.teamId : patch.teamId,
         updatedAt: now,
       })

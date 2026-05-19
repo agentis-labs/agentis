@@ -8,7 +8,7 @@
  */
 
 import { Hono } from 'hono';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne, or, sql } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -24,12 +24,19 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     const agentsTotal = countRows(deps.db
       .select({ count: sql<number>`count(*)` })
       .from(schema.agents)
-      .where(eq(schema.agents.workspaceId, ws.workspaceId))
+      .where(and(
+        eq(schema.agents.workspaceId, ws.workspaceId),
+        or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
+      ))
       .get());
     const agentsOnline = countRows(deps.db
       .select({ count: sql<number>`count(*)` })
       .from(schema.agents)
-      .where(and(eq(schema.agents.workspaceId, ws.workspaceId), eq(schema.agents.status, 'online')))
+      .where(and(
+        eq(schema.agents.workspaceId, ws.workspaceId),
+        eq(schema.agents.status, 'online'),
+        or(isNull(schema.agents.role), ne(schema.agents.role, 'app_brain')),
+      ))
       .get());
     const gatewaysTotal = countRows(deps.db
       .select({ count: sql<number>`count(*)` })
@@ -51,7 +58,7 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .from(schema.workflowRuns)
       .where(and(
         eq(schema.workflowRuns.workspaceId, ws.workspaceId),
-        inArray(schema.workflowRuns.status, ['RUNNING', 'WAITING']),
+        eq(schema.workflowRuns.status, 'RUNNING'),
       ))
       .get());
     const workflowsTotal = countRows(deps.db

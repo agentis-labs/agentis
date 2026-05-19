@@ -46,7 +46,7 @@ export function NodePalette({
   return (
     <aside
       className={clsx(
-        'flex w-44 shrink-0 flex-col gap-1 border-r border-line bg-surface p-2 text-xs',
+        'flex min-h-0 w-44 shrink-0 flex-col gap-1 overflow-x-hidden overflow-y-auto border-r border-line bg-surface p-2 text-xs',
         className,
       )}
     >

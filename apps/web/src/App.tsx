@@ -7,7 +7,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { LiveStrip } from './components/LiveStrip';
 import { OnboardingStrip } from './components/OnboardingStrip';
 import { Sidebar } from './components/Sidebar';
-import { ChatPanel } from './components/chat/ChatPanel';
+import { ChatPanelMount } from './components/chat/ChatPanelMount';
 import { ChatPanelHeaderButton } from './components/chat/ChatPanelHeaderButton';
 import { NotificationPanel } from './components/shared/NotificationPanel';
 import { AvatarMenu } from './components/shared/AvatarMenu';
@@ -35,8 +35,9 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ defa
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
-const BrainPage = lazy(() => import('./pages/BrainPage').then((m) => ({ default: m.BrainPage })));
+const BrainPage = lazy(() => import('./pages/UnifiedBrainPage').then((m) => ({ default: m.UnifiedBrainPage })));
 const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
+const AppCreationWizard = lazy(() => import('./pages/AppCreationWizard').then((m) => ({ default: m.AppCreationWizard })));
 
 interface Workspace {
   id: string;
@@ -127,7 +128,10 @@ export function App() {
     if (!authed) return;
     void (async () => {
       try {
-        const data = await api<{ workspaces: Workspace[] }>('/v1/workspaces');
+        const [data, meData] = await Promise.all([
+          api<{ workspaces: Workspace[] }>('/v1/workspaces'),
+          api<{ user: OperatorMe }>('/v1/auth/me').catch(() => null),
+        ]);
         const current = wsStore.get();
         const picked = data.workspaces.find((w) => w.id === current) ?? data.workspaces[0] ?? null;
         if (picked) {
@@ -135,10 +139,7 @@ export function App() {
           useAgentisStore.getState().setContext(picked.id, ambientStore.get());
           setWs(picked);
         }
-        try {
-          const meData = await api<{ user: OperatorMe }>('/v1/auth/me');
-          setMe(meData.user);
-        } catch { /* fine — me endpoint is optional */ }
+        if (meData?.user) setMe(meData.user);
       } catch {
         logout();
         setAuthed(false);
@@ -196,10 +197,15 @@ export function App() {
               <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/workflows/:id" element={<WorkflowCanvasPage />} />
               <Route path="/apps" element={<AppsPage />} />
+              <Route path="/apps/new" element={<AppCreationWizard />} />
               <Route path="/apps/:slug" element={<AppDetailPage />} />
+              <Route path="/apps/:slug/results/:resultId" element={<AppDetailPage />} />
               <Route path="/knowledge" element={<KnowledgePage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
               <Route path="/brain" element={<BrainPage />} />
+              <Route path="/brain/health" element={<BrainPage />} />
+              <Route path="/brain/config" element={<BrainPage />} />
+              <Route path="/brain/disputes" element={<BrainPage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/packages" element={<PackagesPage />} />
               <Route path="/history" element={<HistoryPage />} />
@@ -265,8 +271,8 @@ function Shell({
   }
 
   return (
-    <div className="flex h-full flex-col bg-canvas">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
+    <div className="flex h-full flex-col bg-canvas" data-agentis-shell>
+      <header data-agentis-shell-header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
         <button
           onClick={() => nav('/home')}
           className="flex items-center gap-2 text-[13px] font-semibold text-text-primary"
@@ -304,13 +310,17 @@ function Shell({
           />
         </div>
       </header>
-      <OnboardingStrip />
-      <div className="flex min-h-0 flex-1">
-        <Sidebar />
-        <main className="min-h-0 flex-1 overflow-auto">{children}</main>
-        {!onChatPage && <ChatPanel />}
+      <div data-agentis-onboarding-strip>
+        <OnboardingStrip />
       </div>
-      <LiveStrip />
+      <div data-agentis-shell-layout className="flex min-h-0 flex-1">
+        <Sidebar />
+        <main data-agentis-shell-main className="min-h-0 flex-1 overflow-auto">{children}</main>
+        {!onChatPage && <ChatPanelMount />}
+      </div>
+      <div data-agentis-live-strip>
+        <LiveStrip />
+      </div>
     </div>
   );
 }

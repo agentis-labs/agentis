@@ -28,6 +28,7 @@ const createSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/)
     .nullable()
     .optional(),
+  iconGlyph: z.string().trim().min(1).max(48).nullable().optional(),
   teamId: z.string().uuid().nullable().optional(),
 });
 
@@ -161,7 +162,7 @@ export function buildSpaceRoutes(deps: {
               ),
             )
             .all()
-            .filter((r) => workflowIds.includes(r.workflowId))
+            .filter((r) => r.workflowId !== null && workflowIds.includes(r.workflowId))
         : [];
 
       const completed = runs.filter((r) => r.status === 'COMPLETED');

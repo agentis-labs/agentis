@@ -16,7 +16,6 @@ import {
   Workflow as WorkflowIcon,
   AppWindow,
   Package as PackageIcon,
-  BookOpen,
   Brain as BrainIcon,
   Settings as SettingsIcon,
   ChevronsLeft,
@@ -24,6 +23,13 @@ import {
   Plus,
   Folder,
   FolderOpen,
+  Briefcase,
+  Megaphone,
+  Target,
+  Wrench,
+  Users,
+  ShoppingBag,
+  Star,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { api } from '../lib/api';
@@ -44,17 +50,29 @@ const NAV: NavItem[] = [
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
   { to: '/agents',    label: 'Agents',    icon: Bot,         badge: 'liveAgents' },
   { to: '/packages',  label: 'Packages',  icon: PackageIcon },
-  { to: '/knowledge', label: 'Knowledge', icon: BookOpen },
   { to: '/brain',     label: 'Brain',     icon: BrainIcon },
 ];
 
-const SPACE_COLORS = ['space-orange', 'space-blue', 'space-purple', 'space-teal', 'space-rose', 'space-lime'] as const;
+const SPACE_COLORS = ['#f97316', '#3b82f6', '#a855f7', '#14b8a6', '#f43f5e', '#84cc16'] as const;
+const SPACE_ICON_LIBRARY = [
+  { id: 'folder', label: 'Folder', icon: Folder },
+  { id: 'briefcase', label: 'Business', icon: Briefcase },
+  { id: 'megaphone', label: 'Marketing', icon: Megaphone },
+  { id: 'target', label: 'Goals', icon: Target },
+  { id: 'wrench', label: 'Ops', icon: Wrench },
+  { id: 'users', label: 'Team', icon: Users },
+  { id: 'shopping-bag', label: 'Sales', icon: ShoppingBag },
+  { id: 'star', label: 'Priority', icon: Star },
+] as const;
+const SPACE_ICON_BY_ID = new Map<string, LucideIcon>(SPACE_ICON_LIBRARY.map((item) => [item.id, item.icon]));
 
 interface Space {
   id: string;
   name: string;
   slug: string;
+  color?: string | null;
   colorHex?: string;
+  iconGlyph?: string | null;
   appCount?: number;
 }
 
@@ -70,6 +88,8 @@ export function Sidebar() {
   });
   const [creatingSpace, setCreatingSpace] = useState(false);
   const [newSpaceName, setNewSpaceName] = useState('');
+  const [newSpaceIcon, setNewSpaceIcon] = useState('folder');
+  const [editingSpaceIconId, setEditingSpaceIconId] = useState<string | null>(null);
   const { spaces, counts } = useWorkspaceData();
   const nav = useNavigate();
   const toast = useToast();
@@ -95,10 +115,12 @@ export function Sidebar() {
     try {
       await api('/v1/spaces', {
         method: 'POST',
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, iconGlyph: newSpaceIcon }),
       });
       toast.success('Space created', name);
       setNewSpaceName('');
+      setNewSpaceIcon('folder');
+      setEditingSpaceIconId(null);
       setCreatingSpace(false);
       void refreshWorkspaceSnapshot();
     } catch (err) {
@@ -106,14 +128,27 @@ export function Sidebar() {
     }
   }
 
-  function spaceDotColor(space: Space, idx: number): string {
-    if (space.colorHex) return '';
-    const c = SPACE_COLORS[idx % SPACE_COLORS.length];
-    return `bg-${c}`;
+  function spaceColor(space: Space, idx: number): string {
+    return space.colorHex ?? space.color ?? SPACE_COLORS[idx % SPACE_COLORS.length] ?? SPACE_COLORS[0];
+  }
+
+  async function handleUpdateSpaceIcon(space: Space, iconGlyph: string) {
+    try {
+      await api(`/v1/spaces/${space.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ iconGlyph }),
+      });
+      setEditingSpaceIconId(null);
+      toast.success('Space icon updated', space.name);
+      void refreshWorkspaceSnapshot();
+    } catch (err) {
+      toast.error('Failed to update space icon', String(err));
+    }
   }
 
   return (
     <aside
+      data-agentis-sidebar
       className={clsx(
         'flex shrink-0 flex-col border-r border-line bg-surface transition-[width] duration-150',
         collapsed ? 'w-14' : 'w-56',
@@ -202,9 +237,10 @@ export function Sidebar() {
                         )
                       }
                     >
-                      <span
-                        className={clsx('h-2 w-2 shrink-0 rounded-full', spaceDotColor(s, idx))}
-                        style={s.colorHex ? { backgroundColor: s.colorHex } : undefined}
+                      <SpaceGlyph
+                        space={s}
+                        color={spaceColor(s, idx)}
+                        onClick={!collapsed ? () => setEditingSpaceIconId((current) => current === s.id ? null : s.id) : undefined}
                       />
                       {!collapsed && (
                         <>
@@ -215,6 +251,11 @@ export function Sidebar() {
                         </>
                       )}
                     </NavLink>
+                    {!collapsed && editingSpaceIconId === s.id && (
+                      <div className="px-2 pb-2">
+                        <SpaceIconPicker value={s.iconGlyph ?? 'folder'} onChange={(icon) => void handleUpdateSpaceIcon(s, icon)} />
+                      </div>
+                    )}
                   </li>
                 ))}
                 {!collapsed && (
@@ -231,6 +272,7 @@ export function Sidebar() {
                           placeholder="Space name"
                           className="h-7 w-full rounded-input border border-line bg-surface-2 px-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
                         />
+                        <SpaceIconPicker value={newSpaceIcon} onChange={setNewSpaceIcon} />
                       </form>
                     ) : (
                       <button
@@ -273,6 +315,7 @@ export function Sidebar() {
                 placeholder="Space name"
                 className="h-7 w-full rounded-input border border-line bg-surface-2 px-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
               />
+              <SpaceIconPicker value={newSpaceIcon} onChange={setNewSpaceIcon} />
             </form>
           </div>
         )}
@@ -318,5 +361,64 @@ export function Sidebar() {
         {!collapsed && <span>Collapse</span>}
       </button>
     </aside>
+  );
+}
+
+function SpaceGlyph({ space, color, onClick }: { space: Space; color: string; onClick?: () => void }) {
+  const Icon = SPACE_ICON_BY_ID.get(space.iconGlyph ?? '') ?? Folder;
+  const interactive = Boolean(onClick);
+  return (
+    <span
+      className={clsx(
+        'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-line bg-canvas',
+        interactive && 'cursor-pointer hover:border-line-strong',
+      )}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onClick={(event) => {
+        if (!onClick) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+      onKeyDown={(event) => {
+        if (!onClick || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+      style={{ color }}
+      title={interactive ? 'Change space icon' : undefined}
+    >
+      <Icon size={13} strokeWidth={2.2} />
+    </span>
+  );
+}
+
+function SpaceIconPicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <div className="mt-2 grid grid-cols-4 gap-1">
+      {SPACE_ICON_LIBRARY.map((item) => {
+        const Icon = item.icon;
+        const selected = value === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            title={item.label}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onChange(item.id)}
+            className={clsx(
+              'flex h-7 items-center justify-center rounded-md border transition-colors',
+              selected
+                ? 'border-accent bg-accent-soft text-accent'
+                : 'border-line bg-surface-2 text-text-muted hover:border-line-strong hover:text-text-primary',
+            )}
+          >
+            <Icon size={13} />
+          </button>
+        );
+      })}
+    </div>
   );
 }

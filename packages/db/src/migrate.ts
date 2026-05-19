@@ -71,6 +71,14 @@ function columnExists(sqlite: Database.Database, tableName: string, columnName: 
   return rows.some((row) => row.name === columnName);
 }
 
+function indexExists(sqlite: Database.Database, indexName: string): boolean {
+  return Boolean(
+    sqlite
+      .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`)
+      .get(indexName),
+  );
+}
+
 function engine10xSchemaIsPresent(sqlite: Database.Database): boolean {
   return (
     columnExists(sqlite, 'workflows', 'max_concurrent_runs') &&
@@ -99,6 +107,19 @@ function spacesSchemaIsPresent(sqlite: Database.Database): boolean {
   return tableExists(sqlite, 'spaces') && columnExists(sqlite, 'app_instances', 'space_id');
 }
 
+function agentHierarchyCanvasSchemaIsPresent(sqlite: Database.Database): boolean {
+  return columnExists(sqlite, 'agents', 'description')
+    && columnExists(sqlite, 'agents', 'space_id')
+    && columnExists(sqlite, 'agents', 'canvas_position');
+}
+
+function intentContractsSchemaIsPresent(sqlite: Database.Database): boolean {
+  return columnExists(sqlite, 'workflows', 'intended_behavior')
+    && columnExists(sqlite, 'app_instances', 'intended_behavior')
+    && columnExists(sqlite, 'workflow_runs', 'conversation_id')
+    && indexExists(sqlite, 'idx_runs_conversation');
+}
+
 const IMPLIED_MIGRATION_STAMPS: readonly {
   readonly version: number;
   readonly isPresent: (sqlite: Database.Database) => boolean;
@@ -108,6 +129,8 @@ const IMPLIED_MIGRATION_STAMPS: readonly {
   { version: 21, isPresent: workflowRunReplaySchemaIsPresent },
   { version: 23, isPresent: agentCapabilityVersionSchemaIsPresent },
   { version: 25, isPresent: spacesSchemaIsPresent },
+  { version: 28, isPresent: agentHierarchyCanvasSchemaIsPresent },
+  { version: 31, isPresent: intentContractsSchemaIsPresent },
 ] as const;
 
 function stampImpliedMigrations(

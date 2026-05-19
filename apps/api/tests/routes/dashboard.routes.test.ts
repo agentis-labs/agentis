@@ -59,6 +59,51 @@ describe('/v1/dashboard/fleet-overview', () => {
     expect(body.length).toBeGreaterThan(10);
   });
 
+  it('counts only actively running workflow runs as active', async () => {
+    const workflowId = randomUUID();
+    ctx.db.insert(schema.workflows).values({
+      id: workflowId,
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      title: 'WF',
+      graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+      latestRevision: 1,
+    }).run();
+
+    for (const status of ['RUNNING', 'WAITING'] as const) {
+      const runId = randomUUID();
+      ctx.db.insert(schema.workflowRuns).values({
+        id: runId,
+        workspaceId: ctx.workspace.id,
+        ambientId: ctx.ambient.id,
+        workflowId,
+        userId: ctx.user.id,
+        status,
+        runState: {
+          runId,
+          workflowId,
+          status,
+          readyQueue: [],
+          waitingInputs: {},
+          nodeStates: {},
+          activeExecutions: {},
+          completedNodeIds: [],
+          failedNodeIds: [],
+          skippedNodeIds: [],
+          graphRevision: 1,
+          replanCount: 0,
+          lastLedgerSequence: 0,
+        },
+      }).run();
+    }
+
+    const res = await app().request('/v1/dashboard/fleet-overview', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runs: { active: number } };
+    expect(body.runs.active).toBe(1);
+  });
+
   it('requires authentication', async () => {
     const res = await app().request('/v1/dashboard/fleet-overview');
     expect(res.status).toBe(401);

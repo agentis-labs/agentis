@@ -163,20 +163,42 @@ export function ContextInspector({
             {jsonError && <div className="mt-1 text-[11px] text-danger">{jsonError}</div>}
           </div>
         ) : (
-          <NodeForm
-            kind={kind}
-            data={editData}
-            update={update}
-            agents={agents}
-            skills={skills}
-            workflows={workflows}
-            knowledgeBases={knowledgeBases}
-            onSkillsChange={() => {
-              void api<{ skills: SkillRow[] }>('/v1/skills')
-                .then((d) => setSkills(d.skills ?? []))
-                .catch(() => {});
-            }}
-          />
+          <>
+            <NodeForm
+              kind={kind}
+              data={editData}
+              update={update}
+              agents={agents}
+              skills={skills}
+              workflows={workflows}
+              knowledgeBases={knowledgeBases}
+              onSkillsChange={() => {
+                void api<{ skills: SkillRow[] }>('/v1/skills')
+                  .then((d) => setSkills(d.skills ?? []))
+                  .catch(() => {});
+              }}
+            />
+            {selection.nodeId && (
+              <div className="mb-4 rounded-input border border-line bg-surface-2 p-3">
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editData.isOutput === true}
+                    onChange={(e) => update({ isOutput: e.target.checked ? true : undefined })}
+                    className="mt-0.5 rounded border-line bg-surface accent-accent"
+                  />
+                  <span>
+                    <span className="block text-[12px] font-medium text-text-primary">
+                      Use as workflow output
+                    </span>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-text-muted">
+                      When any node is marked, the Output tab shows only marked nodes from the latest completed run.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
+          </>
         )}
 
         {selection.nodeId && !jsonMode && (
@@ -581,7 +603,7 @@ function VariablesForm({ data, update }: { data: Record<string, unknown>; update
 }
 
 function GenericForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
-  const entries = useMemo(() => Object.entries(data).filter(([k]) => k !== 'kind'), [data]);
+  const entries = useMemo(() => Object.entries(data).filter(([k]) => k !== 'kind' && k !== 'isOutput'), [data]);
   if (entries.length === 0) {
     return (
       <p className="text-[12px] text-text-muted">

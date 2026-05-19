@@ -12,7 +12,14 @@ export interface ValidationResult {
   warnings: string[];
 }
 
-export function validateWorkflowGraph(graph: WorkflowGraph): ValidationResult {
+export interface ValidateWorkflowGraphOptions {
+  currentWorkflowId?: string | null;
+}
+
+export function validateWorkflowGraph(
+  graph: WorkflowGraph,
+  options: ValidateWorkflowGraphOptions = {},
+): ValidationResult {
   const warnings: string[] = [];
   const ids = new Set<string>();
 
@@ -21,6 +28,16 @@ export function validateWorkflowGraph(graph: WorkflowGraph): ValidationResult {
       throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Duplicate node id: ${node.id}`);
     }
     ids.add(node.id);
+    if (
+      options.currentWorkflowId &&
+      node.config.kind === 'subflow' &&
+      node.config.workflowId === options.currentWorkflowId
+    ) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        `Subflow node ${node.id} cannot call its own workflow`,
+      );
+    }
   }
 
   for (const edge of graph.edges) {

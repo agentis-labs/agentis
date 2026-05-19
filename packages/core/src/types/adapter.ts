@@ -142,6 +142,13 @@ export interface NormalizedTask {
   capabilityTags: string[];
   timeoutMs: number;
   callbackUrl?: string;
+  /**
+   * Frozen brain context block (BRAIN-ABILITIES-REPLAN.md §B2). Relevant
+   * atoms from past runs, retrieved at dispatch. Adapters may surface this as
+   * a stable system-prompt prefix; it is also appended to `description` so it
+   * reaches the agent regardless of adapter.
+   */
+  brainContext?: string;
 }
 
 export type NormalizedAgentEvent =

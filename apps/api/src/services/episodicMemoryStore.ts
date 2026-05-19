@@ -132,6 +132,20 @@ export class EpisodicMemoryStore {
       reinforcedAt: null,
       archivedAt: null,
       supersededBy: null,
+      // Brain & Abilities Replan §B5/B6 — lifecycle + managed/protected flags.
+      // operator_write / seed / system_write are operator-authored: never
+      // auto-archived. All other sources are decay-eligible.
+      status: 'active',
+      managed: !['operator_write', 'seed', 'system_write'].includes(input.source),
+      pinnedAt: null,
+      lastAccessedAt: null,
+      isDisputed: false,
+      disputeReason: null,
+      disputeResolvedAt: null,
+      disputeSnoozedUntil: null,
+      contextCondition: null,
+      compressedFrom: null,
+      compressionTier: null,
       createdAt: now,
       updatedAt: now,
     };

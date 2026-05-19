@@ -1,0 +1,23 @@
+{
+  "version": "1",
+  "workspace": {
+    "name": "cli"
+  },
+  "agents": [
+    {
+      "name": "The Brain",
+      "role": "orchestrator",
+      "adapterType": "claude_code",
+      "description": "Workspace orchestrator. Routes goals, coordinates managers, keeps the system aligned.",
+      "instructions": "# @agentis-ai/cli\r\n\r\n[![npm](https://img.shields.io/npm/v/@agentis-ai/cli.svg)](https://www.npmjs.com/package/@agentis-ai/cli)\r\n[![license](https://img.shields.io/npm/l/@agentis-ai/cli.svg)](https://github.com/nexseed/agentis/blob/main/LICENSE)\r\n\r\nThe Agentis CLI — a one-command launcher for the **Agentis** proactive\r\nambient agent dashboard. Self-hostable, multi-agent orchestration with a\r\nworkflow canvas, an event ledger, and an approval inbox. Zero external\r\ndependencies — SQLite, an embedded HTTP + WebSocket server, and a bundled\r\nReact SPA all ship in this package.\r\n\r\n## Quick start\r\n\r\nInstall once, run anywhere:\r\n\r\n```sh\r\nnpm install -g @agentis-ai/cli\r\nagentis up\r\n```\r\n\r\nThen open <http://127.0.0.1:3737>. The first boot prints an operator\r\n**username and password** to the console — copy them; Agentis will not print\r\nthem again.\r\n\r\nAfter install, `agentis up` is always available — no internet, no\r\nre-download, identical UX every reboot.\r\n\r\n### Try it without installing\r\n\r\n```sh\r\nnpx @agentis-ai/cli up\r\n```\r\n\r\n`npx` is the kick-the-tires path: it works offline-after-cache, but every\r\ncold cache will redownload the package. Use the global install above for the\r\npersistent always-available experience.\r\n\r\n## What you get on first boot\r\n\r\n1. An RSA-2048 keypair for JWTs and an AES-256 key for the credential vault,\r\n   written to `.agentis/secrets.json` with `chmod 0o600`.\r\n2. An embedded SQLite database at `.agentis/agentis.db` with WAL mode and\r\n   foreign keys enabled.\r\n3. A seeded `operator` user, a `Personal` workspace, a `Local` ambient,\r\n   and the `echo` + `http_fetch` builtin skills.\r\n4. The dashboard served from `http://127.0.0.1:3737` — workflow canvas,\r\n   run inspector, approvals inbox, activity feed, command palette,\r\n   conversations dock.\r\n\r\n## Commands\r\n\r\n```text\r\nagentis up                              Start Agentis (default if no command given).\r\nagentis backup [--out <dir>]            Snapshot the data dir into <dir>.\r\nagentis restore <dir> [--force]         Restore a backup directory into the data dir.\r\n                [--data-dir <dir>]      --force overwrites an existing agentis.db.\r\nagentis help                            Show the help message.\r\n```\r\n\r\n## Environment\r\n\r\n| Variable | Purpose | Default |\r\n| -------- | ------- | ------- |\r\n| `AGENTIS_DATA_DIR` | Where to store the SQLite DB and `secrets.json`. | `.agentis` |\r\n| `AGENTIS_HTTP_PORT` | HTTP + WebSocket port. | `3737` |\r\n| `AGENTIS_SEED_USERNAME` | Operator username on first boot. | `operator` |\r\n| `AGENTIS_SEED_PASSWORD` | Operator password on first boot. | random |\r\n| `AGENTIS_DATABASE_URL` | Postgres URL for \"standard\" mode (otherwise embedded SQLite). | — |\r\n| `AGENTIS_WORKFLOW_PARALLELISM` | Max concurrent node dispatches per run (`auto`, `unbounded`, or an integer). | `8` |\r\n\r\n## Requirements\r\n\r\n- Node.js **>= 20.10.0**\r\n- A modern browser (Chromium 110+, Firefox 110+, Safari 16.4+)\r\n\r\n## What's in V1\r\n\r\n- Workflow engine with eight node kinds (trigger, agent task, skill task,\r\n  router, merge, checkpoint, subflow, scratchpad), partial replay, live\r\n  graph patches, and a deterministic ledger.\r\n- Multi-tenant data layer with per-workspace + per-ambient isolation\r\n  enforced on every authenticated route.\r\n- Bundled adapters: **OpenClaw**, **Claude Code**, **HTTP**.\r\n- Skill runtime: builtin, `node_isolate` (vm sandbox), `docker_sandbox`\r\n  (opt-in).\r\n- Channels: Discord + webhook + outbound HTTP bridge.\r\n- Approval inbox, activity feed, command palette (Cmd/Ctrl-K), conversations\r\n  dock.\r\n- Realtime UI over a single socket.io WebSocket.\r\n\r\nSee [V1-SPEC.md](https://github.com/nexseed/agentis/blob/main/docs/V1-SPEC.md)\r\nfor the full product contract this CLI is built to.\r\n\r\n## Links\r\n\r\n- Source: <https://github.com/nexseed/agentis>\r\n- Issues: <https://github.com/nexseed/agentis/issues>\r\n- Decisions ledger: <https://github.com/nexseed/agentis/blob/main/docs/DECISIONS.md>\r\n\r\n## License\r\n\r\nApache-2.0",
+      "capabilityTags": [],
+      "colorHex": "#8b5cf6",
+      "avatarGlyph": "TB",
+      "config": {
+        "binaryPath": "claude",
+        "cwd": "C:\\Users\\antar\\OneDrive\\Documentos\\nexseed\\agentis\\packages\\cli"
+      }
+    }
+  ],
+  "channels": []
+}

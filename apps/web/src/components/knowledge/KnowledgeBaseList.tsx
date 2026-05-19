@@ -11,12 +11,14 @@ export function KnowledgeBaseList({
   onCreate,
   onOpen,
   onDelete,
+  onPackage,
 }: {
   bases: KnowledgeBaseRow[];
   documentCounts: Map<string, number>;
   onCreate: (input: { name: string; description?: string }) => Promise<void>;
   onOpen: (base: KnowledgeBaseRow) => void;
   onDelete: (base: KnowledgeBaseRow) => void;
+  onPackage?: (base: KnowledgeBaseRow) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -69,6 +71,7 @@ export function KnowledgeBaseList({
                 documentCount={documentCounts.get(base.id) ?? 0}
                 onOpen={onOpen}
                 onDelete={onDelete}
+                onPackage={onPackage}
               />
             ))}
           </div>

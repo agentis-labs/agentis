@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   name                TEXT NOT NULL,
   slug                TEXT NOT NULL,
   default_ambient_id  TEXT,
+  issue_prefix        TEXT NOT NULL DEFAULT 'AGT',
   created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(user_id, slug)
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS spaces (
   user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name         TEXT NOT NULL,
   color        TEXT,
+  icon_glyph   TEXT,
   team_id      TEXT,
   created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -107,6 +109,8 @@ CREATE TABLE IF NOT EXISTS agents (
   gateway_id          TEXT REFERENCES openclaw_gateways(id) ON DELETE SET NULL,
   package_id          TEXT REFERENCES agent_packages(id) ON DELETE SET NULL,
   name                TEXT NOT NULL,
+  description         TEXT,
+  space_id            TEXT,
   adapter_type        TEXT NOT NULL,
   capability_tags     TEXT NOT NULL DEFAULT '[]',
   config              TEXT NOT NULL DEFAULT '{}',
@@ -118,11 +122,19 @@ CREATE TABLE IF NOT EXISTS agents (
   avatar_glyph        TEXT,
   runtime_model       TEXT,
   role                TEXT,
+  reports_to          TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  is_paused           INTEGER NOT NULL DEFAULT 0,
+  monthly_budget_cents INTEGER,
+  current_month_spend_cents INTEGER NOT NULL DEFAULT 0,
+  budget_reset_day    INTEGER NOT NULL DEFAULT 1,
+  canvas_position     TEXT,
   created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_agents_gateway ON agents(gateway_id);
+CREATE INDEX IF NOT EXISTS idx_agents_reports_to ON agents(workspace_id, reports_to);
+CREATE UNIQUE INDEX IF NOT EXISTS agents_workspace_orchestrator ON agents(workspace_id) WHERE role = 'orchestrator';
 
 CREATE TABLE IF NOT EXISTS skills (
   id            TEXT PRIMARY KEY,
@@ -196,11 +208,15 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   ambient_id      TEXT REFERENCES ambients(id) ON DELETE SET NULL,
-  workflow_id     TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  workflow_id     TEXT REFERENCES workflows(id) ON DELETE CASCADE,
   user_id         TEXT NOT NULL REFERENCES users(id),
   status          TEXT NOT NULL DEFAULT 'CREATED',
   run_state       TEXT NOT NULL,
   replan_count    INTEGER NOT NULL DEFAULT 0,
+  is_replay       INTEGER NOT NULL DEFAULT 0,
+  is_ephemeral    INTEGER NOT NULL DEFAULT 0,
+  ephemeral_title TEXT,
+  graph_snapshot  TEXT,
   trigger_id      TEXT REFERENCES triggers(id) ON DELETE SET NULL,
   parent_run_id   TEXT,
   started_at      TEXT,
@@ -220,6 +236,75 @@ CREATE TABLE IF NOT EXISTS workflow_run_snapshots (
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_seq ON workflow_run_snapshots(run_id, sequence_number DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_run_queue (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id     TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ambient_id      TEXT REFERENCES ambients(id) ON DELETE SET NULL,
+  trigger_id      TEXT REFERENCES triggers(id) ON DELETE SET NULL,
+  inputs          TEXT NOT NULL DEFAULT '{}',
+  initial_state   TEXT,
+  graph_snapshot  TEXT,
+  enqueued_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  scheduled_at    TEXT,
+  priority        INTEGER NOT NULL DEFAULT 0,
+  reason          TEXT NOT NULL,
+  parent_run_id   TEXT,
+  chain_depth     INTEGER NOT NULL DEFAULT 0,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_run_queue_pending ON workflow_run_queue(workflow_id, status, scheduled_at, priority, enqueued_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_run_queue_workspace ON workflow_run_queue(workspace_id, status, enqueued_at);
+
+CREATE TABLE IF NOT EXISTS node_execution_cache (
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id     TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  node_id         TEXT NOT NULL,
+  input_hash      TEXT NOT NULL,
+  output          TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  expires_at      TEXT NOT NULL,
+  hit_count       INTEGER NOT NULL DEFAULT 0,
+  byte_size       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (workspace_id, workflow_id, node_id, input_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_cache_expiry ON node_execution_cache(expires_at);
+
+CREATE TABLE IF NOT EXISTS workflow_event_subscriptions (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  source_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  target_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  event_type        TEXT NOT NULL,
+  source_node_id    TEXT,
+  filter_expression TEXT,
+  input_mapping     TEXT NOT NULL DEFAULT '{}',
+  coalesce_policy   TEXT NOT NULL DEFAULT 'always_enqueue',
+  catchup_policy    TEXT NOT NULL DEFAULT 'enqueue_missed_with_cap:5',
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_event_sub_source ON workflow_event_subscriptions(source_workflow_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_event_sub_target ON workflow_event_subscriptions(target_workflow_id, enabled);
+
+CREATE TABLE IF NOT EXISTS schedule_runs (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id     TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  trigger_id      TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
+  scheduled_at    TEXT NOT NULL,
+  last_fired_at   TEXT,
+  missed_fires    INTEGER NOT NULL DEFAULT 0,
+  status          TEXT NOT NULL DEFAULT 'active',
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_due ON schedule_runs(status, scheduled_at);
 
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
@@ -804,6 +889,52 @@ CREATE TABLE IF NOT EXISTS app_instances (
 CREATE INDEX IF NOT EXISTS idx_app_instances_ws ON app_instances(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_app_instances_space ON app_instances(workspace_id, space_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_app_instances_slug ON app_instances(workspace_id, slug);
+
+-- ─── App Output surface (APP-OUTPUT-REPLAN.md §5.3 + §5.6) ──────────────
+CREATE TABLE IF NOT EXISTS app_thread_messages (
+  id           TEXT PRIMARY KEY,
+  app_id       TEXT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  content      TEXT NOT NULL,
+  run_id       TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  approval_id  TEXT,
+  operator_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_thread_messages_app ON app_thread_messages(app_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_app_thread_messages_run ON app_thread_messages(run_id);
+
+CREATE TABLE IF NOT EXISTS app_results (
+  id            TEXT PRIMARY KEY,
+  app_id        TEXT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  run_id        TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  output_key    TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  summary       TEXT,
+  triggered_by  TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_results_app_created ON app_results(app_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_app_results_run ON app_results(run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_results_run_key ON app_results(run_id, output_key);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS app_results_fts USING fts5(
+  summary, content, content='app_results', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS app_results_fts_insert AFTER INSERT ON app_results BEGIN
+  INSERT INTO app_results_fts(rowid, summary, content) VALUES (new.rowid, new.summary, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS app_results_fts_delete AFTER DELETE ON app_results BEGIN
+  INSERT INTO app_results_fts(app_results_fts, rowid, summary, content) VALUES('delete', old.rowid, old.summary, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS app_results_fts_update AFTER UPDATE ON app_results BEGIN
+  INSERT INTO app_results_fts(app_results_fts, rowid, summary, content) VALUES('delete', old.rowid, old.summary, old.content);
+  INSERT INTO app_results_fts(rowid, summary, content) VALUES (new.rowid, new.summary, new.content);
+END;
 
 -- Knowledge bases, documents, chunks
 CREATE TABLE IF NOT EXISTS knowledge_bases (

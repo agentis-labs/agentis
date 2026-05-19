@@ -184,6 +184,7 @@ function mimeTypeFromName(fileName: string): string {
   if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.csv')) return 'text/csv';
+  if (name.endsWith('.html') || name.endsWith('.htm')) return 'text/html';
   if (name.endsWith('.md') || name.endsWith('.markdown')) return 'text/markdown';
   return 'text/plain';
 }

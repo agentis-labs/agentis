@@ -16,7 +16,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, primaryKey } from 'drizzle-orm/sqlite-core';
 
 const isoNow = () => sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
 
@@ -51,6 +51,14 @@ export const workspaces = sqliteTable('workspaces', {
   name: text('name').notNull(),
   slug: text('slug').notNull(),
   defaultAmbientId: text('default_ambient_id'),
+  issuePrefix: text('issue_prefix').notNull().default('AGT'),
+  /** Brain & Abilities Replan §Appendix A — embedding provider selection. */
+  embeddingProviderType: text('embedding_provider_type').notNull().default('hashing'),
+  embeddingProviderConfig: text('embedding_provider_config', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** U5 — cheap auxiliary adapter config for background brain work (nullable). */
+  auxiliaryAdapterConfig: text('auxiliary_adapter_config', { mode: 'json' }),
+  /** Per-workspace brain tuning knobs (cadence, thresholds). */
+  brainSettings: text('brain_settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   ...baseTimestamps(),
 });
 
@@ -81,6 +89,7 @@ export const spaces = sqliteTable('spaces', {
     .references(() => users.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   color: text('color'),
+  iconGlyph: text('icon_glyph'),
   /** Optional team association (no team table yet — accepts any string). */
   teamId: text('team_id'),
   ...baseTimestamps(),
@@ -146,6 +155,8 @@ export const agents = sqliteTable('agents', {
   gatewayId: text('gateway_id').references(() => openclawGateways.id, { onDelete: 'set null' }),
   packageId: text('package_id'),
   name: text('name').notNull(),
+  description: text('description'),
+  spaceId: text('space_id'),
   /** openclaw | claude_code | http */
   adapterType: text('adapter_type').notNull(),
   capabilityTags: text('capability_tags', { mode: 'json' }).notNull().default(sql`'[]'`),
@@ -159,8 +170,14 @@ export const agents = sqliteTable('agents', {
   instructions: text('instructions'),
   avatarGlyph: text('avatar_glyph'),
   runtimeModel: text('runtime_model'),
-  /** agent | orchestrator | reviewer | critic. */
+  /** orchestrator | manager | worker, with legacy free-text roles tolerated. */
   role: text('role'),
+  reportsTo: text('reports_to'),
+  isPaused: integer('is_paused', { mode: 'boolean' }).notNull().default(false),
+  monthlyBudgetCents: integer('monthly_budget_cents'),
+  currentMonthSpendCents: integer('current_month_spend_cents').notNull().default(0),
+  budgetResetDay: integer('budget_reset_day').notNull().default(1),
+  canvasPosition: text('canvas_position', { mode: 'json' }).$type<{ x: number; y: number } | null>(),
   ...baseTimestamps(),
 });
 
@@ -240,6 +257,8 @@ export const workflows = sqliteTable('workflows', {
   registryVersion: text('registry_version'),
   title: text('title').notNull(),
   summary: text('summary'),
+  /** Rich operator intent/spec this workflow should stay anchored to. */
+  intendedBehavior: text('intended_behavior'),
   graph: text('graph', { mode: 'json' }).notNull(),
   settings: text('settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   isFromRegistry: integer('is_from_registry', { mode: 'boolean' }).notNull().default(false),
@@ -247,6 +266,8 @@ export const workflows = sqliteTable('workflows', {
   /** queue | drop | error. */
   concurrencyOverflow: text('concurrency_overflow'),
   tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** Owning app instance — set when the workflow was installed as part of an app. */
+  appId: text('app_id'),
   ...baseTimestamps(),
 });
 
@@ -280,8 +301,8 @@ export const workflowRuns = sqliteTable('workflow_runs', {
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   ambientId: text('ambient_id').references(() => ambients.id, { onDelete: 'set null' }),
   workflowId: text('workflow_id')
-    .notNull()
     .references(() => workflows.id, { onDelete: 'cascade' }),
+  conversationId: text('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
   userId: text('user_id')
     .notNull()
     .references(() => users.id),
@@ -289,6 +310,10 @@ export const workflowRuns = sqliteTable('workflow_runs', {
   status: text('status').notNull().default('CREATED'),
   runState: text('run_state', { mode: 'json' }).notNull(),
   replanCount: integer('replan_count').notNull().default(0),
+  isReplay: integer('is_replay', { mode: 'boolean' }).notNull().default(false),
+  isEphemeral: integer('is_ephemeral', { mode: 'boolean' }).notNull().default(false),
+  ephemeralTitle: text('ephemeral_title'),
+  graphSnapshot: text('graph_snapshot', { mode: 'json' }),
   triggerId: text('trigger_id').references(() => triggers.id, { onDelete: 'set null' }),
   /** When this run was forked from a previous one (replay-from-node). */
   parentRunId: text('parent_run_id'),
@@ -306,6 +331,93 @@ export const workflowRunSnapshots = sqliteTable('workflow_run_snapshots', {
   sequenceNumber: integer('sequence_number').notNull(),
   runState: text('run_state', { mode: 'json' }).notNull(),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+export const workflowRunQueue = sqliteTable('workflow_run_queue', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: text('workflow_id')
+    .notNull()
+    .references(() => workflows.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  ambientId: text('ambient_id').references(() => ambients.id, { onDelete: 'set null' }),
+  triggerId: text('trigger_id').references(() => triggers.id, { onDelete: 'set null' }),
+  inputs: text('inputs', { mode: 'json' }).notNull().default(sql`'{}'`),
+  initialState: text('initial_state', { mode: 'json' }),
+  graphSnapshot: text('graph_snapshot', { mode: 'json' }),
+  enqueuedAt: text('enqueued_at').notNull().default(isoNow() as unknown as string),
+  scheduledAt: text('scheduled_at'),
+  priority: integer('priority').notNull().default(0),
+  reason: text('reason').notNull(),
+  parentRunId: text('parent_run_id'),
+  chainDepth: integer('chain_depth').notNull().default(0),
+  status: text('status').notNull().default('pending'),
+  ...baseTimestamps(),
+});
+
+export const nodeExecutionCache = sqliteTable(
+  'node_execution_cache',
+  {
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    nodeId: text('node_id').notNull(),
+    inputHash: text('input_hash').notNull(),
+    output: text('output', { mode: 'json' }).notNull(),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    expiresAt: text('expires_at').notNull(),
+    hitCount: integer('hit_count').notNull().default(0),
+    byteSize: integer('byte_size').notNull().default(0),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.workflowId, table.nodeId, table.inputHash] }),
+  }),
+);
+
+export const workflowEventSubscriptions = sqliteTable('workflow_event_subscriptions', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  sourceWorkflowId: text('source_workflow_id')
+    .notNull()
+    .references(() => workflows.id, { onDelete: 'cascade' }),
+  targetWorkflowId: text('target_workflow_id')
+    .notNull()
+    .references(() => workflows.id, { onDelete: 'cascade' }),
+  eventType: text('event_type').notNull(),
+  sourceNodeId: text('source_node_id'),
+  filterExpression: text('filter_expression'),
+  inputMapping: text('input_mapping', { mode: 'json' }).notNull().default(sql`'{}'`),
+  coalescePolicy: text('coalesce_policy').notNull().default('always_enqueue'),
+  catchupPolicy: text('catchup_policy').notNull().default('enqueue_missed_with_cap:5'),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  ...baseTimestamps(),
+});
+
+export const scheduleRuns = sqliteTable('schedule_runs', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: text('workflow_id')
+    .notNull()
+    .references(() => workflows.id, { onDelete: 'cascade' }),
+  triggerId: text('trigger_id')
+    .notNull()
+    .references(() => triggers.id, { onDelete: 'cascade' }),
+  scheduledAt: text('scheduled_at').notNull(),
+  lastFiredAt: text('last_fired_at'),
+  missedFires: integer('missed_fires').notNull().default(0),
+  status: text('status').notNull().default('active'),
+  ...baseTimestamps(),
 });
 
 export const artifacts = sqliteTable('artifacts', {
@@ -511,11 +623,41 @@ export const conversationMessages = sqliteTable('conversation_messages', {
   authorId: text('author_id'),
   /** Reference to the OpenClaw session.message id when mirrored. */
   sessionMessageId: text('session_message_id'),
+  issueId: text('issue_id'),
   body: text('body').notNull(),
   metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
   /** sent | delivered | failed | mirrored */
   deliveryStatus: text('delivery_status').notNull().default('sent'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+export const issues = sqliteTable('issues', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  assigneeAgentId: text('assignee_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  linkedWorkflowId: text('linked_workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
+  activeRunId: text('active_run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+  identifier: text('identifier').notNull(),
+  title: text('title').notNull(),
+  description: text('description'),
+  status: text('status').notNull().default('backlog'),
+  priority: text('priority').notNull().default('medium'),
+  labels: text('labels', { mode: 'json' }).notNull().default(sql`'[]'`),
+  ...baseTimestamps(),
+});
+
+export const workspaceCounters = sqliteTable('workspace_counters', {
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  counterName: text('counter_name').notNull(),
+  counterValue: integer('counter_value').notNull().default(0),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
 });
 
 // ────────────────────────────────────────────────────────────
@@ -957,7 +1099,7 @@ export const memoryEpisodes = sqliteTable('memory_episodes', {
   entities: text('entities', { mode: 'json' }).notNull().default(sql`'[]'`),
   /** good | bad | mixed | NULL. */
   outcomeStatus: text('outcome_status'),
-  /** Reserved for vector retrieval. JSON array of floats. */
+  /** Vector retrieval — JSON array of floats (B4: real embeddings). */
   embedding: text('embedding', { mode: 'json' }),
   metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
   /** When the episode was last reinforced (re-promoted or re-confirmed). */
@@ -966,6 +1108,22 @@ export const memoryEpisodes = sqliteTable('memory_episodes', {
   archivedAt: text('archived_at'),
   /** ID of an episode that supersedes this one (NULL = current). */
   supersededBy: text('superseded_by'),
+  /** B5 — explicit lifecycle state: active | stale | archived. */
+  status: text('status').notNull().default('active'),
+  /** B6 — true = auto-promoted (decay-eligible); false = operator-protected. */
+  managed: integer('managed', { mode: 'boolean' }).notNull().default(true),
+  /** Pinned atoms are exempt from all automated lifecycle transitions. */
+  pinnedAt: text('pinned_at'),
+  /** Bumped whenever the atom is retrieved into a dispatch context block. */
+  lastAccessedAt: text('last_accessed_at'),
+  /** Gap15 — set when a contradicting atom is detected on the same topic. */
+  isDisputed: integer('is_disputed', { mode: 'boolean' }).notNull().default(false),
+  disputeReason: text('dispute_reason'),
+  disputeResolvedAt: text('dispute_resolved_at'),
+  disputeSnoozedUntil: text('dispute_snoozed_until'),
+  contextCondition: text('context_condition'),
+  compressedFrom: text('compressed_from', { mode: 'json' }),
+  compressionTier: integer('compression_tier'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
 });
@@ -1122,6 +1280,8 @@ export const appInstances = sqliteTable('app_instances', {
   /** setup | active | paused | error. */
   status: text('status').notNull().default('active'),
   entryWorkflowId: text('entry_workflow_id'),
+  /** Rich app-level operating contract used to assess cross-run drift. */
+  intendedBehavior: text('intended_behavior'),
   /** Full AgentisPackageContents snapshot at activation time. */
   packageContents: text('package_contents', { mode: 'json' }).notNull().default(sql`'{}'`),
   credentialBindings: text('credential_bindings', { mode: 'json' }).notNull().default(sql`'{}'`),
@@ -1130,7 +1290,136 @@ export const appInstances = sqliteTable('app_instances', {
   activatedAt: text('activated_at').notNull().default(isoNow() as unknown as string),
   pausedAt: text('paused_at'),
   lastRunAt: text('last_run_at'),
+  /** Deploy layer (AGENTIS-PLATFORM-10X §Layer 5): local | always_on | scheduled | api_server. */
+  deployTarget: text('deploy_target').notNull().default('local'),
+  /** stopped | running | error. */
+  deployStatus: text('deploy_status').notNull().default('stopped'),
+  /** API key for `api_server` deploys — hashed, never returned raw after creation. */
+  apiKeyHash: text('api_key_hash'),
   ...baseTimestamps(),
+});
+
+/**
+ * Durable async job queue (AGENTIS-PLATFORM-10X §A4). A background poller
+ * picks up `pending` rows; jobs survive server restarts.
+ */
+export const asyncJobs = sqliteTable('async_jobs', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** workflow.run | (future kinds). */
+  type: text('type').notNull(),
+  payload: text('payload', { mode: 'json' }).notNull(),
+  /** pending | running | completed | failed. */
+  status: text('status').notNull().default('pending'),
+  /** low | normal | high — pollers drain high first. */
+  priority: text('priority').notNull().default('normal'),
+  attempts: integer('attempts').notNull().default(0),
+  maxAttempts: integer('max_attempts').notNull().default(3),
+  /** Earliest time the job may run — supports retry backoff. */
+  scheduledFor: text('scheduled_for').notNull().default(isoNow() as unknown as string),
+  lastError: text('last_error'),
+  /** Worker lease — set when claimed, cleared on completion. Detects stuck jobs. */
+  leasedAt: text('leased_at'),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Registry of per-app Data tables (AGENTIS-PLATFORM-10X §Layer 3 / §A1).
+ * The actual records live in dynamically-created `appdata_*` tables; this
+ * row records the declared schema for introspection and safe migration.
+ */
+export const appDataTables = sqliteTable('app_data_tables', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id')
+    .notNull()
+    .references(() => appInstances.id, { onDelete: 'cascade' }),
+  /** Logical table name (e.g. "leads"). */
+  name: text('name').notNull(),
+  /** Physical SQLite table name (`appdata_<sanitizedAppId>_<name>`). */
+  physicalName: text('physical_name').notNull(),
+  description: text('description'),
+  /** Full AppDataTable JSON declaration. */
+  schemaJson: text('schema_json', { mode: 'json' }).notNull(),
+  rowCount: integer('row_count').notNull().default(0),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// App Thread + App Results — Output surface (APP-OUTPUT-REPLAN.md §5.3, §5.6)
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Persistent operator-directed conversation surface scoped to one app.
+ * Replaces the issues kanban as the App Output interaction model.
+ *
+ * `kind` differentiates the rendered card type; `content` is a JSON payload
+ * whose shape varies by kind (see APP-OUTPUT-REPLAN.md §5.3).
+ *
+ * Scheduled / autonomous runs do NOT append rows here — they appear only
+ * in the Activity Feed (read from `app_results`).
+ */
+export const appThreadMessages = sqliteTable('app_thread_messages', {
+  id: text('id').primaryKey(),
+  appId: text('app_id')
+    .notNull()
+    .references(() => appInstances.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** 'operator' | 'app' | 'system' */
+  role: text('role').notNull(),
+  /** 'message' | 'progress' | 'result' | 'checkpoint' | 'error' */
+  kind: text('kind').notNull(),
+  /** JSON; shape varies by kind (see §5.3). */
+  content: text('content', { mode: 'json' }).notNull(),
+  /** Run this message is associated with (progress/result/checkpoint/error). */
+  runId: text('run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+  /** Approval id for checkpoint cards. */
+  approvalId: text('approval_id'),
+  /** Operator who sent the message (NULL for system/app messages). */
+  operatorId: text('operator_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Materialized projection of run outputs — the source of truth for the
+ * Output surface (Hero, Activity Feed, Result Detail page).
+ *
+ * `workflow_runs` remains the source of truth for execution.
+ * `AppResultsService.materialize(runId)` writes one row per declared output
+ * key when RUN_COMPLETED fires (see APP-OUTPUT-REPLAN.md §5.6).
+ */
+export const appResults = sqliteTable('app_results', {
+  id: text('id').primaryKey(),
+  appId: text('app_id')
+    .notNull()
+    .references(() => appInstances.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id')
+    .notNull()
+    .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+  /** Matches outputKey declared in app_instances.packageContents.outputComponents. */
+  outputKey: text('output_key').notNull(),
+  /** digest | document | metric | list | decision | table | file | link | chart | custom */
+  artifactType: text('artifact_type').notNull(),
+  /** Full rendered JSON value — source of truth for the hero. */
+  content: text('content', { mode: 'json' }).notNull(),
+  /** Pre-extracted headline / first line for feed display (LIKE-searchable fallback). */
+  summary: text('summary'),
+  /** 'scheduled' | 'operator' | 'event' | 'manual' */
+  triggeredBy: text('triggered_by').notNull(),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
 // ────────────────────────────────────────────────────────────
@@ -1142,6 +1431,7 @@ export const knowledgeBases = sqliteTable('knowledge_bases', {
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').references(() => appInstances.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   description: text('description'),
   embeddingModel: text('embedding_model').notNull().default('lexical-v1'),
@@ -1210,6 +1500,9 @@ export const knowledgeLinks = sqliteTable('knowledge_links', {
   adapterType: text('adapter_type'),
   runId: text('run_id'),
   appId: text('app_id'),
+  /** Context-split disputes no longer count as unresolved contradictions. */
+  contextSplit: integer('context_split', { mode: 'boolean' }).notNull().default(false),
+  resolvedAt: text('resolved_at'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
 });
@@ -1291,4 +1584,228 @@ export const memoryEntries = sqliteTable('memory_entries', {
   archivedAt: text('archived_at'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+// ────────────────────────────────────────────────────────────
+// Brain & Abilities Replan — docs/BRAIN-ABILITIES-REPLAN.md
+//
+//   - brain_promotion_queue  (Appendix B: durable, restart-safe promotion)
+//   - brain_quality_events   (Appendix C: measurable quality gradient)
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Durable promotion queue (BL10 / Appendix B).
+ *
+ * Replaces `queueMicrotask` — promotions survive process restarts, are
+ * serialised per workspace by the worker, and carry priority so an
+ * evaluator-driven correction never waits behind routine promotions.
+ */
+export const brainPromotionQueue = sqliteTable('brain_promotion_queue', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** atom_promotion | ability_review | peer_update | contradiction_check. */
+  itemType: text('item_type').notNull(),
+  /** high | normal | low — drained high-first. */
+  priority: text('priority').notNull().default('normal'),
+  /** JSON; schema depends on itemType. */
+  payload: text('payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** pending | processing | done | failed. */
+  status: text('status').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  lastAttemptAt: text('last_attempt_at'),
+  failReason: text('fail_reason'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Agent Abilities (BRAIN-ABILITIES-REPLAN.md Part IV).
+ *
+ * Procedural how-to knowledge — distinct from brain atoms (world facts) and
+ * skills (executable code). Markdown documents an agent role refines over
+ * time. Per-agent, or per-workflow when `teamRole`/`workflowId` are set.
+ */
+export const agentAbilities = sqliteTable('agent_abilities', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Per-agent ability. Null for team abilities. */
+  agentId: text('agent_id'),
+  /** Set for team abilities (shared across a workflow's agents). */
+  workflowId: text('workflow_id'),
+  /** Optional role scope within a team ability (e.g. 'researcher'). */
+  teamRole: text('team_role'),
+  title: text('title').notNull(),
+  /** Markdown body — the procedure. */
+  content: text('content').notNull(),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+  version: integer('version').notNull().default(1),
+  /** Previous version row (immutable version chain). */
+  parentAbilityId: text('parent_ability_id'),
+  /** JSON array of generated diff strings, newest first. */
+  changelog: text('changelog', { mode: 'json' }).notNull().default(sql`'[]'`),
+  confidence: real('confidence').notNull().default(0.5),
+  reinforceCount: integer('reinforce_count').notNull().default(0),
+  usageCount: integer('usage_count').notNull().default(0),
+  /** package_seed | background_review | operator_write | operator_rollback. */
+  source: text('source').notNull(),
+  derivedFromPackage: text('derived_from_package'),
+  derivedFromRunIds: text('derived_from_run_ids', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** JSON array of AbilityAssertion. */
+  assertions: text('assertions', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** false = operator-protected (never auto-archived). */
+  managed: integer('managed', { mode: 'boolean' }).notNull().default(true),
+  /** active | stale | archived | superseded | pending_review. */
+  status: text('status').notNull().default('active'),
+  pinnedAt: text('pinned_at'),
+  lastUsedAt: text('last_used_at'),
+  /** Embedding vector (JSON array) for relevance matching at dispatch. */
+  embedding: text('embedding', { mode: 'json' }),
+  /** JSON array of linked brain atom IDs (contextAtoms — reserved). */
+  contextAtoms: text('context_atoms', { mode: 'json' }),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * User profile layer (BRAIN-ABILITIES-REPLAN.md §BL8).
+ *
+ * What agents know about the operator — distinct from brain atoms (world
+ * facts). One row per (workspace, user). Operator-editable.
+ */
+export const workspaceUserProfiles = sqliteTable('workspace_user_profiles', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  content: text('content').notNull().default(''),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Peer representations (Part V).
+ *
+ * Lightweight Honcho-style peer cards. Humans and AI agents are both peers;
+ * the App Brain thread uses these summaries for rolling per-turn context.
+ */
+export const peerRepresentations = sqliteTable('peer_representations', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** user | agent. */
+  peerType: text('peer_type').notNull(),
+  /** User id or agent id. */
+  peerId: text('peer_id').notNull(),
+  summary: text('summary').notNull().default(''),
+  peerCard: text('peer_card', { mode: 'json' }).notNull().default(sql`'[]'`),
+  lastDreamAt: text('last_dream_at'),
+  embedding: text('embedding', { mode: 'json' }),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+export const peerRepresentationConclusions = sqliteTable('peer_representation_conclusions', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  subjectPeerId: text('subject_peer_id').notNull(),
+  observerPeerId: text('observer_peer_id').notNull(),
+  content: text('content').notNull(),
+  sourceSessionId: text('source_session_id'),
+  confidence: real('confidence').notNull().default(0.7),
+  conclusionType: text('conclusion_type').notNull().default('deductive'),
+  volatilityClass: text('volatility_class').notNull().default('contextual'),
+  supportingSessionCount: integer('supporting_session_count').notNull().default(1),
+  supersededById: text('superseded_by_id'),
+  status: text('status').notNull().default('active'),
+  embedding: text('embedding', { mode: 'json' }),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+export const agentPeerCards = sqliteTable('agent_peer_cards', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Observer agent id. */
+  observerPeerId: text('observer_peer_id').notNull(),
+  /** User id or agent id being modeled. */
+  subjectPeerId: text('subject_peer_id').notNull(),
+  subjectPeerType: text('subject_peer_type').notNull().default('user'),
+  summary: text('summary').notNull().default(''),
+  peerCard: text('peer_card', { mode: 'json' }).notNull().default(sql`'[]'`),
+  embedding: text('embedding', { mode: 'json' }),
+  lastDreamAt: text('last_dream_at'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Session-local atoms (BL13).
+ *
+ * Ephemeral in-thread facts that affect the next App Brain turns immediately,
+ * then promote or expire when the session closes.
+ */
+export const sessionAtoms = sqliteTable('session_atoms', {
+  id: text('id').primaryKey(),
+  sessionId: text('session_id').notNull(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id'),
+  content: text('content').notNull(),
+  confidence: real('confidence').notNull().default(0.6),
+  embedding: text('embedding', { mode: 'json' }),
+  promotedAt: text('promoted_at'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  expiresAt: text('expires_at').notNull(),
+});
+
+/**
+ * Brain quality events (Gap14 / Appendix C).
+ *
+ * Every confidence delta, atom injection, evaluator verdict, and ability use
+ * is recorded so the Brain Health dashboard can compute coverage, quality
+ * trend, and evaluator signal rate. Without this, "the brain is working" is
+ * an unverifiable claim.
+ */
+export const brainQualityEvents = sqliteTable('brain_quality_events', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id'),
+  agentId: text('agent_id'),
+  /** atom_injected | evaluator_pass | evaluator_fail | atom_confidence_delta | ability_used | ability_confidence_delta. */
+  eventType: text('event_type').notNull(),
+  atomId: text('atom_id'),
+  abilityId: text('ability_id'),
+  runId: text('run_id'),
+  /** Confidence change, positive or negative. */
+  delta: real('delta'),
+  metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+export const brainForgetRequests = sqliteTable('brain_forget_requests', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  requestedByUserId: text('requested_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  topic: text('topic').notNull(),
+  scope: text('scope').notNull().default('all'),
+  status: text('status').notNull().default('pending'),
+  matches: text('matches', { mode: 'json' }).notNull().default(sql`'{}'`),
+  counts: text('counts', { mode: 'json' }).notNull().default(sql`'{}'`),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  executedAt: text('executed_at'),
 });

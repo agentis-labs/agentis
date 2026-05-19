@@ -390,7 +390,9 @@ export function validateAppGraph(
       if (!cfg.workflowId) {
         warnings.push({
           code: 'UNBOUND_WORKFLOW',
-          message: `Connect a workflow to “${node.title}” so it has something to run.`,
+          message: cfg.kind === 'entry_workflow'
+            ? `Connect a workflow to “${node.title}” so the app knows how to start.`
+            : `Connect a workflow to “${node.title}” so this step has something to run.`,
           severity: 'warning',
           nodeId: node.id,
         });

@@ -6,8 +6,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, Brain } from 'lucide-react';
+import clsx from 'clsx';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
@@ -17,7 +18,7 @@ import { Skeleton } from '../components/shared/Skeleton';
 import { ThemeToggle } from '../components/shared/ThemeToggle';
 import { StatusBadge } from '../components/shared/StatusBadge';
 
-type Tab = 'profile' | 'workspace' | 'connections' | 'security';
+type Tab = 'profile' | 'workspace' | 'intelligence' | 'connections' | 'security' | 'budget';
 
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -35,16 +36,20 @@ export function SettingsPage() {
         tabs={[
           { value: 'profile',     label: 'Profile' },
           { value: 'workspace',   label: 'Workspace' },
+          { value: 'intelligence', label: 'Intelligence' },
           { value: 'connections', label: 'Connections' },
           { value: 'security',    label: 'Security' },
+          { value: 'budget',      label: 'Budget' },
         ]}
         className="px-6"
       />
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {tab === 'profile' && <ProfileTab />}
         {tab === 'workspace' && <WorkspaceTab />}
+        {tab === 'intelligence' && <IntelligenceTab />}
         {tab === 'connections' && <ConnectionsTab />}
         {tab === 'security' && <SecurityTab />}
+        {tab === 'budget' && <BudgetTab />}
       </div>
     </div>
   );
@@ -112,6 +117,32 @@ function ProfileTab() {
           <p className="mt-3 text-[12px] text-text-muted">
             Match the system theme, or pick light/dark explicitly.
           </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IntelligenceTab() {
+  return (
+    <div className="max-w-xl">
+      <div className="rounded-card border border-line bg-surface p-5">
+        <div className="flex items-start gap-3">
+          <span className="flex h-9 w-9 items-center justify-center rounded-card bg-accent-soft text-accent">
+            <Brain size={16} />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-[15px] font-semibold text-text-primary">Brain intelligence moved to the Brain page</h2>
+            <p className="mt-2 text-[13px] leading-relaxed text-text-muted">
+              Embeddings, degraded-mode warnings, and background model setup are configured where the Brain health signals are visible.
+            </p>
+            <Link
+              to="/brain/config"
+              className="mt-4 inline-flex h-9 items-center justify-center rounded-input bg-accent px-3 text-[13px] font-semibold text-accent-contrast transition hover:opacity-90 active:translate-y-px"
+            >
+              Open Brain Config
+            </Link>
+          </div>
         </div>
       </div>
     </div>
@@ -718,6 +749,225 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
           >{busy ? 'Connecting…' : 'Connect'}</button>
         </footer>
       </form>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Budget tab
+// ---------------------------------------------------------------------------
+
+interface BudgetAgentRow {
+  id: string;
+  name: string;
+  monthlyBudgetCents?: number | null;
+  currentMonthSpendCents?: number | null;
+}
+
+interface BudgetEventRow {
+  id: string;
+  agentId: string;
+  runId?: string | null;
+  eventType: string;
+  amountCents: number;
+  createdAt: string;
+}
+
+interface BudgetData {
+  agents: BudgetAgentRow[];
+  events: BudgetEventRow[];
+}
+
+function budgetMoney(cents: number) {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function BudgetTab() {
+  const toast = useToast();
+  const [data, setData] = useState<BudgetData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      const res = await api<BudgetData>('/v1/budgets');
+      setData({ agents: res.agents ?? [], events: res.events ?? [] });
+    } catch {
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void refresh(); }, []);
+
+  function startEdit(agent: BudgetAgentRow) {
+    setEditingId(agent.id);
+    setEditValue(agent.monthlyBudgetCents != null ? String(agent.monthlyBudgetCents / 100) : '');
+  }
+
+  async function saveEdit(agentId: string) {
+    setSaving(true);
+    const dollars = parseFloat(editValue);
+    const monthlyBudgetCents = isNaN(dollars) || editValue.trim() === '' ? null : Math.round(dollars * 100);
+    try {
+      await api(`/v1/budgets/agents/${agentId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ monthlyBudgetCents }),
+      });
+      toast.success('Budget updated');
+      setEditingId(null);
+      void refresh();
+    } catch (e) {
+      toast.error('Failed to update', String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <Skeleton height={300} />;
+
+  if (!data) {
+    return (
+      <div className="rounded-card border border-dashed border-line bg-surface/40 p-8 text-center text-[13px] text-text-muted">
+        Could not load budget data.
+      </div>
+    );
+  }
+
+  const totalSpend = data.agents.reduce((s, a) => s + Math.max(0, a.currentMonthSpendCents ?? 0), 0);
+  const allCapped = data.agents.length > 0 && data.agents.every((a) => a.monthlyBudgetCents != null);
+  const totalCap = allCapped ? data.agents.reduce((s, a) => s + (a.monthlyBudgetCents ?? 0), 0) : null;
+  const recentEvents = [...data.events]
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .slice(0, 20);
+
+  function agentName(id: string) {
+    return data!.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8);
+  }
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      {/* Summary strip */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-card border border-line bg-surface p-4">
+          <div className="text-[11px] text-text-muted">This month's spend</div>
+          <div className="mt-1 text-[20px] font-semibold text-text-primary">{budgetMoney(totalSpend)}</div>
+        </div>
+        <div className="rounded-card border border-line bg-surface p-4">
+          <div className="text-[11px] text-text-muted">Monthly cap</div>
+          <div className="mt-1 text-[20px] font-semibold text-text-primary">
+            {totalCap != null ? budgetMoney(totalCap) : <span className="text-[14px] text-text-muted">None set</span>}
+          </div>
+        </div>
+        <div className="rounded-card border border-line bg-surface p-4">
+          <div className="text-[11px] text-text-muted">Spend events</div>
+          <div className="mt-1 text-[20px] font-semibold text-text-primary">{data.events.length}</div>
+        </div>
+      </div>
+
+      {/* Per-agent limits */}
+      <div>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Per-agent limits</h2>
+        {data.agents.length === 0 ? (
+          <div className="rounded-card border border-dashed border-line bg-surface/40 p-6 text-center text-[13px] text-text-muted">
+            No agents in this workspace.
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            {data.agents.map((agent) => {
+              const spend = agent.currentMonthSpendCents ?? 0;
+              const cap = agent.monthlyBudgetCents;
+              const pct = cap != null && cap > 0 ? Math.min(100, (spend / cap) * 100) : 0;
+              const isEditing = editingId === agent.id;
+              return (
+                <div key={agent.id} className="rounded-card border border-line bg-surface px-4 py-3">
+                  <div className="flex items-center gap-3">
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-text-primary">{agent.name}</span>
+                    <span className="text-[12px] text-text-secondary">{budgetMoney(spend)} this month</span>
+                    {isEditing ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[12px] text-text-muted">$</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          placeholder="No cap"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          className="w-24 rounded-input border border-line bg-canvas px-2 py-1 text-[12px] text-text-primary outline-none focus:border-accent"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void saveEdit(agent.id);
+                            if (e.key === 'Escape') setEditingId(null);
+                          }}
+                        />
+                        <Button variant="primary" size="sm" disabled={saving} onClick={() => void saveEdit(agent.id)}>
+                          Save
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[12px] text-text-muted">
+                          Cap: {cap != null ? budgetMoney(cap) : 'None'}
+                        </span>
+                        <Button variant="ghost" size="sm" onClick={() => startEdit(agent)}>
+                          Edit
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  {cap != null && cap > 0 && (
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+                      <div
+                        className={clsx(
+                          'h-full rounded-full transition-all',
+                          pct >= 90 ? 'bg-danger' : pct >= 70 ? 'bg-amber-400' : 'bg-accent',
+                        )}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Recent spend events */}
+      <div>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Recent spend events</h2>
+        {recentEvents.length === 0 ? (
+          <div className="rounded-card border border-dashed border-line bg-surface/40 p-6 text-center text-[13px] text-text-muted">
+            No spend events yet.
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {recentEvents.map((event) => (
+              <div
+                key={event.id}
+                className="flex items-center gap-3 rounded-card border border-line/70 bg-surface px-3 py-2"
+              >
+                <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-info" />
+                <span className="min-w-0 flex-1 truncate text-[12px] text-text-secondary">
+                  {agentName(event.agentId)}
+                </span>
+                <span className="text-[12px] font-medium text-text-primary">{budgetMoney(event.amountCents)}</span>
+                <span className="text-[11px] text-text-muted">
+                  {new Date(event.createdAt).toLocaleDateString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { z } from 'zod';
 import { AgentisError, CONSTANTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -27,33 +27,50 @@ import { HermesAgentAdapter } from '../adapters/HermesAgentAdapter.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
-import { joinUrl, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
+import { joinUrl, normalizeOpenClawGatewayUrl, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']);
+const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
 
 const createSchema = z.object({
   name: z.string().min(1).max(120),
+  description: z.string().max(240).nullish(),
   adapterType: adapterTypeSchema,
   ambientId: z.string().nullish(),
   gatewayId: z.string().nullish(),
+  spaceId: z.string().nullish(),
   capabilityTags: z.array(z.string()).default([]),
   config: z.record(z.unknown()).default({}),
   instructions: z.string().nullish(),
   avatarGlyph: z.string().max(8).nullish(),
   runtimeModel: z.string().nullish(),
   role: z.string().max(120).nullish(),
+  reportsTo: z.string().nullish(),
+  isPaused: z.boolean().optional(),
+  monthlyBudgetCents: z.number().int().nonnegative().nullish(),
+  canvasPosition: z.object({ x: z.number(), y: z.number() }).nullish(),
   colorHex: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  status: agentStatusSchema.optional(),
+  replaceExistingOrchestrator: z.boolean().optional(),
 });
 
 const updateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
+  description: z.string().max(240).nullish().optional(),
+  spaceId: z.string().nullish().optional(),
   capabilityTags: z.array(z.string()).optional(),
   config: z.record(z.unknown()).optional(),
   instructions: z.string().nullish().optional(),
   avatarGlyph: z.string().max(8).nullish().optional(),
   runtimeModel: z.string().nullish().optional(),
   role: z.string().max(120).nullish().optional(),
+  reportsTo: z.string().nullish().optional(),
+  isPaused: z.boolean().optional(),
+  monthlyBudgetCents: z.number().int().nonnegative().nullish().optional(),
+  canvasPosition: z.object({ x: z.number(), y: z.number() }).nullish().optional(),
   colorHex: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  status: agentStatusSchema.optional(),
+  replaceExistingOrchestrator: z.boolean().optional(),
 });
 
 const terminalSendSchema = z.object({
@@ -76,47 +93,65 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
   app.post('/', async (c) => {
     const ws = getWorkspace(c);
     const body = createSchema.parse(await c.req.json());
+    if (body.reportsTo) ensureReportsToTarget(deps.db, ws.workspaceId, body.reportsTo);
     const id = randomUUID();
+    ensureOrEstablishSingleOrchestrator(deps.db, ws.workspaceId, body.role ?? null, id, body.replaceExistingOrchestrator === true);
     const colorHex = body.colorHex ?? CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
-    deps.db
-      .insert(schema.agents)
-      .values({
-        id,
-        workspaceId: ws.workspaceId,
-        ambientId: body.ambientId ?? null,
-        userId: ws.user.id,
-        gatewayId: body.gatewayId ?? null,
-        packageId: null,
-        name: body.name,
-        adapterType: body.adapterType,
-        capabilityTags: body.capabilityTags,
-        config: body.config,
-        status: 'offline',
-        colorHex,
-        instructions: body.instructions ?? null,
-        avatarGlyph: body.avatarGlyph ?? null,
-        runtimeModel: body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, body.config),
-        role: body.role ?? null,
-      })
-      .run();
+    let status = body.status === 'setting_up' ? 'setting_up' : body.isPaused ? 'paused' : 'offline';
+    deps.db.transaction(() => {
+      deps.db
+        .insert(schema.agents)
+        .values({
+          id,
+          workspaceId: ws.workspaceId,
+          ambientId: body.ambientId ?? null,
+          userId: ws.user.id,
+          gatewayId: body.gatewayId ?? null,
+          packageId: null,
+          name: body.name,
+          description: body.description ?? null,
+          spaceId: body.spaceId ?? null,
+          adapterType: body.adapterType,
+          capabilityTags: body.capabilityTags,
+          config: body.config,
+          status,
+          colorHex,
+          instructions: body.instructions ?? null,
+          avatarGlyph: body.avatarGlyph ?? null,
+          runtimeModel: body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, body.config),
+          role: body.role ?? null,
+          reportsTo: body.reportsTo ?? null,
+          isPaused: body.isPaused ?? false,
+          monthlyBudgetCents: body.monthlyBudgetCents ?? null,
+          canvasPosition: body.canvasPosition ?? null,
+        })
+        .run();
+      if (body.role === 'orchestrator' && body.replaceExistingOrchestrator === true) {
+        pointManagersAtOrchestrator(deps.db, ws.workspaceId, id);
+      }
+    });
 
     // Register adapter immediately if we have enough config.
-    try {
-      await registerAdapter(deps, ws.workspaceId, id, body.adapterType, body.config);
-      deps.db
-        .update(schema.agents)
-        .set({ status: 'online', updatedAt: new Date().toISOString() })
-        .where(eq(schema.agents.id, id))
-        .run();
-    } catch (err) {
-      deps.logger.warn('agents.register_failed', { id, err: (err as Error).message });
+    if (status !== 'setting_up') {
+      try {
+        await registerAdapter(deps, ws.workspaceId, id, body.adapterType, body.config);
+        status = body.isPaused ? 'paused' : 'online';
+        deps.db
+          .update(schema.agents)
+          .set({ status, lastHeartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .where(eq(schema.agents.id, id))
+          .run();
+      } catch (err) {
+        deps.logger.warn('agents.register_failed', { id, err: (err as Error).message });
+      }
     }
     return c.json({
       id,
       name: body.name,
       adapterType: body.adapterType,
       colorHex,
-      agent: { id, name: body.name, adapterType: body.adapterType, colorHex },
+      status,
+      agent: { id, name: body.name, adapterType: body.adapterType, colorHex, status },
     }, 201);
   });
 
@@ -125,26 +160,41 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     const id = c.req.param('id');
     const body = updateSchema.parse(await c.req.json());
     const existing = loadAgent(deps.db, ws.workspaceId, id);
+    const nextRole = body.role === undefined ? existing.role : body.role;
+    if (body.reportsTo) ensureReportsToTarget(deps.db, ws.workspaceId, body.reportsTo, id);
     const nextConfig = body.config ?? (existing.config as Record<string, unknown>);
-    deps.db
-      .update(schema.agents)
-      .set({
-        name: body.name ?? existing.name,
-        capabilityTags: body.capabilityTags ?? (existing.capabilityTags as string[]),
-        config: nextConfig,
-        instructions: body.instructions === undefined ? existing.instructions : body.instructions,
-        avatarGlyph: body.avatarGlyph === undefined ? existing.avatarGlyph : body.avatarGlyph,
-        runtimeModel: body.runtimeModel === undefined ? existing.runtimeModel : body.runtimeModel,
-        role: body.role === undefined ? existing.role : body.role,
-        colorHex: body.colorHex ?? existing.colorHex,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(schema.agents.id, id))
-      .run();
-    if (body.config) {
+    ensureOrEstablishSingleOrchestrator(deps.db, ws.workspaceId, nextRole, id, body.replaceExistingOrchestrator === true);
+    deps.db.transaction(() => {
+      deps.db
+        .update(schema.agents)
+        .set({
+          name: body.name ?? existing.name,
+          description: body.description === undefined ? existing.description : body.description,
+          spaceId: body.spaceId === undefined ? existing.spaceId : body.spaceId,
+          capabilityTags: body.capabilityTags ?? (existing.capabilityTags as string[]),
+          config: nextConfig,
+          instructions: body.instructions === undefined ? existing.instructions : body.instructions,
+          avatarGlyph: body.avatarGlyph === undefined ? existing.avatarGlyph : body.avatarGlyph,
+          runtimeModel: body.runtimeModel === undefined ? existing.runtimeModel : body.runtimeModel,
+          role: nextRole,
+          reportsTo: body.reportsTo === undefined ? existing.reportsTo : body.reportsTo,
+          isPaused: body.isPaused === undefined ? existing.isPaused : body.isPaused,
+          monthlyBudgetCents: body.monthlyBudgetCents === undefined ? existing.monthlyBudgetCents : body.monthlyBudgetCents,
+          canvasPosition: body.canvasPosition === undefined ? existing.canvasPosition : body.canvasPosition,
+          colorHex: body.colorHex ?? existing.colorHex,
+          status: body.status === undefined ? existing.status : body.status,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.agents.id, id))
+        .run();
+      if (nextRole === 'orchestrator' && body.replaceExistingOrchestrator === true) {
+        pointManagersAtOrchestrator(deps.db, ws.workspaceId, id);
+      }
+    });
+    if (body.config && body.status !== 'setting_up') {
       try {
         await registerAdapter(deps, ws.workspaceId, id, existing.adapterType as V1HarnessAdapterType, nextConfig);
-        deps.db.update(schema.agents).set({ status: 'online', updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
+        deps.db.update(schema.agents).set({ status: body.isPaused ?? existing.isPaused ? 'paused' : 'online', lastHeartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
       } catch (err) {
         deps.logger.warn('agents.reregister_failed', { id, err: (err as Error).message });
         deps.db.update(schema.agents).set({ status: 'offline', updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
@@ -216,7 +266,7 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     if (!parsed.success) {
       throw new AgentisError('VALIDATION_FAILED', `agent ${id} uses unsupported adapter ${agent.adapterType}`);
     }
-    const result = await testHarnessConfig(parsed.data, (agent.config ?? {}) as Record<string, unknown>);
+    const result = await testHarnessConfig(parsed.data, (agent.config ?? {}) as Record<string, unknown>, { deep: true });
     return c.json(result);
   });
 
@@ -229,6 +279,55 @@ function loadAgent(db: AgentisSqliteDb, workspaceId: string, id: string) {
   return a;
 }
 
+function ensureOrEstablishSingleOrchestrator(db: AgentisSqliteDb, workspaceId: string, role: string | null | undefined, currentAgentId: string, replaceExisting: boolean) {
+  if (role !== 'orchestrator') return;
+  const predicates = [
+    eq(schema.agents.workspaceId, workspaceId),
+    eq(schema.agents.role, 'orchestrator'),
+  ];
+  predicates.push(ne(schema.agents.id, currentAgentId));
+  const existing = db
+    .select({ id: schema.agents.id, name: schema.agents.name })
+    .from(schema.agents)
+    .where(and(...predicates))
+    .get();
+  if (!existing) return;
+  if (!replaceExisting) {
+    throw new AgentisError('WORKSPACE_ORCHESTRATOR_EXISTS', `Workspace already has an orchestrator: ${existing.name}`, {
+      details: { id: existing.id, name: existing.name },
+    });
+  }
+  db
+    .update(schema.agents)
+    .set({ role: 'manager', reportsTo: currentAgentId, updatedAt: new Date().toISOString() })
+    .where(and(...predicates))
+    .run();
+}
+
+function pointManagersAtOrchestrator(db: AgentisSqliteDb, workspaceId: string, orchestratorId: string) {
+  db
+    .update(schema.agents)
+    .set({ reportsTo: orchestratorId, updatedAt: new Date().toISOString() })
+    .where(and(
+      eq(schema.agents.workspaceId, workspaceId),
+      eq(schema.agents.role, 'manager'),
+      ne(schema.agents.id, orchestratorId),
+    ))
+    .run();
+}
+
+function ensureReportsToTarget(db: AgentisSqliteDb, workspaceId: string, reportsTo: string, currentAgentId?: string) {
+  if (reportsTo === currentAgentId) {
+    throw new AgentisError('VALIDATION_FAILED', 'agent cannot report to itself');
+  }
+  const target = db
+    .select({ id: schema.agents.id })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, reportsTo), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (!target) throw new AgentisError('RESOURCE_NOT_FOUND', `reportsTo agent ${reportsTo} not found`);
+}
+
 async function registerAdapter(
   deps: AgentRouteDeps,
   workspaceId: string,
@@ -238,7 +337,7 @@ async function registerAdapter(
 ) {
   await deps.adapters.unregister(agentId);
   if (adapterType === 'openclaw') {
-    const gatewayUrl = String(config.gatewayUrl ?? '');
+    const gatewayUrl = normalizeOpenClawGatewayUrl(String(config.gatewayUrl ?? '')) ?? '';
     const credentialId = stringOf(config.deviceTokenCredentialId) ?? stringOf(config.authCredentialId);
     if (!gatewayUrl) {
       throw new AgentisError('VALIDATION_FAILED', 'openclaw requires gatewayUrl');
@@ -288,9 +387,10 @@ async function registerAdapter(
     return;
   }
   if (adapterType === 'codex') {
+    await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CodexAdapter({
       agentId,
-      binaryPath: stringOf(config.binaryPath) ?? undefined,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       maxTurns: numberOf(config.maxTurns),
@@ -307,9 +407,10 @@ async function registerAdapter(
     return;
   }
   if (adapterType === 'cursor') {
+    await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CursorAdapter({
       agentId,
-      binaryPath: stringOf(config.binaryPath) ?? undefined,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       extraArgs: stringArrayOf(config.extraArgs),
@@ -322,9 +423,10 @@ async function registerAdapter(
     return;
   }
   if (adapterType === 'hermes_agent') {
+    await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new HermesAgentAdapter({
       agentId,
-      binaryPath: stringOf(config.binaryPath) ?? undefined,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       maxTurns: numberOf(config.maxTurns),
@@ -338,9 +440,10 @@ async function registerAdapter(
     deps.adapters.register(agentId, adapter);
     return;
   }
+  await ensureCliHarnessAvailable(adapterType, config);
   const adapter = new ClaudeCodeAdapter({
     agentId,
-    binaryPath: stringOf(config.binaryPath) ?? undefined,
+    binaryPath: cliCommandFromConfig(config) ?? undefined,
     cwd: stringOf(config.cwd) ?? undefined,
     model: stringOf(config.model) ?? undefined,
     maxTurns: numberOf(config.maxTurns),
@@ -352,6 +455,13 @@ async function registerAdapter(
   });
   await adapter.connect();
   deps.adapters.register(agentId, adapter);
+}
+
+async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent'>, config: Record<string, unknown>) {
+  const result = await testHarnessConfig(adapterType, config);
+  if (result.status !== 'fail') return;
+  const firstError = result.checks.find((check) => check.level === 'error') ?? result.checks[0];
+  throw new AgentisError('VALIDATION_FAILED', firstError?.detail ? `${firstError.message} - ${firstError.detail}` : firstError?.message ?? 'Harness binary not found');
 }
 
 function runtimeModelFromConfig(adapterType: V1HarnessAdapterType, config: Record<string, unknown>): string | null {
@@ -370,6 +480,10 @@ function httpUrlFromConfig(config: Record<string, unknown>, pathKey: string, url
 
 function stringOf(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function cliCommandFromConfig(config: Record<string, unknown>): string | null {
+  return stringOf(config.binaryPath) ?? stringOf(config.command);
 }
 
 function numberOf(value: unknown): number | undefined {

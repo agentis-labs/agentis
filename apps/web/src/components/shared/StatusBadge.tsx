@@ -32,6 +32,7 @@ const KNOWN: Record<string, StatusTone> = {
   warning: 'warn',
   warn: 'warn',
   attention: 'warn',
+  setting_up: 'warn',
 
   offline: 'danger',
   failed: 'danger',
@@ -45,10 +46,11 @@ const KNOWN: Record<string, StatusTone> = {
   unknown: 'muted',
   archived: 'muted',
   paused: 'muted',
+  stopped: 'muted',
 };
 
 const PULSE_STATES = new Set([
-  'running', 'live', 'active', 'pending', 'waiting', 'connecting', 'retrying',
+  'running', 'live', 'active', 'pending', 'waiting', 'connecting', 'retrying', 'setting_up',
 ]);
 
 export interface StatusBadgeProps {

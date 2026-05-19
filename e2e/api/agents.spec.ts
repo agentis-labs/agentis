@@ -38,6 +38,36 @@ test.describe('/v1/agents', () => {
     expect(res.headers()['content-type'] ?? '').toMatch(/application\/json/);
   });
 
+  test('list returns connectionSummary for each agent', async ({ request }) => {
+    const created = await request.post('/v1/agents', {
+      headers: ctx.headers,
+      data: {
+        name: 'Summary Agent',
+        adapterType: 'http',
+        role: 'worker',
+        config: { url: 'http://127.0.0.1:9' },
+      },
+    });
+    expect(created.status()).toBe(201);
+
+    const res = await request.get('/v1/agents', { headers: ctx.headers });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'Summary Agent',
+          connectionSummary: expect.objectContaining({
+            apps: expect.any(Array),
+            workflows: expect.any(Array),
+            totalApps: expect.any(Number),
+            totalWorkflows: expect.any(Number),
+          }),
+        }),
+      ]),
+    );
+  });
+
   test('get :id returns 404 for an unknown id', async ({ request }) => {
     const res = await request.get('/v1/agents/00000000-0000-0000-0000-000000000000', { headers: ctx.headers });
     expect(res.status()).toBe(404);

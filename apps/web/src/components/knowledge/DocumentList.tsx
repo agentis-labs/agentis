@@ -4,7 +4,15 @@ import { EmptyState } from '../shared/EmptyState';
 import { DocumentRow } from './DocumentRow';
 import type { KnowledgeDocumentRow } from './types';
 
-export function DocumentList({ documents, onDelete }: { documents: KnowledgeDocumentRow[]; onDelete?: (document: KnowledgeDocumentRow) => void }) {
+export function DocumentList({
+  documents,
+  onDelete,
+  emptyBody = 'Upload files or paste text to give agents shared workspace context.',
+}: {
+  documents: KnowledgeDocumentRow[];
+  onDelete?: (document: KnowledgeDocumentRow) => void;
+  emptyBody?: string;
+}) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -13,7 +21,7 @@ export function DocumentList({ documents, onDelete }: { documents: KnowledgeDocu
   }, [documents, query]);
 
   if (documents.length === 0) {
-    return <EmptyState icon={<FileText size={48} />} title="No documents yet" body="Upload files or paste text to give agents shared workspace context." />;
+    return <EmptyState icon={<FileText size={48} />} title="No documents yet" body={emptyBody} />;
   }
 
   return (

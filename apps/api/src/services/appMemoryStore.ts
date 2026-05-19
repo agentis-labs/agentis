@@ -128,13 +128,14 @@ export class AppMemoryStore {
   /** Update operator-editable fields. Does not allow source/kind changes. */
   update(
     workspaceId: string,
+    appId: string,
     episodeId: string,
     patch: Partial<Pick<MemoryEpisode, 'title' | 'content' | 'trust' | 'importance' | 'tags'>>,
   ): MemoryEpisode | null {
     const row = this.db
       .select()
       .from(schema.appMemory)
-      .where(and(eq(schema.appMemory.workspaceId, workspaceId), eq(schema.appMemory.id, episodeId)))
+      .where(and(eq(schema.appMemory.workspaceId, workspaceId), eq(schema.appMemory.appId, appId), eq(schema.appMemory.id, episodeId)))
       .get();
     if (!row) return null;
     const now = new Date().toISOString();
@@ -148,10 +149,10 @@ export class AppMemoryStore {
     return this.byId(workspaceId, episodeId);
   }
 
-  delete(workspaceId: string, episodeId: string): boolean {
+  delete(workspaceId: string, appId: string, episodeId: string): boolean {
     const result = this.db
       .delete(schema.appMemory)
-      .where(and(eq(schema.appMemory.workspaceId, workspaceId), eq(schema.appMemory.id, episodeId)))
+      .where(and(eq(schema.appMemory.workspaceId, workspaceId), eq(schema.appMemory.appId, appId), eq(schema.appMemory.id, episodeId)))
       .run();
     return result.changes > 0;
   }

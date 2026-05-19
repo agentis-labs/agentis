@@ -47,6 +47,15 @@ export interface EvaluatorExampleListArgs {
   limit?: number;
 }
 
+export interface EvaluatorExampleUpdateInput {
+  evaluatorKey?: string;
+  input?: unknown;
+  expected?: unknown;
+  verdict?: EvaluatorExample['verdict'];
+  score?: number | null;
+  reason?: string | null;
+}
+
 /** Confidence summary surfaced in the AppIntelligenceResponse. */
 export interface EvaluatorConfidence {
   evaluatorKey: string;
@@ -107,6 +116,64 @@ export class EvaluatorExampleStore {
       .where(
         and(
           eq(schema.appEvaluatorExamples.workspaceId, workspaceId),
+          eq(schema.appEvaluatorExamples.id, exampleId),
+        ),
+      )
+      .run();
+    return result.changes > 0;
+  }
+
+  update(
+    workspaceId: string,
+    appId: string,
+    exampleId: string,
+    patch: EvaluatorExampleUpdateInput,
+  ): EvaluatorExample | null {
+    const existing = this.db
+      .select()
+      .from(schema.appEvaluatorExamples)
+      .where(
+        and(
+          eq(schema.appEvaluatorExamples.workspaceId, workspaceId),
+          eq(schema.appEvaluatorExamples.appId, appId),
+          eq(schema.appEvaluatorExamples.id, exampleId),
+        ),
+      )
+      .get();
+    if (!existing) return null;
+    const next = {
+      evaluatorKey: patch.evaluatorKey ?? existing.evaluatorKey,
+      input: patch.input === undefined ? existing.input : (patch.input as object),
+      expected: patch.expected === undefined ? existing.expected : (patch.expected as object),
+      verdict: patch.verdict ?? existing.verdict,
+      score: patch.score === undefined
+        ? existing.score
+        : patch.score === null
+          ? null
+          : String(clamp01(patch.score)),
+      reason: patch.reason === undefined ? existing.reason : patch.reason,
+    };
+    this.db
+      .update(schema.appEvaluatorExamples)
+      .set(next)
+      .where(
+        and(
+          eq(schema.appEvaluatorExamples.workspaceId, workspaceId),
+          eq(schema.appEvaluatorExamples.appId, appId),
+          eq(schema.appEvaluatorExamples.id, exampleId),
+        ),
+      )
+      .run();
+    return rowToExample({ ...existing, ...next });
+  }
+
+  deleteForAppExample(workspaceId: string, appId: string, exampleId: string): boolean {
+    const result = this.db
+      .delete(schema.appEvaluatorExamples)
+      .where(
+        and(
+          eq(schema.appEvaluatorExamples.workspaceId, workspaceId),
+          eq(schema.appEvaluatorExamples.appId, appId),
           eq(schema.appEvaluatorExamples.id, exampleId),
         ),
       )

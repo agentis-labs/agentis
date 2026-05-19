@@ -29,6 +29,7 @@ beforeEach(async () => {
     registry,
     engine: engine as unknown as WorkflowEngine,
     adapters: adapters as unknown as AdapterManager,
+    bus: ctx.bus,
   });
 });
 afterEach(() => ctx.close());

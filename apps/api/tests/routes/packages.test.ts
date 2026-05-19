@@ -51,6 +51,57 @@ function seedWorkflow() {
   return id;
 }
 
+function seedKnowledgeBase() {
+  const now = new Date().toISOString();
+  const knowledgeBaseId = randomUUID();
+  const documentId = randomUUID();
+  ctx.db
+    .insert(schema.knowledgeBases)
+    .values({
+      id: knowledgeBaseId,
+      workspaceId: ctx.workspace.id,
+      name: 'Support Playbooks',
+      description: 'Reusable support procedures.',
+      embeddingModel: 'lexical-v1',
+      embeddingDimension: 0,
+      chunkingConfig: { maxTokens: 240, overlapTokens: 40 },
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+  ctx.db
+    .insert(schema.kbDocuments)
+    .values({
+      id: documentId,
+      knowledgeBaseId,
+      workspaceId: ctx.workspace.id,
+      name: 'refunds.md',
+      mimeType: 'text/markdown',
+      status: 'ready',
+      tokenCount: 8,
+      error: null,
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+  ctx.db
+    .insert(schema.kbChunks)
+    .values({
+      id: randomUUID(),
+      documentId,
+      knowledgeBaseId,
+      workspaceId: ctx.workspace.id,
+      chunkIndex: 0,
+      content: 'Refund requests require order verification and manager approval.',
+      metadata: { source: 'refunds.md' },
+      tokenCount: 8,
+      createdAt: now,
+    })
+    .run();
+  return knowledgeBaseId;
+}
+
 describe('/v1/packages Library packages', () => {
   it('packs a workflow, emits an event, and can use the package', async () => {
     const workflowId = seedWorkflow();
@@ -123,5 +174,27 @@ describe('/v1/packages Library packages', () => {
     expect(imported.status).toBe(422);
     const body = (await imported.json()) as { error: { code: string } };
     expect(body.error.code).toBe('PACKAGE_CHECKSUM_MISMATCH');
+  });
+
+  it('does not expose knowledge packages while the package kind is disabled', async () => {
+    const knowledgeBaseId = seedKnowledgeBase();
+
+    const pack = await app().request(`/v1/packages/pack/knowledge/${knowledgeBaseId}`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ tags: ['knowledge'] }),
+    });
+    expect(pack.status).toBe(404);
+
+    const create = await app().request('/v1/packages', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        name: 'Support Playbooks',
+        kind: 'knowledge',
+        knowledgeBaseIds: [knowledgeBaseId],
+      }),
+    });
+    expect(create.status).toBe(422);
   });
 });

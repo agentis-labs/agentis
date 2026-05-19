@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Brain, ArrowRight, X } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
+import type { KnowledgeBaseRow, KnowledgeDocumentRow } from '../knowledge/types';
 
 interface IntelligenceResponse {
   summary?: {
@@ -25,10 +26,20 @@ export function AppKnowledgeActivationCard({ appSlug, entryWorkflowId, onManage 
     void Promise.all([
       api<IntelligenceResponse>(`/v1/apps/${appSlug}/intelligence`),
       api<ResultsResponse>(`/v1/apps/${appSlug}/results?window=30d`),
-    ]).then(([intelligence, results]) => {
+      api<{ knowledgeBases: KnowledgeBaseRow[] }>(`/v1/apps/${appSlug}/knowledge-bases`),
+    ]).then(async ([intelligence, results, knowledgeBaseData]) => {
       if (cancelled) return;
+      const knowledgeBases = knowledgeBaseData.knowledgeBases ?? [];
+      const knowledgeDocs = await Promise.all(knowledgeBases.map(async (base) => {
+        const documentData = await api<{ documents: KnowledgeDocumentRow[] }>(`/v1/knowledge-bases/${base.id}/documents`);
+        return documentData.documents ?? [];
+      }));
       const summary = intelligence.summary ?? {};
-      const knowledgeCount = (summary.seedCount ?? 0) + (summary.importedDatasetCount ?? 0) + (summary.promotedMemoryCount ?? 0) + (summary.evaluatorExampleCount ?? 0);
+      const knowledgeCount = (summary.seedCount ?? 0)
+        + (summary.importedDatasetCount ?? 0)
+        + (summary.promotedMemoryCount ?? 0)
+        + (summary.evaluatorExampleCount ?? 0)
+        + knowledgeDocs.flat().length;
       setVisible(knowledgeCount === 0 && (results.runCount ?? 0) === 0);
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -47,9 +58,9 @@ export function AppKnowledgeActivationCard({ appSlug, entryWorkflowId, onManage 
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-card border border-line bg-surface-2 text-accent"><Brain size={16} /></span>
         <div className="min-w-0 flex-1">
           <h2 className="text-subheading text-text-primary">Before you run this app, teach it about your business</h2>
-          <p className="mt-1 text-[12px] leading-relaxed text-text-muted">Import data sources and add a few memory rules so the first run starts with domain context.</p>
+          <p className="mt-1 text-[12px] leading-relaxed text-text-muted">Upload key documents, import structured data, and add a few memory rules so the first run starts with domain context.</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="primary" size="sm" iconRight={<ArrowRight size={12} />} onClick={onManage}>Go to Brain Manage</Button>
+            <Button variant="primary" size="sm" iconRight={<ArrowRight size={12} />} onClick={onManage}>Open Brain Knowledge</Button>
             {entryWorkflowId && <Button variant="secondary" size="sm" onClick={() => { window.location.href = `/workflows/${entryWorkflowId}`; }}>Open workflow</Button>}
           </div>
         </div>

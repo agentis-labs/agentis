@@ -71,6 +71,7 @@ export class SubflowExecutor {
   constructor(private readonly deps: SubflowExecutorDeps) {}
 
   async start(args: StartSubflowArgs): Promise<string> {
+    this.#assertNoSubflowCycle(args.parentRunId, args.childWorkflowId);
     const child = this.deps.db
       .select()
       .from(schema.workflows)
@@ -131,6 +132,32 @@ export class SubflowExecutor {
     });
 
     return childRunId;
+  }
+
+  #assertNoSubflowCycle(parentRunId: string, childWorkflowId: string): void {
+    let cursor: string | null = parentRunId;
+    for (let depth = 0; cursor && depth < 32; depth += 1) {
+      const parent = this.deps.db
+        .select({
+          id: schema.workflowRuns.id,
+          parentRunId: schema.workflowRuns.parentRunId,
+          workflowId: schema.workflowRuns.workflowId,
+        })
+        .from(schema.workflowRuns)
+        .where(eq(schema.workflowRuns.id, cursor))
+        .get();
+      if (!parent) return;
+      if (parent.workflowId === childWorkflowId) {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `Subflow cycle detected: workflow ${childWorkflowId} is already in this run chain`,
+        );
+      }
+      cursor = parent.parentRunId;
+    }
+    if (cursor) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'Subflow nesting limit exceeded');
+    }
   }
 
   /** Called when a child run reaches a terminal status. */

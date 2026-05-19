@@ -11,6 +11,17 @@ export interface WorkspaceAgent {
   id: string;
   name: string;
   status?: string;
+  role?: string | null;
+  reportsTo?: string | null;
+  runtimeModel?: string | null;
+  adapterType?: string | null;
+  colorHex?: string | null;
+  avatarGlyph?: string | null;
+  spaceId?: string | null;
+  spaceName?: string | null;
+  currentTaskId?: string | null;
+  description?: string | null;
+  lastHeartbeatAt?: string | null;
 }
 
 export interface WorkspaceApproval {
@@ -58,7 +69,9 @@ export interface WorkspaceSpace {
   id: string;
   name: string;
   slug: string;
+  color?: string | null;
   colorHex?: string;
+  iconGlyph?: string | null;
   appCount?: number;
 }
 
@@ -76,7 +89,7 @@ export interface WorkspaceActivityRow {
 
 export interface WorkspaceNotification {
   id: string;
-  type: 'approval' | 'failure' | 'completion' | 'info';
+  type: 'approval' | 'failure' | 'completion' | 'info' | 'setup';
   title: string;
   context: string;
   timestamp: string;
@@ -85,6 +98,9 @@ export interface WorkspaceNotification {
   runId?: string;
   agentName?: string;
   approvalId?: string;
+  actionLabel?: string;
+  actionEvent?: string;
+  actionPayload?: Record<string, unknown>;
 }
 
 export interface WorkspaceSnapshot {
@@ -149,7 +165,7 @@ export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.ACTIVITY_CREATED,
 ] as const;
 
-const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'WAITING', 'CREATED', 'PLANNING', 'running', 'pending']);
+const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'running']);
 const LIVE_AGENT_STATUSES = new Set(['online', 'active', 'running']);
 
 let snapshot = EMPTY_SNAPSHOT;
@@ -186,10 +202,48 @@ function normalizeArtifact(raw: WorkspaceArtifact): WorkspaceArtifact {
 function deriveNotifications(
   approvals: WorkspaceApproval[],
   failedRuns: WorkspaceFailedRun[],
+  agents: WorkspaceAgent[],
+  spaces: WorkspaceSpace[],
 ): WorkspaceNotification[] {
-  const merged: WorkspaceNotification[] = [];
+  const setup: WorkspaceNotification[] = [];
+  const rest: WorkspaceNotification[] = [];
+
+  const hasOrchestrator = agents.some((a) => (a.role ?? '').toLowerCase().includes('orchestrator'));
+  if (!hasOrchestrator) {
+    setup.push({
+      id: 'setup-orchestrator',
+      type: 'setup',
+      title: 'Commission your orchestrator',
+      context: 'The orchestrator is the workspace brain. Needed for routing, approvals, and command.',
+      timestamp: new Date().toISOString(),
+      actionLabel: 'Commission orchestrator',
+      actionEvent: 'agentis:commission-orchestrator',
+    });
+  }
+
+  const managerlessSpaces = spaces.filter(
+    (space) => !agents.some((a) => (a.role ?? '').toLowerCase().includes('manager') && a.spaceId === space.id),
+  );
+  if (managerlessSpaces.length > 0) {
+    const first = managerlessSpaces[0];
+    if (first) {
+      setup.push({
+        id: 'setup-managers',
+        type: 'setup',
+        title: managerlessSpaces.length === 1
+          ? `${first.name} needs a manager`
+          : `${managerlessSpaces.length} spaces need managers`,
+        context: 'Spaces run more predictably with a coordinator above their workers and workflows.',
+        timestamp: new Date().toISOString(),
+        actionLabel: `Add manager for ${first.name}`,
+        actionEvent: 'agentis:commission-manager',
+        actionPayload: { spaceId: first.id },
+      });
+    }
+  }
+
   for (const approval of approvals) {
-    merged.push({
+    rest.push({
       id: `approval-${approval.id}`,
       type: 'approval',
       title: 'Approval needed',
@@ -202,7 +256,7 @@ function deriveNotifications(
     });
   }
   for (const run of failedRuns) {
-    merged.push({
+    rest.push({
       id: `failed-${run.id}`,
       type: 'failure',
       title: 'Workflow failed',
@@ -212,9 +266,8 @@ function deriveNotifications(
       workflowName: run.workflowName,
     });
   }
-  return merged
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, 5);
+  const sorted = rest.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  return [...setup, ...sorted].slice(0, 8);
 }
 
 function deriveCounts(agents: WorkspaceAgent[], activeRuns: WorkspaceActiveRun[]) {
@@ -242,7 +295,8 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
   if (inflight) return inflight;
 
   const base = keepPreviousForWorkspace(workspaceId);
-  setSnapshot({ ...base, workspaceId, loading: true });
+  const firstLoadForWorkspace = base.workspaceId !== workspaceId || base.updatedAt === 0;
+  setSnapshot({ ...base, workspaceId, loading: firstLoadForWorkspace });
 
   inflight = (async () => {
     const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, artifactsRes, fleetRes, activityRes, spacesRes] =
@@ -281,7 +335,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
       spaces,
       fleet,
       latestActivity,
-      notifications: deriveNotifications(approvals, failedRuns),
+      notifications: deriveNotifications(approvals, failedRuns, agents, spaces),
       counts: deriveCounts(agents, activeRuns),
       updatedAt: Date.now(),
     });

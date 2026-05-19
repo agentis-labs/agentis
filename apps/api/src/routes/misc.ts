@@ -160,7 +160,7 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       )
       .all();
 
-    const activeRuns = runs.filter((r) => r.status === 'RUNNING' || r.status === 'WAITING');
+    const activeRuns = runs.filter((r) => r.status === 'RUNNING');
     const recentRuns = runs
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .slice(0, 10);

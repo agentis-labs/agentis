@@ -19,6 +19,7 @@ export interface CommandAgent {
   isPaused?: boolean | null;
   monthlyBudgetCents?: number | null;
   currentMonthSpendCents?: number | null;
+  spaceId?: string | null;
 }
 
 export type Readiness = 'live' | 'running' | 'standby' | 'unreachable' | 'failed';

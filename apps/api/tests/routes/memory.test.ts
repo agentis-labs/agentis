@@ -105,6 +105,12 @@ describe('/v1/memory', () => {
     expect(body.error.code).toBe('RESOURCE_NOT_FOUND');
   });
 
+  it('does not let flat entry routes shadow reserved memory subroutes', async () => {
+    const res = await app().request('/v1/memory/episodes', { headers: ctx.authHeaders });
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("memory entry 'episodes'");
+  });
+
   it('rejects unauthenticated access', async () => {
     const res = await app().request('/v1/memory');
     expect(res.status).toBe(401);

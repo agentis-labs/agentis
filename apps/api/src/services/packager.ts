@@ -41,8 +41,19 @@ export interface UsePackageResult {
   path: string;
 }
 
+import type { AppDataService } from './appDataService.js';
+import type { Logger } from '../logger.js';
+
 export class PackagerService {
-  constructor(private readonly deps: { db: AgentisSqliteDb; bus?: EventBus }) {}
+  constructor(
+    private readonly deps: {
+      db: AgentisSqliteDb;
+      bus?: EventBus;
+      /** Provisions the app's Data layer tables on install (AGENTIS-PLATFORM-10X §A1). */
+      appData?: AppDataService;
+      logger?: Logger;
+    },
+  ) {}
 
   list(scope: Pick<PackageScope, 'workspaceId'>, filters: { kind?: PackageKind; q?: string } = {}) {
     const q = filters.q?.trim();
@@ -120,6 +131,7 @@ export class PackagerService {
       workflow: {
         title: workflow.title,
         summary: workflow.summary ?? null,
+        intendedBehavior: workflow.intendedBehavior ?? null,
         graph: objectRecord(workflow.graph),
         settings: objectRecord(workflow.settings),
         maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
@@ -150,6 +162,7 @@ export class PackagerService {
       workflow: {
         title: workflow.title,
         summary: workflow.summary ?? null,
+        intendedBehavior: workflow.intendedBehavior ?? null,
         graph: objectRecord(workflow.graph),
         settings: objectRecord(workflow.settings),
         maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
@@ -529,6 +542,7 @@ export class PackagerService {
           registryVersion: null,
           title: workflow.title,
           summary: workflow.summary ?? null,
+          intendedBehavior: workflow.intendedBehavior ?? null,
           graph,
           settings: objectRecord(workflow.settings),
           maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
@@ -583,6 +597,7 @@ export class PackagerService {
         version: row.version,
         status: requiresSetup ? 'setup' : 'active',
         entryWorkflowId,
+        intendedBehavior: stringField(contents as Record<string, unknown>, ['intendedBehavior', 'summary', 'description']),
         packageContents: contents,
         credentialBindings: {},
         datasetStatuses: contents.datasetSpecs.map((spec) => ({
@@ -600,6 +615,72 @@ export class PackagerService {
         updatedAt: now,
       })
       .run();
+    // ── AGENTIS-PLATFORM-10X: 5-layer app model wiring ───────────────────
+
+    // 0. Provision the App Brain — a built-in internal agent invisible in the
+    //    workspace agent list (§Layer 4).
+    if (contents.appBrain) {
+      const brainId = randomUUID();
+      const colorHex = CONSTANTS.AGENT_COLOR_PALETTE[0];
+      this.deps.db
+        .insert(schema.agents)
+        .values({
+          id: brainId,
+          workspaceId: scope.workspaceId,
+          ambientId: scope.ambientId,
+          userId: scope.userId,
+          gatewayId: null,
+          packageId: null,
+          name: `${row.name} Brain`,
+          adapterType: contents.appBrain.adapter,
+          capabilityTags: ['app-brain'],
+          config: {
+            systemPrompt: contents.appBrain.systemPrompt,
+            entryWorkflows: contents.appBrain.entryWorkflows,
+            maxConcurrentDomains: contents.appBrain.maxConcurrentDomains,
+          },
+          status: 'offline',
+          colorHex,
+          instructions: contents.appBrain.systemPrompt,
+          avatarGlyph: null,
+          runtimeModel: null,
+          role: 'app_brain',
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+      agentIds.set('__app_brain', brainId);
+    }
+
+    // 1. Stamp every installed workflow with its owning app so `data_write`
+    //    nodes can resolve the Data layer at run time.
+    for (const wfId of new Set(workflowIds.values())) {
+      this.deps.db
+        .update(schema.workflows)
+        .set({ appId, updatedAt: now })
+        .where(eq(schema.workflows.id, wfId))
+        .run();
+    }
+    // 2. Provision the app's structured Data layer tables.
+    if (this.deps.appData && contents.dataTables && contents.dataTables.length > 0) {
+      try {
+        this.deps.appData.provisionTables(scope.workspaceId, appId, contents.dataTables);
+      } catch (err) {
+        this.deps.logger?.error('packager.data_tables_provision_failed', {
+          appId,
+          err: (err as Error).message,
+        });
+      }
+    }
+    // 3. Apply the declared deploy target.
+    if (contents.deployConfig?.target) {
+      this.deps.db
+        .update(schema.appInstances)
+        .set({ deployTarget: contents.deployConfig.target, updatedAt: now })
+        .where(eq(schema.appInstances.id, appId))
+        .run();
+    }
+
     this.deps.bus?.publish(REALTIME_ROOMS.workspace(scope.workspaceId), REALTIME_EVENTS.PACKAGE_INSTALLED, {
       packageId: row.id,
       kind: 'agentis',
@@ -633,14 +714,37 @@ export class PackagerService {
     seeds: AgentisPackageContents['knowledgeSeeds'],
     now: string,
   ): string {
+    return this.createKnowledgeBaseFromDocuments(
+      scope,
+      `${appName} Seeds`,
+      `Seed knowledge activated with ${appName}`,
+      seeds.map((seed) => ({
+        name: seed.title,
+        mimeType: 'text/markdown',
+        content: seed.content,
+        metadata: seed.metadata,
+      })),
+      now,
+      'agentis_seed',
+    );
+  }
+
+  private createKnowledgeBaseFromDocuments(
+    scope: PackageScope,
+    name: string,
+    description: string | null,
+    documents: Array<{ name: string; mimeType?: string; content: string; metadata?: Record<string, unknown> }>,
+    now: string,
+    metadataKind: string,
+  ): string {
     const knowledgeBaseId = randomUUID();
     this.deps.db
       .insert(schema.knowledgeBases)
       .values({
         id: knowledgeBaseId,
         workspaceId: scope.workspaceId,
-        name: `${appName} Seeds`,
-        description: `Seed knowledge activated with ${appName}`,
+        name,
+        description,
         embeddingModel: 'lexical-v1',
         embeddingDimension: 0,
         chunkingConfig: { maxTokens: 240, overlapTokens: 40 },
@@ -648,19 +752,19 @@ export class PackagerService {
         updatedAt: now,
       })
       .run();
-    for (const seed of seeds) {
+    for (const document of documents) {
       const documentId = randomUUID();
-      const chunks = chunkText(seed.content);
+      const chunks = chunkText(document.content);
       this.deps.db
         .insert(schema.kbDocuments)
         .values({
           id: documentId,
           knowledgeBaseId,
           workspaceId: scope.workspaceId,
-          name: seed.title,
-          mimeType: 'text/markdown',
+          name: document.name,
+          mimeType: document.mimeType ?? 'text/plain',
           status: 'ready',
-          tokenCount: tokenize(seed.content).length,
+          tokenCount: tokenize(document.content).length,
           error: null,
           archivedAt: null,
           createdAt: now,
@@ -677,7 +781,7 @@ export class PackagerService {
             workspaceId: scope.workspaceId,
             chunkIndex: index,
             content: chunk,
-            metadata: { ...seed.metadata, source: seed.title, kind: 'agentis_seed' },
+            metadata: { ...objectRecord(document.metadata), source: document.name, kind: metadataKind },
             tokenCount: tokenize(chunk).length,
             createdAt: now,
           })
@@ -769,6 +873,14 @@ function objectRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function stringField(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 function workflowOverflow(value: unknown): 'queue' | 'reject' | 'replace_oldest' | null {

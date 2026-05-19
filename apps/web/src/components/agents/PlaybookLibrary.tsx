@@ -2,6 +2,7 @@ export interface PlaybookEntry {
   id: string;
   label: string;
   glyph: string;
+  roles?: Array<'orchestrator' | 'manager' | 'worker'>;
   suggestedTags: string[];
   markdown: string;
 }

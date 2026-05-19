@@ -20,7 +20,29 @@ import { EmptyState } from '../components/shared/EmptyState';
 import { MemoryEntryRow } from '../components/knowledge/MemoryEntryRow';
 import { MemoryWriteForm } from '../components/knowledge/MemoryWriteForm';
 import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
+import { AgentChannelsTab } from '../components/agents/AgentChannelsTab';
 import type { MemoryKind } from '../components/knowledge/types';
+
+type TabKey = 'identity' | 'instructions' | 'memory' | 'runtime' | 'channels' | 'history';
+
+/** Map legacy tab values (overview / connections) onto the redesigned set. */
+function normalizeTab(raw: string | null): TabKey {
+  switch (raw) {
+    case 'overview':
+    case 'identity':
+      return 'identity';
+    case 'connections':
+    case 'runtime':
+      return 'runtime';
+    case 'instructions':
+    case 'memory':
+    case 'channels':
+    case 'history':
+      return raw;
+    default:
+      return 'identity';
+  }
+}
 
 interface AgentDetail {
   id: string;
@@ -78,6 +100,12 @@ interface RunHistoryEntry {
   finishedAt?: string;
 }
 
+interface AgentSummary {
+  id: string;
+  name: string;
+  role?: string | null;
+}
+
 function initials(name: string): string {
   const p = name.trim().split(/\s+/).filter(Boolean);
   if (p.length === 0) return '?';
@@ -103,16 +131,25 @@ export function AgentDetailPage() {
   const toast = useToast();
   const confirm = useConfirm();
   const [searchParams] = useSearchParams();
-  const tab = searchParams.get('tab') ?? 'overview';
+  const tab = normalizeTab(searchParams.get('tab'));
   const [agent, setAgent] = useState<AgentDetail | null>(null);
+  const [allAgents, setAllAgents] = useState<AgentSummary[]>([]);
+  const [allSpaces, setAllSpaces] = useState<Array<{ id: string; name: string }>>([]);
   const [loading, setLoading] = useState(true);
 
   async function refresh() {
     if (!id) return;
     setLoading(true);
     try {
-      const a = await api<{ agent: AgentDetail }>(`/v1/agents/${id}`);
-      setAgent(a.agent);
+      const [agentResult, agentsResult, spacesResult] = await Promise.allSettled([
+        api<{ agent: AgentDetail }>(`/v1/agents/${id}`),
+        api<{ agents: AgentSummary[] }>('/v1/agents'),
+        api<{ spaces: Array<{ id: string; name: string }> }>('/v1/spaces'),
+      ]);
+      if (agentResult.status === 'fulfilled') setAgent(agentResult.value.agent);
+      else setAgent(null);
+      if (agentsResult.status === 'fulfilled') setAllAgents(agentsResult.value.agents ?? []);
+      if (spacesResult.status === 'fulfilled') setAllSpaces(spacesResult.value.spaces ?? []);
     } catch { setAgent(null); }
     finally { setLoading(false); }
   }
@@ -209,52 +246,209 @@ export function AgentDetailPage() {
 
       <Tabs
         param="tab"
-        defaultValue="overview"
+        value={tab}
+        defaultValue="identity"
         tabs={[
-          { value: 'overview',     label: 'Overview' },
+          { value: 'identity',     label: 'Identity' },
           { value: 'instructions', label: 'Instructions' },
           { value: 'memory',       label: 'Memory' },
-          { value: 'connections',  label: 'Connections' },
+          { value: 'runtime',      label: 'Runtime' },
+          { value: 'channels',     label: 'Channels' },
           { value: 'history',      label: 'History' },
         ]}
         className="px-6"
       />
 
       <div className="flex-1 overflow-y-auto px-6 py-5">
-        {tab === 'overview' && <OverviewTab agent={agent} />}
+        {tab === 'identity' && <IdentityTab agent={agent} allAgents={allAgents} allSpaces={allSpaces} onChange={refresh} />}
         {tab === 'instructions' && <InstructionsTab agent={agent} />}
         {tab === 'memory' && <MemoryTab agent={agent} />}
-        {tab === 'connections' && <ConnectionsTab agent={agent} onChange={refresh} />}
+        {tab === 'runtime' && <RuntimeTab agent={agent} allAgents={allAgents} onChange={refresh} />}
+        {tab === 'channels' && <AgentChannelsTab agentId={agent.id} agentName={agent.name} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
       </div>
     </div>
   );
 }
 
-function OverviewTab({ agent }: { agent: AgentDetail }) {
+const ROLE_OPTIONS = [
+  { value: 'orchestrator', label: 'Orchestrator' },
+  { value: 'manager', label: 'Manager' },
+  { value: 'worker', label: 'Worker' },
+] as const;
+
+const IDENTITY_INPUT_CLS =
+  'w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none';
+
+/**
+ * Identity tab — who the agent is: name, role, avatar, description, and the
+ * chain-of-command placement (AGENTS-PAGE-REDESIGN.md §3.2). Technical harness
+ * and model fields live in the Runtime tab.
+ */
+function IdentityTab({
+  agent,
+  allAgents,
+  allSpaces,
+  onChange,
+}: {
+  agent: AgentDetail;
+  allAgents: AgentSummary[];
+  allSpaces: Array<{ id: string; name: string }>;
+  onChange: () => void;
+}) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [name, setName] = useState(agent.name);
+  const [role, setRole] = useState(agent.role ?? 'worker');
+  const [description, setDescription] = useState(agent.description ?? '');
+  const [reportsTo, setReportsTo] = useState(agent.reportsTo ?? '');
+  const [spaceId, setSpaceId] = useState(agent.spaceId ?? '');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setName(agent.name);
+    setRole(agent.role ?? 'worker');
+    setDescription(agent.description ?? '');
+    setReportsTo(agent.reportsTo ?? '');
+    setSpaceId(agent.spaceId ?? '');
+  }, [agent]);
+
+  const needsSupervisor = role === 'manager' || role === 'worker';
+  const dirty =
+    name.trim() !== agent.name ||
+    role !== (agent.role ?? 'worker') ||
+    description !== (agent.description ?? '') ||
+    (needsSupervisor ? reportsTo : '') !== (agent.reportsTo ?? '') ||
+    (needsSupervisor ? spaceId : '') !== (agent.spaceId ?? '');
+
+  async function save() {
+    if (!name.trim()) {
+      toast.error('Name is required');
+      return;
+    }
+    setSaving(true);
+    try {
+      const currentOrchestrator = allAgents.find((candidate) => candidate.id !== agent.id && candidate.role === 'orchestrator');
+      const replaceExistingOrchestrator = role === 'orchestrator' && Boolean(currentOrchestrator);
+      if (replaceExistingOrchestrator && currentOrchestrator) {
+        const ok = await confirm({
+          title: `Make ${agent.name} the orchestrator?`,
+          body: `${currentOrchestrator.name} is the current workspace orchestrator. This will demote ${currentOrchestrator.name} to manager and route managers to ${agent.name}.`,
+          confirmLabel: 'Make orchestrator',
+          tone: 'warn',
+        });
+        if (!ok) return;
+      }
+      await api(`/v1/agents/${agent.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: name.trim(),
+          role,
+          description: description.trim() || null,
+          reportsTo: needsSupervisor ? reportsTo || null : null,
+          spaceId: needsSupervisor ? spaceId || null : null,
+          ...(replaceExistingOrchestrator ? { replaceExistingOrchestrator: true } : {}),
+        }),
+      });
+      toast.success('Identity saved');
+      onChange();
+    } catch (err) {
+      toast.error('Could not save identity', String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <Stat label="Status" value={agent.status ?? 'offline'} />
-        <Stat label="Harness" value={harnessLabel(agentHarnessType(agent))} />
-        <Stat label="Model" value={agentRuntimeModel(agent) ?? '—'} />
-      </div>
-      {agent.description && (
-        <div className="rounded-card border border-line bg-surface p-4">
-          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Description</div>
-          <p className="text-[13px] leading-relaxed text-text-primary">{agent.description}</p>
+    <div className="max-w-xl space-y-5">
+      <div className="flex items-center gap-4">
+        <div className="h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line bg-surface-2">
+          {agent.avatarUrl ? (
+            <img src={agent.avatarUrl} alt={agent.name} className="h-full w-full object-cover" />
+          ) : (
+            <span className="flex h-full w-full items-center justify-center text-[20px] font-bold text-text-primary">
+              {agent.avatarGlyph || initials(agent.name)}
+            </span>
+          )}
         </div>
+        <div className="text-[12px] text-text-muted">
+          The avatar is set from the agent's harness glyph.
+        </div>
+      </div>
+
+      <IdentityField label="Name">
+        <input value={name} onChange={(event) => setName(event.target.value)} className={IDENTITY_INPUT_CLS} />
+      </IdentityField>
+
+      <IdentityField label="Role">
+        <div className="flex flex-wrap gap-2">
+          {ROLE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setRole(option.value)}
+              className={
+                'rounded-btn border px-3 py-1.5 text-[13px] font-medium transition-colors ' +
+                (role === option.value
+                  ? 'border-accent bg-accent-soft text-accent'
+                  : 'border-line bg-surface-2 text-text-secondary hover:border-line-strong hover:text-text-primary')
+              }
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </IdentityField>
+
+      <IdentityField label="Description" hint="Optional">
+        <textarea
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          rows={3}
+          className={IDENTITY_INPUT_CLS + ' resize-none'}
+          placeholder="What this agent is responsible for."
+        />
+      </IdentityField>
+
+      {needsSupervisor && (
+        <>
+          <IdentityField label="Reports to">
+            <select value={reportsTo} onChange={(event) => setReportsTo(event.target.value)} className={IDENTITY_INPUT_CLS}>
+              <option value="">No supervisor</option>
+              {allAgents
+                .filter((candidate) => candidate.id !== agent.id)
+                .map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>{candidate.name}</option>
+                ))}
+            </select>
+          </IdentityField>
+          <IdentityField label="Space">
+            <select value={spaceId} onChange={(event) => setSpaceId(event.target.value)} className={IDENTITY_INPUT_CLS}>
+              <option value="">No space</option>
+              {allSpaces.map((space) => (
+                <option key={space.id} value={space.id}>{space.name}</option>
+              ))}
+            </select>
+          </IdentityField>
+        </>
       )}
+
+      <Button variant="primary" size="md" iconLeft={<Save size={13} />} disabled={saving || !dirty} onClick={() => void save()}>
+        {saving ? 'Saving…' : 'Save identity'}
+      </Button>
     </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: React.ReactNode }) {
+function IdentityField({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-card border border-line bg-surface p-4">
-      <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">{label}</div>
-      <div className="mt-1 text-heading capitalize text-text-primary">{value}</div>
-    </div>
+    <label className="block">
+      <span className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+        {label}
+        {hint && <span className="font-normal normal-case tracking-normal text-text-muted">· {hint}</span>}
+      </span>
+      {children}
+    </label>
   );
 }
 
@@ -265,6 +459,22 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
   const [active, setActive] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const [newFileName, setNewFileName] = useState<string | null>(null);
+
+  function createFile() {
+    const raw = (newFileName ?? '').trim();
+    if (!raw) return;
+    const fileName = /\.[a-z0-9]+$/i.test(raw) ? raw : `${raw}.md`;
+    if (files.some((f) => f.name === fileName)) {
+      toast.error('File already exists', fileName);
+      return;
+    }
+    const created: InstructionFile = { name: fileName, content: '', source: 'platform' };
+    setFiles((arr) => [...arr, created]);
+    setActive(fileName);
+    setDraft('');
+    setNewFileName(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -315,12 +525,34 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
 
   if (files.length === 0) {
     return (
-      <EmptyState
-        icon={<FileText size={48} />}
-        title="No instruction files"
-        body="This agent's harness hasn't declared any instruction files yet. Files appear here automatically when the harness ships them."
-        variant="page"
-      />
+      <div className="mx-auto max-w-md rounded-card border border-line bg-surface px-6 py-8 text-center">
+        <FileText size={40} className="mx-auto text-text-muted" />
+        <h3 className="mt-3 text-subheading text-text-primary">No instruction files yet</h3>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-text-secondary">
+          Start by creating one — give this agent a persona, a role, or standing operating instructions.
+        </p>
+        {newFileName === null ? (
+          <Button variant="primary" size="sm" className="mt-4" onClick={() => setNewFileName('')}>
+            + Create first file
+          </Button>
+        ) : (
+          <div className="mt-4 flex items-center gap-2">
+            <input
+              autoFocus
+              value={newFileName}
+              onChange={(event) => setNewFileName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') createFile();
+                if (event.key === 'Escape') setNewFileName(null);
+              }}
+              placeholder="File name (e.g. persona.md)"
+              className="flex-1 rounded-input border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+            />
+            <Button variant="primary" size="sm" onClick={createFile}>Create</Button>
+            <Button variant="ghost" size="sm" onClick={() => setNewFileName(null)}>Cancel</Button>
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -340,11 +572,36 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
           >
             <FileText size={12} />
             <span className="flex-1 truncate font-mono">{f.name}</span>
-            {f.source === 'harness' && (
-              <span className="text-[10px] text-text-muted">harness</span>
-            )}
+            <span className="text-[10px] text-text-muted">{f.source}</span>
           </button>
         ))}
+        {newFileName === null ? (
+          <button
+            type="button"
+            onClick={() => setNewFileName('')}
+            className="flex w-full items-center gap-2 rounded-md border border-dashed border-line px-2.5 py-2 text-left text-[13px] text-text-muted transition-colors hover:border-line-strong hover:text-text-primary"
+          >
+            <FileText size={12} /> + New file
+          </button>
+        ) : (
+          <div className="space-y-1.5 rounded-md border border-line bg-surface-2 p-2">
+            <input
+              autoFocus
+              value={newFileName}
+              onChange={(event) => setNewFileName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') createFile();
+                if (event.key === 'Escape') setNewFileName(null);
+              }}
+              placeholder="persona.md"
+              className="w-full rounded-input border border-line bg-surface px-2 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+            />
+            <div className="flex gap-1.5">
+              <Button variant="primary" size="sm" onClick={createFile}>Create</Button>
+              <Button variant="ghost" size="sm" onClick={() => setNewFileName(null)}>Cancel</Button>
+            </div>
+          </div>
+        )}
       </aside>
 
       {activeFile && (
@@ -470,7 +727,11 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
   );
 }
 
-function ConnectionsTab({ agent, onChange }: { agent: AgentDetail; onChange: () => void }) {
+/**
+ * Runtime tab — how the agent connects to a harness, its model, capability
+ * tags, budget, and supervisor (AGENTS-PAGE-REDESIGN.md §3.4).
+ */
+function RuntimeTab({ agent, allAgents, onChange }: { agent: AgentDetail; allAgents: AgentSummary[]; onChange: () => void }) {
   return (
     <AgentConfigPanel
       agent={{
@@ -489,8 +750,9 @@ function ConnectionsTab({ agent, onChange }: { agent: AgentDetail; onChange: () 
         currentMonthSpendCents: agent.currentMonthSpendCents ?? null,
         config: agent.config ?? agent.adapter?.config ?? null,
         reportsTo: agent.reportsTo ?? null,
+        spaceId: agent.spaceId ?? null,
       }}
-      allAgents={[]}
+      allAgents={allAgents}
       onSaved={onChange}
     />
   );

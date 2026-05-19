@@ -82,7 +82,7 @@ export function buildRunRoutes(deps: {
 function normalizeRunStatus(status: string | undefined): string[] {
   const value = status?.trim().toUpperCase();
   if (!value) return [];
-  if (value === 'ACTIVE') return ['CREATED', 'PLANNING', 'RUNNING', 'WAITING'];
+  if (value === 'ACTIVE') return ['RUNNING'];
   if (value === 'PENDING') return ['CREATED', 'PLANNING', 'WAITING'];
   const allowed = new Set(['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'COMPLETED', 'FAILED', 'CANCELLED']);
   return allowed.has(value) ? [value] : [];

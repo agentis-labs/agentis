@@ -12,7 +12,7 @@ export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | '
 
 export type ActivityActorType = 'user' | 'agent' | 'gateway' | 'system' | 'hub';
 
-export type AgentStatus = 'online' | 'busy' | 'offline' | 'error';
+export type AgentStatus = 'online' | 'busy' | 'offline' | 'error' | 'paused' | 'setting_up';
 
 export interface AuthenticatedUser {
   id: string;

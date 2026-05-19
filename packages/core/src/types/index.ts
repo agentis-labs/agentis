@@ -12,4 +12,5 @@ export * from './retrieval.js';
 export * from './baseline.js';
 export * from './appGraph.js';
 export * from './brain.js';
+export * from './ability.js';
 export * from './telemetry.js';

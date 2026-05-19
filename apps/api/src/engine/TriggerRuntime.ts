@@ -17,15 +17,18 @@
  */
 
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
-import { CONSTANTS, AgentisError, type WorkflowGraph } from '@agentis/core';
+import { eq } from 'drizzle-orm';
+import { CONSTANTS, AgentisError, REALTIME_EVENTS, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
+import type { EventBus } from '../event-bus.js';
 import type { ActiveWorkflowRegistry, ActiveTrigger } from './ActiveWorkflowRegistry.js';
 import type { WorkflowEngine } from './WorkflowEngine.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
+import { type JobQueueBackend, shouldQueueWorkflowRun } from '../services/jobQueue.js';
 import { buildInitialRunState } from './initialRunState.js';
+import { evalCondition } from './SafeConditionParser.js';
 
 interface CronLib {
   schedule(expression: string, callback: () => void, options?: { scheduled?: boolean; timezone?: string }): {
@@ -57,13 +60,26 @@ export interface TriggerRuntimeDeps {
   registry: ActiveWorkflowRegistry;
   engine: WorkflowEngine;
   adapters: AdapterManager;
+  bus: EventBus;
+  /**
+   * Durable job queue. When wired, long-running / human-gated workflow runs
+   * are enqueued (and survive a server restart) instead of dispatched inline.
+   */
+  jobQueue?: JobQueueBackend;
 }
 
 export class TriggerRuntime {
+  /** Live `data_event` triggers keyed by triggerId. */
+  readonly #dataTriggers = new Map<string, ActiveTrigger>();
+  /** Live `workflow_completed` triggers keyed by triggerId. */
+  readonly #workflowTriggers = new Map<string, ActiveTrigger>();
+  #busBound = false;
+
   constructor(private readonly deps: TriggerRuntimeDeps) {}
 
   /** Rehydrate every active trigger from DB on boot. */
   async hydrate(): Promise<void> {
+    this.#bindBus();
     const active = this.deps.registry.loadActiveFromDb();
     for (const t of active) {
       try {
@@ -76,6 +92,7 @@ export class TriggerRuntime {
 
   /** Activate a trigger row. Idempotent — re-activating replaces the cleanup. */
   async activate(t: ActiveTrigger): Promise<void> {
+    this.#bindBus();
     await this.deps.registry.deactivate(t.triggerId).catch(() => {});
     switch (t.triggerType) {
       case 'cron':
@@ -89,8 +106,138 @@ export class TriggerRuntime {
       case 'persistent_listener':
         await this.#activatePersistentListener(t);
         return;
+      case 'data_event':
+        this.#activateDataEvent(t);
+        return;
+      case 'workflow_completed':
+        this.#activateWorkflowCompleted(t);
+        return;
       case 'manual':
         return; // no runtime resources
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // Cross-workflow event triggers (AGENTIS-PLATFORM-10X §A2, §A3)
+  // ─────────────────────────────────────────────
+
+  /** Subscribe (once) to the event bus for data + workflow-completion events. */
+  #bindBus(): void {
+    if (this.#busBound) return;
+    this.#busBound = true;
+    this.deps.bus.subscribe((msg) => {
+      const event = msg.envelope.event;
+      if (event === REALTIME_EVENTS.DATA_RECORD_CHANGED) {
+        this.#onDataRecordChanged(msg.envelope.payload);
+      } else if (
+        event === REALTIME_EVENTS.APP_WORKFLOW_COMPLETED ||
+        event === REALTIME_EVENTS.APP_WORKFLOW_FAILED
+      ) {
+        // Only react once — handle on the workspace room, ignore the app room
+        // duplicate so the workflow doesn't fire twice.
+        if (msg.room.startsWith('workspace:')) {
+          this.#onWorkflowFinished(
+            event === REALTIME_EVENTS.APP_WORKFLOW_COMPLETED ? 'COMPLETED' : 'FAILED',
+            msg.envelope.payload,
+          );
+        }
+      }
+    });
+  }
+
+  #activateDataEvent(t: ActiveTrigger): void {
+    // Resolve and cache the owning app so cross-app tables with the same name
+    // don't cross-fire.
+    const wf = this.deps.db
+      .select({ appId: schema.workflows.appId })
+      .from(schema.workflows)
+      .where(eq(schema.workflows.id, t.workflowId))
+      .get();
+    const enriched: ActiveTrigger = {
+      ...t,
+      config: { ...t.config, __appId: wf?.appId ?? (t.config as { appId?: string }).appId ?? null },
+    };
+    this.#dataTriggers.set(t.triggerId, enriched);
+    this.deps.registry.activate(t, async () => {
+      this.#dataTriggers.delete(t.triggerId);
+    });
+  }
+
+  #activateWorkflowCompleted(t: ActiveTrigger): void {
+    this.#workflowTriggers.set(t.triggerId, t);
+    this.deps.registry.activate(t, async () => {
+      this.#workflowTriggers.delete(t.triggerId);
+    });
+  }
+
+  #onDataRecordChanged(payload: unknown): void {
+    const p = payload as {
+      appId?: string;
+      table?: string;
+      event?: string;
+      record?: Record<string, unknown>;
+    } | null;
+    if (!p?.table || !p.event) return;
+    for (const t of this.#dataTriggers.values()) {
+      const cfg = t.config as {
+        table?: string;
+        event?: string;
+        filter?: string;
+        __appId?: string | null;
+      };
+      if (cfg.table !== p.table) continue;
+      if (cfg.__appId && p.appId && cfg.__appId !== p.appId) continue;
+      const wantEvent = cfg.event ?? 'any';
+      if (wantEvent !== 'any' && wantEvent !== p.event) continue;
+      if (cfg.filter && p.record) {
+        try {
+          if (!evalCondition(cfg.filter, { ...p.record, record: p.record })) continue;
+        } catch {
+          continue;
+        }
+      }
+      void this.fire({
+        trigger: t,
+        payload: {
+          firedAt: new Date().toISOString(),
+          event: p.event,
+          table: p.table,
+          record: p.record ?? {},
+          ...(p.record ?? {}),
+        },
+      }).catch((err) =>
+        this.deps.logger.error('trigger.data_event_fire_failed', {
+          triggerId: t.triggerId,
+          err: (err as Error).message,
+        }),
+      );
+    }
+  }
+
+  #onWorkflowFinished(status: 'COMPLETED' | 'FAILED', payload: unknown): void {
+    const p = payload as { workflowId?: string; runId?: string } | null;
+    if (!p?.workflowId) return;
+    for (const t of this.#workflowTriggers.values()) {
+      const cfg = t.config as { sourceWorkflowId?: string; sourceStatus?: string };
+      if (cfg.sourceWorkflowId && cfg.sourceWorkflowId !== p.workflowId) continue;
+      // Never let a workflow re-trigger itself.
+      if (p.workflowId === t.workflowId) continue;
+      const wantStatus = cfg.sourceStatus ?? 'COMPLETED';
+      if (wantStatus !== 'any' && wantStatus !== status) continue;
+      void this.fire({
+        trigger: t,
+        payload: {
+          firedAt: new Date().toISOString(),
+          sourceWorkflowId: p.workflowId,
+          sourceRunId: p.runId ?? null,
+          sourceStatus: status,
+        },
+      }).catch((err) =>
+        this.deps.logger.error('trigger.workflow_completed_fire_failed', {
+          triggerId: t.triggerId,
+          err: (err as Error).message,
+        }),
+      );
     }
   }
 
@@ -145,51 +292,88 @@ export class TriggerRuntime {
 
   /** Common fire path → create run + start engine. */
   async fire(args: { trigger: ActiveTrigger; payload: Record<string, unknown> }): Promise<{ runId: string }> {
+    const result = await this.startWorkflowRun({
+      workflowId: args.trigger.workflowId,
+      workspaceId: args.trigger.workspaceId,
+      ambientId: args.trigger.ambientId,
+      userId: args.trigger.userId,
+      triggerId: args.trigger.triggerId,
+      inputs: args.payload,
+    });
+    this.deps.db
+      .update(schema.triggers)
+      .set({ lastFiredAt: new Date().toISOString() })
+      .where(eq(schema.triggers.id, args.trigger.triggerId))
+      .run();
+    return result;
+  }
+
+  /**
+   * Start a workflow run directly. Used by triggers, the App API surface, and
+   * the webhook receiver — every entry point converges here so run creation
+   * stays uniform.
+   */
+  async startWorkflowRun(args: {
+    workflowId: string;
+    workspaceId: string;
+    ambientId: string | null;
+    userId: string;
+    triggerId?: string | null;
+    inputs: Record<string, unknown>;
+    /**
+     * Dispatch mode. `auto` (default) queues the run when the graph has
+     * long-running / human-gated nodes; `async` always queues; `inline`
+     * never queues.
+     */
+    dispatchMode?: 'auto' | 'inline' | 'async';
+  }): Promise<{ runId: string; queued: boolean }> {
     const workflow = this.deps.db
       .select()
       .from(schema.workflows)
-      .where(eq(schema.workflows.id, args.trigger.workflowId))
+      .where(eq(schema.workflows.id, args.workflowId))
       .get();
-    if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${args.trigger.workflowId} missing`);
+    if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${args.workflowId} missing`);
     const graph = workflow.graph as WorkflowGraph;
     const runId = randomUUID();
     const initialState = buildInitialRunState({
       runId,
       workflowId: workflow.id,
       graph,
-      inputs: args.payload,
+      inputs: args.inputs,
     });
     this.deps.db
       .insert(schema.workflowRuns)
       .values({
         id: runId,
-        workspaceId: args.trigger.workspaceId,
-        ambientId: args.trigger.ambientId,
+        workspaceId: args.workspaceId,
+        ambientId: args.ambientId,
         workflowId: workflow.id,
-        userId: args.trigger.userId,
+        userId: args.userId,
         status: 'CREATED',
         runState: initialState as unknown as object,
         replanCount: 0,
-        triggerId: args.trigger.triggerId,
+        triggerId: args.triggerId ?? null,
         parentRunId: null,
       })
       .run();
-    this.deps.db
-      .update(schema.triggers)
-      .set({ lastFiredAt: new Date().toISOString() })
-      .where(eq(schema.triggers.id, args.trigger.triggerId))
-      .run();
-    await this.deps.engine.startRun({
-      workspaceId: args.trigger.workspaceId,
-      ambientId: args.trigger.ambientId,
+    const payload = {
+      workspaceId: args.workspaceId,
+      ambientId: args.ambientId,
       workflowId: workflow.id,
-      userId: args.trigger.userId,
-      triggerId: args.trigger.triggerId,
-      inputs: args.payload,
+      userId: args.userId,
+      triggerId: args.triggerId ?? null,
+      inputs: args.inputs,
       initialState,
       graph,
-    });
-    return { runId };
+    };
+    // Durable dispatch: long-running / human-gated graphs go through the
+    // queue so they survive a server restart. Everything else runs inline.
+    if (this.deps.jobQueue && shouldQueueWorkflowRun(graph, args.dispatchMode ?? 'auto')) {
+      await this.deps.jobQueue.enqueueWorkflowRun(payload);
+      return { runId, queued: true };
+    }
+    await this.deps.engine.startRun(payload);
+    return { runId, queued: false };
   }
 
   // ─────────────────────────────────────────────

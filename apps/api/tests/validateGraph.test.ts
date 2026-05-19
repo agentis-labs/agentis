@@ -69,4 +69,27 @@ describe('validateWorkflowGraph', () => {
     const g = graph([{ id: 'a' }], [{ id: 'e1', source: 'a', target: 'a' }]);
     expect(() => validateWorkflowGraph(g)).toThrow(/cycle/i);
   });
+
+  it('rejects a subflow node that calls the same workflow', () => {
+    const g: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        {
+          id: 'self',
+          type: 'subflow',
+          title: 'Self',
+          position: { x: 0, y: 0 },
+          config: {
+            kind: 'subflow',
+            workflowId: 'wf-self',
+            inputMapping: {},
+            outputMapping: {},
+          },
+        },
+      ],
+      edges: [],
+    };
+    expect(() => validateWorkflowGraph(g, { currentWorkflowId: 'wf-self' })).toThrow(/own workflow/i);
+  });
 });

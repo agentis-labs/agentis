@@ -33,6 +33,21 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.ephemeral.run',
+    description:
+      'Run a temporary workflow graph once without saving it to the workflow library. Use for exploratory one-off automations after the operator confirms the graph or intent. Returns the ephemeral runId and stream URL. The run can be promoted later if it proves useful.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short label for the temporary run.' },
+        graph: { type: 'object', description: 'Agentis WorkflowGraph JSON to execute once. Trigger nodes are stripped before execution.' },
+        inputs: { type: 'object', description: 'Initial input object for root nodes.' },
+        maxDurationMs: { type: 'number', description: 'Execution cap in milliseconds, max 300000.' },
+      },
+      required: ['graph'],
+    },
+  },
+  {
     name: 'agentis.workflow.status',
     description:
       'Get the current execution status of a workflow run. Use this when the user asks about ' +
@@ -72,7 +87,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
-    name: 'agentis.workflow.cancel',
+    name: 'agentis.run.cancel',
     description:
       'Cancel a running workflow run by runId. Use this when the user explicitly asks to stop, cancel, or abort a run. Returns the cancelled runId and status.',
     parameters: {
@@ -312,6 +327,97 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
 
   // ─── Decisions & Approvals ───────────────────────────────────────────────
   {
+    name: 'agentis.brain.search',
+    description:
+      'Search the Brain for durable learned atoms from prior runs. Use when the current answer needs remembered patterns, facts, or operator-taught rules.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural-language query for the memory you need.' },
+        scope: { type: 'string', enum: ['workspace', 'app', 'both'], description: 'Search workspace, current app, or both. Default both.' },
+        limit: { type: 'number', description: 'Maximum atoms to return. Default 5.' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'agentis.brain.add',
+    description:
+      'Teach the Brain a durable fact, rule, or pattern. Use for important user preferences or lessons that should affect future turns.',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'The fact, rule, preference, or pattern to remember.' },
+        title: { type: 'string', description: 'Optional short label.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional semantic tags.' },
+        confidence: { type: 'number', description: '0-1 confidence. Default 0.72.' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'agentis.brain.summarize',
+    description:
+      'Get Brain health and capacity status for this workspace/app/session. Use when deciding whether memory needs review or compression.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'agentis.brain.refresh',
+    description:
+      'Reload Brain context for the current topic. Call when the conversation has shifted domain or after a long thread.',
+    parameters: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Why fresh context is needed.' },
+        query: { type: 'string', description: 'Optional topic query. Defaults to reason/current topic.' },
+      },
+    },
+  },
+  {
+    name: 'agentis.brain.preload',
+    description:
+      'Proactively surface relevant Brain context before starting a complex task. Returns ranked atoms, peer context, suggested abilities, and possible unknown gaps.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskDescription: { type: 'string', description: 'Upcoming task or opening topic.' },
+        peerId: { type: 'string', description: 'Optional peer/user id for person-specific context.' },
+        appId: { type: 'string', description: 'Optional app scope.' },
+        limit: { type: 'number', description: 'Maximum atoms to return. Default 5.' },
+      },
+      required: ['taskDescription'],
+    },
+  },
+  {
+    name: 'agentis.brain.forget',
+    description:
+      'Selective forgetting cascade for a topic across Brain atoms, peer memory, and abilities. Defaults to dryRun=true; execute only after explicit operator confirmation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        topic: { type: 'string', description: 'Topic, person, project, or entity to forget.' },
+        scope: { type: 'string', enum: ['atoms', 'peer_conclusions', 'abilities', 'all'], description: 'Memory layers to include. Default all.' },
+        dryRun: { type: 'boolean', description: 'When true, returns matches without archiving. Default true.' },
+        confirmRequestId: { type: 'string', description: 'Required when dryRun=false. Use the id returned by the prior dry run.' },
+        limit: { type: 'number', description: 'Maximum matches per layer. Default 25.' },
+      },
+      required: ['topic'],
+    },
+  },
+  {
+    name: 'agentis.session.search',
+    description:
+      'Search prior workflow ledger events and conversation messages. Use for cross-session recall like "what did we try last week?".',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search terms or natural-language query.' },
+        limit: { type: 'number', description: 'Maximum hits. Default 10.' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'agentis.approval.list',
     description:
       'List pending approvals waiting for operator decision in the workspace. Use this when ' +
@@ -446,6 +552,87 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         },
       },
       required: ['description'],
+    },
+  },
+  {
+    name: 'agentis.app.create',
+    description:
+      'Create a deployed Agentis app from a natural-language goal. Use this after the operator confirms an app plan. ' +
+      'If workflowId is omitted, the tool creates a sensible entry workflow and app canvas automatically.',
+    parameters: {
+      type: 'object',
+      properties: {
+        goal: {
+          type: 'string',
+          description: 'What the app should do for the operator.',
+        },
+        name: {
+          type: 'string',
+          description: 'Human-facing app name.',
+        },
+        description: {
+          type: 'string',
+          description: 'One-line app description.',
+        },
+        workflowId: {
+          type: 'string',
+          description: 'Optional existing workflow ID to use as the app entry workflow.',
+        },
+      },
+      required: ['goal'],
+    },
+  },
+  {
+    name: 'agentis.app.compose',
+    description:
+      'Complete or update an existing draft Agentis app. Use this during the app builder flow after the operator describes what the app should do. ' +
+      'Updates the app identity, surfaces, entry workflow, worker agents, and app canvas instead of creating a duplicate app.',
+    parameters: {
+      type: 'object',
+      properties: {
+        appId: {
+          type: 'string',
+          description: 'Existing draft app id to complete.',
+        },
+        slug: {
+          type: 'string',
+          description: 'Existing draft app slug if appId is unavailable.',
+        },
+        goal: {
+          type: 'string',
+          description: 'What the app should do for the operator.',
+        },
+        name: {
+          type: 'string',
+          description: 'Updated human-facing app name.',
+        },
+        description: {
+          type: 'string',
+          description: 'One-line app description.',
+        },
+        workflowId: {
+          type: 'string',
+          description: 'Optional existing workflow ID to use as the app entry workflow.',
+        },
+        workflowTitle: {
+          type: 'string',
+          description: 'Title for a generated entry workflow when workflowId is omitted.',
+        },
+        surfaces: {
+          type: 'array',
+          description: 'Declared app surfaces such as thread, dashboard, api, webhook_receiver, stream, artifact, page, or embed.',
+          items: { type: 'object' },
+        },
+        agents: {
+          type: 'array',
+          description: 'Optional worker agents to create for this app. Each item may include name, description, role, adapterType, capabilityTags, and instructions.',
+          items: { type: 'object' },
+        },
+        appGraph: {
+          type: 'object',
+          description: 'Optional complete App Canvas graph. If omitted, Agentis creates a compact entry workflow to output graph.',
+        },
+      },
     },
   },
   {
@@ -610,6 +797,45 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         },
       },
       required: ['spaceId'],
+    },
+  },
+
+  // ─── Apps Output surface (APP-OUTPUT-REPLAN.md §10) ─────────────────────
+  {
+    name: 'agentis.apps.run_status',
+    description:
+      'Cross-app run status overview. Use at /chat when the operator asks "what are all my apps doing?" or wants a fleet view. Returns one row per installed app with current run status, last result summary, and 7-day run count. Different from agentis.apps.status (which checks gateway connectivity).',
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'string',
+          description: 'Maximum apps to return (default 50, max 200).',
+        },
+      },
+    },
+  },
+  {
+    name: 'agentis.app.thread.open',
+    description:
+      "Hand off the operator from /chat to a specific App Thread. Use when the operator's intent at /chat names or implies one specific app (e.g. 'reschedule the demo' → CRM app). The chat surface receives this tool result and navigates the operator to the App Thread, pre-filling the composer with the carried message. Does NOT mutate state — only signals navigation.",
+    parameters: {
+      type: 'object',
+      properties: {
+        appSlug: {
+          type: 'string',
+          description: 'Slug or id of the target installed app.',
+        },
+        carriedMessage: {
+          type: 'string',
+          description: "The operator's original message to pre-fill in the App Thread composer.",
+        },
+        reason: {
+          type: 'string',
+          description: 'Short explanation displayed at /chat before navigation.',
+        },
+      },
+      required: ['appSlug'],
     },
   },
 ];

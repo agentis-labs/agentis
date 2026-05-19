@@ -23,13 +23,13 @@ interface PaletteEntry {
 
 const PALETTE: PaletteEntry[] = [
   { type: 'app_core',            label: 'App core',           hint: 'Anchors this app',                   icon: Sparkles, zone: 'core' },
-  { type: 'entry_workflow',      label: 'Entry workflow',     hint: 'Runs when this app is triggered',    icon: Workflow, zone: 'core' },
+  { type: 'entry_workflow',      label: 'Trigger',            hint: 'What starts this app',               icon: Workflow, zone: 'core' },
   { type: 'workflow_module',     label: 'Workflow',           hint: 'A connected workflow',               icon: Layers,   zone: 'core' },
-  { type: 'agent_group',         label: 'Agent team',         hint: 'Agents that do the work',            icon: Users,    zone: 'core' },
-  { type: 'knowledge_source',    label: 'Data source',        hint: 'Data this app reads and learns from',icon: BookOpen, zone: 'inputs' },
+  { type: 'agent_group',         label: 'Team',               hint: 'The agents doing the work',          icon: Users,    zone: 'core' },
+  { type: 'knowledge_source',    label: 'Knowledge',          hint: 'Information this app reads from',    icon: BookOpen, zone: 'inputs' },
   { type: 'memory_surface',      label: 'Memory',             hint: 'What this app remembers',            icon: Brain,    zone: 'core' },
-  { type: 'integration_surface', label: 'Integration',        hint: 'A connected external tool',          icon: Cable,    zone: 'inputs' },
-  { type: 'approval_surface',    label: 'Approval',           hint: 'A point where a human reviews',      icon: ShieldCheck, zone: 'core' },
+  { type: 'integration_surface', label: 'Connection',         hint: 'An external account or tool',        icon: Cable,    zone: 'inputs' },
+  { type: 'approval_surface',    label: 'Checkpoint',         hint: 'Pause here for human review',        icon: ShieldCheck, zone: 'core' },
   { type: 'output_surface',      label: 'Output',             hint: 'Something this app produces',        icon: Target,   zone: 'outputs' },
   { type: 'scheduler',           label: 'Schedule',           hint: 'Runs on a recurring schedule',       icon: Clock,    zone: 'inputs' },
   { type: 'channel_surface',     label: 'Channel',            hint: 'Inbound or outbound communication',  icon: Megaphone,zone: 'outputs' },

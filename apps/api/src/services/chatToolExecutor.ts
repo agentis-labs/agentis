@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { ChatTurnContext } from '@agentis/core';
+import type { AgentisToolDefinition, ChatTurnContext } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { AgentisToolRegistry } from './agentisToolRegistry.js';
 
@@ -21,6 +21,14 @@ export class ChatToolExecutor {
 
   static configure(deps: ChatToolExecutorDeps | null): void {
     this.#deps = deps;
+  }
+
+  static definition(name: string): AgentisToolDefinition | undefined {
+    return this.#deps?.registry.get(name);
+  }
+
+  static requiresConfirmation(name: string): boolean {
+    return Boolean(this.definition(name)?.mutating);
   }
 
   /**

@@ -14,9 +14,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Search, AlertTriangle, CircleDashed } from 'lucide-react';
+import { Search, AlertTriangle, CircleDashed, ArrowUpRight } from 'lucide-react';
 import { REALTIME_EVENTS, type BrainGraph, type BrainNode, type BrainResponse } from '@agentis/core';
-import { api } from '../../lib/api';
+import { api, workspace as workspaceStore } from '../../lib/api';
 import { rtSubscribe, useRealtime } from '../../lib/realtime';
 import { Skeleton } from '../shared/Skeleton';
 import { useToast } from '../shared/Toast';
@@ -24,11 +24,18 @@ import { BrainStage } from './BrainStage';
 import { BrainFlowMode } from './BrainFlowMode';
 import { BrainLedgerMode } from './BrainLedgerMode';
 import { BrainDetailRail } from './BrainDetailRail';
+import { BrainConfigWizard } from './BrainConfigWizard';
 import { EmptyBrainStage } from './EmptyBrainStage';
 import { graphToBrainNodes } from './brainGraphAdapter';
 
 type Mode = 'map' | 'flow' | 'ledger';
 type LayerFilter = 'all' | 'knowledge' | 'memory' | 'judgment';
+
+interface IntelligenceConfig {
+  embeddingProviderType: string;
+  degraded: boolean;
+  migration: unknown;
+}
 
 interface BrainViewProps {
   /** When set, loads /v1/apps/:slug/brain. When null, loads /v1/brain (global). */
@@ -47,10 +54,38 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
   const [showWarnings, setShowWarnings] = useState(true);
   const [showGaps, setShowGaps] = useState(true);
   const [livePulse, setLivePulse] = useState(0);
+  const [intelligence, setIntelligence] = useState<IntelligenceConfig | null>(null);
+  const [showFirstSetup, setShowFirstSetup] = useState(() => !readFirstSetupDone());
   const toast = useToast();
 
   const brainUrl = slug ? `/v1/apps/${slug}/brain` : `/v1/brain`;
   const graphUrl = slug ? `/v1/apps/${slug}/brain/graph` : `/v1/brain/graph`;
+
+  const reloadBrain = useCallback(async (showLoader = false) => {
+    if (showLoader) {
+      setLoading(true);
+      setSelectedId(null);
+      setGraph(null);
+    }
+    try {
+      const [brain, graphResponse] = await Promise.all([
+        api<BrainResponse>(brainUrl),
+        api<{ graph: BrainGraph }>(graphUrl),
+      ]);
+      if (!slug) {
+        api<IntelligenceConfig>('/v1/workspace/intelligence')
+          .then(setIntelligence)
+          .catch(() => {});
+      }
+      setData(brain);
+      setGraph(graphResponse.graph);
+    } catch (e) {
+      toast.error('Failed to load Brain', String(e));
+    } finally {
+      if (showLoader) setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brainUrl, graphUrl]);
 
   const reloadGraph = useCallback(() => {
     void api<{ graph: BrainGraph }>(graphUrl)
@@ -59,28 +94,31 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
   }, [graphUrl]);
 
   useEffect(() => {
-    setLoading(true);
-    setSelectedId(null);
-    setGraph(null);
-    void Promise.all([
-      api<BrainResponse>(brainUrl),
-      api<{ graph: BrainGraph }>(graphUrl),
-    ])
-      .then(([brain, graphResponse]) => {
-        setData(brain);
-        setGraph(graphResponse.graph);
-      })
-      .catch((e) => toast.error('Failed to load Brain', String(e)))
-      .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brainUrl, graphUrl]);
+    void reloadBrain(true);
+  }, [reloadBrain]);
 
   useEffect(() => rtSubscribe('workspace', {}), []);
+
+  // Atoms can be removed elsewhere (deleting a document, archiving in another
+  // tab) — there is no realtime "deleted" event, so refetch whenever the page
+  // regains focus to drop stale nodes from the canvas.
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') reloadGraph(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [reloadGraph]);
 
   useRealtime([
     REALTIME_EVENTS.BRAIN_ATOM_CREATED,
     REALTIME_EVENTS.BRAIN_ATOM_REINFORCED,
     REALTIME_EVENTS.BRAIN_LINK_CREATED,
+    REALTIME_EVENTS.BRAIN_CONFIG_DEGRADED,
+    REALTIME_EVENTS.BRAIN_EMBEDDING_MIGRATION_STARTED,
+    REALTIME_EVENTS.BRAIN_EMBEDDING_MIGRATION_COMPLETED,
   ], (env) => {
     const payload = env.payload as { appId?: string | null } | null;
     if (slug && graph?.meta.appId && payload?.appId && payload.appId !== graph.meta.appId) return;
@@ -122,6 +160,7 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
   const isEmptyBrain = data
     ? data.layers.knowledge.length === 0 && data.layers.memory.length === 0 && data.layers.judgment.length === 0
     : false;
+  const shouldShowInlineSetup = !slug && showFirstSetup && Boolean(intelligence?.degraded);
 
   if (loading) {
     return (
@@ -137,25 +176,26 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
 
   return (
     <div className="flex h-full flex-col">
+      {shouldShowInlineSetup && (
+        <div className="max-h-[72vh] overflow-y-auto border-b border-line bg-surface-2/25">
+          <BrainConfigWizard
+            embedded
+            onFinished={() => {
+              writeFirstSetupDone();
+              setShowFirstSetup(false);
+              void reloadBrain(false);
+            }}
+          />
+        </div>
+      )}
       {/* Stat rail + mode switcher */}
       <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-3">
-        <Stat label="Knowledge" value={data.stats.knowledgeNodes} />
-        <Stat label="Memory" value={data.stats.memoryNodes} />
-        <Stat label="Evaluators+Baselines" value={data.stats.evaluatorNodes} />
-        <Stat
-          label="Baseline"
-          value={
-            data.stats.baselineConfidence != null
-              ? `${Math.round(data.stats.baselineConfidence * 100)}%`
-              : '—'
-          }
+        <BrainStatsSentence
+          stats={data.stats}
+          linkCount={graph?.meta.linkCount ?? data.edges.length}
+          live={livePulse > 0}
+          onManage={onManage ?? (() => { window.location.href = '/brain?tab=documents'; })}
         />
-        {data.stats.staleSources > 0 && (
-          <Stat label="Stale" value={data.stats.staleSources} tone="warn" />
-        )}
-        {graph && (
-          <Stat label="Links" value={graph.meta.linkCount} tone={livePulse > 0 ? 'live' : undefined} />
-        )}
         <div className="ml-auto flex items-center gap-2">
           <SearchBox
             value={search}
@@ -213,8 +253,8 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
             isEmptyBrain ? (
               <EmptyBrainStage
                 scope={slug ? 'app' : 'workspace'}
-                actionLabel={slug ? 'Go to Manage' : 'Open Knowledge Hub'}
-                onAction={onManage ?? (() => { window.location.href = '/knowledge'; })}
+                actionLabel={slug ? 'Add knowledge' : 'Open Knowledge Hub'}
+                onAction={onManage ?? (() => { window.location.href = '/brain?tab=documents'; })}
               />
             ) : (
               <BrainStage
@@ -224,6 +264,7 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
                 onSelect={setSelectedId}
                 filters={{ showWarnings, showGaps, layerFilter }}
                 livePulse={livePulse}
+                layoutKey={slug ?? 'workspace'}
               />
             )
           )}
@@ -238,24 +279,77 @@ export function BrainView({ slug, onManage }: BrainViewProps) {
           brain={data}
           node={selectedNode}
           appSlug={slug}
+          candidateNodes={allNodes}
+          detailPath={selectedId ? `${graphUrl}/node/${encodeURIComponent(selectedId)}` : null}
+          linkPath={slug ? `/v1/apps/${slug}/brain/links` : '/v1/brain/links'}
+          atomPathBase={slug ? `/v1/apps/${slug}/brain/atoms` : '/v1/brain/atoms'}
+          onClose={() => setSelectedId(null)}
+          onGraphChanged={() => reloadBrain(false)}
+          onArchived={() => {
+            setSelectedId(null);
+            return reloadBrain(false);
+          }}
         />
       </div>
     </div>
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: string | number; tone?: 'warn' | 'live' }) {
+function BrainStatsSentence({
+  stats,
+  linkCount,
+  live,
+  onManage,
+}: {
+  stats: BrainResponse['stats'];
+  linkCount: number;
+  live: boolean;
+  onManage: () => void;
+}) {
+  const parts = [
+    `${stats.knowledgeNodes} ${plural(stats.knowledgeNodes, 'knowledge', 'knowledge')}`,
+    `${stats.memoryNodes} ${plural(stats.memoryNodes, 'memory', 'memories')}`,
+    `${linkCount} ${plural(linkCount, 'link', 'links')}`,
+  ];
+  if (stats.staleSources > 0) parts.push(`${stats.staleSources} stale`);
+  if (stats.baselineConfidence != null) parts.push(`${Math.round(stats.baselineConfidence * 100)}% baseline confidence`);
+
   return (
-    <div className="rounded-card border border-line bg-bg-base px-2.5 py-1.5">
-      <div className={[
-        'text-[14px] font-semibold leading-tight',
-        tone === 'warn' ? 'text-amber-300' : tone === 'live' ? 'text-cyan-300' : 'text-text-primary',
-      ].join(' ')}>
-        {value}
-      </div>
-      <div className="text-[10px] uppercase tracking-wider text-text-muted">{label}</div>
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-[13px] text-text-secondary">
+      <span className={live ? 'text-cyan-200' : 'text-text-secondary'}>{parts.join(' - ')}</span>
+      <button
+        type="button"
+        onClick={onManage}
+        className="inline-flex items-center gap-1 rounded-btn px-1.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary"
+      >
+        Open knowledge <ArrowUpRight size={11} />
+      </button>
     </div>
   );
+}
+
+function plural(count: number, singular: string, pluralValue: string): string {
+  return count === 1 ? singular : pluralValue;
+}
+
+function firstSetupKey(): string {
+  return `agentis.brain.firstSetupDone:${workspaceStore.get() ?? 'default'}`;
+}
+
+function readFirstSetupDone(): boolean {
+  try {
+    return localStorage.getItem(firstSetupKey()) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeFirstSetupDone(): void {
+  try {
+    localStorage.setItem(firstSetupKey(), '1');
+  } catch {
+    // Ignore storage failures; the health banner remains the durable nudge.
+  }
 }
 
 function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {

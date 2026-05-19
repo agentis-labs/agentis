@@ -21,6 +21,7 @@ export const workflowContentsSchema = z.object({
   slug: z.string().min(1).optional(),
   title: z.string().min(1),
   summary: z.string().nullable().optional(),
+  intendedBehavior: z.string().max(8000).nullable().optional(),
   graph: z.unknown(),
   settings: z.record(z.unknown()).default({}),
   maxConcurrentRuns: z.number().int().positive().nullable().optional(),
@@ -191,6 +192,133 @@ const retrievalPolicySchema = z.object({
   includeWorkingSummary: z.boolean().optional(),
 }).optional();
 
+// ────────────────────────────────────────────────────────────
+// App 5-layer model (AGENTIS-PLATFORM-10X)
+// ────────────────────────────────────────────────────────────
+
+/** A single field in an app Data table schema. */
+export const appDataFieldSchema = z.object({
+  type: z.enum(['string', 'number', 'boolean', 'date', 'json', 'text']),
+  required: z.boolean().optional(),
+  description: z.string().optional(),
+});
+export type AppDataField = z.infer<typeof appDataFieldSchema>;
+
+/** Per-app structured Data table declaration (§Layer 3). */
+export const appDataTableSchema = z.object({
+  name: z.string().min(1).max(64).regex(/^[a-z][a-z0-9_]*$/),
+  description: z.string().optional(),
+  schema: z.record(appDataFieldSchema),
+  indexes: z
+    .array(z.object({ field: z.string().min(1), type: z.enum(['index', 'unique']) }))
+    .optional(),
+  retention: z
+    .object({
+      maxRows: z.number().int().positive().optional(),
+      ttlDays: z.number().int().positive().optional(),
+    })
+    .optional(),
+});
+export type AppDataTable = z.infer<typeof appDataTableSchema>;
+
+/** A REST route exposed by the app's API surface (§Layer 1). */
+export const appApiRouteSchema = z.object({
+  method: z.enum(['GET', 'POST', 'PUT', 'DELETE']),
+  path: z.string().min(1),
+  handler: z.enum(['query_data', 'trigger_workflow', 'custom_skill']),
+  workflowSlug: z.string().optional(),
+  dataTable: z.string().optional(),
+  skillSlug: z.string().optional(),
+  auth: z.enum(['public', 'api_key', 'bearer', 'none']).default('api_key'),
+});
+export type AppApiRoute = z.infer<typeof appApiRouteSchema>;
+
+/** App surface declaration (§Layer 1). */
+export const appSurfaceSchema = z.object({
+  type: z.enum([
+    'thread',
+    'dashboard',
+    'api',
+    'webhook_receiver',
+    'stream',
+    'embed',
+    'artifact',
+    'page',
+  ]),
+  label: z.string().optional(),
+  description: z.string().optional(),
+});
+export type AppSurface = z.infer<typeof appSurfaceSchema>;
+
+/** Auto-generated dashboard surface declaration (§Layer 1). */
+export const appDashboardSchema = z.object({
+  metrics: z
+    .array(
+      z.object({
+        label: z.string().min(1),
+        table: z.string().min(1),
+        field: z.string().min(1),
+        aggregation: z.enum(['count', 'sum', 'avg', 'min', 'max']),
+        filter: z.string().optional(),
+        timeBucket: z.enum(['today', '7d', '30d', 'all']).optional(),
+      }),
+    )
+    .optional(),
+  charts: z
+    .array(
+      z.object({
+        type: z.enum(['line', 'bar', 'pie', 'area']),
+        label: z.string().min(1),
+        table: z.string().min(1),
+        timeField: z.string().optional(),
+        valueField: z.string().min(1),
+        groupBy: z.string().optional(),
+        aggregation: z.enum(['count', 'sum', 'avg']).optional(),
+        refreshIntervalSeconds: z.number().int().positive().optional(),
+      }),
+    )
+    .optional(),
+  pinnedTables: z.array(z.string()).optional(),
+  defaultRefreshIntervalSeconds: z.number().int().positive().optional(),
+});
+export type AppDashboard = z.infer<typeof appDashboardSchema>;
+
+/**
+ * App Brain config — the app's built-in internal agent (§Layer 4).
+ * Provisioned automatically on install; invisible in the workspace agent list.
+ */
+export const appBrainConfigSchema = z.object({
+  /** Adapter used to power the Brain agent. */
+  adapter: z.string().min(1),
+  /** System prompt — the app's goals, rules, and decision logic. */
+  systemPrompt: z.string().min(1),
+  /** Entry workflows the Brain can invoke by slug. */
+  entryWorkflows: z.array(z.string().min(1)).default([]),
+  /** Max concurrent domain workflows the Brain can orchestrate. */
+  maxConcurrentDomains: z.number().int().positive().optional(),
+});
+export type AppBrainConfig = z.infer<typeof appBrainConfigSchema>;
+
+/** Deploy layer config (§Layer 5). */
+export const appDeployConfigSchema = z.object({
+  target: z.enum(['local', 'always_on', 'scheduled', 'api_server']).default('local'),
+  apiServer: z
+    .object({
+      auth: z.enum(['api_key', 'jwt', 'public']).default('api_key'),
+      cors: z.boolean().optional(),
+      rateLimit: z.object({ requestsPerMinute: z.number().int().positive() }).optional(),
+    })
+    .optional(),
+  restartPolicy: z.enum(['always', 'on_failure', 'never']).optional(),
+  resources: z
+    .object({
+      maxConcurrentRuns: z.number().int().positive().optional(),
+      priorityClass: z.enum(['low', 'normal', 'high']).optional(),
+    })
+    .optional(),
+});
+export type AppDeployConfig = z.infer<typeof appDeployConfigSchema>;
+
 export const credentialSlotSchema = z.object({
   key: z.string().min(1),
   service: z.string().min(1),
@@ -248,11 +376,30 @@ export const agentisPackageContentsSchema = z.object({
   appGraphTemplate: z.custom<AppGraph>().optional(),
   entryWorkflowSlug: z.string().optional(),
   category: z.string().optional(),
+  intendedBehavior: z.string().max(8000).nullable().optional(),
   replaces: z.string().optional(),
   costSavedPerMonth: z.string().optional(),
   readme: z.string().optional(),
   screenshotUrls: z.array(z.string().url()).default([]),
   crossAppDependencies: z.array(z.string()).default([]),
+  // ── 5-layer app model (AGENTIS-PLATFORM-10X) ──────────────────────────
+  // Optional so existing package literals stay valid; consumers default to [].
+  /** The app's operational Data layer schema (§Layer 3 / §A6). */
+  dataTables: z.array(appDataTableSchema).optional(),
+  /** Surfaces the app exposes to the world (§Layer 1 / §A6). */
+  surfaces: z.array(appSurfaceSchema).optional(),
+  /** REST routes for `api` surfaces (§A6). */
+  apiRoutes: z.array(appApiRouteSchema).optional(),
+  /** Default deploy target for the app (§Layer 5 / §A6). */
+  deployConfig: appDeployConfigSchema.optional(),
+  /** Auto-generated dashboard declaration (§Layer 1). */
+  dashboard: appDashboardSchema.optional(),
+  /** Composed sub-app slugs installed as dependencies (§A10). */
+  subApps: z.array(z.string()).optional(),
+  /** Number of new Data records before the Brain absorbs patterns (§Layer 4). */
+  brainAbsorptionThreshold: z.number().int().positive().optional(),
+  /** App Brain configuration — the built-in internal agent (§Layer 4). */
+  appBrain: appBrainConfigSchema.optional(),
 });
 export type AgentisPackageContents = z.infer<typeof agentisPackageContentsSchema>;
 

@@ -28,14 +28,13 @@ beforeEach(async () => {
 });
 afterEach(() => ctx.close());
 
-function buildEngine() {
+function buildEngine(skillsOverride?: SkillRuntime) {
   const ledger = new LedgerService(ctx.db, ctx.bus);
   const scratchpad = new ScratchpadService(ctx.bus, ctx.logger);
   const activity = new ActivityFeedService(ctx.db, ctx.bus);
   const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
   const adapters = new AdapterManager(ctx.logger);
-  // Skill runtime not exercised in this test (no skill_task nodes).
-  const skills = {} as unknown as SkillRuntime;
+  const skills = skillsOverride ?? ({} as unknown as SkillRuntime);
   return new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
@@ -216,6 +215,64 @@ describe('WorkflowEngine — fan-out / multi-input merge', () => {
     const row = ctx.db.select().from(schema.workflowRuns).where(eqRunId(runId)).get()!;
     const state = row.runState as { completedNodeIds: string[] };
     expect(state.completedNodeIds.sort()).toEqual(['A', 'B', 'T']);
+  });
+
+  it('fails instead of waiting forever when a failed node blocks downstream inputs', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        {
+          id: 'T',
+          type: 'trigger',
+          title: 'trigger',
+          position: { x: 0, y: 0 },
+          config: { kind: 'trigger', triggerType: 'manual' },
+        },
+        {
+          id: 'S',
+          type: 'skill_task',
+          title: 'bad skill',
+          position: { x: 100, y: 0 },
+          config: { kind: 'skill_task', skillId: 'bad', inputMapping: {}, outputMapping: {} },
+        },
+        {
+          id: 'D',
+          type: 'merge',
+          title: 'downstream',
+          position: { x: 200, y: 0 },
+          config: { kind: 'merge', requiredInputs: 'all' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'T', target: 'S' },
+        { id: 'e2', source: 'S', target: 'D' },
+      ],
+    };
+    const { wfId, runId } = seedWorkflow(graph);
+    const skills = {
+      execute: async () => ({ ok: false, errorCode: 'INTERNAL_ERROR', message: 'boom' }),
+    } as unknown as SkillRuntime;
+    const engine = buildEngine(skills);
+    const initialState = buildInitialRunState({ runId, workflowId: wfId, graph, inputs: {} });
+    await engine.startRun({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId: wfId,
+      userId: ctx.user.id,
+      triggerId: null,
+      inputs: {},
+      initialState,
+      graph,
+    });
+    await waitForRunStatus(runId, 'FAILED');
+
+    const row = ctx.db.select().from(schema.workflowRuns).where(eqRunId(runId)).get()!;
+    expect(row.status).toBe('FAILED');
+    const state = row.runState as { nodeStates: Record<string, { status: string }>; waitingInputs: Record<string, unknown> };
+    expect(state.nodeStates.S?.status).toBe('FAILED');
+    expect(state.nodeStates.D?.status).toBe('SKIPPED');
+    expect(Object.keys(state.waitingInputs)).toHaveLength(0);
   });
 });
 

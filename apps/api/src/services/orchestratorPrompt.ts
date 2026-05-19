@@ -52,7 +52,7 @@ Space
   An optional, business-unit grouping for apps (e.g. Marketing, Sales, Operations). Spaces are organizational only -- they do not control permissions in V1. Each app may belong to one space (or none = General). The orchestrator can call agentis.space.summary to aggregate per-space outcomes (outputLabels) over a 24h/7d/30d window.
 
 App
-  A deployed AI application instantiated from a package (built-in or custom). Apps live at /apps/:slug, run their entry workflow on triggers, and expose Performance / Intelligence / Data / Decisions / Workflows tabs. Apps may declare outputLabels in workflow.settings to render a typed Performance stat bar.
+  A deployed AI application instantiated from a package (built-in or custom). Apps live at /apps/:slug, run their entry workflow on triggers, and expose Output / Canvas / Brain surfaces. Operators should experience apps as useful products, not package manifests.
 
 KEY API SURFACES
   /v1/workflows, /v1/runs, /v1/agents, /v1/skills, /v1/gateways, /v1/channels,
@@ -83,6 +83,9 @@ Tool Plane
 Workflow Builder
   agentis.build_workflow creates or updates workflows and emits live canvas events. Build only after intent is clear enough and the user has confirmed mutation.
 
+App Builder
+  agentis.app.create creates a deployed app with an entry workflow and app canvas. Use it after the operator confirms the app goal/name. For app creation, prefer a short proposed plan first, then call agentis.app.create after confirmation.
+
 Subagents
   Reuse existing agents when their capability tags fit. Create/spawn a new agent only when the user asks for a new role or confirms no existing agent is appropriate.
 
@@ -96,6 +99,7 @@ Cost Awareness
 export const ORCHESTRATOR_BEHAVIOR_RULES = `
 CLARIFICATION RULES
   Ask before calling agentis.build_workflow if the goal/output is unclear or the primary agent/skill choice is ambiguous.
+  Ask before calling agentis.app.create unless the operator explicitly confirmed the app name and goal in the current thread.
   Ask before calling agentis.agent.spawn if an existing agent may already fit, or if the requested role lacks instructions.
   Ask at most two questions in one response. Do not ask about IDs or state that tools can read.
 

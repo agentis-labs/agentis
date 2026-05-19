@@ -29,8 +29,11 @@ async function collect(iterable: AsyncIterable<ChatDelta>): Promise<ChatDelta[]>
   return deltas;
 }
 
+let mutatingToolCalls = 0;
+
 describe('ChatSessionExecutor', () => {
   beforeEach(() => {
+    mutatingToolCalls = 0;
     const registry = new AgentisToolRegistry({ logger: createLogger({ level: 'error' }) });
     registry.register(
       {
@@ -41,6 +44,19 @@ describe('ChatSessionExecutor', () => {
         mutating: false,
       },
       async (args) => ({ goal: args.goal, steps: [`Plan ${String(args.goal)}`] }),
+    );
+    registry.register(
+      {
+        id: 'agentis.write_test',
+        family: 'run',
+        description: 'Test write action.',
+        inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
+        mutating: true,
+      },
+      async (args) => {
+        mutatingToolCalls += 1;
+        return { wrote: args.value };
+      },
     );
     ChatToolExecutor.configure({ registry });
     ChatSessionExecutor.configure({});
@@ -104,5 +120,39 @@ describe('ChatSessionExecutor', () => {
     }));
 
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'max_turns' });
+  });
+
+  it('pauses mutating tools for confirmation and resumes after approval', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'tool_call', id: 'tool_write', name: 'agentis.write_test', args: { value: 'confirmed' } };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'write complete' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const ctx = {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_confirm',
+    };
+    const initial = await collect(ChatSessionExecutor.turn(adapter, [], 'write this', ctx));
+    const confirmation = initial.find(
+      (delta): delta is Extract<ChatDelta, { type: 'confirmation_required' }> => delta.type === 'confirmation_required',
+    );
+
+    expect(confirmation).toBeTruthy();
+    expect(initial.some((delta) => delta.type === 'tool_result')).toBe(false);
+    expect(mutatingToolCalls).toBe(0);
+
+    const resumed = await collect(ChatSessionExecutor.confirm(adapter, confirmation!.turnId, true, ctx));
+
+    expect(mutatingToolCalls).toBe(1);
+    expect(resumed.some((delta) => delta.type === 'tool_result' && delta.name === 'agentis.write_test')).toBe(true);
+    expect(resumed).toContainEqual({ type: 'text', delta: 'write complete' });
+    expect(adapter.calls).toHaveLength(2);
   });
 });

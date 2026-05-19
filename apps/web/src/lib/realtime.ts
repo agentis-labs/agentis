@@ -59,7 +59,7 @@ export function useRealtime(events: string[], handler: (env: RealtimeEnvelope) =
 }
 
 export function rtSubscribe(
-  kind: 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room',
+  kind: 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room' | 'app',
   args: Record<string, string>,
 ): () => void {
   const sock = getSocket();

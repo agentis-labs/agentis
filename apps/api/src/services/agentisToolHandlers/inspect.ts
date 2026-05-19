@@ -221,7 +221,7 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
           .orderBy(desc(schema.workflowRuns.createdAt))
           .limit(100)
           .all()
-          .filter((run) => workflowIds.size === 0 || workflowIds.has(run.workflowId))
+          .filter((run): run is typeof run & { workflowId: string } => run.workflowId !== null && (workflowIds.size === 0 || workflowIds.has(run.workflowId)))
           .filter((run) => isInsideWindow(run.createdAt, String(args.window ?? '7d')));
         const pendingApprovals = deps.approvals.list(ctx.workspaceId, 'pending');
         const outputLabels = aggregateOutputLabels(workflows, runs);

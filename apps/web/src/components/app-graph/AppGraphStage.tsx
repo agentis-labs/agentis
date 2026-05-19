@@ -8,7 +8,7 @@
  * Custom node renderer lives in AppGraphNode.
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type Node,
   type Edge,
@@ -38,24 +38,56 @@ interface StageProps {
   onDropNodeType: (type: AppGraphNodeType, position: { x: number; y: number }) => void;
   onDropCollection?: (collection: NonNullable<AppGraphReferenceScope['collections']>[number], position: { x: number; y: number }) => void;
   showMinimap?: boolean;
+  /** Live per-workflow run status, keyed by workflow id (§Layer 2). */
+  workflowStatus?: Record<string, { status: string; lastRunAt: string | null }>;
+  /** When set, nodes whose workflow is outside this set are dimmed (domain focus). */
+  focusWorkflowIds?: string[] | null;
 }
 
 export function AppGraphStage({
-  graph, onChange, selectedId, onSelect, onDropNodeType, onDropCollection, showMinimap,
+  graph, onChange, selectedId, onSelect, onDropNodeType, onDropCollection, showMinimap, workflowStatus,
+  focusWorkflowIds,
 }: StageProps) {
   const rfRef = useRef<CanvasEngineInstance | null>(null);
 
   const nodes = useMemo<Node<AppGraphNodeData>[]>(
     () =>
-      graph.nodes.map((n) => ({
-        id: n.id,
-        type: 'appNode',
-        position: n.position,
-        data: { title: n.title, type: n.type },
-        selected: n.id === selectedId,
-      })),
-    [graph.nodes, selectedId],
+      graph.nodes.map((n) => {
+        const workflowId =
+          n.config.kind === 'workflow_module' || n.config.kind === 'entry_workflow'
+            ? n.config.workflowId
+            : undefined;
+        const live = workflowId ? workflowStatus?.[workflowId] : undefined;
+        const dimmed =
+          !!focusWorkflowIds &&
+          focusWorkflowIds.length > 0 &&
+          !(workflowId && focusWorkflowIds.includes(workflowId));
+        return {
+          id: n.id,
+          type: 'appNode',
+          position: n.position,
+          data: {
+            title: n.title,
+            type: n.type,
+            subtitle: subtitleFor(n.type),
+            guidance: guidanceFor(n),
+            guidanceAction: guidanceActionFor(n),
+            dimmed,
+            ...(live
+              ? {
+                  runStatus: mapRunStatus(live.status),
+                  lastRunLabel: relativeTime(live.lastRunAt),
+                  active: mapRunStatus(live.status) === 'running',
+                }
+              : {}),
+          },
+          selected: n.id === selectedId,
+        };
+      }),
+    [graph.nodes, selectedId, workflowStatus, focusWorkflowIds],
   );
+  const [stageNodes, setStageNodes] = useState<Node<AppGraphNodeData>[]>(nodes);
+  const stageNodesRef = useRef<Node<AppGraphNodeData>[]>(nodes);
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -71,19 +103,34 @@ export function AppGraphStage({
     [graph.edges],
   );
 
-  const onNodesChange = useCallback(
-    (changes: NodeChange[]) => {
-      const updated = applyNodeChanges(changes, nodes);
-      const map = new Map(updated.map((u) => [u.id, u.position]));
-      const next: AppGraph = {
+  useEffect(() => {
+    setStageNodes(nodes);
+    stageNodesRef.current = nodes;
+  }, [nodes]);
+
+  const commitNodes = useCallback(
+    (updatedNodes: Node<AppGraphNodeData>[]) => {
+      const keep = new Set(updatedNodes.map((node) => node.id));
+      const positions = new Map(updatedNodes.map((node) => [node.id, node.position]));
+      onChange({
         ...graph,
         nodes: graph.nodes
-          .filter((n) => map.has(n.id))
-          .map((n) => ({ ...n, position: map.get(n.id) ?? n.position })),
-      };
-      onChange(next);
+          .filter((node) => keep.has(node.id))
+          .map((node) => ({ ...node, position: positions.get(node.id) ?? node.position })),
+        edges: graph.edges.filter((edge) => keep.has(edge.source) && keep.has(edge.target)),
+      });
     },
-    [graph, nodes, onChange],
+    [graph, onChange],
+  );
+
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      const updated = applyNodeChanges(changes as NodeChange<Node<AppGraphNodeData>>[], stageNodesRef.current);
+      stageNodesRef.current = updated;
+      setStageNodes(updated);
+      if (changes.some((change) => change.type === 'remove')) commitNodes(updated);
+    },
+    [commitNodes],
   );
 
   const onEdgesChange = useCallback(
@@ -94,6 +141,10 @@ export function AppGraphStage({
     },
     [graph, edges, onChange],
   );
+
+  const onNodeDragStop = useCallback(() => {
+    commitNodes(stageNodesRef.current);
+  }, [commitNodes]);
 
   const onConnect = useCallback(
     (conn: Connection) => {
@@ -117,12 +168,13 @@ export function AppGraphStage({
   return (
     <CanvasEngine
       onReady={(inst) => { rfRef.current = inst; }}
-      nodes={nodes}
+      nodes={stageNodes}
       edges={edges}
       nodeTypes={nodeTypes}
       defaultViewport={graph.viewport}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
+      onNodeDragStop={onNodeDragStop}
       onConnect={onConnect}
       onNodeClick={(_e, n) => onSelect(n.id)}
       onPaneClick={() => onSelect(null)}
@@ -152,6 +204,28 @@ export function AppGraphStage({
   );
 }
 
+/** Collapse a workflow run status into the canvas's four-state overlay. */
+function mapRunStatus(status: string): NonNullable<AppGraphNodeData['runStatus']> {
+  if (status === 'COMPLETED') return 'completed';
+  if (status === 'FAILED' || status === 'CANCELLED') return 'failed';
+  if (status === 'RUNNING' || status === 'PLANNING' || status === 'CREATED') {
+    return 'running';
+  }
+  return 'idle';
+}
+
+/** Short relative-time label, e.g. "3m ago". */
+function relativeTime(iso: string | null): string | undefined {
+  if (!iso) return undefined;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return undefined;
+  const diff = Date.now() - then;
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
 function edgeColor(type: AppGraphEdge['type']): string {
   switch (type) {
     case 'activates': return '#7c83ff';
@@ -168,6 +242,55 @@ function edgeColor(type: AppGraphEdge['type']): string {
 
 function humanEdge(t: AppGraphEdge['type']): string {
   return t.replace(/_/g, ' ');
+}
+
+function subtitleFor(type: AppGraphNodeType): string {
+  switch (type) {
+    case 'app_core': return 'Runs your main logic';
+    case 'entry_workflow': return 'Runs when this app starts';
+    case 'workflow_module': return 'A connected workflow step';
+    case 'agent_group': return 'The agents doing the work';
+    case 'knowledge_source': return 'Information this app can use';
+    case 'memory_surface': return 'What this app remembers';
+    case 'integration_surface': return 'Accounts and tools it uses';
+    case 'approval_surface': return 'Pause here for review';
+    case 'output_surface': return 'What this app produces';
+    case 'scheduler': return 'Runs on a schedule';
+    case 'channel_surface': return 'Where results are delivered';
+    case 'brain_surface': return 'Deep knowledge for this app';
+  }
+}
+
+function guidanceFor(node: AppGraphNode): string | undefined {
+  switch (node.config.kind) {
+    case 'entry_workflow':
+    case 'workflow_module':
+      return node.config.workflowId ? undefined : 'Connect a workflow here. This is how this part of the app runs.';
+    case 'agent_group':
+      return node.config.agentIds?.length ? undefined : 'Add the agents that should do this work.';
+    case 'output_surface':
+      return node.config.outputKey ? undefined : 'Name the result operators should see here.';
+    case 'integration_surface':
+      return node.config.service ? undefined : 'Choose the external tool or account this app uses.';
+    default:
+      return undefined;
+  }
+}
+
+function guidanceActionFor(node: AppGraphNode): string | undefined {
+  switch (node.config.kind) {
+    case 'entry_workflow':
+    case 'workflow_module':
+      return 'Connect workflow';
+    case 'agent_group':
+      return 'Pick agents';
+    case 'output_surface':
+      return 'Set output';
+    case 'integration_surface':
+      return 'Pick connection';
+    default:
+      return undefined;
+  }
 }
 
 /** Helper used by the page to seed a new node position safely. */

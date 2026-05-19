@@ -75,6 +75,9 @@ export class PartialReplayService {
     if (!source || source.workspaceId !== args.workspaceId) {
       throw new AgentisError('WORKFLOW_RUN_NOT_FOUND', `source run ${args.sourceRunId} not found`);
     }
+    if (!source.workflowId) {
+      throw new AgentisError('WORKFLOW_RUN_INVALID_STATE', 'ephemeral runs cannot be replayed as saved workflows');
+    }
     const workflow = this.db
       .select()
       .from(schema.workflows)

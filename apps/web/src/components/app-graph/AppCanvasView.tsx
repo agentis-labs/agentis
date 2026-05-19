@@ -8,16 +8,18 @@
  * lifecycle and renders the toolbar / palette / stage / inspector.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, AlertTriangle, RotateCcw, Map as MapIcon, MapPinOff, Save, Check } from 'lucide-react';
 import {
   type AppGraph,
   type AppGraphNode,
   type AppGraphNodeType,
   type AppGraphReferenceScope,
+  REALTIME_EVENTS,
   emptyAppGraph,
 } from '@agentis/core';
 import { api } from '../../lib/api';
+import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
 import { useToast } from '../shared/Toast';
@@ -38,6 +40,11 @@ interface CanvasResponse {
 
 type SaveState = 'saved' | 'saving' | 'dirty' | 'error';
 
+export interface WorkflowLiveStatus {
+  status: string;
+  lastRunAt: string | null;
+}
+
 const MINIMAP_KEY = 'agentis.app-canvas.minimap';
 
 interface AppCanvasViewProps {
@@ -57,23 +64,66 @@ export function AppCanvasView({ slug }: AppCanvasViewProps) {
     try { return localStorage.getItem(MINIMAP_KEY) === '1'; } catch { return false; }
   });
   const [loading, setLoading] = useState(true);
+  const [workflowStatus, setWorkflowStatus] = useState<Record<string, WorkflowLiveStatus>>({});
+  const [focusedDomainId, setFocusedDomainId] = useState<string | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    if (!slug) return;
+    try {
+      const d = await api<{ workflowStatus: Record<string, WorkflowLiveStatus> }>(
+        `/v1/apps/${slug}/canvas/status`,
+      );
+      setWorkflowStatus(d.workflowStatus ?? {});
+    } catch {
+      /* status overlay is best-effort */
+    }
+  }, [slug]);
+
+  const loadCanvas = useCallback(async (options?: { silent?: boolean }) => {
+    if (!slug) return;
+    if (!options?.silent) setLoading(true);
+    try {
+      const d = await api<CanvasResponse>(`/v1/apps/${slug}/canvas`);
+      setData(d);
+      setGraph(d.graph ?? emptyAppGraph());
+      setSaveState('saved');
+    } catch (e) {
+      toast.error('Failed to load canvas', String(e));
+    } finally {
+      if (!options?.silent) setLoading(false);
+    }
+  }, [slug, toast]);
 
   // ── Initial load ──
   useEffect(() => {
-    if (!slug) return;
-    setLoading(true);
-    void api<CanvasResponse>(`/v1/apps/${slug}/canvas`)
-      .then((d) => {
-        setData(d);
-        setGraph(d.graph ?? emptyAppGraph());
-      })
-      .catch((e) => {
-        toast.error('Failed to load canvas', String(e));
-      })
-      .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
+    void loadCanvas();
+    void loadStatus();
+  }, [loadCanvas, loadStatus]);
+
+  useEffect(() => rtSubscribe('workspace', {}), []);
+
+  useRealtime([REALTIME_EVENTS.APP_CANVAS_UPDATED], (env: RealtimeEnvelope) => {
+    const payload = env.payload as { appId?: string; slug?: string };
+    if (payload.slug !== slug && payload.appId !== data?.app.id) return;
+    void loadCanvas({ silent: true });
+  });
+
+  // Live node status — runs update the canvas overlays in real time (§Layer 2).
+  useRealtime(
+    [REALTIME_EVENTS.RUN_RUNNING, REALTIME_EVENTS.RUN_COMPLETED, REALTIME_EVENTS.RUN_FAILED],
+    (env: RealtimeEnvelope) => {
+      const payload = env.payload as { workflowId?: string; status?: string };
+      if (!payload.workflowId || !payload.status) return;
+      setWorkflowStatus((prev) => ({
+        ...prev,
+        [payload.workflowId as string]: {
+          status: payload.status as string,
+          lastRunAt: new Date().toISOString(),
+        },
+      }));
+    },
+  );
 
   // ── Persist minimap pref ──
   useEffect(() => {
@@ -114,6 +164,12 @@ export function AppCanvasView({ slug }: AppCanvasViewProps) {
     () => graph.nodes.find((n) => n.id === selectedId) ?? null,
     [graph.nodes, selectedId],
   );
+
+  const domains = graph.domains ?? [];
+  const focusWorkflowIds = useMemo<string[] | null>(() => {
+    if (!focusedDomainId) return null;
+    return domains.find((d) => d.id === focusedDomainId)?.workflowIds ?? null;
+  }, [domains, focusedDomainId]);
 
   function dropNodeAt(type: AppGraphNodeType, position: { x: number; y: number }) {
     const id = `n_${Math.random().toString(36).slice(2, 10)}`;
@@ -277,6 +333,49 @@ export function AppCanvasView({ slug }: AppCanvasViewProps) {
         </div>
       )}
 
+      {/* Macro domain band — the two-zoom-level view (§Layer 2). Renders only
+          when the app declares domain groups; click a domain to focus it. */}
+      {domains.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface px-5 py-2">
+          <span className="text-[11px] uppercase tracking-wider text-text-muted">Domains</span>
+          {domains.map((d) => {
+            const running = (d.workflowIds ?? []).some(
+              (id) => mapStatus(workflowStatus[id]?.status) === 'running',
+            );
+            const focused = focusedDomainId === d.id;
+            return (
+              <button
+                key={d.id}
+                onClick={() => setFocusedDomainId(focused ? null : d.id)}
+                className={[
+                  'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition',
+                  focused
+                    ? 'border-accent bg-accent/10 text-text-primary'
+                    : 'border-line text-text-secondary hover:border-text-muted',
+                ].join(' ')}
+              >
+                <span
+                  className={[
+                    'h-1.5 w-1.5 rounded-full',
+                    running ? 'bg-cyan-400 animate-pulse' : 'bg-slate-500',
+                  ].join(' ')}
+                />
+                {d.name}
+                <span className="text-text-muted">{(d.workflowIds ?? []).length}</span>
+              </button>
+            );
+          })}
+          {focusedDomainId && (
+            <button
+              onClick={() => setFocusedDomainId(null)}
+              className="text-[11px] text-text-muted hover:text-text-primary"
+            >
+              Clear focus
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Stage */}
       <div className="flex flex-1 overflow-hidden">
         <AppGraphPalette
@@ -327,6 +426,8 @@ export function AppCanvasView({ slug }: AppCanvasViewProps) {
             onDropNodeType={dropNodeAt}
             onDropCollection={dropCollectionAt}
             showMinimap={showMinimap}
+            workflowStatus={workflowStatus}
+            focusWorkflowIds={focusWorkflowIds}
           />
         </div>
         <AppGraphInspector
@@ -347,6 +448,13 @@ function isNewAppCanvas(): boolean {
 
 function appNameForCollection(name: string): string {
   return name.trim() ? `${name} app` : 'App core';
+}
+
+/** True-ish run status → 'running' for the domain-band pulse. */
+function mapStatus(status: string | undefined): 'running' | 'other' {
+  return status === 'RUNNING' || status === 'PLANNING' || status === 'CREATED'
+    ? 'running'
+    : 'other';
 }
 
 function SaveIndicator({ state }: { state: SaveState }) {
@@ -371,13 +479,13 @@ function SaveIndicator({ state }: { state: SaveState }) {
 function titleFor(t: AppGraphNodeType): string {
   switch (t) {
     case 'app_core': return 'App core';
-    case 'entry_workflow': return 'Entry workflow';
+    case 'entry_workflow': return 'Trigger';
     case 'workflow_module': return 'Workflow';
-    case 'agent_group': return 'Agent team';
-    case 'knowledge_source': return 'Data source';
+    case 'agent_group': return 'Team';
+    case 'knowledge_source': return 'Knowledge';
     case 'memory_surface': return 'Memory';
-    case 'integration_surface': return 'Integration';
-    case 'approval_surface': return 'Approval';
+    case 'integration_surface': return 'Connection';
+    case 'approval_surface': return 'Checkpoint';
     case 'output_surface': return 'Output';
     case 'scheduler': return 'Schedule';
     case 'channel_surface': return 'Channel';

@@ -6,6 +6,7 @@ import type {
   NormalizedTask,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
+import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 
 export interface CursorAdapterOptions {
   agentId: string;
@@ -44,7 +45,7 @@ export class CursorAdapter implements AgentAdapter {
   async dispatchTask(task: NormalizedTask): Promise<void> {
     const controller = new AbortController();
     this.#inFlight.set(task.taskId, controller);
-    const binary = this.opts.binaryPath || 'cursor';
+    const binary = this.opts.binaryPath || 'agent';
     const args = [
       '--output-format',
       'stream-json',
@@ -56,9 +57,12 @@ export class CursorAdapter implements AgentAdapter {
     let terminalEventEmitted = false;
     let timeout: NodeJS.Timeout | undefined;
     try {
-      childProcess = spawn(binary, args, {
+      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
+      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
+      childProcess = spawn(target.command, target.args, {
         cwd: this.opts.cwd,
-        env: { ...process.env, ...(this.opts.env ?? {}) },
+        env,
+        windowsHide: true,
         signal: controller.signal,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

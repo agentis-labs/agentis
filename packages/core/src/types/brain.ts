@@ -156,6 +156,16 @@ export interface BrainGraphNode {
   runId?: string | null;
   isDisputed?: boolean;
   isStale?: boolean;
+  status?: 'active' | 'stale' | 'archived' | string | null;
+  managed?: boolean | null;
+  pinnedAt?: string | null;
+  lastAccessedAt?: string | null;
+  disputeReason?: string | null;
+  disputeResolvedAt?: string | null;
+  disputeSnoozedUntil?: string | null;
+  contextCondition?: string | null;
+  compressedFrom?: string[] | null;
+  compressionTier?: number | null;
   createdAt: string;
   updatedAt: string;
   metadata: Record<string, unknown>;
@@ -176,6 +186,8 @@ export interface BrainGraphLink {
   adapterType?: string | null;
   appId?: string | null;
   runId?: string | null;
+  contextSplit?: boolean;
+  resolvedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
