@@ -38,6 +38,84 @@ export function validateWorkflowGraph(
         `Subflow node ${node.id} cannot call its own workflow`,
       );
     }
+    // Per-kind semantic validation. Required config fields are caught at save
+    // time, not at run time. Agent task lacking an agentId is a warning — the
+    // canvas can assign one later from a capability tag match.
+    const kind = node.config.kind;
+    switch (kind) {
+      case 'agent_task':
+        if (!node.config.agentId && (!node.config.capabilityTags || node.config.capabilityTags.length === 0)) {
+          warnings.push(`Node ${node.id} (${kind}): no agentId or capabilityTags — runs will fail until one is assigned`);
+        }
+        break;
+      case 'skill_task':
+        if (!node.config.skillId) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (skill_task) missing skillId`);
+        }
+        break;
+      case 'integration':
+        if (!node.config.integrationId) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (integration) missing integrationId`);
+        }
+        if (!node.config.operationId) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (integration) missing operationId`);
+        }
+        break;
+      case 'http_request':
+        if (!node.config.url) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (http_request) missing url`);
+        }
+        if (!node.config.method) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (http_request) missing method`);
+        }
+        break;
+      case 'transform':
+        if (!node.config.expression) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (transform) missing expression`);
+        }
+        break;
+      case 'filter':
+        if (!node.config.condition) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (filter) missing condition`);
+        }
+        break;
+      case 'wait':
+        if (typeof node.config.delayMs !== 'number' || node.config.delayMs < 0) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (wait) requires non-negative delayMs`);
+        }
+        break;
+      case 'workflow_store':
+        if (!Array.isArray(node.config.operations) || node.config.operations.length === 0) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (workflow_store) must declare at least one operation`);
+        }
+        break;
+      case 'evaluator':
+        if (!node.config.targetPath) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (evaluator) missing targetPath`);
+        }
+        if (!node.config.criteria) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (evaluator) missing criteria`);
+        }
+        break;
+      case 'guardrails':
+        if (!Array.isArray(node.config.rules) || node.config.rules.length === 0) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (guardrails) must declare at least one rule`);
+        }
+        break;
+      case 'loop':
+        if (!node.config.bodyWorkflowId) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (loop) missing bodyWorkflowId`);
+        }
+        if (!node.config.itemsExpression) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (loop) missing itemsExpression`);
+        }
+        if (!node.config.outputArrayKey) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (loop) missing outputArrayKey`);
+        }
+        break;
+      default:
+        break;
+    }
   }
 
   for (const edge of graph.edges) {

@@ -41,6 +41,16 @@ import {
   type ScratchpadNodeConfig,
   type AgentSwarmNodeConfig,
   type ArtifactCollectNodeConfig,
+  type WaitNodeConfig,
+  type TransformNodeConfig,
+  type FilterNodeConfig,
+  type IntegrationNodeConfig,
+  type HttpRequestNodeConfig,
+  type WorkflowStoreNodeConfig,
+  type EvaluatorNodeConfig,
+  type GuardrailsNodeConfig,
+  type LoopNodeConfig,
+  type ParallelNodeConfig,
   type WorkflowEdge,
   type WorkflowGraphPatch,
 } from '@agentis/core';
@@ -57,9 +67,15 @@ import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
 import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
 import type { ConversationStore } from '../services/conversationStore.js';
+import type { ConnectorRegistry } from '@agentis/integrations';
+import type { WorkflowStoreService } from '../services/workflowStore.js';
+import type { EvaluatorRuntime } from '../services/evaluatorRuntime.js';
+import type { CredentialVault } from '../services/credentialVault.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
+import { buildTemplateContext, resolveTemplate, resolveTemplateDeep, readTemplatePath, type TemplateContext } from './templateResolver.js';
+import { evaluateExpression, evaluateBooleanExpression } from './safeExpression.js';
 
 export interface EngineDeps {
   db: AgentisSqliteDb;
@@ -75,6 +91,14 @@ export interface EngineDeps {
   knowledgeBases?: KnowledgeBaseService;
   /** Conversation bridge — lets chat-started runs report terminal state back to the thread. */
   conversations?: ConversationStore;
+  /** Integration connector registry — required for `integration` and `http_request` nodes. */
+  connectors?: ConnectorRegistry;
+  /** Workflow-scoped KV — required for `workflow_store` nodes. */
+  workflowStore?: WorkflowStoreService;
+  /** LLM-as-judge runtime — required for `evaluator` nodes and the `router` llm_route mode. */
+  evaluatorRuntime?: EvaluatorRuntime;
+  /** Credential vault — required for `integration` nodes that need decrypted credentials. */
+  vault?: CredentialVault;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
   telemetry?: Telemetry;
 }
@@ -471,6 +495,14 @@ export class WorkflowEngine {
   ): Promise<void> {
     await this.#startNode(ctx, node, item.inputData);
 
+    // Build template context once per dispatch and resolve every templated
+    // field in the node's config before any handler sees it. Handlers that
+    // need the raw value (transform/filter expressions, evaluator targetPath,
+    // workflow_store keys/values) re-read from the original config and call
+    // `readTemplatePath()` directly to avoid double-encoding.
+    const tctx = this.#buildTemplateContext(ctx, item);
+    const resolvedConfig = resolveTemplateDeep(node.config, tctx);
+
     switch (node.config.kind) {
       case 'trigger': {
         // Triggers are pure pass-throughs at run time — they were the seed.
@@ -478,7 +510,7 @@ export class WorkflowEngine {
         return;
       }
       case 'scratchpad': {
-        const result = await this.#executeScratchpadNode(ctx, node.config, item.inputData);
+        const result = await this.#executeScratchpadNode(ctx, resolvedConfig as ScratchpadNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -488,35 +520,94 @@ export class WorkflowEngine {
         return;
       }
       case 'router': {
-        const branchOutputs = this.#executeRouter(ctx, node.config, item.inputData);
-        await this.#completeNode(ctx, node.id, { branches: branchOutputs });
+        const cfg = resolvedConfig as RouterNodeConfig;
+        if (cfg.routingMode === 'llm_route') {
+          const branchOutputs = await this.#executeRouterLlm(ctx, node, cfg, item.inputData);
+          await this.#completeNode(ctx, node.id, { branches: branchOutputs });
+        } else {
+          const branchOutputs = this.#executeRouter(ctx, cfg, item.inputData);
+          await this.#completeNode(ctx, node.id, { branches: branchOutputs });
+        }
         return;
       }
       case 'checkpoint': {
-        await this.#executeCheckpoint(ctx, node, node.config, item.inputData);
+        await this.#executeCheckpoint(ctx, node, resolvedConfig as CheckpointNodeConfig, item.inputData);
         return;
       }
       case 'skill_task': {
-        const result = await this.#executeSkillTask(ctx, node, node.config, item.inputData);
+        const result = await this.#executeSkillTask(ctx, node, resolvedConfig as SkillTaskNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'knowledge': {
-        const result = await this.#executeKnowledgeNode(ctx, node.config, item.inputData);
+        const result = await this.#executeKnowledgeNode(ctx, resolvedConfig as KnowledgeNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'agent_task': {
-        await this.#dispatchAgentTask(ctx, node, node.config, item.inputData);
+        await this.#dispatchAgentTask(ctx, node, resolvedConfig as AgentTaskNodeConfig, item.inputData);
         return; // adapter event will call notifyTaskCompleted
       }
       case 'agent_swarm': {
-        await this.#dispatchAgentSwarm(ctx, node, node.config, item.inputData);
+        await this.#dispatchAgentSwarm(ctx, node, resolvedConfig as AgentSwarmNodeConfig, item.inputData);
         return; // swarm subtask events resolve the node
       }
       case 'artifact_collect': {
-        const result = await this.#executeArtifactCollect(ctx, node, node.config, item.inputData);
+        const result = await this.#executeArtifactCollect(ctx, node, resolvedConfig as ArtifactCollectNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'wait': {
+        await this.#executeWait(ctx, node, resolvedConfig as WaitNodeConfig, item.inputData);
+        return;
+      }
+      case 'transform': {
+        const result = this.#executeTransform(node.config as TransformNodeConfig, item.inputData, tctx);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'filter': {
+        const result = this.#executeFilter(node.config as FilterNodeConfig, item.inputData, tctx);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'integration': {
+        const result = await this.#executeIntegration(ctx, node, resolvedConfig as IntegrationNodeConfig, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'http_request': {
+        const result = await this.#executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'workflow_store': {
+        const result = await this.#executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'evaluator': {
+        const result = await this.#executeEvaluator(ctx, node, node.config as EvaluatorNodeConfig, item.inputData, tctx);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'guardrails': {
+        const result = this.#executeGuardrails(node.config as GuardrailsNodeConfig, item.inputData);
+        if (result.shouldFail) {
+          throw new AgentisError('VALIDATION_FAILED', result.message);
+        }
+        await this.#completeNode(ctx, node.id, result.output);
+        return;
+      }
+      case 'loop': {
+        await this.#dispatchLoop(ctx, node, resolvedConfig as LoopNodeConfig, item.inputData, tctx);
+        return;
+      }
+      case 'parallel': {
+        // Parallel is a pure passthrough at dispatch time — fan-out happens via
+        // the regular edge mechanism. `waitFor` / `onBranchError` / `mergeStrategy`
+        // are honored at the downstream `merge` node.
+        await this.#completeNode(ctx, node.id, item.inputData);
         return;
       }
       case 'subflow': {
@@ -998,6 +1089,563 @@ export class WorkflowEngine {
     return matches;
   }
 
+  /**
+   * LLM-routed router. Asks the configured evaluator-tier model to pick exactly
+   * one branch by id, given the branch labels + the current input. Falls back
+   * to `first_match` semantics if the evaluator runtime isn't wired or if the
+   * LLM response can't be parsed.
+   */
+  async #executeRouterLlm(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: RouterNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<string[]> {
+    if (!this.deps.evaluatorRuntime) {
+      this.deps.logger.warn('engine.router.llm_route.no_runtime', { nodeId: node.id });
+      return this.#executeRouter(ctx, { ...config, routingMode: 'first_match' }, inputData);
+    }
+    try {
+      const branchIds = config.branches.map((b) => b.branchId);
+      const decision = await this.deps.evaluatorRuntime.routeBranch({
+        workspaceId: ctx.workspaceId,
+        input: inputData,
+        branches: config.branches.map((b) => ({ branchId: b.branchId, label: b.label, condition: b.condition })),
+      });
+      if (decision && branchIds.includes(decision)) {
+        return [decision];
+      }
+      this.deps.logger.warn('engine.router.llm_route.bad_decision', { nodeId: node.id, decision });
+    } catch (err) {
+      this.deps.logger.warn('engine.router.llm_route.failed', { nodeId: node.id, err: (err as Error).message });
+    }
+    return this.#executeRouter(ctx, { ...config, routingMode: 'first_match' }, inputData);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // New deterministic primitives — wait / transform / filter
+  // ────────────────────────────────────────────────────────────
+
+  async #executeWait(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: WaitNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<void> {
+    const delayMs = Math.max(0, Math.floor(config.delayMs ?? 0));
+    if (delayMs <= 0) {
+      await this.#completeNode(ctx, node.id, inputData);
+      return;
+    }
+    // The wait holds a synthetic active execution so the settle loop doesn't
+    // mark the run as completed mid-wait.
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `wait:${node.id}`,
+      nodeId: node.id,
+      executorType: 'wait',
+      executorRef: `timer:${delayMs}ms`,
+      startedAt: new Date().toISOString(),
+    };
+    const timer = setTimeout(() => {
+      delete ctx.state.activeExecutions[node.id];
+      void (async () => {
+        await this.#completeNode(ctx, node.id, inputData);
+        void this.#tick(ctx);
+      })();
+    }, delayMs);
+    // Don't keep the process alive solely for a long wait.
+    timer.unref?.();
+  }
+
+  #executeTransform(
+    config: TransformNodeConfig,
+    inputData: Record<string, unknown>,
+    tctx: TemplateContext,
+  ): Record<string, unknown> {
+    const result = evaluateExpression<unknown>(config.expression, {
+      input: inputData,
+      ctx: { trigger: tctx.trigger, nodes: tctx.nodes, scratchpad: tctx.scratchpad, store: tctx.store },
+    });
+    if (config.outputKey) {
+      return { [config.outputKey]: result };
+    }
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      return result as Record<string, unknown>;
+    }
+    return { value: result };
+  }
+
+  #executeFilter(
+    config: FilterNodeConfig,
+    inputData: Record<string, unknown>,
+    tctx: TemplateContext,
+  ): Record<string, unknown> {
+    const passed = evaluateBooleanExpression(config.condition, {
+      input: inputData,
+      ctx: { trigger: tctx.trigger, nodes: tctx.nodes, scratchpad: tctx.scratchpad, store: tctx.store },
+    });
+    // Filter emits a single payload tagged with the result so downstream nodes
+    // can either read the boolean or use sourceHandle gating (`pass`/`skip`).
+    return { passed, input: inputData };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Integration / HTTP
+  // ────────────────────────────────────────────────────────────
+
+  async #executeIntegration(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: IntegrationNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.connectors) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'integration node present but ConnectorRegistry not wired');
+    }
+    if (!config.integrationId) {
+      throw new AgentisError('VALIDATION_FAILED', 'integration node missing integrationId');
+    }
+    if (!config.operationId) {
+      throw new AgentisError('VALIDATION_FAILED', 'integration node missing operationId');
+    }
+    let credential: Record<string, unknown> | null = null;
+    if (config.credentialId) {
+      if (!this.deps.vault) {
+        throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'integration node references a credential but CredentialVault is not wired');
+      }
+      const row = this.deps.db
+        .select()
+        .from(schema.credentials)
+        .where(and(eq(schema.credentials.id, config.credentialId), eq(schema.credentials.workspaceId, ctx.workspaceId)))
+        .get();
+      if (!row) {
+        throw new AgentisError('RESOURCE_NOT_FOUND', `credential '${config.credentialId}' not found`);
+      }
+      try {
+        const decoded = this.deps.vault.decrypt(row.encryptedValue);
+        const parsed = parseJsonOrString(decoded);
+        credential = typeof parsed === 'object' && parsed !== null
+          ? (parsed as Record<string, unknown>)
+          : { value: decoded };
+      } catch (err) {
+        throw new AgentisError('INTEGRATION_CREDENTIAL_MISSING', `failed to decrypt credential: ${(err as Error).message}`);
+      }
+    }
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `integration:${node.id}`,
+      nodeId: node.id,
+      executorType: 'integration',
+      executorRef: `${config.integrationId}.${config.operationId}`,
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      const result = await this.deps.connectors.execute(config.integrationId, {
+        operation: config.operationId,
+        params: config.inputs ?? {},
+        credential,
+        inputData,
+      });
+      return result;
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
+  }
+
+  async #executeHttpRequest(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: HttpRequestNodeConfig,
+  ): Promise<Record<string, unknown>> {
+    if (!config.url) throw new AgentisError('VALIDATION_FAILED', 'http_request node missing url');
+    const method = (config.method ?? 'GET').toUpperCase();
+    const timeoutMs = Math.max(1, Math.min(config.timeoutMs ?? 30_000, 120_000));
+    const maxRetries = Math.max(0, Math.min(config.maxRetries ?? 0, 5));
+    const retryOn = new Set((config.retryOn ?? []).map((c) => Number(c)));
+    const headers: Record<string, string> = { ...(config.headers ?? {}) };
+    if (config.auth) {
+      switch (config.auth.type) {
+        case 'bearer':
+          headers['authorization'] = `Bearer ${config.auth.token}`;
+          break;
+        case 'api_key':
+          headers[config.auth.header.toLowerCase()] = config.auth.token;
+          break;
+        case 'basic': {
+          const encoded = Buffer.from(`${config.auth.username}:${config.auth.password}`).toString('base64');
+          headers['authorization'] = `Basic ${encoded}`;
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `http:${node.id}`,
+      nodeId: node.id,
+      executorType: 'http',
+      executorRef: `${method} ${redactUrl(config.url)}`,
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      let attempt = 0;
+      let lastError: Error | null = null;
+      while (attempt <= maxRetries) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(config.url, {
+            method,
+            headers,
+            body: method === 'GET' || method === 'DELETE' ? undefined : config.body,
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          const text = await res.text();
+          let parsed: unknown = text;
+          if (text && res.headers.get('content-type')?.includes('json')) {
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              /* keep text */
+            }
+          }
+          if (!res.ok) {
+            if (retryOn.has(res.status) && attempt < maxRetries) {
+              attempt += 1;
+              await sleep(backoffMs(attempt));
+              continue;
+            }
+            return {
+              ok: false,
+              status: res.status,
+              body: parsed,
+            };
+          }
+          const out: Record<string, unknown> = {
+            ok: true,
+            status: res.status,
+            body: parsed,
+          };
+          if (config.responseMapping) {
+            const key = config.responseMapping.outputKey;
+            if (config.responseMapping.bodyPath) {
+              out[key] = readDotPath(parsed, config.responseMapping.bodyPath);
+            } else {
+              out[key] = parsed;
+            }
+          }
+          return out;
+        } catch (err) {
+          clearTimeout(timer);
+          lastError = err as Error;
+          if (attempt >= maxRetries) break;
+          attempt += 1;
+          await sleep(backoffMs(attempt));
+        }
+      }
+      throw new AgentisError('INTEGRATION_OPERATION_FAILED', `http_request failed: ${lastError?.message ?? 'unknown error'}`);
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Workflow-scoped persistent KV
+  // ────────────────────────────────────────────────────────────
+
+  async #executeWorkflowStore(
+    ctx: RunningContext,
+    config: WorkflowStoreNodeConfig,
+    tctx: TemplateContext,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.workflowStore) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'workflow_store node present but WorkflowStoreService not wired');
+    }
+    if (!ctx.workflowId) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'workflow_store node requires a persistent workflow id (ephemeral runs are not supported)');
+    }
+    const out: Record<string, unknown> = {};
+    for (const op of config.operations ?? []) {
+      const key = op.key ? resolveTemplate(op.key, tctx) : undefined;
+      const outKey = op.outputKey ?? key ?? op.op;
+      switch (op.op) {
+        case 'get': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.get requires a key');
+          out[outKey] = this.deps.workflowStore.get(ctx.workspaceId, ctx.workflowId, key);
+          break;
+        }
+        case 'set': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.set requires a key');
+          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
+          out[outKey] = this.deps.workflowStore.set(ctx.workspaceId, ctx.workflowId, key, value);
+          break;
+        }
+        case 'delete': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.delete requires a key');
+          out[outKey] = this.deps.workflowStore.delete(ctx.workspaceId, ctx.workflowId, key);
+          break;
+        }
+        case 'increment': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.increment requires a key');
+          out[outKey] = this.deps.workflowStore.increment(ctx.workspaceId, ctx.workflowId, key, op.incrementBy ?? 1);
+          break;
+        }
+        case 'append': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.append requires a key');
+          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
+          out[outKey] = this.deps.workflowStore.append(ctx.workspaceId, ctx.workflowId, key, value);
+          break;
+        }
+        case 'get_all': {
+          out[outKey] = this.deps.workflowStore.snapshot(ctx.workspaceId, ctx.workflowId);
+          break;
+        }
+        default:
+          throw new AgentisError('VALIDATION_FAILED', `workflow_store: unknown op ${(op as { op: string }).op}`);
+      }
+    }
+    return out;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Evaluator / Guardrails
+  // ────────────────────────────────────────────────────────────
+
+  async #executeEvaluator(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: EvaluatorNodeConfig,
+    inputData: Record<string, unknown>,
+    tctx: TemplateContext,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.evaluatorRuntime) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'evaluator node present but EvaluatorRuntime not wired');
+    }
+    if (!config.targetPath) {
+      throw new AgentisError('VALIDATION_FAILED', 'evaluator node missing targetPath');
+    }
+    // Read the raw value (typed, not stringified) from the input or run context.
+    const target = readTemplatePath({ ...tctx, trigger: inputData, nodes: { ...tctx.nodes, input: inputData } }, config.targetPath)
+      ?? readDotPath(inputData, config.targetPath);
+    if (target === undefined) {
+      throw new AgentisError('VALIDATION_FAILED', `evaluator: targetPath '${config.targetPath}' did not resolve`);
+    }
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `evaluator:${node.id}`,
+      nodeId: node.id,
+      executorType: 'evaluator',
+      executorRef: 'llm_judge',
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      // Track FAIL→retry cycles via a tagged inputData field — the evaluator-retry
+      // pattern routes back to the upstream agent_task, which receives a bumped
+      // iterationCount on each cycle.
+      const prevIteration = Number(inputData['__evalIteration'] ?? 0);
+      const verdict = await this.deps.evaluatorRuntime.evaluate({
+        workspaceId: ctx.workspaceId,
+        target,
+        criteria: config.criteria,
+        rubric: config.rubric,
+        passThreshold: config.passThreshold,
+      });
+      return {
+        score: verdict.score,
+        passed: verdict.passed,
+        critique: verdict.critique,
+        dimensionScores: verdict.dimensionScores,
+        iterationCount: prevIteration + 1,
+        maxRetriesReached: prevIteration + 1 >= (config.maxRetries ?? 3),
+      };
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
+  }
+
+  #executeGuardrails(
+    config: GuardrailsNodeConfig,
+    inputData: Record<string, unknown>,
+  ): { shouldFail: boolean; message: string; output: Record<string, unknown> } {
+    const violations: Array<{ rule: string; target: string; message: string }> = [];
+    for (const rule of config.rules ?? []) {
+      const value = readDotPath(inputData, rule.target);
+      const ok = checkGuardrail(rule.type, value, rule);
+      if (!ok) {
+        violations.push({
+          rule: rule.type,
+          target: rule.target,
+          message: rule.message ?? `guardrail '${rule.type}' failed for '${rule.target}'`,
+        });
+      }
+    }
+    const block = (config.onViolation ?? 'block') === 'block' && violations.length > 0;
+    return {
+      shouldFail: block,
+      message: violations.map((v) => v.message).join('; ') || 'guardrails violated',
+      output: { ...inputData, guardrailViolations: violations },
+    };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Loop
+  // ────────────────────────────────────────────────────────────
+
+  async #dispatchLoop(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: LoopNodeConfig,
+    inputData: Record<string, unknown>,
+    tctx: TemplateContext,
+  ): Promise<void> {
+    if (!this.deps.subflows) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'loop node present but SubflowExecutor not wired');
+    }
+    if (!config.bodyWorkflowId) {
+      throw new AgentisError('VALIDATION_FAILED', 'loop node missing bodyWorkflowId');
+    }
+    // Resolve items array — accept either a `{{path}}` template or a raw dot path.
+    let items: unknown;
+    if (config.itemsExpression?.includes('{{')) {
+      // Stringified pass — we need typed access, so read the path directly.
+      const stripped = config.itemsExpression.replace(/^\{\{\s*|\s*\}\}$/g, '');
+      items = readTemplatePath(tctx, stripped);
+    } else if (config.itemsExpression) {
+      items = readTemplatePath(tctx, config.itemsExpression) ?? readDotPath(inputData, config.itemsExpression);
+    }
+    if (!Array.isArray(items)) {
+      throw new AgentisError('VALIDATION_FAILED', `loop.itemsExpression did not resolve to an array (got ${typeof items})`);
+    }
+    if (items.length === 0) {
+      await this.#completeNode(ctx, node.id, { [config.outputArrayKey]: [], count: 0 });
+      return;
+    }
+    const concurrency = Math.max(1, Math.min(config.maxConcurrency ?? 1, 32));
+    const chunkSize = Math.max(1, config.chunkSize ?? items.length);
+    const errorPolicy = config.onIterationError ?? 'stop_all';
+
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `loop:${node.id}`,
+      nodeId: node.id,
+      executorType: 'loop',
+      executorRef: `${items.length} items, c=${concurrency}, chunk=${chunkSize}`,
+      startedAt: new Date().toISOString(),
+    };
+
+    // Run loop fully async; complete/fail the node once all chunks settle.
+    void this.#runLoop(ctx, node, config, items, concurrency, chunkSize, errorPolicy)
+      .catch((err) => {
+        delete ctx.state.activeExecutions[node.id];
+        void this.#failNode(ctx, node.id, (err as Error).message);
+        void this.#tick(ctx);
+      });
+  }
+
+  async #runLoop(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: LoopNodeConfig,
+    items: unknown[],
+    concurrency: number,
+    chunkSize: number,
+    errorPolicy: 'stop_all' | 'continue' | 'collect_errors',
+  ): Promise<void> {
+    const results: unknown[] = new Array(items.length);
+    const errors: Array<{ index: number; message: string }> = [];
+
+    for (let chunkStart = 0; chunkStart < items.length; chunkStart += chunkSize) {
+      const chunkEnd = Math.min(chunkStart + chunkSize, items.length);
+      const chunkIndexes: number[] = [];
+      for (let i = chunkStart; i < chunkEnd; i += 1) chunkIndexes.push(i);
+
+      // Process this chunk with bounded concurrency.
+      const pool: Array<Promise<void>> = [];
+      const next = (async () => {
+        let cursor = 0;
+        const runOne = async (i: number): Promise<void> => {
+          try {
+            const itemOutput = await this.#runLoopIteration(ctx, node, config, items[i], i);
+            results[i] = itemOutput;
+          } catch (err) {
+            const message = (err as Error).message;
+            errors.push({ index: i, message });
+            if (errorPolicy === 'stop_all') throw err;
+          }
+        };
+        const workers: Array<Promise<void>> = [];
+        const launch = async (): Promise<void> => {
+          while (cursor < chunkIndexes.length) {
+            const my = chunkIndexes[cursor++]!;
+            await runOne(my);
+          }
+        };
+        for (let w = 0; w < Math.min(concurrency, chunkIndexes.length); w += 1) {
+          workers.push(launch());
+        }
+        await Promise.all(workers);
+      })();
+      pool.push(next);
+
+      try {
+        await Promise.all(pool);
+      } catch (err) {
+        // stop_all: bubble up.
+        delete ctx.state.activeExecutions[node.id];
+        await this.#failNode(ctx, node.id, `loop aborted on item ${errors.at(-1)?.index ?? '?'}: ${(err as Error).message}`);
+        void this.#tick(ctx);
+        return;
+      }
+
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.LOOP_PROGRESS, {
+        runId: ctx.runId,
+        nodeId: node.id,
+        completed: chunkEnd,
+        total: items.length,
+        errors: errors.length,
+      });
+    }
+
+    delete ctx.state.activeExecutions[node.id];
+    const output: Record<string, unknown> = {
+      [config.outputArrayKey]: results,
+      count: items.length,
+    };
+    if (errorPolicy === 'collect_errors' && errors.length > 0) {
+      output['errors'] = errors;
+    }
+    await this.#completeNode(ctx, node.id, output);
+    void this.#tick(ctx);
+  }
+
+  /**
+   * Run a single loop iteration by delegating to SubflowExecutor.
+   * Returns the child run's final output map.
+   */
+  async #runLoopIteration(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: LoopNodeConfig,
+    item: unknown,
+    index: number,
+  ): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      void this.deps.subflows!.start({
+        parentRunId: ctx.runId,
+        parentNodeId: `${node.id}:item:${index}`,
+        workspaceId: ctx.workspaceId,
+        ambientId: ctx.ambientId,
+        userId: ctx.userId,
+        childWorkflowId: config.bodyWorkflowId,
+        inputs: { loop: { item, index } },
+        resumeParent: async (output) => resolve(output ?? {}),
+        failParent: async (msg) => reject(new Error(msg)),
+        startChildRun: async (childArgs) => {
+          const handle = await this.startRun(childArgs);
+          return { runId: handle.runId };
+        },
+      });
+    });
+  }
+
   async #executeCheckpoint(
     ctx: RunningContext,
     node: WorkflowNode,
@@ -1083,8 +1731,10 @@ export class WorkflowEngine {
     if (completedNode) this.#emitWorkStep(ctx, completedNode, 'complete');
     ctx.eventsSinceSnapshot += 1;
 
-    // Fan out to downstream nodes.
+    // Fan out to downstream nodes. Error edges are reserved for `#failNode`
+    // and must NOT be traversed on a successful completion.
     for (const edge of ctx.downstreamEdges.get(nodeId) ?? []) {
+      if (edge.type === 'error') continue;
       // Conditional edge gating.
       if (edge.condition) {
         const scope = { output, scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId) };
@@ -1136,6 +1786,74 @@ export class WorkflowEngine {
     const failedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
     if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
     await this.#persistRun(ctx);
+
+    // Error-edge routing: a failed node with a connected `type: 'error'` edge
+    // routes its failure context downstream as a catch branch INSTEAD of
+    // terminating the run. The downstream node receives the original input
+    // plus an `error` field describing what failed.
+    const errorEdges = (ctx.downstreamEdges.get(nodeId) ?? []).filter((e) => e.type === 'error');
+    if (errorEdges.length > 0) {
+      // The failure is "handled" — remove from failedNodeIds so settle logic
+      // doesn't flip the whole run to FAILED.
+      ctx.state.failedNodeIds = ctx.state.failedNodeIds.filter((id) => id !== nodeId);
+      const errorPayload = {
+        ...(ns.inputData ?? {}),
+        error: {
+          nodeId,
+          message: error,
+          at: new Date().toISOString(),
+        },
+      };
+      for (const edge of errorEdges) {
+        const buf = ctx.state.waitingInputs[edge.target];
+        if (!buf) continue;
+        buf.receivedInputs[nodeId] = errorPayload;
+        buf.requiredInputs = buf.requiredInputs.filter((id) => id !== nodeId);
+        if (buf.requiredInputs.length === 0) {
+          const merged = mergeBufferedInputs(buf);
+          ctx.state.readyQueue.push({
+            nodeId: edge.target,
+            priority: 0,
+            insertedAt: new Date().toISOString(),
+            inputData: merged,
+          });
+          delete ctx.state.waitingInputs[edge.target];
+        }
+      }
+    }
+  }
+
+  /**
+   * Build the template-resolver context snapshot for the current dispatch.
+   *
+   * Captured once per node so the resolver sees a consistent view even if
+   * other nodes complete concurrently. The `nodes` map is keyed by node id;
+   * we expose the `outputData` directly so `{{nodes.foo.bar}}` matches the
+   * user's intuition about node outputs.
+   */
+  #buildTemplateContext(ctx: RunningContext, item: ReadyQueueItem, loop?: { item: unknown; index: number }): TemplateContext {
+    const nodeOutputs: Record<string, Record<string, unknown>> = {};
+    for (const [id, ns] of Object.entries(ctx.state.nodeStates)) {
+      if (ns.outputData) nodeOutputs[id] = ns.outputData as Record<string, unknown>;
+    }
+    // The trigger inputs are whatever the run was started with — the first
+    // queued item's inputData on the trigger node carries them.
+    const triggerNode = ctx.graph.nodes.find((n) => n.type === 'trigger');
+    const triggerInputs = (triggerNode && ctx.state.nodeStates[triggerNode.id]?.inputData) as
+      | Record<string, unknown>
+      | undefined;
+    const scratchpadSnap = this.deps.scratchpad.snapshotOf(ctx.runId);
+    // Workflow-store snapshot — empty when the service isn't wired or workflowId is missing.
+    const storeSnap = this.deps.workflowStore && ctx.workflowId
+      ? this.deps.workflowStore.snapshot(ctx.workspaceId, ctx.workflowId)
+      : {};
+    return buildTemplateContext({
+      triggerInputs: triggerInputs ?? item.inputData ?? {},
+      nodeOutputs,
+      scratchpad: scratchpadSnap,
+      store: storeSnap,
+      loop,
+    });
   }
 
   #skipBlockedNodes(ctx: RunningContext, reason: string): void {
@@ -1579,4 +2297,119 @@ function mergeBufferedInputs(buf: { receivedInputs: Record<string, unknown> }): 
     }
   }
   return merged;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+}
+
+function backoffMs(attempt: number): number {
+  // Exponential with jitter, capped at 4s.
+  const base = Math.min(4000, 200 * 2 ** (attempt - 1));
+  return base + Math.floor(Math.random() * 100);
+}
+
+function redactUrl(url: string): string {
+  // Strip query params from the executor reference for activity feeds; keep
+  // host + path so operators can still recognize the call.
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url.length > 60 ? `${url.slice(0, 60)}…` : url;
+  }
+}
+
+function readDotPath(obj: unknown, path: string): unknown {
+  if (!path) return obj;
+  let cursor: unknown = obj;
+  for (const segment of path.split('.')) {
+    if (cursor == null || typeof cursor !== 'object') return undefined;
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  return cursor;
+}
+
+function parseJsonOrString(input: string): unknown {
+  if (typeof input !== 'string') return input;
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  // Best-effort JSON parse for values authored as templates — fall back to the
+  // literal string when the result isn't valid JSON.
+  if (
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+    trimmed === 'true' ||
+    trimmed === 'false' ||
+    trimmed === 'null' ||
+    /^-?\d+(\.\d+)?$/.test(trimmed)
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return input;
+    }
+  }
+  return input;
+}
+
+function checkGuardrail(
+  type: string,
+  value: unknown,
+  rule: { value?: string; limit?: number },
+): boolean {
+  const asString = (v: unknown): string => {
+    if (v == null) return '';
+    if (typeof v === 'string') return v;
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+  switch (type) {
+    case 'not_empty':
+      if (value == null) return false;
+      if (typeof value === 'string') return value.trim().length > 0;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === 'object') return Object.keys(value as object).length > 0;
+      return Boolean(value);
+    case 'min_length':
+      return asString(value).length >= (rule.limit ?? 0);
+    case 'max_length':
+      return asString(value).length <= (rule.limit ?? Number.POSITIVE_INFINITY);
+    case 'contains':
+      return !!rule.value && asString(value).includes(rule.value);
+    case 'not_contains':
+      return !!rule.value && !asString(value).includes(rule.value);
+    case 'regex':
+      if (!rule.value) return true;
+      try {
+        return new RegExp(rule.value).test(asString(value));
+      } catch {
+        return false;
+      }
+    case 'json_schema':
+      // Lightweight check — full JSON Schema validation lives in the contract
+      // pipeline. For inline guardrails we just verify the value parses as JSON
+      // and (optionally) has the declared required top-level keys.
+      if (!rule.value) return true;
+      try {
+        const schema = JSON.parse(rule.value) as { required?: string[] };
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+        if (Array.isArray(schema.required)) {
+          for (const key of schema.required) {
+            if (!(key in (value as Record<string, unknown>))) return false;
+          }
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    default:
+      return true;
+  }
 }

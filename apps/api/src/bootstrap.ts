@@ -73,6 +73,9 @@ import { buildTeamRoutes } from './routes/teams.js';
 import { TeamService } from './services/teams.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
 import { BudgetService } from './services/budget.js';
+import { defaultConnectorRegistry } from '@agentis/integrations';
+import { WorkflowStoreService } from './services/workflowStore.js';
+import { EvaluatorRuntime } from './services/evaluatorRuntime.js';
 import { buildTerminalRoutes } from './routes/terminal.js';
 import { buildCredentialRoutes } from './routes/credentials.js';
 import { buildTriggerRoutes } from './routes/triggers.js';
@@ -157,6 +160,25 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const knowledgeBaseService = new KnowledgeBaseService(sqlite);
   const teamService = new TeamService(sqlite, bus);
   const budgetService = new BudgetService({ db: sqlite, bus, approvals });
+  const workflowStoreService = new WorkflowStoreService(sqlite);
+
+  // EvaluatorRuntime — only constructed when an LLM endpoint is configured.
+  // Without these env vars, `evaluator` nodes throw at dispatch time and
+  // `router` llm_route mode falls back to first-match. This keeps v1.0 usable
+  // without forcing operators to configure a model on day one.
+  const evaluatorRuntime = (env.AGENTIS_EVALUATOR_BASE_URL && env.AGENTIS_EVALUATOR_MODEL)
+    ? new EvaluatorRuntime({
+        baseUrl: env.AGENTIS_EVALUATOR_BASE_URL,
+        apiKey: env.AGENTIS_EVALUATOR_API_KEY,
+        model: env.AGENTIS_EVALUATOR_MODEL,
+        logger,
+      })
+    : undefined;
+  if (!evaluatorRuntime) {
+    logger.info('engine.evaluator.disabled', {
+      reason: 'AGENTIS_EVALUATOR_BASE_URL or AGENTIS_EVALUATOR_MODEL not set',
+    });
+  }
 
   // Channel bridge (Batch 4): Telegram inbound+outbound, Discord outbound-only.
   const channelBridge = new ChannelBridge({
@@ -187,6 +209,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     subflows,
     knowledgeBases: knowledgeBaseService,
     conversations,
+    connectors: defaultConnectorRegistry,
+    workflowStore: workflowStoreService,
+    evaluatorRuntime,
+    vault: credentialVault,
     telemetry,
   });
   const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations });

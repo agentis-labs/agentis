@@ -283,6 +283,31 @@ export const triggers = sqliteTable('triggers', {
   ...baseTimestamps(),
 });
 
+/**
+ * Workflow-scoped persistent KV — survives run boundaries.
+ *
+ * Distinct from the run-scoped scratchpad: a daily workflow can accumulate
+ * state across 30+ runs without external infrastructure. Brain-apps will
+ * index these entries as structured facts per workflow — the `workspace_id`
+ * column already provides the scope needed for that without a migration.
+ */
+export const workflowKvEntries = sqliteTable('workflow_kv_entries', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: text('workflow_id')
+    .notNull()
+    .references(() => workflows.id, { onDelete: 'cascade' }),
+  key: text('key').notNull(),
+  /** JSON-encoded value. */
+  value: text('value', { mode: 'json' }).notNull(),
+  /** Bumped on every write — supports optimistic concurrency in v1.1. */
+  version: integer('version').notNull().default(1),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
 export const workflowRuns = sqliteTable('workflow_runs', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')

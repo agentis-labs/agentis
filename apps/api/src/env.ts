@@ -60,6 +60,13 @@ const envSchema = z.object({
   // so an install that doesn't need tracing keeps the dep graph small.
   AGENTIS_OTEL_ENDPOINT: z.string().url().optional(),
   AGENTIS_OTEL_SERVICE_NAME: z.string().default('agentis-api'),
+
+  // Evaluator runtime — opt-in. When unset, `evaluator` nodes fail at dispatch
+  // with WORKFLOW_GRAPH_INVALID and `router` llm_route mode falls back to
+  // first-match. Configure to enable LLM-as-judge for quality gates.
+  AGENTIS_EVALUATOR_BASE_URL: z.string().url().optional(),
+  AGENTIS_EVALUATOR_API_KEY: z.string().optional(),
+  AGENTIS_EVALUATOR_MODEL: z.string().optional(),
 });
 
 export type AgentisEnv = z.infer<typeof envSchema>;

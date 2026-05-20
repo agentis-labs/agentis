@@ -8,25 +8,43 @@
  */
 
 export type WorkflowNodeType =
+  // Control flow
   | 'trigger'
-  | 'agent_task'
-  | 'skill_task'
-  | 'knowledge'
   | 'router'
   | 'merge'
-  | 'checkpoint'
   | 'subflow'
+  | 'wait'
+  | 'loop'
+  | 'parallel'
+  // Data & logic — deterministic, zero LLM tokens
+  | 'transform'
+  | 'filter'
+  | 'integration'
+  | 'http_request'
+  | 'workflow_store'
   | 'scratchpad'
-  /** Parallel agent fan-out over an input array. */
+  // Intelligence — LLM-powered
+  | 'agent_task'
+  | 'skill_task'
   | 'agent_swarm'
-  /** Collect and version artifacts produced by upstream nodes. */
-  | 'artifact_collect';
+  | 'evaluator'
+  | 'guardrails'
+  // Knowledge & enrichment
+  | 'knowledge'
+  | 'artifact_collect'
+  // Human interaction
+  | 'checkpoint';
 
 export interface WorkflowGraph {
   version: 1;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   viewport: { x: number; y: number; zoom: number };
+  /** Optional input/output contracts — declared shape of what triggers this workflow + what it produces. */
+  inputContract?: WorkflowContract;
+  outputContract?: WorkflowContract;
+  /** Named phase groups for large graphs. */
+  phases?: WorkflowPhase[];
 }
 
 export interface WorkflowNode {
@@ -45,6 +63,39 @@ export interface WorkflowEdge {
   targetHandle?: string;
   /** Safe expression (no eval). Evaluated by SafeConditionParser. */
   condition?: string;
+  /**
+   * Edge semantics. Defaults to `'default'`.
+   * - `'default'`  → normal success edge.
+   * - `'error'`    → only traversed when the source node fails. Replaces run termination.
+   * - `'condition'`→ traversed when the (already-evaluated) condition is truthy. Hint for renderer.
+   */
+  type?: 'default' | 'error' | 'condition';
+}
+
+/**
+ * Declared contract for what a workflow accepts as trigger input or produces as final output.
+ * Mirrors the shape brain-apps' `AppRuntimeContract` will reference — an "app" is, structurally,
+ * a workflow with a named outputContract. Keep this shape stable.
+ */
+export interface WorkflowContract {
+  fields: Array<{
+    key: string;
+    type: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'any';
+    required?: boolean;
+    description?: string;
+    /** JSON Schema string for additional validation when `type` is `'object'` or `'array'`. */
+    schema?: string;
+  }>;
+}
+
+/** A named group of nodes used by the canvas for collapse/expand in large graphs. */
+export interface WorkflowPhase {
+  id: string;
+  name: string;
+  /** Hex color used for the canvas region background. */
+  color: string;
+  nodeIds: string[];
+  collapsed?: boolean;
 }
 
 export interface WorkflowOutputConfig {
@@ -64,6 +115,16 @@ export type WorkflowNodeConfig = (
   | ScratchpadNodeConfig
   | AgentSwarmNodeConfig
   | ArtifactCollectNodeConfig
+  | WaitNodeConfig
+  | TransformNodeConfig
+  | FilterNodeConfig
+  | IntegrationNodeConfig
+  | HttpRequestNodeConfig
+  | WorkflowStoreNodeConfig
+  | EvaluatorNodeConfig
+  | GuardrailsNodeConfig
+  | LoopNodeConfig
+  | ParallelNodeConfig
 ) & WorkflowOutputConfig;
 
 /** Trigger node config. */
@@ -185,6 +246,171 @@ export interface ScratchpadNodeConfig {
 }
 
 // ────────────────────────────────────────────────────────────
+// Control-flow & deterministic primitives
+// ────────────────────────────────────────────────────────────
+
+/** Time-based delay. Resumes the downstream chain after `delayMs`. */
+export interface WaitNodeConfig {
+  kind: 'wait';
+  /** Delay in milliseconds. ≤0 completes instantly. */
+  delayMs: number;
+}
+
+/** JS expression evaluated against `input`. Output replaces the node's outputData. */
+export interface TransformNodeConfig {
+  kind: 'transform';
+  /** A JS expression. Receives `input` bound to inputData. Must return the output object. */
+  expression: string;
+  /** Optional key under which the result is also stored; otherwise the result is the whole output. */
+  outputKey?: string;
+}
+
+/** Boolean gate. Truthy → `pass` handle; falsy → `skip` handle. */
+export interface FilterNodeConfig {
+  kind: 'filter';
+  /** Boolean JS expression. Receives `input`. */
+  condition: string;
+  passLabel?: string;
+  skipLabel?: string;
+}
+
+/** Call a registered integration connector (Slack / Gmail / GitHub / Sheets / HTTP …). */
+export interface IntegrationNodeConfig {
+  kind: 'integration';
+  /** Connector slug from `ConnectorRegistry.list()`. */
+  integrationId: string;
+  /** Operation slug from the connector's manifest. */
+  operationId: string;
+  /** Resolved at dispatch time — values may contain `{{variable}}` templates. */
+  inputs: Record<string, string>;
+  /** Credential ID from the workspace credential store. Optional for connectors that don't require auth. */
+  credentialId?: string;
+}
+
+/** Raw outbound HTTP for cases without a named connector. */
+export interface HttpRequestNodeConfig {
+  kind: 'http_request';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** URL template — supports `{{variable}}`. */
+  url: string;
+  /** Header templates. */
+  headers?: Record<string, string>;
+  /** Body template. Sent as-is when present. */
+  body?: string;
+  auth?:
+    | { type: 'none' }
+    | { type: 'bearer'; token: string }
+    | { type: 'api_key'; header: string; token: string }
+    | { type: 'basic'; username: string; password: string };
+  /** Optional response extraction. */
+  responseMapping?: {
+    /** JSON-path-like dot notation (e.g. `data.items[0].id`). */
+    bodyPath?: string;
+    /** Key under which the extracted value is stored. */
+    outputKey: string;
+  };
+  /** Status codes that trigger a retry (e.g. `[429, 503]`). */
+  retryOn?: number[];
+  /** Max retry attempts after the initial dispatch (default 0). */
+  maxRetries?: number;
+  /** Per-request timeout (default 30000). */
+  timeoutMs?: number;
+}
+
+/**
+ * Workflow-scoped persistent KV.
+ *
+ * Distinct from `scratchpad` (run-scoped, disposed on completion). `workflow_store`
+ * survives run boundaries — a daily workflow can accumulate state across 30+ runs.
+ * Brain-apps will index these entries as structured facts; the schema carries
+ * `workspaceId` to support that without later migration.
+ */
+export interface WorkflowStoreNodeConfig {
+  kind: 'workflow_store';
+  operations: Array<{
+    op: 'get' | 'set' | 'delete' | 'increment' | 'append' | 'get_all';
+    /** Key template — supports `{{variable}}`. Required for everything except `get_all`. */
+    key?: string;
+    /** Value template — supports `{{variable}}`. Required for `set` / `append`. */
+    value?: string;
+    /** Result is stored under this key in the node's output. Defaults to the key name. */
+    outputKey?: string;
+    /** For `increment`. Defaults to 1. */
+    incrementBy?: number;
+  }>;
+}
+
+// ────────────────────────────────────────────────────────────
+// Intelligence
+// ────────────────────────────────────────────────────────────
+
+/** LLM-as-judge: scores an upstream output and routes pass/fail. */
+export interface EvaluatorNodeConfig {
+  kind: 'evaluator';
+  /** Path into the node's input to find what should be evaluated (dot notation). */
+  targetPath: string;
+  /** Natural-language acceptance criteria. */
+  criteria: string;
+  /** Minimum score (0–10) to pass. Default 7. */
+  passThreshold?: number;
+  /** Max times the FAIL edge may cycle back before terminating. Default 3. */
+  maxRetries?: number;
+  /** Optional rubric dimensions for multi-axis scoring. */
+  rubric?: Array<{ dimension: string; weight: number }>;
+}
+
+/** Deterministic policy enforcement — rule-based, no LLM. */
+export interface GuardrailsNodeConfig {
+  kind: 'guardrails';
+  rules: Array<{
+    type: 'not_empty' | 'min_length' | 'max_length' | 'contains' | 'not_contains' | 'regex' | 'json_schema';
+    /** Dot-notation path into input data. */
+    target: string;
+    /** Match string, regex pattern, or JSON Schema string depending on `type`. */
+    value?: string;
+    /** Length bound for `min_length` / `max_length`. */
+    limit?: number;
+    /** Human-readable message attached to violations. */
+    message?: string;
+  }>;
+  /** `block` routes to the error edge; `flag` adds the violation array to output and continues. */
+  onViolation: 'block' | 'flag';
+}
+
+// ────────────────────────────────────────────────────────────
+// Loop / Parallel
+// ────────────────────────────────────────────────────────────
+
+/** Array iteration. Each item dispatches a child subflow with `{{loop.item}}` / `{{loop.index}}` bound. */
+export interface LoopNodeConfig {
+  kind: 'loop';
+  /** Template expression resolving to the array (e.g. `{{nodes.step1.results}}`). */
+  itemsExpression: string;
+  /** Concurrency cap — 1 is sequential, >1 fans out in parallel. */
+  maxConcurrency: number;
+  /** Body workflow ID — invoked once per item via SubflowExecutor. */
+  bodyWorkflowId: string;
+  /** What happens when a single iteration fails. */
+  onIterationError: 'stop_all' | 'continue' | 'collect_errors';
+  /** Key under which iteration outputs are collected. */
+  outputArrayKey: string;
+  /**
+   * For very large arrays: process this many at a time. Engine emits LOOP_PROGRESS
+   * after each chunk completes. Defaults to processing all items at once.
+   */
+  chunkSize?: number;
+}
+
+/** Structural fan-out: every outgoing edge is a branch executed simultaneously. */
+export interface ParallelNodeConfig {
+  kind: 'parallel';
+  /** `all` waits for every branch; `first` settles when any single branch completes. */
+  waitFor: 'all' | 'first';
+  onBranchError: 'fail_all' | 'continue_with_results';
+  mergeStrategy: 'merge_keys' | 'collect_all' | 'first_non_null';
+}
+
+// ────────────────────────────────────────────────────────────
 // Run state
 // ────────────────────────────────────────────────────────────
 
@@ -194,6 +420,8 @@ export type WorkflowRunStatus =
   | 'RUNNING'
   | 'WAITING'
   | 'COMPLETED'
+  /** The graph ran to completion but the final output did not match the declared outputContract. */
+  | 'COMPLETED_WITH_CONTRACT_VIOLATION'
   | 'FAILED'
   | 'CANCELLED';
 
@@ -247,7 +475,16 @@ export interface WorkflowNodeState {
 export interface ActiveExecution {
   taskId: string;
   nodeId: string;
-  executorType: 'agent' | 'skill' | 'subflow' | 'router';
+  executorType:
+    | 'agent'
+    | 'skill'
+    | 'subflow'
+    | 'router'
+    | 'wait'
+    | 'http'
+    | 'integration'
+    | 'evaluator'
+    | 'loop';
   executorRef: string;
   startedAt: string;
   heartbeatAt?: string;

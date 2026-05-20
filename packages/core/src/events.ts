@@ -63,6 +63,15 @@ export const REALTIME_EVENTS = {
   NODE_CACHE_HIT: 'node.cache_hit',
   NODE_COMPRESS_STATS: 'node.compress_stats',
   NODE_SURGICAL_RETRY: 'node.surgical_retry',
+  NODE_TEST_COMPLETED: 'node.test_completed',
+
+  // Loop / phase progress
+  LOOP_PROGRESS: 'loop.progress',
+  PHASE_COMPLETED: 'phase.completed',
+  PHASE_FAILED: 'phase.failed',
+
+  // Contracts
+  CONTRACT_VIOLATION: 'contract.violation',
 
   // Scheduler / event chains
   SCHEDULE_FIRED: 'schedule.fired',

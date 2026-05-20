@@ -204,6 +204,20 @@ CREATE TABLE IF NOT EXISTS triggers (
 );
 CREATE INDEX IF NOT EXISTS idx_triggers_workflow ON triggers(workflow_id);
 
+CREATE TABLE IF NOT EXISTS workflow_kv_entries (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id   TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  key           TEXT NOT NULL,
+  value         TEXT NOT NULL,
+  version       INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(workflow_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_kv_lookup ON workflow_kv_entries(workflow_id, key);
+CREATE INDEX IF NOT EXISTS idx_workflow_kv_workspace ON workflow_kv_entries(workspace_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS workflow_runs (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
