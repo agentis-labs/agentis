@@ -50,9 +50,7 @@ export interface AgentHierarchyAgent {
   spendTodayCents?: number | null;
   pendingApprovals?: number | null;
   connectionCounts?: {
-    apps: number;
     workflows: number;
-    memoryPlanes: number;
   } | null;
   isGhost?: boolean | null;
   ghostDescription?: string | null;

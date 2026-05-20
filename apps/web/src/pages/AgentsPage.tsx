@@ -50,9 +50,7 @@ interface AgentRow {
   spendTodayCents?: number | null;
   pendingApprovals?: number | null;
   connectionCounts?: {
-    apps: number;
     workflows: number;
-    memoryPlanes: number;
   } | null;
 }
 

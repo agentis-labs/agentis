@@ -35,7 +35,6 @@ export function CanvasHudBar({
           <Metric value={counts.idleAgents} label="idle" />
           <Metric value={counts.attentionCount} label="attention" tone={counts.attentionCount > 0 ? 'warn' : undefined} />
           <Metric value={counts.workflows} label="workflows" />
-          <Metric value={counts.apps} label="apps" />
         </div>
         <div className="flex items-center gap-1.5">
           <HudButton label="Reset view" onClick={onResetView} icon={<RotateCcw size={14} />} />

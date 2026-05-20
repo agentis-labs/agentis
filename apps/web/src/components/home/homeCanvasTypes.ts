@@ -15,7 +15,6 @@ export type CanvasNodeKind =
   | 'orchestrator'
   | 'manager'
   | 'worker'
-  | 'app'
   | 'workflow'
   | 'knowledge'
   | 'artifact'
@@ -23,23 +22,6 @@ export type CanvasNodeKind =
   | 'ghost';
 
 export type CanvasEdgeType = 'command' | 'resource';
-
-export interface HomeApp {
-  id: string;
-  slug: string;
-  name: string;
-  status?: string;
-  deployStatus?: string | null;
-  entryWorkflowId?: string | null;
-  spaceId?: string | null;
-  iconGlyph?: string;
-  iconColor?: string;
-  iconUrl?: string | null;
-  imageUrl?: string | null;
-  logoUrl?: string | null;
-  avatarUrl?: string | null;
-  category?: string;
-}
 
 export interface HomeWorkflow {
   id: string;
@@ -63,7 +45,6 @@ export interface HomeKnowledgeBase {
 }
 
 export interface EcosystemData {
-  apps: HomeApp[];
   workflows: HomeWorkflow[];
   knowledgeBases: HomeKnowledgeBase[];
   loading: boolean;
@@ -93,7 +74,6 @@ export interface CanvasNode {
   startedAt?: string;
   tooltipLines: string[];
   agent?: WorkspaceAgent;
-  app?: HomeApp;
   workflow?: HomeWorkflow;
   knowledge?: HomeKnowledgeBase;
   artifact?: WorkspaceArtifact;
@@ -141,7 +121,6 @@ export interface FleetCounts {
   idleAgents: number;
   attentionCount: number;
   workflows: number;
-  apps: number;
 }
 
 export interface ComposerRecentCompletion {

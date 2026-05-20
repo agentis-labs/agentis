@@ -21,9 +21,7 @@ interface AgentSummary {
   spendTodayCents?: number | null;
   pendingApprovals?: number | null;
   connectionCounts?: {
-    apps: number;
     workflows: number;
-    memoryPlanes: number;
   } | null;
 }
 
@@ -49,17 +47,13 @@ interface AgentPanelDetail {
 }
 
 interface AgentConnections {
-  apps: Array<{ id: string; name?: string; title?: string }>;
   workflows: Array<{ id: string; title?: string; name?: string }>;
   tasks: Array<{ id: string; title: string; status: string }>;
-  memoryPlanes: Array<{ id: string; name: string }>;
 }
 
 const EMPTY_CONNECTIONS: AgentConnections = {
-  apps: [],
   workflows: [],
   tasks: [],
-  memoryPlanes: [],
 };
 
 export function AgentHierarchyDetailPanel({
@@ -108,9 +102,7 @@ export function AgentHierarchyDetailPanel({
   if (!open || !summaryAgent) return null;
 
   const connectionCounts = summaryAgent.connectionCounts ?? {
-    apps: connections.apps.length,
     workflows: connections.workflows.length,
-    memoryPlanes: connections.memoryPlanes.length,
   };
 
   return (
@@ -168,16 +160,12 @@ export function AgentHierarchyDetailPanel({
             </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
-              <ConnectionChip label={countLabel(connectionCounts.apps, 'app')} />
               <ConnectionChip label={countLabel(connectionCounts.workflows, 'workflow')} />
-              <ConnectionChip label={countLabel(connectionCounts.memoryPlanes, 'memory plane', 'memory planes')} />
             </div>
           </section>
 
-          <section className="grid gap-3 md:grid-cols-3">
-            <ConnectionList title="Apps" items={connections.apps.map((item) => item.name ?? item.title ?? item.id)} empty="No linked apps" />
+          <section className="grid gap-3 md:grid-cols-1">
             <ConnectionList title="Workflows" items={connections.workflows.map((item) => item.title ?? item.name ?? item.id)} empty="No linked workflows" />
-            <ConnectionList title="Memory" items={connections.memoryPlanes.map((item) => item.name)} empty="No linked memory" />
           </section>
 
           {connections.tasks.length > 0 ? (
@@ -227,10 +215,8 @@ export function AgentHierarchyDetailPanel({
 
 function normalizeConnections(value: AgentConnections): AgentConnections {
   return {
-    apps: Array.isArray(value.apps) ? value.apps : [],
     workflows: Array.isArray(value.workflows) ? value.workflows : [],
     tasks: Array.isArray(value.tasks) ? value.tasks : [],
-    memoryPlanes: Array.isArray(value.memoryPlanes) ? value.memoryPlanes : [],
   };
 }
 
