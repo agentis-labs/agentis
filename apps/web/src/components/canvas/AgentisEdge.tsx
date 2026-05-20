@@ -34,6 +34,25 @@ export function AgentisEdge(props: EdgeProps) {
   const { setEdges } = useReactFlow();
   const label = (data as { label?: string } | undefined)?.label ?? '';
   const xray = (data as { xray?: { costLabel: string; tokenLabel: string } } | undefined)?.xray;
+  const edgeType = (data as { type?: 'default' | 'error' | 'condition' } | undefined)?.type ?? 'default';
+
+  // Edge-type styling. Error edges render dashed in red to make catch branches
+  // visually distinct from the success path; condition edges get a subtle
+  // amber accent. The base color comes from `style`, so we only override what
+  // matters for the type discriminant.
+  const typedStyle: React.CSSProperties = (() => {
+    if (edgeType === 'error') {
+      return {
+        ...(style ?? {}),
+        stroke: 'var(--color-danger, #ef4444)',
+        strokeDasharray: '6 4',
+      };
+    }
+    if (edgeType === 'condition') {
+      return { ...(style ?? {}), stroke: 'var(--color-warn, #d97706)' };
+    }
+    return style ?? {};
+  })();
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(label);
@@ -74,7 +93,7 @@ export function AgentisEdge(props: EdgeProps) {
 
   return (
     <>
-      <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
+      <BaseEdge id={id} path={edgePath} style={typedStyle} markerEnd={markerEnd} />
       <EdgeLabelRenderer>
         <div
           // React Flow recommends pointer-events:all on labels so they can

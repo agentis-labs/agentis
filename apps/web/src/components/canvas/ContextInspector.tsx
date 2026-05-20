@@ -4,6 +4,8 @@ import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { SkillCombobox } from './SkillCombobox';
 import type { InstalledSkillOption } from './SkillCombobox';
+import { describeCron, nextFires, CRON_PRESETS } from '../../lib/cronPreview';
+import { NodeTestRunner } from './NodeTestRunner';
 
 export interface InspectorSelection {
   kind: 'node' | 'edge' | null;
@@ -37,19 +39,25 @@ const KIND_LABEL: Record<string, string> = {
 
 export function ContextInspector({
   selection,
+  workflowId,
   onClose,
   onSave,
   className,
 }: {
   selection: InspectorSelection;
+  /** Required for the per-node Test tab. Omit (null) on canvases that don't yet have a saved workflow id. */
+  workflowId?: string | null;
   onClose: () => void;
   onSave?: (data: Record<string, unknown>) => void;
   className?: string;
 }) {
-  const [jsonMode, setJsonMode] = useState(false);
+  const [pane, setPane] = useState<'form' | 'json' | 'test'>('form');
   const [editData, setEditData] = useState<Record<string, unknown>>(selection.data ?? {});
   const [jsonText, setJsonText] = useState(JSON.stringify(selection.data ?? {}, null, 2));
   const [jsonError, setJsonError] = useState<string | null>(null);
+  // Backward-compat alias for sites in the file that still reference `jsonMode`.
+  const jsonMode = pane === 'json';
+  const setJsonMode = (v: boolean) => setPane(v ? 'json' : 'form');
 
   // Lazy-load reference data (agents/skills/workflows) when the form needs it.
   const [agents, setAgents] = useState<AgentRow[]>([]);
@@ -68,7 +76,7 @@ export function ContextInspector({
     setEditData(d);
     setJsonText(JSON.stringify(d, null, 2));
     setJsonError(null);
-    setJsonMode(false);
+    setPane('form');
   }, [selection.nodeId, selection.kind]);
 
   useEffect(() => {
@@ -127,15 +135,30 @@ export function ContextInspector({
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={() => { setJsonMode((v) => !v); setJsonError(null); }}
-            title={jsonMode ? 'Form view' : 'JSON view'}
-            className={clsx(
-              'rounded p-1 transition-colors',
-              jsonMode ? 'text-accent' : 'text-text-muted hover:text-text-primary',
-            )}
+            onClick={() => { setPane('form'); setJsonError(null); }}
+            title="Form view"
+            className={clsx('rounded p-1 transition-colors', pane === 'form' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
           >
-            {jsonMode ? <LayoutTemplate size={12} /> : <Code2 size={12} />}
+            <LayoutTemplate size={12} />
           </button>
+          <button
+            type="button"
+            onClick={() => { setPane('json'); }}
+            title="JSON view"
+            className={clsx('rounded p-1 transition-colors', pane === 'json' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
+          >
+            <Code2 size={12} />
+          </button>
+          {selection.kind === 'node' && workflowId && selection.nodeId && (
+            <button
+              type="button"
+              onClick={() => setPane('test')}
+              title="Test this node in isolation"
+              className={clsx('rounded p-1 transition-colors', pane === 'test' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
+            >
+              ▶
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -148,7 +171,13 @@ export function ContextInspector({
       </header>
 
       <div className="flex-1 overflow-auto px-3 py-3">
-        {jsonMode ? (
+        {pane === 'test' && workflowId && selection.nodeId ? (
+          <NodeTestRunner
+            workflowId={workflowId}
+            nodeId={selection.nodeId}
+            seedInputs={(editData.lastInputData as Record<string, unknown> | undefined) ?? {}}
+          />
+        ) : pane === 'json' ? (
           <div>
             <textarea
               value={jsonText}
@@ -326,6 +355,9 @@ function asStr(v: unknown): string {
 
 function TriggerForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const triggerType = asStr(data.triggerType) || 'manual';
+  const schedule = asStr(data.schedule);
+  const cronDescription = useMemo(() => triggerType === 'cron' && schedule ? describeCron(schedule) : null, [triggerType, schedule]);
+  const cronNextFires = useMemo(() => triggerType === 'cron' && schedule ? nextFires(schedule, 5) : [], [triggerType, schedule]);
   return (
     <>
       <Field label="Trigger type" hint="How should this workflow start?">
@@ -334,22 +366,64 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
           value={triggerType}
           onChange={(e) => update({ triggerType: e.target.value })}
         >
-          <option value="manual">Manual</option>
-          <option value="cron">Schedule (cron)</option>
-          <option value="webhook">Webhook</option>
-          <option value="persistent_listener">Persistent listener</option>
+          <option value="manual">Manual — run on demand</option>
+          <option value="cron">Schedule — recurring (cron)</option>
+          <option value="webhook">Webhook — inbound POST</option>
+          <option value="persistent_listener">Persistent listener — long-poll source</option>
         </select>
       </Field>
       {triggerType === 'cron' && (
-        <Field label="Schedule" hint="Cron expression — e.g., '0 9 * * 1' for every Monday at 9am.">
-          <input
-            type="text"
-            className={inputCls}
-            placeholder="0 9 * * 1"
-            value={asStr(data.schedule)}
-            onChange={(e) => update({ schedule: e.target.value })}
-          />
-        </Field>
+        <>
+          <Field label="Schedule (UTC cron)" hint="Five fields: minute hour day-of-month month day-of-week.">
+            <input
+              type="text"
+              className={inputCls + ' font-mono'}
+              placeholder="0 9 * * 1"
+              value={schedule}
+              onChange={(e) => update({ schedule: e.target.value })}
+            />
+          </Field>
+          <Field label="Presets">
+            <div className="flex flex-wrap gap-1">
+              {CRON_PRESETS.map((preset) => (
+                <button
+                  key={preset.expression}
+                  type="button"
+                  onClick={() => update({ schedule: preset.expression })}
+                  className="rounded-pill border border-line bg-canvas px-2 py-0.5 text-[10px] text-text-secondary hover:border-accent/50 hover:text-text-primary"
+                  title={preset.description}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          {schedule && (
+            <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px]">
+              {cronDescription
+                ? <div className="text-text-primary">{cronDescription}</div>
+                : <div className="text-warn">Could not parse expression — saving anyway, server may still accept it.</div>}
+              {cronNextFires.length > 0 && (
+                <div className="mt-1.5 border-t border-line/60 pt-1.5">
+                  <div className="mb-0.5 text-[10px] uppercase tracking-wider text-text-muted">Next 5 fires (UTC)</div>
+                  <ul className="space-y-0.5 font-mono text-[10px] text-text-secondary">
+                    {cronNextFires.map((iso) => <li key={iso}>{iso.replace('T', ' ').replace('.000Z', 'Z')}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {triggerType === 'webhook' && (
+        <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] text-text-secondary">
+          Webhook URL is generated when this trigger is registered. The endpoint accepts <code className="rounded bg-canvas px-1">POST</code> with HMAC verification — see the Triggers list for the secret.
+        </div>
+      )}
+      {triggerType === 'persistent_listener' && (
+        <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] text-text-secondary">
+          Persistent listeners stay connected to a source (e.g. a chat channel) and fire the workflow each time a relevant event arrives.
+        </div>
       )}
     </>
   );

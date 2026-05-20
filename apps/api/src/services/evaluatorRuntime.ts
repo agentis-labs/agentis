@@ -124,6 +124,42 @@ export class EvaluatorRuntime {
     }
   }
 
+  /**
+   * Generic structured-JSON completion. Used by NL workflow synthesis and any
+   * other tool handler that wants the same OpenAI-compatible endpoint without
+   * inventing its own.
+   *
+   * Retries up to `maxAttempts` times if the response can't be parsed as a
+   * JSON object — each retry includes the parse error so the model can correct.
+   */
+  async completeStructured<T extends Record<string, unknown>>(args: {
+    system: string;
+    user: string;
+    maxTokens?: number;
+    maxAttempts?: number;
+  }): Promise<T | null> {
+    const attempts = Math.max(1, Math.min(args.maxAttempts ?? 3, 5));
+    let lastError: string | null = null;
+    let userPrompt = args.user;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const raw = await this.#callJson({
+          system: args.system,
+          user: userPrompt,
+          maxTokens: args.maxTokens ?? 1500,
+        });
+        const parsed = parseGeneric(raw) as T | null;
+        if (parsed) return parsed;
+        lastError = 'response was not parseable as a JSON object';
+      } catch (err) {
+        lastError = (err as Error).message;
+      }
+      userPrompt = `${args.user}\n\nPREVIOUS ATTEMPT FAILED: ${lastError}. Return strict JSON only — no prose, no code fences.`;
+    }
+    this.opts.logger.warn('evaluator.completeStructured.exhausted', { lastError, attempts });
+    return null;
+  }
+
   async #callJson(req: { system: string; user: string; maxTokens?: number }): Promise<string> {
     const url = this.opts.baseUrl.replace(/\/+$/, '') + '/chat/completions';
     const headers: Record<string, string> = { 'content-type': 'application/json' };

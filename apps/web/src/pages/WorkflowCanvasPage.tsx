@@ -229,7 +229,20 @@ export function WorkflowCanvasPage() {
       })),
     );
     setFlowEdges(
-      wf.graph.edges.map((e) => ({ id: e.id, source: e.source, target: e.target, animated: false })),
+      wf.graph.edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        animated: false,
+        // Carry the edge-type discriminant through to the renderer (used by
+        // AgentisEdge for error-edge dashed-red styling) along with any
+        // human-edited label.
+        data: {
+          type: (e as { type?: 'default' | 'error' | 'condition' }).type ?? 'default',
+          label: (e as { label?: string }).label,
+          condition: (e as { condition?: string }).condition,
+        },
+      })),
     );
   }, [wf, setFlowNodes, setFlowEdges]);
 
@@ -296,7 +309,18 @@ export function WorkflowCanvasPage() {
           config: { kind: data.kind ?? data.type ?? 'task' },
         };
       });
-      const nextEdges = flowEdges.map((fe) => ({ id: fe.id, source: fe.source, target: fe.target }));
+      const nextEdges = flowEdges.map((fe) => {
+        const data = (fe.data ?? {}) as { type?: 'default' | 'error' | 'condition'; label?: string; condition?: string };
+        const e: { id: string; source: string; target: string; type?: 'default' | 'error' | 'condition'; label?: string; condition?: string } = {
+          id: fe.id,
+          source: fe.source,
+          target: fe.target,
+        };
+        if (data.type && data.type !== 'default') e.type = data.type;
+        if (data.label) e.label = data.label;
+        if (data.condition) e.condition = data.condition;
+        return e;
+      });
       return { ...prev, graph: { ...prev.graph, nodes: nextNodes, edges: nextEdges } };
     });
     queueSave();
@@ -661,6 +685,7 @@ export function WorkflowCanvasPage() {
         </div>
         <ContextInspector
           selection={selection}
+          workflowId={wf?.id ?? null}
           onClose={() => setSelection({ kind: null })}
           onSave={(data) => {
             if (!wf || !selection.nodeId) return;

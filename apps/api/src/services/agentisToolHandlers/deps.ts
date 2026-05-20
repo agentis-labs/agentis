@@ -17,6 +17,7 @@ import type { ApprovalInboxService } from '../approvalInbox.js';
 import type { ActivityFeedService } from '../activityFeed.js';
 import type { PartialReplayService } from '../partialReplay.js';
 import type { KnowledgeBaseService } from '../knowledgeBase.js';
+import type { EvaluatorRuntime } from '../evaluatorRuntime.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -30,4 +31,6 @@ export interface ToolHandlerDeps {
   activity: ActivityFeedService;
   replay: PartialReplayService;
   knowledgeBases?: KnowledgeBaseService;
+  /** Optional — used by NL workflow synthesis for structured-output LLM calls. */
+  evaluatorRuntime?: EvaluatorRuntime;
 }

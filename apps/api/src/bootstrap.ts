@@ -248,6 +248,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     activity,
     replay,
     knowledgeBases: knowledgeBaseService,
+    evaluatorRuntime,
   });
   ChatToolExecutor.configure({ registry: toolRegistry, logger });
   ChatSessionExecutor.configure({ db: sqlite, logger, bus, adapters });

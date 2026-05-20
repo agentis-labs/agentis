@@ -143,7 +143,10 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const description = String(args.description ?? '').trim();
         if (!description) throw new Error('build_workflow requires description');
         const title = String(args.title ?? titleFromDescription(description));
-        const graph = buildWorkflowDraft(description, deps, ctx.workspaceId);
+        // LLM synthesis when an evaluator endpoint is configured; deterministic
+        // regex fallback otherwise. Both produce a validated WorkflowGraph.
+        const graph = (await synthesizeWithLlm(description, deps, ctx.workspaceId))
+          ?? buildWorkflowDraft(description, deps, ctx.workspaceId);
         validateWorkflowGraph(graph);
 
         const now = new Date().toISOString();
@@ -545,3 +548,119 @@ function buildPlan(goal: string, context: string): Array<{ step: number; action:
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * LLM-based workflow synthesis.
+ *
+ * Asks the configured evaluator endpoint to design a `WorkflowGraph` from a
+ * natural-language description, validates the result against the same
+ * `validateWorkflowGraph` contract operators see in the canvas, and retries
+ * up to 2 times with the validation error appended on parse failure.
+ *
+ * Returns `null` when no LLM endpoint is configured OR after all retries
+ * exhausted. The caller falls back to the regex synthesizer in either case
+ * so workflows can always be built, just less intelligently.
+ */
+async function synthesizeWithLlm(
+  description: string,
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+): Promise<WorkflowGraph | null> {
+  if (!deps.evaluatorRuntime) return null;
+  // Surface the user's existing agents + skills + knowledge bases so the model
+  // can reference real IDs instead of placeholders.
+  const agents = deps.db
+    .select({ id: schema.agents.id, name: schema.agents.name, capabilityTags: schema.agents.capabilityTags })
+    .from(schema.agents)
+    .where(eq(schema.agents.workspaceId, workspaceId))
+    .all();
+  const knowledgeBases = deps.knowledgeBases
+    ? deps.knowledgeBases.listKnowledgeBases(workspaceId).map((kb) => ({ id: kb.id, name: kb.name }))
+    : [];
+
+  const systemPrompt = SYNTHESIS_SYSTEM_PROMPT;
+  const userPrompt = [
+    `DESCRIPTION:\n${description}`,
+    agents.length > 0
+      ? `\nAVAILABLE AGENTS (use the id verbatim if you reference one):\n${agents.slice(0, 12).map((a) => `- ${a.id}: ${a.name} (tags: ${(a.capabilityTags as string[] | undefined)?.join(', ') ?? 'none'})`).join('\n')}`
+      : '\nNo agents are defined yet — leave `agentId` blank and set `capabilityTags` to drive routing.',
+    knowledgeBases.length > 0
+      ? `\nAVAILABLE KNOWLEDGE BASES:\n${knowledgeBases.slice(0, 8).map((kb) => `- ${kb.id}: ${kb.name}`).join('\n')}`
+      : '',
+  ].filter(Boolean).join('\n');
+
+  const result = await deps.evaluatorRuntime.completeStructured<{ graph?: unknown }>({
+    system: systemPrompt,
+    user: userPrompt,
+    maxTokens: 2000,
+    maxAttempts: 3,
+  });
+  if (!result || !result.graph) return null;
+  const graph = result.graph as WorkflowGraph;
+  // Defensive normalization — the model can omit version/viewport.
+  const normalized: WorkflowGraph = {
+    version: 1,
+    nodes: Array.isArray(graph.nodes) ? graph.nodes : [],
+    edges: Array.isArray(graph.edges) ? graph.edges : [],
+    viewport: graph.viewport ?? { x: 0, y: 0, zoom: 1 },
+  };
+  try {
+    validateWorkflowGraph(normalized);
+  } catch (err) {
+    deps.logger.warn('synthesizeWithLlm.invalid_graph', { err: (err as Error).message });
+    return null;
+  }
+  return normalized;
+}
+
+const SYNTHESIS_SYSTEM_PROMPT = [
+  'You are the Agentis workflow architect. Convert the user\'s description into a valid',
+  '`WorkflowGraph` JSON object. Return ONLY a JSON object of shape',
+  '{ "graph": { version: 1, nodes: [...], edges: [...], viewport: { x: 0, y: 0, zoom: 1 } } }',
+  '— no prose, no markdown, no code fences.',
+  '',
+  'Node kinds available on `node.config.kind`:',
+  '  control: trigger, router, merge, subflow, wait, loop, parallel',
+  '  data:    transform, filter, integration, http_request, workflow_store, scratchpad',
+  '  intel:   agent_task, skill_task, agent_swarm, evaluator, guardrails',
+  '  know:    knowledge, artifact_collect',
+  '  human:   checkpoint',
+  '',
+  'Required config fields per kind (anything else is optional):',
+  '  trigger:        { kind: "trigger", triggerType: "manual" | "cron" | "webhook" | "persistent_listener" }',
+  '  agent_task:     { kind: "agent_task", prompt, capabilityTags, inputKeys, outputKeys, agentId? }',
+  '  skill_task:     { kind: "skill_task", skillId, inputMapping, outputMapping }',
+  '  knowledge:      { kind: "knowledge", queryMode: "static" | "dynamic", topK, retrievalMode }',
+  '  router:         { kind: "router", routingMode: "first_match" | "all_matching" | "llm_route", branches: [] }',
+  '  merge:          { kind: "merge", requiredInputs: "all" | "any" }',
+  '  checkpoint:     { kind: "checkpoint", approvalMode: "manual" | "auto_after_timeout" }',
+  '  scratchpad:     { kind: "scratchpad", operation: "read"|"write"|"append"|"delete", key }',
+  '  wait:           { kind: "wait", delayMs }',
+  '  transform:      { kind: "transform", expression }',
+  '  filter:         { kind: "filter", condition }',
+  '  integration:    { kind: "integration", integrationId, operationId, inputs }',
+  '  http_request:   { kind: "http_request", method, url, headers?, body?, auth?, responseMapping? }',
+  '  workflow_store: { kind: "workflow_store", operations: [{ op, key, value?, outputKey? }] }',
+  '  evaluator:      { kind: "evaluator", targetPath, criteria, passThreshold? }',
+  '  guardrails:     { kind: "guardrails", rules: [], onViolation: "block"|"flag" }',
+  '  loop:           { kind: "loop", itemsExpression, maxConcurrency, bodyWorkflowId, outputArrayKey, onIterationError }',
+  '  parallel:       { kind: "parallel", waitFor, onBranchError, mergeStrategy }',
+  '  agent_swarm:    { kind: "agent_swarm", prompt, inputArrayPath, maxParallel, mergeStrategy, capabilityTags, outputKey }',
+  '  artifact_collect: { kind: "artifact_collect", collectionName }',
+  '',
+  'Variable templates: any string field accepts `{{trigger.foo}}`, `{{nodes.<id>.path}}`,',
+  '`{{scratchpad.key}}`, `{{store.key}}`, and inside loops `{{loop.item}}` / `{{loop.index}}`.',
+  '',
+  'Edges: { id, source, target, type?: "default"|"error"|"condition" }. Wire an error edge',
+  'when a node has a meaningful recovery path. Otherwise stick with default edges.',
+  '',
+  'Principles:',
+  '- Every workflow starts with exactly one trigger node.',
+  '- Prefer deterministic primitives (transform/filter/http_request/integration) over agent_task',
+  '  whenever the step does NOT require reasoning. Saves cost and is more reliable.',
+  '- Use `evaluator` after an `agent_task` whenever output quality matters; route its FAIL handle',
+  '  back to the agent_task with the critique embedded via `{{nodes.<EVALID>.critique}}`.',
+  '- Use `checkpoint` only when human review is genuinely needed (irreversible action, high spend).',
+  '- Always give each node a stable string `id` (kebab-case) and a human-readable `title`.',
+  '- Place nodes left-to-right: trigger at x ≈ 0, each downstream step at x += 260.',
+].join('\n');
