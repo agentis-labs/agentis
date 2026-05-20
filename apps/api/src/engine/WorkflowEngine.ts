@@ -178,6 +178,178 @@ export class WorkflowEngine {
     return { runId: ctx.runId, workflowId: ctx.workflowId };
   }
 
+  /**
+   * Dry-run a single node in isolation.
+   *
+   * Builds an ephemeral RunningContext that does NOT persist to the database
+   * or fire ledger events, dispatches the node's handler against the provided
+   * inputs, and returns either the output or a structured error. The node's
+   * own side-effects (HTTP calls, integration writes, agent dispatches) still
+   * happen — this is "run this one node now" with real credentials, not a mock.
+   *
+   * Used by the canvas Test tab.
+   */
+  async testNode(args: {
+    workspaceId: string;
+    ambientId: string | null;
+    userId: string;
+    workflowId: string;
+    nodeId: string;
+    inputs: Record<string, unknown>;
+  }): Promise<{ ok: true; output: Record<string, unknown>; durationMs: number }
+              | { ok: false; error: string; code?: string; durationMs: number }> {
+    const startedAt = Date.now();
+    const wf = this.deps.db
+      .select()
+      .from(schema.workflows)
+      .where(eq(schema.workflows.id, args.workflowId))
+      .get();
+    if (!wf || wf.workspaceId !== args.workspaceId) {
+      return { ok: false, error: `workflow ${args.workflowId} not found`, code: 'RESOURCE_NOT_FOUND', durationMs: Date.now() - startedAt };
+    }
+    const graph = wf.graph as unknown as WorkflowGraph;
+    const node = graph.nodes.find((n) => n.id === args.nodeId);
+    if (!node) {
+      return { ok: false, error: `node ${args.nodeId} not found in workflow`, code: 'RESOURCE_NOT_FOUND', durationMs: Date.now() - startedAt };
+    }
+    // Async node kinds (agent_task, subflow, agent_swarm, checkpoint) cannot
+    // be dry-run synchronously through #dispatchNode without setting up the
+    // full callback machinery. Reject them explicitly so the UI can surface
+    // a friendly message instead of hanging.
+    const asyncKinds: ReadonlyArray<string> = ['agent_task', 'agent_swarm', 'subflow', 'checkpoint', 'loop'];
+    if (asyncKinds.includes(node.config.kind)) {
+      return {
+        ok: false,
+        error: `'${node.config.kind}' is async — test it via a real run`,
+        code: 'VALIDATION_FAILED',
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
+    // Build a throwaway context. We use a fake runId so any ledger/bus calls
+    // (none should fire in test mode) are clearly tagged.
+    const testRunId = `test-${randomUUID()}`;
+    const initialState: WorkflowRunState = {
+      runId: testRunId,
+      workflowId: args.workflowId,
+      status: 'RUNNING',
+      readyQueue: [],
+      waitingInputs: {},
+      nodeStates: {
+        [args.nodeId]: {
+          nodeId: args.nodeId,
+          status: 'PENDING',
+          inputData: args.inputs,
+        },
+      },
+      activeExecutions: {},
+      completedNodeIds: [],
+      failedNodeIds: [],
+      skippedNodeIds: [],
+      graphRevision: 0,
+      replanCount: 0,
+      lastLedgerSequence: 0,
+    };
+    const ctx: RunningContext = {
+      runId: testRunId,
+      workflowId: args.workflowId,
+      workspaceId: args.workspaceId,
+      ambientId: args.ambientId,
+      conversationId: null,
+      userId: args.userId,
+      graph,
+      downstreamEdges: buildDownstreamEdges(graph),
+      state: initialState,
+      eventsSinceSnapshot: 0,
+      inflightDispatches: 0,
+      swarms: new Map(),
+      selfHealAttempts: new Map(),
+    };
+
+    // Build the template context and resolve config templates the same way
+    // the real dispatch path does.
+    const item: ReadyQueueItem = {
+      nodeId: args.nodeId,
+      priority: 0,
+      insertedAt: new Date().toISOString(),
+      inputData: args.inputs,
+    };
+    const tctx = this.#buildTemplateContext(ctx, item);
+    const resolvedConfig = resolveTemplateDeep(node.config, tctx);
+
+    try {
+      let output: Record<string, unknown> = {};
+      switch (node.config.kind) {
+        case 'trigger':
+        case 'merge':
+        case 'parallel':
+          output = args.inputs;
+          break;
+        case 'scratchpad':
+          output = await this.#executeScratchpadNode(ctx, resolvedConfig as ScratchpadNodeConfig, args.inputs);
+          break;
+        case 'router': {
+          const cfg = resolvedConfig as RouterNodeConfig;
+          const branchOutputs = cfg.routingMode === 'llm_route'
+            ? await this.#executeRouterLlm(ctx, node, cfg, args.inputs)
+            : this.#executeRouter(ctx, cfg, args.inputs);
+          output = { branches: branchOutputs };
+          break;
+        }
+        case 'skill_task':
+          output = await this.#executeSkillTask(ctx, node, resolvedConfig as SkillTaskNodeConfig, args.inputs);
+          break;
+        case 'knowledge':
+          output = await this.#executeKnowledgeNode(ctx, resolvedConfig as KnowledgeNodeConfig, args.inputs);
+          break;
+        case 'artifact_collect':
+          output = await this.#executeArtifactCollect(ctx, node, resolvedConfig as ArtifactCollectNodeConfig, args.inputs);
+          break;
+        case 'wait':
+          // No-op for tests — return inputs immediately.
+          output = args.inputs;
+          break;
+        case 'transform':
+          output = this.#executeTransform(node.config as TransformNodeConfig, args.inputs, tctx);
+          break;
+        case 'filter':
+          output = this.#executeFilter(node.config as FilterNodeConfig, args.inputs, tctx);
+          break;
+        case 'integration':
+          output = await this.#executeIntegration(ctx, node, resolvedConfig as IntegrationNodeConfig, args.inputs);
+          break;
+        case 'http_request':
+          output = await this.#executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig);
+          break;
+        case 'workflow_store':
+          output = await this.#executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
+          break;
+        case 'evaluator':
+          output = await this.#executeEvaluator(ctx, node, node.config as EvaluatorNodeConfig, args.inputs, tctx);
+          break;
+        case 'guardrails': {
+          const result = this.#executeGuardrails(node.config as GuardrailsNodeConfig, args.inputs);
+          if (result.shouldFail) {
+            return { ok: false, error: result.message, code: 'VALIDATION_FAILED', durationMs: Date.now() - startedAt };
+          }
+          output = result.output;
+          break;
+        }
+        default:
+          return { ok: false, error: `node kind '${node.config.kind}' is not testable in isolation`, code: 'VALIDATION_FAILED', durationMs: Date.now() - startedAt };
+      }
+      return { ok: true, output, durationMs: Date.now() - startedAt };
+    } catch (err) {
+      const e = err as { code?: string; message?: string };
+      return {
+        ok: false,
+        error: e.message ?? String(err),
+        code: e.code,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+  }
+
   async cancelRun(runId: string): Promise<void> {
     const ctx = this.#runs.get(runId);
     if (!ctx) {
@@ -1732,16 +1904,39 @@ export class WorkflowEngine {
     ctx.eventsSinceSnapshot += 1;
 
     // Fan out to downstream nodes. Error edges are reserved for `#failNode`
-    // and must NOT be traversed on a successful completion.
+    // and must NOT be traversed on a successful completion — but their
+    // downstream target IS still waiting on this source's id. Drop it from
+    // the required list so the target doesn't block the run from settling.
     for (const edge of ctx.downstreamEdges.get(nodeId) ?? []) {
-      if (edge.type === 'error') continue;
+      const buf = ctx.state.waitingInputs[edge.target];
+      if (!buf) continue;
+
+      if (edge.type === 'error') {
+        // Catch branch — source completed successfully, so this edge never
+        // fires. Drop it from required. If the target has no other required
+        // sources AND received no inputs, it's an unreachable catch-only
+        // node and we mark it skipped.
+        buf.requiredInputs = buf.requiredInputs.filter((id) => id !== nodeId);
+        if (buf.requiredInputs.length === 0 && Object.keys(buf.receivedInputs).length === 0) {
+          const targetState = ctx.state.nodeStates[edge.target];
+          if (targetState && targetState.status === 'PENDING') {
+            targetState.status = 'SKIPPED';
+            targetState.completedAt = new Date().toISOString();
+            if (!ctx.state.skippedNodeIds.includes(edge.target)) {
+              ctx.state.skippedNodeIds.push(edge.target);
+            }
+          }
+          delete ctx.state.waitingInputs[edge.target];
+        }
+        continue;
+      }
+
       // Conditional edge gating.
       if (edge.condition) {
         const scope = { output, scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId) };
         if (!evalCondition(edge.condition, scope)) continue;
       }
-      const buf = ctx.state.waitingInputs[edge.target];
-      if (!buf) continue;
+
       buf.receivedInputs[nodeId] = output;
       buf.requiredInputs = buf.requiredInputs.filter((id) => id !== nodeId);
       if (buf.requiredInputs.length === 0) {
@@ -1764,11 +1959,76 @@ export class WorkflowEngine {
   async #failNode(ctx: RunningContext, nodeId: string, error: string): Promise<void> {
     const ns = ctx.state.nodeStates[nodeId];
     if (!ns) return;
+    delete ctx.state.activeExecutions[nodeId];
+
+    // ── Error-edge routing (must happen BEFORE we mark the node as FAILED
+    //    or push to failedNodeIds). When a connected error edge exists, the
+    //    failure is "handled" — the catch branch runs and the node is
+    //    treated as COMPLETED-with-error for settle purposes. This ordering
+    //    matters because #tick() can re-enter from another path between
+    //    `void this.#failNode()` and its first await, and would see the
+    //    failed state and transition the run to FAILED.
+    const errorEdges = (ctx.downstreamEdges.get(nodeId) ?? []).filter((e) => e.type === 'error');
+    if (errorEdges.length > 0) {
+      const errorPayload = {
+        ...(ns.inputData ?? {}),
+        error: {
+          nodeId,
+          message: error,
+          at: new Date().toISOString(),
+        },
+      };
+      // Mark as completed (not failed) — the catch branch handled it.
+      ns.status = 'COMPLETED';
+      ns.completedAt = new Date().toISOString();
+      ns.error = error;        // keep the error for debugging
+      ns.outputData = errorPayload;
+      if (!ctx.state.completedNodeIds.includes(nodeId)) ctx.state.completedNodeIds.push(nodeId);
+
+      for (const edge of errorEdges) {
+        const buf = ctx.state.waitingInputs[edge.target];
+        if (!buf) continue;
+        buf.receivedInputs[nodeId] = errorPayload;
+        buf.requiredInputs = buf.requiredInputs.filter((id) => id !== nodeId);
+        if (buf.requiredInputs.length === 0) {
+          const merged = mergeBufferedInputs(buf);
+          ctx.state.readyQueue.push({
+            nodeId: edge.target,
+            priority: 0,
+            insertedAt: new Date().toISOString(),
+            inputData: merged,
+          });
+          delete ctx.state.waitingInputs[edge.target];
+        }
+      }
+
+      // Emit an explanatory ledger event + bus event so observers still see
+      // the failure even though the run continues.
+      await this.deps.ledger.append({
+        workspaceId: ctx.workspaceId,
+        ambientId: ctx.ambientId,
+        runId: ctx.runId,
+        eventType: 'node.failed',
+        nodeId,
+        payload: { error, handledBy: 'error_edge' },
+      });
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_FAILED, {
+        runId: ctx.runId,
+        nodeId,
+        error,
+        handledByErrorEdge: true,
+      });
+      const failedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
+      if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
+      await this.#persistRun(ctx);
+      return;
+    }
+
+    // No error edge wired — terminal failure for the node + the run.
     ns.status = 'FAILED';
     ns.completedAt = new Date().toISOString();
     ns.error = error;
     if (!ctx.state.failedNodeIds.includes(nodeId)) ctx.state.failedNodeIds.push(nodeId);
-    delete ctx.state.activeExecutions[nodeId];
 
     await this.deps.ledger.append({
       workspaceId: ctx.workspaceId,
@@ -1786,41 +2046,6 @@ export class WorkflowEngine {
     const failedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
     if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
     await this.#persistRun(ctx);
-
-    // Error-edge routing: a failed node with a connected `type: 'error'` edge
-    // routes its failure context downstream as a catch branch INSTEAD of
-    // terminating the run. The downstream node receives the original input
-    // plus an `error` field describing what failed.
-    const errorEdges = (ctx.downstreamEdges.get(nodeId) ?? []).filter((e) => e.type === 'error');
-    if (errorEdges.length > 0) {
-      // The failure is "handled" — remove from failedNodeIds so settle logic
-      // doesn't flip the whole run to FAILED.
-      ctx.state.failedNodeIds = ctx.state.failedNodeIds.filter((id) => id !== nodeId);
-      const errorPayload = {
-        ...(ns.inputData ?? {}),
-        error: {
-          nodeId,
-          message: error,
-          at: new Date().toISOString(),
-        },
-      };
-      for (const edge of errorEdges) {
-        const buf = ctx.state.waitingInputs[edge.target];
-        if (!buf) continue;
-        buf.receivedInputs[nodeId] = errorPayload;
-        buf.requiredInputs = buf.requiredInputs.filter((id) => id !== nodeId);
-        if (buf.requiredInputs.length === 0) {
-          const merged = mergeBufferedInputs(buf);
-          ctx.state.readyQueue.push({
-            nodeId: edge.target,
-            priority: 0,
-            insertedAt: new Date().toISOString(),
-            inputData: merged,
-          });
-          delete ctx.state.waitingInputs[edge.target];
-        }
-      }
-    }
   }
 
   /**

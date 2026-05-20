@@ -190,6 +190,41 @@ export function buildWorkflowRoutes(deps: {
     return c.json({ runId }, 202);
   });
 
+  /**
+   * POST /:id/nodes/:nodeId/test
+   *
+   * Dry-run a single node in isolation with the supplied inputs. Used by the
+   * canvas Test tab so users can iterate on a node config without running
+   * the entire workflow. Side-effecting nodes (integration, http_request,
+   * agent_task, etc.) still hit real systems — this is a real dispatch
+   * scoped to one node, not a mock.
+   */
+  app.post('/:id/nodes/:nodeId/test', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const nodeId = c.req.param('nodeId');
+    loadWorkflow(deps.db, ws.workspaceId, id);
+    const body = (await c.req.json().catch(() => ({}))) as { inputs?: Record<string, unknown> };
+    const inputs = body.inputs && typeof body.inputs === 'object' && !Array.isArray(body.inputs)
+      ? body.inputs
+      : {};
+    const result = await deps.engine.testNode({
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      userId: ws.user.id,
+      workflowId: id,
+      nodeId,
+      inputs,
+    });
+    deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.NODE_TEST_COMPLETED, {
+      workflowId: id,
+      nodeId,
+      ok: result.ok,
+      durationMs: result.durationMs,
+    });
+    return c.json(result, result.ok ? 200 : 422);
+  });
+
   // ── Workflow Page Redesign — Runs / Output tabs ────────────────────────
   // WORKFLOW-PAGE-REDESIGN.md: the workflow page answers two questions —
   // "what has this run?" (Runs tab) and "what did it produce?" (Output tab).

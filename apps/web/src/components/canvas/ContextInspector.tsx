@@ -244,6 +244,8 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <TriggerForm data={data} update={update} />;
     case 'agent_task':
       return <AgentTaskForm data={data} update={update} agents={agents} />;
+    case 'agent_swarm':
+      return <AgentSwarmForm data={data} update={update} />;
     case 'skill':
     case 'skill_task':
       return <SkillForm data={data} update={update} skills={skills} onSkillsChange={onSkillsChange} />;
@@ -264,6 +266,26 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
     case 'variables':
     case 'scratchpad':
       return <VariablesForm data={data} update={update} />;
+    case 'transform':
+      return <TransformForm data={data} update={update} />;
+    case 'filter':
+      return <FilterForm data={data} update={update} />;
+    case 'integration':
+      return <IntegrationForm data={data} update={update} />;
+    case 'http_request':
+      return <HttpRequestForm data={data} update={update} />;
+    case 'workflow_store':
+      return <WorkflowStoreForm data={data} update={update} />;
+    case 'evaluator':
+      return <EvaluatorForm data={data} update={update} />;
+    case 'guardrails':
+      return <GuardrailsForm data={data} update={update} />;
+    case 'loop':
+      return <LoopForm data={data} update={update} workflows={workflows} />;
+    case 'parallel':
+      return <ParallelForm data={data} update={update} />;
+    case 'artifact_collect':
+      return <ArtifactCollectForm data={data} update={update} />;
     default:
       // Fallback: render generic key/value editors for unknown kinds.
       return <GenericForm data={data} update={update} />;
@@ -556,16 +578,512 @@ function WebhookForm({ data, update }: { data: Record<string, unknown>; update: 
 }
 
 function WaitForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  // Engine config is `delayMs` (number). Migrate older nodes that still carry
+  // `durationSeconds` by converting on first edit.
+  const ms = typeof data.delayMs === 'number'
+    ? data.delayMs
+    : typeof data.durationSeconds === 'number'
+      ? data.durationSeconds * 1000
+      : 0;
+  const seconds = Math.floor(ms / 1000);
   return (
-    <Field label="Duration (seconds)" hint="How long to wait before continuing.">
+    <Field label="Wait (seconds)" hint="The run pauses on this node for this duration before continuing.">
       <input
         type="number"
         className={inputCls}
         min={0}
-        value={typeof data.durationSeconds === 'number' ? data.durationSeconds : (typeof data.duration === 'number' ? data.duration : '')}
-        onChange={(e) => update({ durationSeconds: e.target.value === '' ? undefined : Number(e.target.value) })}
+        value={seconds}
+        onChange={(e) => {
+          const s = e.target.value === '' ? 0 : Math.max(0, Number(e.target.value));
+          update({ delayMs: s * 1000, durationSeconds: undefined });
+        }}
       />
     </Field>
+  );
+}
+
+// ─── Transform & Filter ─────────────────────────────────────────────────────
+
+function TransformForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field
+        label="Expression"
+        hint="A JS expression. `input` is the merged inputs map. Must return the output object."
+      >
+        <textarea
+          rows={6}
+          spellCheck={false}
+          className={textareaCls + ' font-mono text-[11px]'}
+          placeholder="({ name: input.user.fullName, domain: input.user.email.split('@')[1] })"
+          value={asStr(data.expression)}
+          onChange={(e) => update({ expression: e.target.value })}
+        />
+      </Field>
+      <Field label="Output key (optional)" hint="Wraps the expression result under this key. Leave blank to use the result directly.">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="extracted"
+          value={asStr(data.outputKey)}
+          onChange={(e) => update({ outputKey: e.target.value || undefined })}
+        />
+      </Field>
+    </>
+  );
+}
+
+function FilterForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Condition" hint="Boolean JS expression — truthy passes the input through; falsy stops this branch.">
+        <textarea
+          rows={3}
+          spellCheck={false}
+          className={textareaCls + ' font-mono text-[11px]'}
+          placeholder="input.score > 0.7"
+          value={asStr(data.condition)}
+          onChange={(e) => update({ condition: e.target.value })}
+        />
+      </Field>
+    </>
+  );
+}
+
+// ─── Integration & HTTP ─────────────────────────────────────────────────────
+
+function IntegrationForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Integration" hint="Slug of a registered connector (slack, gmail, github, sheets, …).">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="slack"
+          value={asStr(data.integrationId)}
+          onChange={(e) => update({ integrationId: e.target.value })}
+        />
+      </Field>
+      <Field label="Operation" hint="Operation slug from the connector's manifest.">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="send_message"
+          value={asStr(data.operationId)}
+          onChange={(e) => update({ operationId: e.target.value })}
+        />
+      </Field>
+      <Field label="Credential ID (optional)">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="uuid of a saved credential"
+          value={asStr(data.credentialId)}
+          onChange={(e) => update({ credentialId: e.target.value || undefined })}
+        />
+      </Field>
+      <Field
+        label="Inputs (JSON)"
+        hint="Object of input fields. Values support `{{variable}}` templates."
+      >
+        <textarea
+          rows={6}
+          spellCheck={false}
+          className={textareaCls + ' font-mono text-[11px]'}
+          value={JSON.stringify(typeof data.inputs === 'object' && data.inputs ? data.inputs : {}, null, 2)}
+          onChange={(e) => {
+            try { update({ inputs: JSON.parse(e.target.value) as unknown }); }
+            catch { /* keep prior */ }
+          }}
+        />
+      </Field>
+    </>
+  );
+}
+
+function HttpRequestForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  const method = asStr(data.method) || 'GET';
+  return (
+    <>
+      <Field label="Method">
+        <select className={selectCls} value={method} onChange={(e) => update({ method: e.target.value })}>
+          <option>GET</option>
+          <option>POST</option>
+          <option>PUT</option>
+          <option>PATCH</option>
+          <option>DELETE</option>
+        </select>
+      </Field>
+      <Field label="URL" hint="Supports `{{variable}}` templates.">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="https://api.example.com/{{trigger.path}}"
+          value={asStr(data.url)}
+          onChange={(e) => update({ url: e.target.value })}
+        />
+      </Field>
+      <Field label="Headers (JSON)" hint="Object of header strings. Values support templates.">
+        <textarea
+          rows={3}
+          spellCheck={false}
+          className={textareaCls + ' font-mono text-[11px]'}
+          value={JSON.stringify(typeof data.headers === 'object' && data.headers ? data.headers : {}, null, 2)}
+          onChange={(e) => {
+            try { update({ headers: JSON.parse(e.target.value) as unknown }); }
+            catch { /* keep prior */ }
+          }}
+        />
+      </Field>
+      {method !== 'GET' && method !== 'DELETE' && (
+        <Field label="Body" hint="Raw request body. Supports templates.">
+          <textarea
+            rows={4}
+            spellCheck={false}
+            className={textareaCls + ' font-mono text-[11px]'}
+            placeholder='{"message": "{{nodes.draft.text}}"}'
+            value={asStr(data.body)}
+            onChange={(e) => update({ body: e.target.value })}
+          />
+        </Field>
+      )}
+      <Field label="Timeout (ms)" hint="Max 120000 (2 minutes).">
+        <input
+          type="number"
+          className={inputCls}
+          min={1}
+          max={120000}
+          value={typeof data.timeoutMs === 'number' ? data.timeoutMs : ''}
+          placeholder="30000"
+          onChange={(e) => update({ timeoutMs: e.target.value === '' ? undefined : Number(e.target.value) })}
+        />
+      </Field>
+      <Field label="Retry on status codes" hint="Comma-separated list, e.g. 429, 503.">
+        <input
+          type="text"
+          className={inputCls}
+          value={Array.isArray(data.retryOn) ? (data.retryOn as number[]).join(', ') : ''}
+          placeholder="429, 503"
+          onChange={(e) => {
+            const parsed = e.target.value
+              .split(/[,\s]+/)
+              .map((s) => Number(s.trim()))
+              .filter((n) => Number.isInteger(n) && n > 0);
+            update({ retryOn: parsed.length > 0 ? parsed : undefined });
+          }}
+        />
+      </Field>
+    </>
+  );
+}
+
+// ─── Workflow Store ─────────────────────────────────────────────────────────
+
+function WorkflowStoreForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <Field label="Operations (JSON)" hint="Array of operations: { op, key, value, outputKey, incrementBy }.">
+      <textarea
+        rows={8}
+        spellCheck={false}
+        className={textareaCls + ' font-mono text-[11px]'}
+        placeholder='[\n  { "op": "set", "key": "lastRunAt", "value": "{{trigger.now}}" }\n]'
+        value={JSON.stringify(Array.isArray(data.operations) ? data.operations : [], null, 2)}
+        onChange={(e) => {
+          try { update({ operations: JSON.parse(e.target.value) as unknown }); }
+          catch { /* keep prior */ }
+        }}
+      />
+    </Field>
+  );
+}
+
+// ─── Evaluator & Guardrails ─────────────────────────────────────────────────
+
+function EvaluatorForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Target path" hint="Dot notation into the input. E.g. `nodes.draft.text`.">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="nodes.draft.text"
+          value={asStr(data.targetPath)}
+          onChange={(e) => update({ targetPath: e.target.value })}
+        />
+      </Field>
+      <Field label="Criteria" hint="Natural-language pass criteria for the LLM judge.">
+        <textarea
+          rows={4}
+          spellCheck={false}
+          className={textareaCls}
+          placeholder="The output should be a complete paragraph under 200 words, with no list formatting."
+          value={asStr(data.criteria)}
+          onChange={(e) => update({ criteria: e.target.value })}
+        />
+      </Field>
+      <Field label="Pass threshold (0–10)">
+        <input
+          type="number"
+          className={inputCls}
+          min={0}
+          max={10}
+          value={typeof data.passThreshold === 'number' ? data.passThreshold : 7}
+          onChange={(e) => update({ passThreshold: e.target.value === '' ? undefined : Number(e.target.value) })}
+        />
+      </Field>
+      <Field label="Max retries" hint="How many fail→retry cycles before the run is terminated. Default 3.">
+        <input
+          type="number"
+          className={inputCls}
+          min={0}
+          max={10}
+          value={typeof data.maxRetries === 'number' ? data.maxRetries : 3}
+          onChange={(e) => update({ maxRetries: e.target.value === '' ? undefined : Number(e.target.value) })}
+        />
+      </Field>
+    </>
+  );
+}
+
+function GuardrailsForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Violation policy">
+        <select
+          className={selectCls}
+          value={asStr(data.onViolation) || 'block'}
+          onChange={(e) => update({ onViolation: e.target.value })}
+        >
+          <option value="block">Block — route to error edge</option>
+          <option value="flag">Flag — annotate output and continue</option>
+        </select>
+      </Field>
+      <Field label="Rules (JSON)" hint="Array of { type, target, value?, limit?, message? }.">
+        <textarea
+          rows={8}
+          spellCheck={false}
+          className={textareaCls + ' font-mono text-[11px]'}
+          placeholder='[\n  { "type": "not_empty", "target": "nodes.draft.text", "message": "Draft is empty" }\n]'
+          value={JSON.stringify(Array.isArray(data.rules) ? data.rules : [], null, 2)}
+          onChange={(e) => {
+            try { update({ rules: JSON.parse(e.target.value) as unknown }); }
+            catch { /* keep prior */ }
+          }}
+        />
+      </Field>
+    </>
+  );
+}
+
+// ─── Loop & Parallel ────────────────────────────────────────────────────────
+
+function LoopForm({ data, update, workflows }: { data: Record<string, unknown>; update: NodeFormProps['update']; workflows: WorkflowRow[] }) {
+  return (
+    <>
+      <Field label="Items expression" hint="Path resolving to the array, e.g. `{{nodes.fetch.items}}` or `trigger.leads`.">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="{{nodes.fetch.items}}"
+          value={asStr(data.itemsExpression)}
+          onChange={(e) => update({ itemsExpression: e.target.value })}
+        />
+      </Field>
+      <Field label="Body workflow" hint="The workflow invoked once per item. Inputs include `{{loop.item}}` and `{{loop.index}}`.">
+        <select
+          className={selectCls}
+          value={asStr(data.bodyWorkflowId)}
+          onChange={(e) => update({ bodyWorkflowId: e.target.value })}
+        >
+          <option value="">— Select workflow —</option>
+          {workflows.map((wf) => (
+            <option key={wf.id} value={wf.id}>{wf.title ?? wf.name ?? wf.id}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Max concurrency">
+        <input
+          type="number"
+          className={inputCls}
+          min={1}
+          max={32}
+          value={typeof data.maxConcurrency === 'number' ? data.maxConcurrency : 1}
+          onChange={(e) => update({ maxConcurrency: Math.max(1, Number(e.target.value || 1)) })}
+        />
+      </Field>
+      <Field label="Chunk size (optional)" hint="For very large arrays — process this many at a time. Emits LOOP_PROGRESS per chunk.">
+        <input
+          type="number"
+          className={inputCls}
+          min={1}
+          value={typeof data.chunkSize === 'number' ? data.chunkSize : ''}
+          placeholder="100"
+          onChange={(e) => update({ chunkSize: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
+        />
+      </Field>
+      <Field label="On iteration error">
+        <select
+          className={selectCls}
+          value={asStr(data.onIterationError) || 'stop_all'}
+          onChange={(e) => update({ onIterationError: e.target.value })}
+        >
+          <option value="stop_all">Stop all — fail the loop</option>
+          <option value="continue">Continue — skip failed items</option>
+          <option value="collect_errors">Collect errors — emit alongside results</option>
+        </select>
+      </Field>
+      <Field label="Output array key">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="results"
+          value={asStr(data.outputArrayKey)}
+          onChange={(e) => update({ outputArrayKey: e.target.value })}
+        />
+      </Field>
+    </>
+  );
+}
+
+function ParallelForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Wait for">
+        <select className={selectCls} value={asStr(data.waitFor) || 'all'} onChange={(e) => update({ waitFor: e.target.value })}>
+          <option value="all">All branches</option>
+          <option value="first">First to complete</option>
+        </select>
+      </Field>
+      <Field label="On branch error">
+        <select className={selectCls} value={asStr(data.onBranchError) || 'fail_all'} onChange={(e) => update({ onBranchError: e.target.value })}>
+          <option value="fail_all">Fail the run</option>
+          <option value="continue_with_results">Continue with successful branches</option>
+        </select>
+      </Field>
+      <Field label="Merge strategy">
+        <select className={selectCls} value={asStr(data.mergeStrategy) || 'merge_keys'} onChange={(e) => update({ mergeStrategy: e.target.value })}>
+          <option value="merge_keys">Merge keys</option>
+          <option value="collect_all">Collect all</option>
+          <option value="first_non_null">First non-null</option>
+        </select>
+      </Field>
+    </>
+  );
+}
+
+// ─── Agent Swarm & Artifact Collect (engine handlers already shipped) ───────
+
+function AgentSwarmForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  const tags = Array.isArray(data.capabilityTags) ? (data.capabilityTags as string[]).join(', ') : '';
+  return (
+    <>
+      <Field label="Input array path" hint="Path into the input data that resolves to the array. Each item dispatches one task.">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="leads"
+          value={asStr(data.inputArrayPath)}
+          onChange={(e) => update({ inputArrayPath: e.target.value })}
+        />
+      </Field>
+      <Field label="Prompt template" hint="Applied to each input element. Supports `{{item}}` plus the usual template namespaces.">
+        <textarea
+          rows={4}
+          spellCheck={false}
+          className={textareaCls}
+          value={asStr(data.prompt)}
+          onChange={(e) => update({ prompt: e.target.value })}
+        />
+      </Field>
+      <Field label="Max parallel">
+        <input
+          type="number"
+          className={inputCls}
+          min={1}
+          max={32}
+          value={typeof data.maxParallel === 'number' ? data.maxParallel : 3}
+          onChange={(e) => update({ maxParallel: Math.max(1, Number(e.target.value || 1)) })}
+        />
+      </Field>
+      <Field label="Merge strategy">
+        <select className={selectCls} value={asStr(data.mergeStrategy) || 'collect_all'} onChange={(e) => update({ mergeStrategy: e.target.value })}>
+          <option value="collect_all">Collect all results</option>
+          <option value="first_success">First success wins</option>
+          <option value="majority_vote">Majority vote</option>
+        </select>
+      </Field>
+      <Field label="Capability tags" hint="Comma-separated. Used to route to a capable agent when no explicit agent is bound.">
+        <input
+          type="text"
+          className={inputCls}
+          value={tags}
+          placeholder="research, summarize"
+          onChange={(e) => {
+            const list = e.target.value
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            update({ capabilityTags: list });
+          }}
+        />
+      </Field>
+      <Field label="Output key">
+        <input
+          type="text"
+          className={inputCls}
+          value={asStr(data.outputKey)}
+          placeholder="results"
+          onChange={(e) => update({ outputKey: e.target.value })}
+        />
+      </Field>
+    </>
+  );
+}
+
+function ArtifactCollectForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Collection name">
+        <input
+          type="text"
+          className={inputCls}
+          value={asStr(data.collectionName)}
+          placeholder="Campaign Pack Q3"
+          onChange={(e) => update({ collectionName: e.target.value })}
+        />
+      </Field>
+      <Field label="Artifact path (optional)" hint="Path into the input where artifact refs live. Defaults to the whole input.">
+        <input
+          type="text"
+          className={inputCls}
+          value={asStr(data.artifactPath)}
+          placeholder="artifacts"
+          onChange={(e) => update({ artifactPath: e.target.value || undefined })}
+        />
+      </Field>
+      <Field label="Versioned">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={data.versioned !== false}
+            onChange={(e) => update({ versioned: e.target.checked })}
+            className="rounded border-line bg-surface-2 accent-accent"
+          />
+          <span className="text-[12px] text-text-primary">Increment version on each run</span>
+        </label>
+      </Field>
+      <Field label="Require approval">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={data.requireApproval === true}
+            onChange={(e) => update({ requireApproval: e.target.checked })}
+            className="rounded border-line bg-surface-2 accent-accent"
+          />
+          <span className="text-[12px] text-text-primary">Hold for operator review</span>
+        </label>
+      </Field>
+    </>
   );
 }
 

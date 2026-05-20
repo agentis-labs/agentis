@@ -20,6 +20,9 @@
  * trust-equivalent to agent prompts.
  */
 
+// Globals we shadow by passing them as `undefined` parameters. NOTE: strict
+// mode forbids `eval` and `arguments` as parameter names, so those two are
+// covered by the static guard regex (BLOCKED_PATTERNS) only.
 const BLOCKED_GLOBALS: ReadonlyArray<string> = [
   'globalThis',
   'global',
@@ -31,8 +34,6 @@ const BLOCKED_GLOBALS: ReadonlyArray<string> = [
   'exports',
   '__dirname',
   '__filename',
-  'eval',
-  'Function',
   'setTimeout',
   'setInterval',
   'setImmediate',
@@ -50,6 +51,8 @@ const BLOCKED_PATTERNS: ReadonlyArray<RegExp> = [
   /\brequire\s*\(/,
   /\bFunction\s*\(/,
   /\beval\s*\(/,
+  /\beval\b/,
+  /\barguments\b/,
   /\bprocess\b/,
   /\bglobalThis\b/,
   /\b__proto__\b/,
