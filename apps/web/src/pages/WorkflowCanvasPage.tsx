@@ -62,13 +62,6 @@ interface WorkflowDetail {
   variables?: Array<{ name: string; type: string; default?: unknown; label?: string }>;
   isReusable?: boolean;
   isInLibrary?: boolean;
-  appId?: string | null;
-}
-
-interface AppOutputOwner {
-  id: string;
-  slug: string;
-  name: string;
 }
 
 interface SkillRow { id: string; slug: string; name: string; runtime: string; }
@@ -689,11 +682,7 @@ export function WorkflowCanvasPage() {
       )}
       {tab === 'output' && (
         <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-          {wf.appId ? (
-            <WorkflowAppOutputRedirect appId={wf.appId} />
-          ) : (
-            <WorkflowOutputTab workflowId={wf.id} onRun={() => setRunDialogOpen(true)} />
-          )}
+          <WorkflowOutputTab workflowId={wf.id} onRun={() => setRunDialogOpen(true)} />
         </div>
       )}
 
@@ -731,50 +720,6 @@ export function WorkflowCanvasPage() {
           } catch (e) { toast.error('Failed to save inputs', String(e)); }
         }}
       />
-    </div>
-  );
-}
-
-function WorkflowAppOutputRedirect({ appId }: { appId: string }) {
-  const [app, setApp] = useState<AppOutputOwner | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void api<{ app: AppOutputOwner }>(`/v1/apps/${appId}`)
-      .then((data) => {
-        if (!cancelled) setApp(data.app);
-      })
-      .catch(() => {
-        if (!cancelled) setApp(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [appId]);
-
-  const appName = app?.name ?? 'its app';
-  const appPath = `/apps/${app?.slug ?? appId}?layer=output`;
-
-  return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 items-center px-6 py-10">
-      <div className="w-full rounded-card border border-line bg-surface p-6 shadow-sm">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-          Output surface transferred
-        </div>
-        <h2 className="text-[18px] font-semibold text-text-primary">
-          This workflow is part of {appName}
-        </h2>
-        <p className="mt-2 max-w-2xl text-[13px] leading-relaxed text-text-secondary">
-          App-connected workflows defer their output surface to the app, so operators see one canonical place for results, history, and generated artifacts.
-        </p>
-        <Link
-          to={appPath}
-          className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover"
-        >
-          View outputs in {appName}
-          <ExternalLink size={12} />
-        </Link>
-      </div>
     </div>
   );
 }

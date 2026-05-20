@@ -7,7 +7,7 @@
  * for code/data; plain prose for document.
  */
 import { useEffect, useState } from 'react';
-import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, Archive, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -64,27 +64,6 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
     URL.revokeObjectURL(url);
   }
 
-  async function storeArtifact() {
-    try {
-      await api('/v1/memory', {
-        method: 'POST',
-        body: JSON.stringify({
-          sourceType: 'artifact',
-          sourceId: artifact.id,
-          kind: 'artifact',
-          title: artifact.title,
-          content: artifact.content.slice(0, 32000),
-          importance: 6,
-          tags: ['artifact', artifact.type],
-          metadata: { artifactId: artifact.id, artifactType: artifact.type },
-        }),
-      });
-      toast.success('Stored in memory', artifact.title);
-    } catch {
-      toast.error('Could not store artifact');
-    }
-  }
-
   async function shareArtifact() {
     const url = `${window.location.origin}/artifacts?open=${encodeURIComponent(artifact.id)}`;
     try {
@@ -128,14 +107,6 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
             title="Iterate"
           >
             <RefreshCw size={12} />
-          </button>
-          <button
-            type="button"
-            onClick={() => void storeArtifact()}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text"
-            title="Store in memory"
-          >
-            <Archive size={12} />
           </button>
           <button
             type="button"

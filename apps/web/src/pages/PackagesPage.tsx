@@ -10,7 +10,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Package as PackageIcon, Plus, ArrowDownToLine, ArrowUpFromLine,
   MoreHorizontal, Trash2, Copy, Edit3, Sparkles, Bot,
-  AppWindow, Workflow as WorkflowIcon, SearchX, X, Check, ChevronRight, ArrowLeft, FolderTree,
+  Workflow as WorkflowIcon, SearchX, X, Check, ChevronRight, ArrowLeft, FolderTree,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { api } from '../lib/api';
@@ -26,7 +26,7 @@ interface Package {
   id: string;
   name: string;
   slug: string;
-  kind: 'app' | 'skill' | 'workflow' | 'agent' | 'integration';
+  kind: 'skill' | 'workflow' | 'agent' | 'integration' | 'agentis';
   version?: string;
   description?: string;
   isTemplate?: boolean;
@@ -38,7 +38,7 @@ interface AgentItem { id: string; name: string; status: string; adapterType: str
 interface SkillItem { id: string; name: string; slug: string; version: string; runtime: string; }
 interface WorkflowCollection { name: string; count: number; }
 
-type PackageTab = 'all' | 'apps' | 'workflows' | 'agents' | 'skills' | 'collections';
+type PackageTab = 'all' | 'workflows' | 'agents' | 'skills' | 'collections';
 
 interface PackageDetail {
   package: {
@@ -57,11 +57,11 @@ interface PackageDetail {
 }
 
 const TYPE_ICONS: Record<Package['kind'], LucideIcon> = {
-  app:      AppWindow,
   skill:    Sparkles,
   workflow: WorkflowIcon,
   agent:    Bot,
   integration: PackageIcon,
+  agentis:  PackageIcon,
 };
 
 export function PackagesPage() {
@@ -97,8 +97,7 @@ export function PackagesPage() {
     // 10.12: "Yours" library is the single source of truth — always exclude
     // templates. Type tabs filter by package kind.
     let list = packages.filter((p) => !p.isTemplate);
-    if (tab === 'apps') list = list.filter((p) => p.kind === 'app');
-    else if (tab === 'skills') list = list.filter((p) => p.kind === 'skill');
+    if (tab === 'skills') list = list.filter((p) => p.kind === 'skill');
     else if (tab === 'workflows') list = list.filter((p) => p.kind === 'workflow');
     else if (tab === 'agents') list = list.filter((p) => p.kind === 'agent');
     if (search.trim()) {
@@ -260,7 +259,6 @@ export function PackagesPage() {
         onChange={(v) => setTab(v as typeof tab)}
         tabs={[
           { value: 'all',       label: 'All' },
-          { value: 'apps',      label: 'Apps' },
           { value: 'workflows', label: 'Workflows' },
           { value: 'agents',    label: 'Agents' },
           { value: 'skills',    label: 'Skills' },
@@ -444,7 +442,6 @@ const KIND_CONFIG = [
   { value: 'workflow' as const, label: 'Workflow', icon: WorkflowIcon },
   { value: 'agent'    as const, label: 'Agent',    icon: Bot },
   { value: 'skill'    as const, label: 'Skill',    icon: Sparkles },
-  { value: 'app'      as const, label: 'App',      icon: AppWindow },
 ];
 
 function NewPackageDialog({
@@ -495,15 +492,14 @@ function NewPackageDialog({
     }).finally(() => setLoadingRes(false));
   }, [open]);
 
-  const showWorkflows = kind === 'workflow' || kind === 'app';
-  const showAgents    = kind === 'agent'    || kind === 'app';
-  const showSkills    = kind === 'skill'    || kind === 'app';
+  const showWorkflows = kind === 'workflow';
+  const showAgents    = kind === 'agent';
+  const showSkills    = kind === 'skill';
 
   const canAdvance =
     (kind === 'workflow' && selWorkflows.size > 0) ||
     (kind === 'agent'    && selAgents.size > 0)    ||
-    (kind === 'skill'    && selSkills.size > 0)    ||
-    (kind === 'app' && (selWorkflows.size > 0 || selAgents.size > 0 || selSkills.size > 0));
+    (kind === 'skill'    && selSkills.size > 0);
 
   const totalSelected = selWorkflows.size + selAgents.size + selSkills.size;
 
@@ -886,7 +882,6 @@ function PackageDetailDrawer({
   const [detail, setDetail] = useState<PackageDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [duplicating, setDuplicating] = useState(false);
-  const [launching, setLaunching] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -922,22 +917,6 @@ function PackageDetailDrawer({
       toast.error('Duplicate failed', e.message ?? 'Unknown error');
     } finally {
       setDuplicating(false);
-    }
-  }
-
-  async function drawerLaunch() {
-    if (!detail || launching) return;
-    setLaunching(true);
-    try {
-      await api(`/v1/apps/activate/${pkg.id}`, { method: 'POST' });
-      toast.success('App launched!', detail.package.name);
-      onClose();
-      nav('/apps');
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Launch failed', e.message ?? 'Unknown error');
-    } finally {
-      setLaunching(false);
     }
   }
 
@@ -1100,16 +1079,6 @@ function PackageDetailDrawer({
 
         {/* Footer */}
         <div className="flex items-center gap-2 border-t border-line bg-surface-2 px-5 py-3">
-          {pkg.kind === 'app' && (
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => void drawerLaunch()}
-              disabled={!detail || launching}
-            >
-              {launching ? 'Launching…' : 'Launch App'}
-            </Button>
-          )}
           <Button
             variant="secondary"
             size="sm"

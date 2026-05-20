@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Bot, Brain, Check, ChevronRight, ClipboardList, Plus, RefreshCw, Save, Sparkles, Users } from 'lucide-react';
+import { Bot, Check, ChevronRight, ClipboardList, Plus, RefreshCw, Save, Sparkles, Users } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 
@@ -47,15 +47,6 @@ interface WorkflowRow {
   updatedAt: string;
 }
 
-interface MemoryRow {
-  id: string;
-  title: string;
-  content: string;
-  kind: string;
-  importance: number;
-  updatedAt: string;
-}
-
 interface ApprovalRow {
   id: string;
   title: string;
@@ -71,7 +62,6 @@ interface TeamDetail {
   stats: TeamStats;
   agents: AgentRow[];
   workflows: WorkflowRow[];
-  memory: MemoryRow[];
   approvals: ApprovalRow[];
 }
 
@@ -81,11 +71,10 @@ interface ArchitectProposal {
   context: TeamContext;
 }
 
-type TeamTab = 'overview' | 'agents' | 'memory' | 'workflows';
+type TeamTab = 'overview' | 'agents' | 'workflows';
 const TEAM_TABS: Array<{ id: TeamTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'agents', label: 'Agents' },
-  { id: 'memory', label: 'Memory' },
   { id: 'workflows', label: 'Workflows' },
 ];
 
@@ -128,7 +117,7 @@ export function TeamsPage() {
       <header className="mb-5 flex flex-wrap items-center gap-3">
         <div>
           <h1 className="text-lg font-medium text-text-primary">Teams</h1>
-          <p className="text-xs text-text-muted">Organize agents, execution context, approvals, and durable memory around teams.</p>
+          <p className="text-xs text-text-muted">Organize agents, execution context, and approvals around teams.</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <input
@@ -182,8 +171,6 @@ export function TeamPage() {
   const toast = useToast();
   const [detail, setDetail] = useState<TeamDetail | null>(null);
   const [contextDraft, setContextDraft] = useState<TeamContext | null>(null);
-  const [memoryTitle, setMemoryTitle] = useState('');
-  const [memoryContent, setMemoryContent] = useState('');
   const [architectBrief, setArchitectBrief] = useState('');
   const [proposal, setProposal] = useState<ArchitectProposal | null>(null);
   const [busy, setBusy] = useState(false);
@@ -230,24 +217,6 @@ export function TeamPage() {
       toast.success(decision === 'approve' ? 'Approved' : 'Rejected');
     } catch (error) {
       toast.error('Approval not resolved', messageFrom(error));
-    }
-  }
-
-  async function writeMemory() {
-    if (!id || !memoryTitle.trim() || !memoryContent.trim()) return;
-    setBusy(true);
-    try {
-      await api(`/v1/teams/${id}/memory`, {
-        method: 'POST',
-        body: JSON.stringify({ title: memoryTitle.trim(), content: memoryContent.trim(), kind: 'note', importance: 5 }),
-      });
-      setMemoryTitle('');
-      setMemoryContent('');
-      await load();
-    } catch (error) {
-      toast.error('Memory not written', messageFrom(error));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -345,21 +314,11 @@ export function TeamPage() {
         </div>
         )}
 
-        {(tab === 'overview' || tab === 'agents' || tab === 'memory') && (
+        {(tab === 'overview' || tab === 'agents') && (
         <div className="mt-6 grid gap-6 xl:grid-cols-3">
           {(tab === 'overview' || tab === 'agents') && (
           <Panel title="Agents" icon={<Bot size={16} className="text-accent" />} empty="No agents assigned to this team.">
             {detail.agents.map((agent) => <Link key={agent.id} to={`/agents/${agent.id}`} className="flex items-center justify-between rounded-md border border-line bg-canvas px-3 py-2 text-xs hover:border-accent/50"><span>{agent.avatarGlyph || '*'} {agent.name}</span><span className="text-text-muted">{agent.status}</span></Link>)}
-          </Panel>
-          )}
-          {(tab === 'overview' || tab === 'memory') && (
-          <Panel title="Memory" icon={<Brain size={16} className="text-accent" />} empty="No memory yet.">
-            <div className="mb-3 space-y-2">
-              <input value={memoryTitle} onChange={(event) => setMemoryTitle(event.target.value)} placeholder="Memory title" className="h-8 w-full rounded-md border border-line bg-canvas px-3 text-xs outline-none focus:border-accent" />
-              <textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} placeholder="What should this team remember?" rows={3} className="w-full resize-none rounded-md border border-line bg-canvas p-3 text-xs outline-none focus:border-accent" />
-              <button disabled={busy || !memoryTitle.trim() || !memoryContent.trim()} onClick={() => void writeMemory()} className="inline-flex h-8 items-center gap-1 rounded-md border border-line bg-canvas px-2.5 text-xs hover:border-accent/50 disabled:opacity-50"><Save size={13} /> Write memory</button>
-            </div>
-            {detail.memory.map((memory) => <div key={memory.id} className="rounded-md border border-line bg-canvas p-3 text-xs"><div className="font-medium text-text-primary">{memory.title}</div><p className="mt-1 text-text-muted">{memory.content}</p></div>)}
           </Panel>
           )}
           {tab === 'overview' && (
