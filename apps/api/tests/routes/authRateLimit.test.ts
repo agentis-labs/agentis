@@ -1,9 +1,23 @@
 /**
  * D32 — /v1/auth/login throttles credential stuffing.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildAuthRoutes } from '../../src/routes/auth.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
+
+// The per-pair limiter buckets by (ip, username). The clientIp() helper
+// only honors the `x-forwarded-for` header when AGENTIS_TRUST_PROXY=true
+// (production sits behind nginx/Cloudflare). Pin it on for this suite so
+// the simulated proxy headers actually segment buckets.
+let previousTrustProxy: string | undefined;
+beforeAll(() => {
+  previousTrustProxy = process.env.AGENTIS_TRUST_PROXY;
+  process.env.AGENTIS_TRUST_PROXY = 'true';
+});
+afterAll(() => {
+  if (previousTrustProxy === undefined) delete process.env.AGENTIS_TRUST_PROXY;
+  else process.env.AGENTIS_TRUST_PROXY = previousTrustProxy;
+});
 
 describe('POST /v1/auth/login rate limiting', () => {
   it('returns OPERATION_RATE_LIMITED after 5 failed attempts for the same (ip, username) pair', async () => {

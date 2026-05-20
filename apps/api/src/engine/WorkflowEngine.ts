@@ -1234,22 +1234,11 @@ export class WorkflowEngine {
       })
       .where(eq(schema.workflowRuns.id, ctx.runId));
 
-    const eventName =
-      status === 'COMPLETED'
-        ? REALTIME_EVENTS.RUN_COMPLETED
-        : status === 'FAILED'
-          ? REALTIME_EVENTS.RUN_FAILED
-          : REALTIME_EVENTS.RUN_RUNNING;
-    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), eventName, {
-      runId: ctx.runId,
-      status,
-    });
-    this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), eventName, {
-      runId: ctx.runId,
-      status,
-      workflowId: ctx.workflowId,
-    });
-
+    // Finalize all internal bookkeeping (terminal conversation message,
+    // subflow parent notification) BEFORE we publish the terminal event.
+    // External observers (schedulers, tests, the activity feed) treat
+    // RUN_COMPLETED / RUN_FAILED / RUN_CANCELLED as the "everything is done"
+    // signal — so any further work performed after the publish would race.
     if (finishing && previous !== status) {
       await this.#appendTerminalConversationMessage(ctx, status);
     }
@@ -1282,6 +1271,22 @@ export class WorkflowEngine {
         }
       }
     }
+
+    const eventName =
+      status === 'COMPLETED'
+        ? REALTIME_EVENTS.RUN_COMPLETED
+        : status === 'FAILED'
+          ? REALTIME_EVENTS.RUN_FAILED
+          : REALTIME_EVENTS.RUN_RUNNING;
+    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), eventName, {
+      runId: ctx.runId,
+      status,
+    });
+    this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), eventName, {
+      runId: ctx.runId,
+      status,
+      workflowId: ctx.workflowId,
+    });
   }
 
   async #persistRun(ctx: RunningContext): Promise<void> {
