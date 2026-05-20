@@ -188,7 +188,7 @@ export class TeamService {
     const workflows = this.db.select().from(schema.workflows).where(eq(schema.workflows.workspaceId, workspaceId)).all()
       .filter((workflow) => workflow.ambientId === team.ambientId);
     const approvals = this.db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.workspaceId, workspaceId)).all()
-      .filter((approval) => approval.ambientId === team.ambientId && approval.status === 'pending' && !approval.dismissedAt);
+      .filter((approval) => approval.ambientId === team.ambientId && approval.status === 'pending');
     return {
       agents: agents.length,
       liveAgents: agents.filter((agent) => agent.status === 'online' || agent.status === 'busy').length,

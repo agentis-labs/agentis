@@ -145,8 +145,8 @@ function workflowsForTeam(db: AgentisSqliteDb, workspaceId: string, ambientId: s
 
 function approvalsForTeam(db: AgentisSqliteDb, workspaceId: string, ambientId: string) {
   return db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.workspaceId, workspaceId)).all()
-    .filter((approval) => approval.ambientId === ambientId && approval.status === 'pending' && !approval.dismissedAt)
-    .sort((a, b) => b.priority - a.priority || b.createdAt.localeCompare(a.createdAt));
+    .filter((approval) => approval.ambientId === ambientId && approval.status === 'pending')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function proposeTeamDesign(teamName: string, brief: string) {

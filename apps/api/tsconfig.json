@@ -7,24 +7,8 @@
   },
   "include": ["src/**/*"],
   "exclude": [
-    "src/routes/agentLedger.ts",
     "src/routes/budgets.ts",
-    "src/routes/evals.ts",
-    "src/routes/files.ts",
-    "src/routes/inbox.ts",
-    "src/routes/policies.ts",
-    "src/routes/routines.ts",
-    "src/routes/teams.ts",
-    "src/security/agentIdentity.ts",
-    "src/services/agentLedger.ts",
     "src/services/budget.ts",
-    "src/services/dataIngestion.ts",
-    "src/services/evals.ts",
-    "src/services/fileStorage.ts",
-    "src/services/inbox.ts",
-    "src/services/policies.ts",
-    "src/services/routines.ts",
-    "src/services/teams.ts",
     "src/services/telemetrySink.ts"
   ]
 }

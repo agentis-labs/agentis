@@ -69,6 +69,8 @@ import { buildGatewayRoutes } from './routes/gateways.js';
 import { buildAmbientRoutes } from './routes/ambients.js';
 import { buildScratchpadRoutes } from './routes/scratchpad.js';
 import { buildTaskRoutes } from './routes/tasks.js';
+import { buildTeamRoutes } from './routes/teams.js';
+import { TeamService } from './services/teams.js';
 import { buildTerminalRoutes } from './routes/terminal.js';
 import { buildCredentialRoutes } from './routes/credentials.js';
 import { buildTriggerRoutes } from './routes/triggers.js';
@@ -151,6 +153,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const viewportStore = new ViewportStore();
 
   const knowledgeBaseService = new KnowledgeBaseService(sqlite);
+  const teamService = new TeamService(sqlite, bus);
 
   // Channel bridge (Batch 4): Telegram inbound+outbound, Discord outbound-only.
   const channelBridge = new ChannelBridge({
@@ -305,6 +308,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/spaces', buildSpaceRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/runs', buildScratchpadRoutes({ db: sqlite, auth, scratchpad }));
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth }));
+  app.route('/v1/teams', buildTeamRoutes({ db: sqlite, auth, bus, teams: teamService }));
 
   // ── Test harness (D29) ──────────────────────────────────
   // Mounted ONLY when AGENTIS_TEST_MODE=true AND NODE_ENV !== 'production'.
