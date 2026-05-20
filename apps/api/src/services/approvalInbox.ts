@@ -25,7 +25,7 @@ export interface ApprovalCreateArgs {
   runId: string | null;
   taskId: string | null;
   gatewayId: string | null;
-  source: 'checkpoint' | 'openclaw_exec' | 'package_install' | 'credential_access';
+  source: 'checkpoint' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
   title: string;
   summary: string;
   confidence: number | null;

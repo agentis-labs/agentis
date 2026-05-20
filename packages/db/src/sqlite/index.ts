@@ -323,10 +323,3 @@ ALTER TABLE channel_deliveries_next RENAME TO channel_deliveries;
 }
 
 export { schema };
-export {
-  openTelemetrySqlite,
-  closeTelemetrySqlite,
-  insertTelemetrySpan,
-  listTelemetrySpans,
-  type ListTelemetrySpanOptions,
-} from './telemetryDb.js';

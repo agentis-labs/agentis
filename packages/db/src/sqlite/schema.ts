@@ -556,6 +556,23 @@ export const activityEvents = sqliteTable('activity_events', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
+export const budgetEvents = sqliteTable('budget_events', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id')
+    .notNull()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  runId: text('run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+  /** spend | limit_hit | extension_granted | reset */
+  eventType: text('event_type').notNull(),
+  amountCents: integer('amount_cents').notNull(),
+  /** Headroom remaining after this event, in cents. */
+  balanceAfterCents: integer('balance_after_cents').notNull(),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
 export const approvalRequests = sqliteTable('approval_requests', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')

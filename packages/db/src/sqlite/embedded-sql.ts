@@ -358,6 +358,19 @@ CREATE TABLE IF NOT EXISTS activity_events (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_ws_created ON activity_events(workspace_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS budget_events (
+  id                    TEXT PRIMARY KEY,
+  workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  agent_id              TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  run_id                TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  event_type            TEXT NOT NULL,
+  amount_cents          INTEGER NOT NULL,
+  balance_after_cents   INTEGER NOT NULL,
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_budget_events_workspace ON budget_events(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_budget_events_agent ON budget_events(agent_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS approval_requests (
   id                TEXT PRIMARY KEY,
   workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

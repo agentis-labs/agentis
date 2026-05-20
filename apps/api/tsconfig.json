@@ -6,9 +6,5 @@
     "composite": true
   },
   "include": ["src/**/*"],
-  "exclude": [
-    "src/routes/budgets.ts",
-    "src/services/budget.ts",
-    "src/services/telemetrySink.ts"
-  ]
+  "exclude": []
 }
