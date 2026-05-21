@@ -6,7 +6,77 @@ follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
-—
+### Workflow engine — WORKFLOW-REPLAN
+
+A major expansion of the workflow engine and canvas, landed entirely on
+`main` and designed to stay compatible with the future `brain-apps`
+merge.
+
+#### Added — node kinds
+- 10 new node kinds: `wait`, `transform`, `filter`, `integration`,
+  `http_request`, `workflow_store`, `evaluator`, `guardrails`, `loop`,
+  `parallel` — bringing the engine to 21 working kinds. Each has a
+  dispatch handler, an inspector form, and a palette entry.
+- Router `llm_route` mode — branch selection via the evaluator endpoint
+  with first-match fallback.
+
+#### Added — engine capabilities
+- Variable templates in every string config field: `{{trigger.x}}`,
+  `{{nodes.<id>.path}}`, `{{scratchpad.x}}`, `{{store.x}}`,
+  `{{loop.item}}`, `{{loop.index}}`, with array indexing and deep walk.
+- Error edges — a failed node with a connected `type: 'error'` edge
+  routes its failure context downstream as a catch branch instead of
+  terminating the run. Unreachable catch targets are skipped on success.
+- Workflow Contracts — `inputContract` / `outputContract` on the graph.
+  Completed runs whose output doesn't match the declared `outputContract`
+  land in the new `COMPLETED_WITH_CONTRACT_VIOLATION` status with
+  per-field violation messages surfaced on the Output + Runs tabs.
+- Workflow-scoped persistent KV (`workflow_kv_entries`) via the
+  `workflow_store` node — survives across runs (counters, last-seen
+  cursors, monthly rollups).
+- `budget_events` table + `/v1/budgets` mounted; `/v1/teams`,
+  `/v1/integrations` mounted.
+
+#### Added — authoring & UI
+- Cmd+K command palette (nodes, skills, subflows, integration ops).
+- Live per-node run overlay for every node kind (pulsing/check/×/↻/wait
+  + loop progress bars).
+- Per-node test runner — `POST /v1/workflows/:id/nodes/:nodeId/test`
+  plus an inspector Test tab.
+- Variable picker (`{{`-triggered autocomplete) in agent prompt, HTTP
+  url/body, transform, and filter fields.
+- Schedule editor with cron description + next-5-fires preview + presets.
+- Workflow Contracts modal, Event Chains modal, error-edge handle on
+  every node, dashed-red error-edge / amber condition-edge styling.
+- Phase regions — colored canvas backgrounds grouping nodes into named
+  phases (renders when the graph declares `phases[]`).
+
+#### Added — intelligence
+- LLM workflow synthesis — `agentis.build_workflow` calls the evaluator
+  endpoint with the full node taxonomy when configured; deterministic
+  regex synthesizer remains the fallback. Both validate through
+  `validateWorkflowGraph`.
+- Workflows-as-agent-tools — each workspace workflow surfaces to the
+  orchestrator as a discrete `workflow.<id>` tool with parameters
+  derived from its `inputContract`.
+
+#### Added — resilience
+- `RunCompactionService` — daily compaction of terminal-run state
+  (>30 days) and ledger pruning (>90 days).
+- Wait nodes persist `wakeAt` + inputs before arming the timer.
+- Boot-time orphan reclamation — runs left `RUNNING` by a dead process
+  are failed-loud with a structured log instead of hanging forever.
+
+#### Fixed
+- `safeExpression` strict-mode crash (`eval`/`arguments` as parameter
+  names) that broke every transform/filter.
+- `#failNode` error-edge race that flipped runs to FAILED before the
+  catch branch could route.
+- Subflow parent notification ordering vs. `RUN_COMPLETED`.
+
+#### Deferred to a future engine pass
+- True durable run resume (rebuild in-memory run state after restart).
+- Loop crash recovery (resume mid-iteration).
 
 ## [1.0.0] — 2026-05-20
 
