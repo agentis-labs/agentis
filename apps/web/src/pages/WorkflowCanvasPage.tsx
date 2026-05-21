@@ -24,7 +24,7 @@ import {
 import {
   ArrowLeft, Undo2, Redo2, Play, Upload, Map as MapIcon, MapPinOff,
   ChevronDown, X, Variable, Trash2, Webhook, Clock as ClockIcon, Copy,
-  BookOpen, ExternalLink, FileSignature,
+  BookOpen, ExternalLink, FileSignature, GitBranch,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../lib/api';
@@ -32,6 +32,7 @@ import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime
 import { NodePalette } from '../components/canvas/NodePalette';
 import { NodeCommandPalette } from '../components/canvas/NodeCommandPalette';
 import { WorkflowContractsPanel, type WorkflowContractValue } from '../components/canvas/WorkflowContractsPanel';
+import { EventChainsPanel } from '../components/canvas/EventChainsPanel';
 import { ContextInspector, type InspectorSelection } from '../components/canvas/ContextInspector';
 import { RunDrawer } from '../components/canvas/RunDrawer';
 import { CanvasEngine } from '../components/canvas/CanvasEngine';
@@ -134,6 +135,7 @@ export function WorkflowCanvasPage() {
   const [selection, setSelection] = useState<InspectorSelection>({ kind: null });
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [contractsOpen, setContractsOpen] = useState(false);
+  const [chainsOpen, setChainsOpen] = useState(false);
   const [integrations, setIntegrations] = useState<Array<{ service: string; name: string; operations: readonly string[]; icon?: string }>>([]);
   const [reusableWorkflows, setReusableWorkflows] = useState<Array<{ id: string; title: string }>>([]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
@@ -680,6 +682,9 @@ export function WorkflowCanvasPage() {
           <Button variant="secondary" size="sm" iconLeft={<FileSignature size={12} />} onClick={() => setContractsOpen(true)}>
             Contracts
           </Button>
+          <Button variant="secondary" size="sm" iconLeft={<GitBranch size={12} />} onClick={() => setChainsOpen(true)}>
+            Chains
+          </Button>
           <Button variant="secondary" size="sm" iconLeft={<Play size={12} />} onClick={() => setRunDialogOpen(true)} disabled={running}>
             Test run
           </Button>
@@ -851,6 +856,36 @@ export function WorkflowCanvasPage() {
           }}
         />
       </div>
+
+      {chainsOpen && wf && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/60 backdrop-blur-sm"
+          onClick={() => setChainsOpen(false)}
+        >
+          <div
+            className="flex h-[640px] w-[560px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between border-b border-line px-3 py-2.5">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-muted">Workflow</div>
+                <div className="text-subheading text-text-primary">Event Chains</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChainsOpen(false)}
+                className="rounded p-1 text-text-muted hover:text-accent"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </header>
+            <div className="flex-1 overflow-hidden px-3 py-3">
+              <EventChainsPanel workflowId={wf.id} />
+            </div>
+          </div>
+        </div>
+      )}
 
       {contractsOpen && wf && (
         <div
