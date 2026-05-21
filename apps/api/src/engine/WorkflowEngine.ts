@@ -1309,15 +1309,23 @@ export class WorkflowEngine {
       await this.#completeNode(ctx, node.id, inputData);
       return;
     }
-    // The wait holds a synthetic active execution so the settle loop doesn't
-    // mark the run as completed mid-wait.
+    // Persist the wake-at on the active execution so a crash mid-wait isn't
+    // a silent run loss — the WaitRecovery boot scan can pick it up. The
+    // synthetic execution keeps the settle loop from marking the run COMPLETED
+    // while the timer is pending.
+    const wakeAt = new Date(Date.now() + delayMs).toISOString();
     ctx.state.activeExecutions[node.id] = {
       taskId: `wait:${node.id}`,
       nodeId: node.id,
       executorType: 'wait',
       executorRef: `timer:${delayMs}ms`,
       startedAt: new Date().toISOString(),
+      ...({ wakeAt, inputData } as Record<string, unknown>),
     };
+    // Persist the run-state mid-wait so a restart can recover this exact
+    // wait state. Without this the runState row reflects the pre-wait
+    // moment and the recovery pass can't see the pending timer.
+    await this.#persistRun(ctx);
     const timer = setTimeout(() => {
       delete ctx.state.activeExecutions[node.id];
       void (async () => {

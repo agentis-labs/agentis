@@ -13,6 +13,8 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import { loadEnv, type AgentisEnv } from './env.js';
 import { createLogger, type Logger } from './logger.js';
 import { loadOrCreateSecrets, type AgentisSecrets } from './secrets.js';
@@ -101,6 +103,7 @@ import { listenHttpServer } from './httpServer.js';
 import { createRealtimeServer, type RealtimeServer } from './websocket/rooms.js';
 import { IssueService } from './services/issues.js';
 import { EventChainService, SchedulerService } from './services/scheduler.js';
+import { RunCompactionService } from './services/runCompactionService.js';
 
 export interface BootstrapResult {
   env: AgentisEnv;
@@ -237,6 +240,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 
   const scheduler = new SchedulerService({ db: sqlite, bus, engine, logger });
   const eventChain = new EventChainService({ db: sqlite, bus, engine, logger });
+  const runCompaction = new RunCompactionService({
+    db: sqlite,
+    logger,
+    keepFullStateDays: 30,
+    keepLedgerDays: 90,
+  });
 
   const toolRegistry = new AgentisToolRegistry({ logger });
   registerAllTools(toolRegistry, {
@@ -412,12 +421,47 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       eventChain.start();
       scheduler.start();
       jobQueue.start();
+      runCompaction.start();
+
+      // Reclaim runs that were RUNNING when the previous process died. The
+      // engine's in-memory #runs map is empty after a restart — those runs
+      // would hang in RUNNING forever otherwise. We mark them FAILED with a
+      // clear reason so operators can see and replay them. A future v1.1
+      // ships durable run resume; today's contract is "fail loud, not
+      // silent."
+      try {
+        const orphaned = sqlite
+          .select({ id: schema.workflowRuns.id })
+          .from(schema.workflowRuns)
+          .where(eq(schema.workflowRuns.status, 'RUNNING'))
+          .all();
+        if (orphaned.length > 0) {
+          for (const row of orphaned) {
+            sqlite
+              .update(schema.workflowRuns)
+              .set({
+                status: 'FAILED',
+                completedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              })
+              .where(eq(schema.workflowRuns.id, row.id))
+              .run();
+          }
+          logger.warn('agentis.orphan_runs_failed', {
+            count: orphaned.length,
+            reason: 'previous engine died mid-run; restart cannot resume non-persisted state',
+          });
+        }
+      } catch (err) {
+        logger.warn('agentis.orphan_scan_failed', { err: (err as Error).message });
+      }
       const url = `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`;
       logger.info('agentis.listening', { url });
       return { url, httpServer };
     },
     async stop() {
       logger.info('agentis.shutdown');
+      runCompaction.stop();
       jobQueue.stop();
       scheduler.shutdown();
       eventChain.shutdown();
