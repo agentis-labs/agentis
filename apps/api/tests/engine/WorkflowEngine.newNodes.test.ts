@@ -265,6 +265,62 @@ describe('WorkflowEngine — workflow_store node', () => {
   });
 });
 
+describe('WorkflowEngine — output contract enforcement', () => {
+  it('downgrades to COMPLETED_WITH_CONTRACT_VIOLATION when the output is missing a required field', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'X',
+          type: 'transform',
+          title: 'Build output',
+          position: { x: 200, y: 0 },
+          config: { kind: 'transform', expression: '({ name: "alice" })', isOutput: true },
+        },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }],
+      outputContract: { fields: [
+        { key: 'name', type: 'string', required: true },
+        { key: 'score', type: 'number', required: true },
+      ] },
+    } as WorkflowGraph;
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    const row = loadRun(runId);
+    expect(row.status).toBe('COMPLETED_WITH_CONTRACT_VIOLATION');
+    const state = row.runState as { contractViolations?: string[] };
+    expect(state.contractViolations?.some((v) => v.includes('score'))).toBe(true);
+  });
+
+  it('completes normally when the output matches the contract', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'X',
+          type: 'transform',
+          title: 'Build output',
+          position: { x: 200, y: 0 },
+          config: { kind: 'transform', expression: '({ name: "alice", score: 87 })', isOutput: true },
+        },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }],
+      outputContract: { fields: [
+        { key: 'name', type: 'string', required: true },
+        { key: 'score', type: 'number', required: true },
+      ] },
+    } as WorkflowGraph;
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    const row = loadRun(runId);
+    expect(row.status).toBe('COMPLETED');
+  });
+});
+
 describe('WorkflowEngine — error edge routing', () => {
   it('does not traverse error edges on success', async () => {
     const graph: WorkflowGraph = {

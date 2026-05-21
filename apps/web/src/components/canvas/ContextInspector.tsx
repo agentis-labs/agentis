@@ -6,6 +6,8 @@ import { SkillCombobox } from './SkillCombobox';
 import type { InstalledSkillOption } from './SkillCombobox';
 import { describeCron, nextFires, CRON_PRESETS } from '../../lib/cronPreview';
 import { NodeTestRunner } from './NodeTestRunner';
+import { TemplatedTextField } from './TemplatedTextField';
+import type { UpstreamNode } from './VariablePicker';
 
 export interface InspectorSelection {
   kind: 'node' | 'edge' | null;
@@ -40,6 +42,7 @@ const KIND_LABEL: Record<string, string> = {
 export function ContextInspector({
   selection,
   workflowId,
+  upstream,
   onClose,
   onSave,
   className,
@@ -47,6 +50,8 @@ export function ContextInspector({
   selection: InspectorSelection;
   /** Required for the per-node Test tab. Omit (null) on canvases that don't yet have a saved workflow id. */
   workflowId?: string | null;
+  /** Other nodes in the same workflow, for the variable picker. */
+  upstream?: UpstreamNode[];
   onClose: () => void;
   onSave?: (data: Record<string, unknown>) => void;
   className?: string;
@@ -201,6 +206,7 @@ export function ContextInspector({
               skills={skills}
               workflows={workflows}
               knowledgeBases={knowledgeBases}
+              upstream={upstream}
               onSkillsChange={() => {
                 void api<{ skills: SkillRow[] }>('/v1/skills')
                   .then((d) => setSkills(d.skills ?? []))
@@ -264,15 +270,17 @@ interface NodeFormProps {
   skills: SkillRow[];
   workflows: WorkflowRow[];
   knowledgeBases: KnowledgeBaseRow[];
+  /** Other nodes in the same workflow — populates the variable picker. */
+  upstream?: UpstreamNode[];
   onSkillsChange?: () => void;
 }
 
-function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, onSkillsChange }: NodeFormProps) {
+function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, upstream, onSkillsChange }: NodeFormProps) {
   switch (kind) {
     case 'trigger':
       return <TriggerForm data={data} update={update} />;
     case 'agent_task':
-      return <AgentTaskForm data={data} update={update} agents={agents} />;
+      return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} />;
     case 'agent_swarm':
       return <AgentSwarmForm data={data} update={update} />;
     case 'skill':
@@ -296,13 +304,13 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
     case 'scratchpad':
       return <VariablesForm data={data} update={update} />;
     case 'transform':
-      return <TransformForm data={data} update={update} />;
+      return <TransformForm data={data} update={update} upstream={upstream} />;
     case 'filter':
-      return <FilterForm data={data} update={update} />;
+      return <FilterForm data={data} update={update} upstream={upstream} />;
     case 'integration':
-      return <IntegrationForm data={data} update={update} />;
+      return <IntegrationForm data={data} update={update} upstream={upstream} />;
     case 'http_request':
-      return <HttpRequestForm data={data} update={update} />;
+      return <HttpRequestForm data={data} update={update} upstream={upstream} />;
     case 'workflow_store':
       return <WorkflowStoreForm data={data} update={update} />;
     case 'evaluator':
@@ -429,7 +437,7 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
   );
 }
 
-function AgentTaskForm({ data, update, agents }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[] }) {
+function AgentTaskForm({ data, update, agents, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[] }) {
   return (
     <>
       <Field label="Agent" hint="Which agent should handle this task?">
@@ -444,13 +452,14 @@ function AgentTaskForm({ data, update, agents }: { data: Record<string, unknown>
           ))}
         </select>
       </Field>
-      <Field label="Prompt" hint="What you want the agent to do.">
-        <textarea
-          className={textareaCls}
+      <Field label="Prompt" hint="Type `{{` to insert a variable from the trigger or any upstream node.">
+        <TemplatedTextField
+          multiline
           rows={5}
           placeholder="Describe the task in plain English…"
           value={asStr(data.prompt)}
-          onChange={(e) => update({ prompt: e.target.value })}
+          onChange={(next) => update({ prompt: next })}
+          upstream={upstream}
         />
       </Field>
     </>
@@ -678,20 +687,21 @@ function WaitForm({ data, update }: { data: Record<string, unknown>; update: Nod
 
 // ─── Transform & Filter ─────────────────────────────────────────────────────
 
-function TransformForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+function TransformForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   return (
     <>
       <Field
         label="Expression"
-        hint="A JS expression. `input` is the merged inputs map. Must return the output object."
+        hint="A JS expression. `input` is the merged inputs map. Type `{{` to reference upstream values."
       >
-        <textarea
+        <TemplatedTextField
+          multiline
+          mono
           rows={6}
-          spellCheck={false}
-          className={textareaCls + ' font-mono text-[11px]'}
           placeholder="({ name: input.user.fullName, domain: input.user.email.split('@')[1] })"
           value={asStr(data.expression)}
-          onChange={(e) => update({ expression: e.target.value })}
+          onChange={(next) => update({ expression: next })}
+          upstream={upstream}
         />
       </Field>
       <Field label="Output key (optional)" hint="Wraps the expression result under this key. Leave blank to use the result directly.">
@@ -707,17 +717,18 @@ function TransformForm({ data, update }: { data: Record<string, unknown>; update
   );
 }
 
-function FilterForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+function FilterForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   return (
     <>
       <Field label="Condition" hint="Boolean JS expression — truthy passes the input through; falsy stops this branch.">
-        <textarea
+        <TemplatedTextField
+          multiline
+          mono
           rows={3}
-          spellCheck={false}
-          className={textareaCls + ' font-mono text-[11px]'}
           placeholder="input.score > 0.7"
           value={asStr(data.condition)}
-          onChange={(e) => update({ condition: e.target.value })}
+          onChange={(next) => update({ condition: next })}
+          upstream={upstream}
         />
       </Field>
     </>
@@ -726,7 +737,7 @@ function FilterForm({ data, update }: { data: Record<string, unknown>; update: N
 
 // ─── Integration & HTTP ─────────────────────────────────────────────────────
 
-function IntegrationForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+function IntegrationForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   return (
     <>
       <Field label="Integration" hint="Slug of a registered connector (slack, gmail, github, sheets, …).">
@@ -775,7 +786,7 @@ function IntegrationForm({ data, update }: { data: Record<string, unknown>; upda
   );
 }
 
-function HttpRequestForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+function HttpRequestForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   const method = asStr(data.method) || 'GET';
   return (
     <>
@@ -788,13 +799,12 @@ function HttpRequestForm({ data, update }: { data: Record<string, unknown>; upda
           <option>DELETE</option>
         </select>
       </Field>
-      <Field label="URL" hint="Supports `{{variable}}` templates.">
-        <input
-          type="text"
-          className={inputCls}
+      <Field label="URL" hint="Type `{{` to insert a variable.">
+        <TemplatedTextField
           placeholder="https://api.example.com/{{trigger.path}}"
           value={asStr(data.url)}
-          onChange={(e) => update({ url: e.target.value })}
+          onChange={(next) => update({ url: next })}
+          upstream={upstream}
         />
       </Field>
       <Field label="Headers (JSON)" hint="Object of header strings. Values support templates.">
@@ -810,14 +820,15 @@ function HttpRequestForm({ data, update }: { data: Record<string, unknown>; upda
         />
       </Field>
       {method !== 'GET' && method !== 'DELETE' && (
-        <Field label="Body" hint="Raw request body. Supports templates.">
-          <textarea
+        <Field label="Body" hint="Raw request body. Type `{{` to insert a variable.">
+          <TemplatedTextField
+            multiline
+            mono
             rows={4}
-            spellCheck={false}
-            className={textareaCls + ' font-mono text-[11px]'}
             placeholder='{"message": "{{nodes.draft.text}}"}'
             value={asStr(data.body)}
-            onChange={(e) => update({ body: e.target.value })}
+            onChange={(next) => update({ body: next })}
+            upstream={upstream}
           />
         </Field>
       )}

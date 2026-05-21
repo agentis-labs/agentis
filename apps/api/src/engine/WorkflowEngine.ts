@@ -2161,9 +2161,35 @@ export class WorkflowEngine {
 
   async #transitionRunStatus(ctx: RunningContext, status: WorkflowRunStatus): Promise<void> {
     if (ctx.state.status === status) return;
+
+    // Output contract enforcement: a run transitioning to COMPLETED must match
+    // the workflow's declared `outputContract` (when set). Mismatches downgrade
+    // to COMPLETED_WITH_CONTRACT_VIOLATION so operators see the problem on the
+    // canvas instead of silently shipping bad data. Brain-apps will reuse this
+    // exact path when validating an App's typed output surface.
+    if (status === 'COMPLETED') {
+      const contract = (ctx.graph as { outputContract?: { fields?: Array<{ key: string; type: string; required?: boolean }> } }).outputContract;
+      if (contract?.fields && contract.fields.length > 0) {
+        const finalOutput = this.#collectFinalOutput(ctx);
+        const violations = validateAgainstContract(finalOutput, contract.fields);
+        if (violations.length > 0) {
+          this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONTRACT_VIOLATION, {
+            runId: ctx.runId,
+            violations,
+          });
+          status = 'COMPLETED_WITH_CONTRACT_VIOLATION';
+          // Persist the violations alongside the run state for the Output tab.
+          (ctx.state as unknown as { contractViolations?: string[] }).contractViolations = violations;
+        }
+      }
+    }
+
     const previous = ctx.state.status;
     ctx.state.status = status;
-    const finishing = status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED';
+    const finishing = status === 'COMPLETED'
+      || status === 'COMPLETED_WITH_CONTRACT_VIOLATION'
+      || status === 'FAILED'
+      || status === 'CANCELLED';
     await this.deps.db
       .update(schema.workflowRuns)
       .set({
@@ -2216,9 +2242,9 @@ export class WorkflowEngine {
     }
 
     const eventName =
-      status === 'COMPLETED'
+      status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION'
         ? REALTIME_EVENTS.RUN_COMPLETED
-        : status === 'FAILED'
+        : status === 'FAILED' || status === 'CANCELLED'
           ? REALTIME_EVENTS.RUN_FAILED
           : REALTIME_EVENTS.RUN_RUNNING;
     this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), eventName, {
@@ -2240,6 +2266,34 @@ export class WorkflowEngine {
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflowRuns.id, ctx.runId));
+  }
+
+  /**
+   * Compute the final-output payload for a run, used for outputContract
+   * validation. Prefers nodes marked `config.isOutput` over the
+   * "last-completed node" heuristic; falls back to the union of every
+   * sink node's output when no nodes are explicitly marked.
+   */
+  #collectFinalOutput(ctx: RunningContext): Record<string, unknown> {
+    const outputNodes = ctx.graph.nodes.filter((n) => {
+      const cfg = n.config as { isOutput?: boolean };
+      return cfg.isOutput === true;
+    });
+    if (outputNodes.length > 0) {
+      const merged: Record<string, unknown> = {};
+      for (const n of outputNodes) {
+        const out = ctx.state.nodeStates[n.id]?.outputData;
+        if (out && typeof out === 'object' && !Array.isArray(out)) {
+          Object.assign(merged, out);
+        }
+      }
+      return merged;
+    }
+    // Fallback — last completed node's output. Matches the subflow parent
+    // notification semantics so contract validation and parent handoff agree.
+    const finalNodeId = ctx.state.completedNodeIds.at(-1);
+    const out = (finalNodeId && ctx.state.nodeStates[finalNodeId]?.outputData) || {};
+    return (out && typeof out === 'object' && !Array.isArray(out)) ? (out as Record<string, unknown>) : {};
   }
 
   async #maybeSnapshot(ctx: RunningContext): Promise<void> {
@@ -2522,6 +2576,41 @@ function mergeBufferedInputs(buf: { receivedInputs: Record<string, unknown> }): 
     }
   }
   return merged;
+}
+
+/**
+ * Validate a final-output payload against a `WorkflowContract.fields` shape.
+ * Returns human-readable violation messages; empty array means the contract
+ * is satisfied. Brain-apps' AppRuntimeContract reuses this same function via
+ * the `WorkflowContract` shape — keep it pure and dependency-free.
+ */
+function validateAgainstContract(
+  output: Record<string, unknown>,
+  fields: Array<{ key: string; type: string; required?: boolean }>,
+): string[] {
+  const violations: string[] = [];
+  for (const field of fields) {
+    const value = output[field.key];
+    const present = value !== undefined && value !== null;
+    if (!present) {
+      if (field.required) violations.push(`Required field "${field.key}" is missing`);
+      continue;
+    }
+    if (field.type === 'any') continue;
+    const actual = Array.isArray(value) ? 'array' : typeof value;
+    if (field.type === 'object' && (actual !== 'object' || Array.isArray(value))) {
+      violations.push(`Field "${field.key}" expected object, got ${actual}`);
+    } else if (field.type === 'array' && !Array.isArray(value)) {
+      violations.push(`Field "${field.key}" expected array, got ${actual}`);
+    } else if (field.type === 'string' && actual !== 'string') {
+      violations.push(`Field "${field.key}" expected string, got ${actual}`);
+    } else if (field.type === 'number' && actual !== 'number') {
+      violations.push(`Field "${field.key}" expected number, got ${actual}`);
+    } else if (field.type === 'boolean' && actual !== 'boolean') {
+      violations.push(`Field "${field.key}" expected boolean, got ${actual}`);
+    }
+  }
+  return violations;
 }
 
 function sleep(ms: number): Promise<void> {

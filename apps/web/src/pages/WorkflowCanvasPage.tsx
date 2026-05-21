@@ -24,13 +24,14 @@ import {
 import {
   ArrowLeft, Undo2, Redo2, Play, Upload, Map as MapIcon, MapPinOff,
   ChevronDown, X, Variable, Trash2, Webhook, Clock as ClockIcon, Copy,
-  BookOpen, ExternalLink,
+  BookOpen, ExternalLink, FileSignature,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
 import { NodePalette } from '../components/canvas/NodePalette';
 import { NodeCommandPalette } from '../components/canvas/NodeCommandPalette';
+import { WorkflowContractsPanel, type WorkflowContractValue } from '../components/canvas/WorkflowContractsPanel';
 import { ContextInspector, type InspectorSelection } from '../components/canvas/ContextInspector';
 import { RunDrawer } from '../components/canvas/RunDrawer';
 import { CanvasEngine } from '../components/canvas/CanvasEngine';
@@ -132,6 +133,7 @@ export function WorkflowCanvasPage() {
 
   const [selection, setSelection] = useState<InspectorSelection>({ kind: null });
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [contractsOpen, setContractsOpen] = useState(false);
   const [integrations, setIntegrations] = useState<Array<{ service: string; name: string; operations: readonly string[]; icon?: string }>>([]);
   const [reusableWorkflows, setReusableWorkflows] = useState<Array<{ id: string; title: string }>>([]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
@@ -445,11 +447,30 @@ export function WorkflowCanvasPage() {
 
   const handleConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
+    // The AgentisNode renderer exposes an `error` handle on the bottom-right
+    // of each node. Edges drawn from that handle persist with `type: 'error'`
+    // so AgentisEdge can render them dashed-red and the engine routes failures
+    // through them as catch branches.
+    const edgeType: 'default' | 'error' = conn.sourceHandle === 'error' ? 'error' : 'default';
     setFlowEdges((eds) => {
-      const exists = eds.some((e) => e.source === conn.source && e.target === conn.target);
+      const exists = eds.some(
+        (e) =>
+          e.source === conn.source
+          && e.target === conn.target
+          && ((e.data as { type?: string } | undefined)?.type ?? 'default') === edgeType,
+      );
       if (exists) return eds;
-      const id = `e-${conn.source}-${conn.target}-${Date.now().toString(36)}`;
-      return [...eds, { id, source: conn.source!, target: conn.target!, animated: false }];
+      const id = `e-${conn.source}-${conn.target}-${edgeType === 'error' ? 'err-' : ''}${Date.now().toString(36)}`;
+      return [
+        ...eds,
+        {
+          id,
+          source: conn.source!,
+          target: conn.target!,
+          animated: false,
+          data: { type: edgeType },
+        },
+      ];
     });
     queueSyncAndSave();
   }, [setFlowEdges, queueSyncAndSave]);
@@ -656,6 +677,9 @@ export function WorkflowCanvasPage() {
           <Button variant="secondary" size="sm" iconLeft={<BookOpen size={12} />} onClick={() => { setIntentDraft(wf.intendedBehavior ?? ''); setIntentOpen(true); }}>
             Intent
           </Button>
+          <Button variant="secondary" size="sm" iconLeft={<FileSignature size={12} />} onClick={() => setContractsOpen(true)}>
+            Contracts
+          </Button>
           <Button variant="secondary" size="sm" iconLeft={<Play size={12} />} onClick={() => setRunDialogOpen(true)} disabled={running}>
             Test run
           </Button>
@@ -795,6 +819,25 @@ export function WorkflowCanvasPage() {
         <ContextInspector
           selection={selection}
           workflowId={wf?.id ?? null}
+          upstream={
+            wf
+              ? wf.graph.nodes
+                  .filter((n) => n.id !== selection.nodeId)
+                  .map((n) => {
+                    const cfg = (n.config ?? {}) as { kind?: string; outputKey?: string; outputKeys?: string[] };
+                    return {
+                      id: n.id,
+                      title: n.title,
+                      type: cfg.kind ?? n.type,
+                      outputKeys: Array.isArray(cfg.outputKeys)
+                        ? cfg.outputKeys
+                        : cfg.outputKey
+                          ? [cfg.outputKey]
+                          : [],
+                    };
+                  })
+              : []
+          }
           onClose={() => setSelection({ kind: null })}
           onSave={(data) => {
             if (!wf || !selection.nodeId) return;
@@ -808,6 +851,48 @@ export function WorkflowCanvasPage() {
           }}
         />
       </div>
+
+      {contractsOpen && wf && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/60 backdrop-blur-sm"
+          onClick={() => setContractsOpen(false)}
+        >
+          <div
+            className="flex h-[640px] w-[560px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between border-b border-line px-3 py-2.5">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-muted">Workflow</div>
+                <div className="text-subheading text-text-primary">Contracts</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setContractsOpen(false)}
+                className="rounded p-1 text-text-muted hover:text-accent"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </header>
+            <div className="flex-1 overflow-hidden px-3 py-3">
+              <WorkflowContractsPanel
+                inputContract={(wf.graph as { inputContract?: WorkflowContractValue }).inputContract}
+                outputContract={(wf.graph as { outputContract?: WorkflowContractValue }).outputContract}
+                onChange={({ inputContract, outputContract }) => {
+                  const nextGraph = {
+                    ...wf.graph,
+                    inputContract,
+                    outputContract,
+                  };
+                  setWf({ ...wf, graph: nextGraph });
+                  queueSave();
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       <NodeCommandPalette
         open={commandPaletteOpen}
