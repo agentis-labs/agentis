@@ -50,8 +50,19 @@ export class ChatToolExecutor {
       ? args as Record<string, unknown>
       : {};
 
+    // Dynamic per-workflow tools surface as `workflow.<id>`. Rewrite them to
+    // the generic agentis.workflow.run handler with the id pulled from the
+    // tool name and the model's args passed straight through as inputs.
+    let toolId = name;
+    let toolInput = input;
+    if (name.startsWith('workflow.')) {
+      const workflowId = name.slice('workflow.'.length);
+      toolId = 'agentis.workflow.run';
+      toolInput = { workflowId, inputs: input };
+    }
+
     const outcome = await this.#deps.registry.execute(
-      { id: randomUUID(), toolId: name, arguments: input },
+      { id: randomUUID(), toolId, arguments: toolInput },
       {
         workspaceId: ctx.workspaceId,
         ambientId: ctx.ambientId ?? null,

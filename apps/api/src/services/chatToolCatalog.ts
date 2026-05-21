@@ -753,3 +753,53 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
 export const CHAT_TOOL_CATALOG_MAP: Record<string, ToolDefinition> = Object.fromEntries(
   CHAT_TOOL_CATALOG.map((t) => [t.name, t]),
 );
+
+/**
+ * Build the workspace-scoped tool catalog: the static base PLUS one discrete
+ * tool per reusable workflow. Surfacing each reusable workflow as its own
+ * named tool (`workflow.<id>`) lets the orchestrator invoke them directly with
+ * typed parameters drawn from the workflow's inputContract — far more reliable
+ * than asking the model to remember a workflowId and call agentis.workflow.run.
+ *
+ * The ChatToolExecutor rewrites `workflow.<id>` calls back to
+ * agentis.workflow.run, so no new handler is needed.
+ */
+export interface ReusableWorkflowSummary {
+  id: string;
+  title: string;
+  summary?: string | null;
+  inputContract?: {
+    fields?: Array<{ key: string; type?: string; required?: boolean; description?: string }>;
+  } | null;
+}
+
+export function buildWorkspaceToolCatalog(workflows: ReusableWorkflowSummary[]): ToolDefinition[] {
+  const dynamic: ToolDefinition[] = [];
+  for (const wf of workflows) {
+    const fields = wf.inputContract?.fields ?? [];
+    const properties: Record<string, { type: string; description?: string }> = {};
+    const required: string[] = [];
+    for (const f of fields) {
+      const jsonType = f.type === 'number' ? 'number'
+        : f.type === 'boolean' ? 'boolean'
+        : f.type === 'array' ? 'array'
+        : f.type === 'object' ? 'object'
+        : 'string';
+      properties[f.key] = { type: jsonType, ...(f.description ? { description: f.description } : {}) };
+      if (f.required) required.push(f.key);
+    }
+    dynamic.push({
+      name: `workflow.${wf.id}`,
+      description:
+        `Run the "${wf.title}" workflow.` +
+        (wf.summary ? ` ${wf.summary}` : '') +
+        ' Inputs map to the workflow trigger. Returns the runId so you can follow up with agentis.workflow.status.',
+      parameters: {
+        type: 'object',
+        properties: fields.length > 0 ? properties : { inputs: { type: 'object', description: 'Free-form inputs for the workflow trigger.' } },
+        ...(required.length > 0 ? { required } : {}),
+      },
+    });
+  }
+  return [...CHAT_TOOL_CATALOG, ...dynamic];
+}

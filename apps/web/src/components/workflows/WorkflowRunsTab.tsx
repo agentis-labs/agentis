@@ -21,6 +21,7 @@ const PAGE_SIZE = 30;
 const STATUS_DOT: Record<WorkflowRunSummary['status'], string> = {
   running: 'bg-accent animate-pulse-dot',
   completed: 'bg-accent',
+  completed_with_violation: 'bg-warn',
   failed: 'bg-danger',
   pending: 'bg-warn',
   cancelled: 'bg-text-muted',
@@ -29,6 +30,7 @@ const STATUS_DOT: Record<WorkflowRunSummary['status'], string> = {
 const STATUS_LABEL: Record<WorkflowRunSummary['status'], string> = {
   running: 'running',
   completed: 'completed',
+  completed_with_violation: 'contract violation',
   failed: 'failed',
   pending: 'pending',
   cancelled: 'cancelled',

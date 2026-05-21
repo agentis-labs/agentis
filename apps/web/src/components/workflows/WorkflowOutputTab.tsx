@@ -19,6 +19,7 @@ import { WorkflowRecordBrowser, type RecordTable } from './WorkflowRecordBrowser
 const STATUS_DOT: Record<WorkflowRunSummary['status'], string> = {
   running: 'bg-accent animate-pulse-dot',
   completed: 'bg-accent',
+  completed_with_violation: 'bg-warn',
   failed: 'bg-danger',
   pending: 'bg-warn',
   cancelled: 'bg-text-muted',
@@ -124,8 +125,8 @@ export function WorkflowOutputTab({
               <span
                 className={clsx('h-2 w-2 shrink-0 rounded-full', STATUS_DOT[data.lastRun.status])}
               />
-              <span className="text-[13px] font-medium capitalize text-text-primary">
-                {data.lastRun.status}
+              <span className="text-[13px] font-medium text-text-primary">
+                {data.lastRun.status === 'completed_with_violation' ? 'Completed (contract violation)' : <span className="capitalize">{data.lastRun.status}</span>}
               </span>
               <span className="text-[12px] text-text-muted">{relativeTime(data.lastRun.startedAt)}</span>
               <span className="font-mono text-[12px] text-text-secondary">
@@ -139,6 +140,21 @@ export function WorkflowOutputTab({
                 View run →
               </button>
             </div>
+            {data.lastRun.contractViolations && data.lastRun.contractViolations.length > 0 && (
+              <div className="border-b border-warn/30 bg-warn-soft px-4 py-2.5">
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-warn">
+                  Output contract violations
+                </div>
+                <ul className="space-y-0.5 text-[12px] text-text-secondary">
+                  {data.lastRun.contractViolations.map((v, i) => (
+                    <li key={i} className="flex items-start gap-1.5">
+                      <span className="mt-0.5 text-warn">•</span>
+                      <span>{v}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="p-4">
               {data.outputs.length > 0 ? (
                 <div className="space-y-4">

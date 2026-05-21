@@ -29,10 +29,12 @@ export function relativeTime(iso?: string | null): string {
 
 export interface WorkflowRunSummary {
   id: string;
-  status: 'running' | 'completed' | 'failed' | 'pending' | 'cancelled';
+  status: 'running' | 'completed' | 'completed_with_violation' | 'failed' | 'pending' | 'cancelled';
   startedAt: string | null;
   finishedAt: string | null;
   durationMs: number | null;
   triggeredBy: 'manual' | 'cron' | 'webhook' | 'event';
   isReplay?: boolean;
+  /** Output contract violations from the run's final output, when the workflow declared an outputContract. */
+  contractViolations?: string[];
 }

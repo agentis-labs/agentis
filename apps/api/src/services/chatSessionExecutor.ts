@@ -3,7 +3,7 @@ import type { AgentAdapter, ChatDelta, ChatMessage, ChatToolCall, ChatTurnContex
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
-import { CHAT_TOOL_CATALOG } from './chatToolCatalog.js';
+import { CHAT_TOOL_CATALOG, buildWorkspaceToolCatalog } from './chatToolCatalog.js';
 import { ChatToolExecutor } from './chatToolExecutor.js';
 import { buildOrchestratorSystemPrompt } from './orchestratorPrompt.js';
 import { recordToolCall } from './chatMetrics.js';
@@ -49,6 +49,46 @@ export class ChatSessionExecutor {
     this.#deps = deps;
   }
 
+  /**
+   * Build the tool catalog for a turn. When the db is wired we surface the
+   * workspace's workflows as discrete `workflow.<id>` tools so the
+   * orchestrator can call them directly with typed parameters. Capped at 40
+   * to keep the tool list manageable for the model. Falls back to the static
+   * catalog if the db is unavailable or the lookup fails.
+   */
+  static #buildCatalog(ctx: ChatTurnContext): ToolDefinition[] {
+    const db = this.#deps.db;
+    if (!db || !ctx.workspaceId) return CHAT_TOOL_CATALOG;
+    try {
+      const rows = db
+        .select({
+          id: schema.workflows.id,
+          title: schema.workflows.title,
+          summary: schema.workflows.summary,
+          graph: schema.workflows.graph,
+          updatedAt: schema.workflows.updatedAt,
+        })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.workspaceId, ctx.workspaceId))
+        .all()
+        // Most-recently-edited first so the cap keeps the workflows the
+        // operator is actively working on.
+        .sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
+      if (rows.length === 0) return CHAT_TOOL_CATALOG;
+      return buildWorkspaceToolCatalog(
+        rows.slice(0, 40).map((r) => ({
+          id: r.id,
+          title: r.title,
+          summary: r.summary,
+          inputContract: (r.graph as { inputContract?: { fields?: Array<{ key: string; type?: string; required?: boolean; description?: string }> } } | null)?.inputContract ?? null,
+        })),
+      );
+    } catch (err) {
+      this.#deps.logger?.warn('chat.catalog.dynamic_failed', { err: (err as Error).message });
+      return CHAT_TOOL_CATALOG;
+    }
+  }
+
   static async *turn(
     adapter: AgentAdapter,
     history: ChatMessage[],
@@ -59,7 +99,7 @@ export class ChatSessionExecutor {
     const startedAt = Date.now();
     const maxTurns = Math.max(1, Math.min(options.maxTurns ?? ctx.maxTurns ?? 5, 8));
     const maxToolCalls = Math.max(1, Math.min(options.maxToolCalls ?? 12, 24));
-    const tools = options.tools ?? CHAT_TOOL_CATALOG;
+    const tools = options.tools ?? this.#buildCatalog(ctx);
     const viewport = options.viewport ?? ctx.viewport ?? null;
 
     if (!adapter.chat) {

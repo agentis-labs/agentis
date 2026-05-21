@@ -293,10 +293,12 @@ export function buildWorkflowRoutes(deps: {
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;
 
 /** CREATED/PLANNING/WAITING collapse to "pending"; RUNNING stays distinct. */
-function mapRunStatus(status: string): 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' {
+function mapRunStatus(status: string): 'running' | 'completed' | 'completed_with_violation' | 'failed' | 'pending' | 'cancelled' {
   switch (status) {
     case 'COMPLETED':
       return 'completed';
+    case 'COMPLETED_WITH_CONTRACT_VIOLATION':
+      return 'completed_with_violation';
     case 'FAILED':
       return 'failed';
     case 'CANCELLED':
@@ -340,6 +342,7 @@ function mapRunSummary(run: WorkflowRunRow, triggerMap: Map<string, string>) {
         : rawType === 'persistent_listener'
           ? 'event'
           : 'manual';
+  const runState = run.runState as { contractViolations?: string[] } | null;
   return {
     id: run.id,
     status: mapRunStatus(run.status),
@@ -348,6 +351,7 @@ function mapRunSummary(run: WorkflowRunRow, triggerMap: Map<string, string>) {
     durationMs,
     triggeredBy,
     isReplay: run.isReplay,
+    contractViolations: Array.isArray(runState?.contractViolations) ? runState!.contractViolations : undefined,
   };
 }
 
