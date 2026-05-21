@@ -11,9 +11,9 @@
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, CONSTANTS, type ChatTurnContext, type ViewportContext } from '@agentis/core';
+import { AgentisError, CONSTANTS, type ChatDelta, type ChatTurnContext, type ViewportContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -98,11 +98,12 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     });
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? CONSTANTS.CONVERSATION_HISTORY_PAGE_SIZE), 1), 200);
     const before = c.req.query('before') ?? null;
+    const beforeId = c.req.query('beforeId') ?? null;
     return c.json({
       agent: serializeScopeAgent(orchestrator),
       conversation,
       messages: deps.conversations
-        .messages(conversation.id, limit, before)
+        .messages(conversation.id, limit, before, beforeId)
         .map(serializeConversationMessage),
     });
   });
@@ -180,10 +181,11 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     });
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? CONSTANTS.CONVERSATION_HISTORY_PAGE_SIZE), 1), 200);
     const before = c.req.query('before') ?? null;
+    const beforeId = c.req.query('beforeId') ?? null;
     return c.json({
       conversation,
       messages: deps.conversations
-        .messages(conversation.id, limit, before)
+        .messages(conversation.id, limit, before, beforeId)
         .map(serializeConversationMessage),
     });
   });
@@ -295,10 +297,11 @@ async function relayOpenClaw(
 }
 
 function findWorkspaceOrchestrator(db: AgentisSqliteDb, workspaceId: string): AgentRow | null {
-  const agents = db.select().from(schema.agents).where(eq(schema.agents.workspaceId, workspaceId)).all();
-  return agents.find((agent) => agent.role === 'orchestrator')
-    ?? agents.find((agent) => /agentis|orchestrator/i.test(agent.name))
-    ?? null;
+  return db
+    .select()
+    .from(schema.agents)
+    .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.role, 'orchestrator')))
+    .get() ?? null;
 }
 
 function serializeScopeAgent(agent: AgentRow) {
@@ -338,6 +341,8 @@ async function sendConversationMessage(
     return streamSSE(c, async (stream) => {
       let finalText = '';
       let wroteDoneDelta = false;
+      let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
+      let adapterError: string | null = null;
       if (reg?.adapter?.chat) {
         const viewportOverride = body.viewportOverride as ViewportContext | null | undefined;
         const history = deps.conversations
@@ -359,9 +364,14 @@ async function sendConversationMessage(
             : viewportOverride ?? null,
         };
         for await (const delta of ChatSessionExecutor.turn(reg.adapter, history, body.body, turnContext)) {
+          if (isAdapterErrorDelta(delta)) {
+            adapterError = delta.error;
+            continue;
+          }
           await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
           if (delta.type === 'text') finalText += delta.delta;
           if (delta.type === 'done') {
+            finishReason = delta.finishReason;
             wroteDoneDelta = true;
             break;
           }
@@ -376,10 +386,20 @@ async function sendConversationMessage(
       }
 
       if (!wroteDoneDelta) {
-        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'done', finishReason: 'stop' }) });
+        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'done', finishReason }) });
       }
 
-      if (finalText.trim()) {
+      if (finishReason === 'error') {
+        await stream.writeSSE({
+          event: 'error',
+          data: JSON.stringify({
+            code: 'ADAPTER_CHAT_FAILED',
+            message: adapterError ?? 'The agent runtime failed before it could complete the chat turn.',
+          }),
+        });
+      }
+
+      if (finishReason !== 'error' && finalText.trim()) {
         const persisted = deps.conversations.appendMirrored({
           workspaceId: ws.workspaceId,
           conversationId: conversation.id,
@@ -400,7 +420,7 @@ async function sendConversationMessage(
           }),
         });
       }
-      await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason: 'stop' }) });
+      await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
     });
   }
 
@@ -433,22 +453,38 @@ async function confirmConversationAction(
     return streamSSE(c, async (stream) => {
       let finalText = '';
       let wroteDoneDelta = false;
+      let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
+      let adapterError: string | null = null;
       for await (const delta of ChatSessionExecutor.confirm(reg.adapter, body.turnId, body.confirmed, {
         workspaceId: ws.workspaceId,
         userId: ws.user.id,
         conversationId: conversation.id,
       })) {
+        if (isAdapterErrorDelta(delta)) {
+          adapterError = delta.error;
+          continue;
+        }
         await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
         if (delta.type === 'text') finalText += delta.delta;
         if (delta.type === 'done') {
+          finishReason = delta.finishReason;
           wroteDoneDelta = true;
           break;
         }
       }
       if (!wroteDoneDelta) {
-        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'done', finishReason: 'stop' }) });
+        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'done', finishReason }) });
       }
-      if (finalText.trim()) {
+      if (finishReason === 'error') {
+        await stream.writeSSE({
+          event: 'error',
+          data: JSON.stringify({
+            code: 'ADAPTER_CHAT_FAILED',
+            message: adapterError ?? 'The agent runtime failed before it could complete the confirmation.',
+          }),
+        });
+      }
+      if (finishReason !== 'error' && finalText.trim()) {
         const persisted = deps.conversations.appendMirrored({
           workspaceId: ws.workspaceId,
           conversationId: conversation.id,
@@ -469,12 +505,13 @@ async function confirmConversationAction(
           }),
         });
       }
-      await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason: 'stop' }) });
+      await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
     });
   }
 
   const deltas: unknown[] = [];
   let finalText = '';
+  let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
   for await (const delta of ChatSessionExecutor.confirm(reg.adapter, body.turnId, body.confirmed, {
     workspaceId: ws.workspaceId,
     userId: ws.user.id,
@@ -482,8 +519,9 @@ async function confirmConversationAction(
   })) {
     deltas.push(delta);
     if (delta.type === 'text') finalText += delta.delta;
+    if (delta.type === 'done') finishReason = delta.finishReason;
   }
-  if (finalText.trim()) {
+  if (finishReason !== 'error' && finalText.trim()) {
     deps.conversations.appendMirrored({
       workspaceId: ws.workspaceId,
       conversationId: conversation.id,
@@ -493,4 +531,12 @@ async function confirmConversationAction(
     });
   }
   return c.json({ deltas, conversationId: conversation.id, agentId });
+}
+
+function isAdapterErrorDelta(delta: ChatDelta): delta is Extract<ChatDelta, { type: 'tool_result' }> & { error: string } {
+  return delta.type === 'tool_result'
+    && delta.id === 'adapter'
+    && delta.name === 'adapter.chat'
+    && typeof delta.error === 'string'
+    && delta.error.trim().length > 0;
 }

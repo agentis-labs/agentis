@@ -17,7 +17,6 @@ import type {
   NormalizedTask,
   ToolDefinition,
 } from '@agentis/core';
-import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 
@@ -203,7 +202,9 @@ export class CodexAdapter implements AgentAdapter {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (err) {
-      yield { type: 'text', delta: `Codex adapter failed to start: ${(err as Error).message}` };
+      const message = `Codex adapter failed to start: ${(err as Error).message}`;
+      this.opts.logger.warn('codex.chat.spawn_failed', { err: message });
+      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
       yield { type: 'done', finishReason: 'error' };
       return;
     }
@@ -211,9 +212,14 @@ export class CodexAdapter implements AgentAdapter {
       timeout = setTimeout(() => controller.abort(), this.opts.timeoutSec * 1000);
       timeout.unref?.();
     }
-    childProcess.stderr?.on('data', (data) => this.opts.logger.warn('codex.chat.stderr', { data: String(data).slice(0, 512) }));
+    let stderrText = '';
+    childProcess.stderr?.on('data', (data) => {
+      const chunk = String(data);
+      stderrText = `${stderrText}${chunk}`.slice(-1024);
+      this.opts.logger.warn('codex.chat.stderr', { data: chunk.slice(0, 512) });
+    });
     childProcess.on('error', (err) => {
-      queue.push({ type: 'text', delta: `Codex error: ${err.message}` });
+      queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: `Codex error: ${err.message}` });
       queue.push({ type: 'done', finishReason: 'error' });
       queue.close();
       if (timeout) clearTimeout(timeout);
@@ -240,6 +246,16 @@ export class CodexAdapter implements AgentAdapter {
     });
     childProcess.on('exit', (code) => {
       if (timeout) clearTimeout(timeout);
+      if (code !== 0) {
+        const details = stderrText.trim();
+        queue.push({
+          type: 'tool_result',
+          id: 'adapter',
+          name: 'adapter.chat',
+          result: null,
+          error: details ? `Codex exited ${code}: ${details}` : `Codex exited ${code}`,
+        });
+      }
       queue.push({ type: 'done', finishReason: code === 0 ? 'stop' : 'error' });
       queue.close();
     });
@@ -276,12 +292,12 @@ export class CodexAdapter implements AgentAdapter {
 }
 
 function buildCodexArgs(opts: CodexAdapterOptions): string[] {
+  const reasoningEffort = opts.modelReasoningEffort ?? (opts.fastMode ? 'minimal' : undefined);
   return [
+    'exec',
     '--json',
-    `--max-turns=${opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24}`,
     ...(opts.model ? [`--model=${opts.model}`] : []),
-    ...(opts.modelReasoningEffort ? [`--model-reasoning-effort=${opts.modelReasoningEffort}`] : []),
-    ...(opts.fastMode ? ['--fast'] : []),
+    ...(reasoningEffort ? ['-c', `model_reasoning_effort="${reasoningEffort}"`] : []),
     ...(opts.dangerouslyBypassApprovalsAndSandbox !== false ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
     ...(opts.extraArgs ?? []),
   ];

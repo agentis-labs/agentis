@@ -78,17 +78,20 @@ import { WorkflowStoreService } from './services/workflowStore.js';
 import { EvaluatorRuntime } from './services/evaluatorRuntime.js';
 import { buildTerminalRoutes } from './routes/terminal.js';
 import { buildCredentialRoutes } from './routes/credentials.js';
+import { buildIntegrationRoutes } from './routes/integrations.js';
 import { buildTriggerRoutes } from './routes/triggers.js';
 import { buildWebhookRoutes } from './routes/webhooks.js';
 import { buildSchedulerRoutes } from './routes/scheduler.js';
 import { buildConversationRoutes } from './routes/conversations.js';
 import { buildRoomRoutes } from './routes/rooms.js';
+import { buildHistoryRoutes } from './routes/history.js';
 import { buildSkillRegistryRoutes } from './routes/skillRegistry.js';
 import { buildChannelRoutes } from './routes/channels.js';
 import { buildCommandRoutes } from './routes/command.js';
 import { buildReplayRoutes } from './routes/replay.js';
 import { buildPackageRoutes } from './routes/packages.js';
 import { PackagerService } from './services/packager.js';
+import { hydrateAgentRuntimes } from './services/agentRuntimeHydrator.js';
 import { buildArtifactRoutes } from './routes/artifacts.js';
 import { buildIssueRoutes } from './routes/issues.js';
 import { buildKnowledgeBaseRoutes } from './routes/knowledgeBases.js';
@@ -326,8 +329,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/triggers', buildTriggerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
   app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge }));
   app.route('/v1/credentials', buildCredentialRoutes({ db: sqlite, auth, vault: credentialVault }));
+  app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
   app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore }));
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus }));
+  app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));
   app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge }));
   app.route('/v1/skills/registry', buildSkillRegistryRoutes({ db: sqlite, auth, registry: skillRegistry, activity }));
   app.route('/v1/command', buildCommandRoutes({ db: sqlite, auth, commandIndex }));
@@ -393,6 +398,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         port: env.AGENTIS_HTTP_PORT,
         hostname: env.AGENTIS_HTTP_HOST,
       });
+      try {
+        await hydrateAgentRuntimes({ db: sqlite, vault: credentialVault, adapters, logger, bus });
+      } catch (err) {
+        logger.error('agentis.agent_runtime_hydrate_failed', { err: (err as Error).message });
+      }
       // Hydrate active triggers so cron schedules + persistent listeners come back online.
       try {
         await triggerRuntime.hydrate();

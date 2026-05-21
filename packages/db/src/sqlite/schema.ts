@@ -162,6 +162,7 @@ export const agents = sqliteTable('agents', {
   colorHex: text('color_hex'),
   instructions: text('instructions'),
   avatarGlyph: text('avatar_glyph'),
+  avatarUrl: text('avatar_url'),
   runtimeModel: text('runtime_model'),
   /** orchestrator | manager | worker, with legacy free-text roles tolerated. */
   role: text('role'),
@@ -464,7 +465,7 @@ export const rooms = sqliteTable('rooms', {
   userId: text('user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
-  teamId: text('team_id'),
+  teamId: text('team_id').references(() => teams.id, { onDelete: 'cascade' }),
   /** workspace | team | custom | thread */
   kind: text('kind').notNull().default('custom'),
   name: text('name').notNull(),

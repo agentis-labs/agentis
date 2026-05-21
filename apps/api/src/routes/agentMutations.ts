@@ -28,6 +28,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
 import { joinUrl, normalizeOpenClawGatewayUrl, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
+import { repairCliHarnessConfig } from '../services/harnessConfigRepair.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']);
 const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
@@ -43,6 +44,7 @@ const createSchema = z.object({
   config: z.record(z.unknown()).default({}),
   instructions: z.string().nullish(),
   avatarGlyph: z.string().max(8).nullish(),
+  avatarUrl: z.string().max(2_000_000).nullish(),
   runtimeModel: z.string().nullish(),
   role: z.string().max(120).nullish(),
   reportsTo: z.string().nullish(),
@@ -62,6 +64,7 @@ const updateSchema = z.object({
   config: z.record(z.unknown()).optional(),
   instructions: z.string().nullish().optional(),
   avatarGlyph: z.string().max(8).nullish().optional(),
+  avatarUrl: z.string().max(2_000_000).nullish().optional(),
   runtimeModel: z.string().nullish().optional(),
   role: z.string().max(120).nullish().optional(),
   reportsTo: z.string().nullish().optional(),
@@ -97,7 +100,10 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     const id = randomUUID();
     ensureOrEstablishSingleOrchestrator(deps.db, ws.workspaceId, body.role ?? null, id, body.replaceExistingOrchestrator === true);
     const colorHex = body.colorHex ?? CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
-    let status = body.status === 'setting_up' ? 'setting_up' : body.isPaused ? 'paused' : 'offline';
+    const repaired = await repairCliHarnessConfig(body.adapterType, body.config);
+    const config = repaired.config;
+    const isPaused = body.isPaused ?? false;
+    let status = body.status === 'setting_up' ? 'setting_up' : isPaused ? 'paused' : 'offline';
     deps.db.transaction(() => {
       deps.db
         .insert(schema.agents)
@@ -113,15 +119,16 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           spaceId: body.spaceId ?? null,
           adapterType: body.adapterType,
           capabilityTags: body.capabilityTags,
-          config: body.config,
+          config,
           status,
           colorHex,
           instructions: body.instructions ?? null,
           avatarGlyph: body.avatarGlyph ?? null,
-          runtimeModel: body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, body.config),
+          avatarUrl: body.avatarUrl ?? null,
+          runtimeModel: body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, config),
           role: body.role ?? null,
           reportsTo: body.reportsTo ?? null,
-          isPaused: body.isPaused ?? false,
+          isPaused,
           monthlyBudgetCents: body.monthlyBudgetCents ?? null,
           canvasPosition: body.canvasPosition ?? null,
         })
@@ -132,10 +139,10 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     });
 
     // Register adapter immediately if we have enough config.
-    if (status !== 'setting_up') {
+    if (status !== 'setting_up' && !isPaused) {
       try {
-        await registerAdapter(deps, ws.workspaceId, id, body.adapterType, body.config);
-        status = body.isPaused ? 'paused' : 'online';
+        await registerAdapter(deps, ws.workspaceId, id, body.adapterType, config);
+        status = 'online';
         deps.db
           .update(schema.agents)
           .set({ status, lastHeartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
@@ -160,9 +167,18 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     const id = c.req.param('id');
     const body = updateSchema.parse(await c.req.json());
     const existing = loadAgent(deps.db, ws.workspaceId, id);
+    const existingIsPaused = Boolean(existing.isPaused);
+    const nextIsPaused = body.isPaused === undefined ? existingIsPaused : body.isPaused;
+    const pauseChanged = body.isPaused !== undefined && body.isPaused !== existingIsPaused;
+    const configChanged = body.config !== undefined;
+    const nextStatus = body.status === undefined
+      ? nextIsPaused ? 'paused' : existing.status
+      : body.status;
     const nextRole = body.role === undefined ? existing.role : body.role;
     if (body.reportsTo) ensureReportsToTarget(deps.db, ws.workspaceId, body.reportsTo, id);
-    const nextConfig = body.config ?? (existing.config as Record<string, unknown>);
+    const rawNextConfig = body.config ?? (existing.config as Record<string, unknown>);
+    const repairedConfig = await repairCliHarnessConfig(existing.adapterType as V1HarnessAdapterType, rawNextConfig);
+    const nextConfig = repairedConfig.config;
     ensureOrEstablishSingleOrchestrator(deps.db, ws.workspaceId, nextRole, id, body.replaceExistingOrchestrator === true);
     deps.db.transaction(() => {
       deps.db
@@ -178,11 +194,12 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           runtimeModel: body.runtimeModel === undefined ? existing.runtimeModel : body.runtimeModel,
           role: nextRole,
           reportsTo: body.reportsTo === undefined ? existing.reportsTo : body.reportsTo,
-          isPaused: body.isPaused === undefined ? existing.isPaused : body.isPaused,
+          isPaused: nextIsPaused,
           monthlyBudgetCents: body.monthlyBudgetCents === undefined ? existing.monthlyBudgetCents : body.monthlyBudgetCents,
           canvasPosition: body.canvasPosition === undefined ? existing.canvasPosition : body.canvasPosition,
           colorHex: body.colorHex ?? existing.colorHex,
-          status: body.status === undefined ? existing.status : body.status,
+          avatarUrl: body.avatarUrl === undefined ? existing.avatarUrl : body.avatarUrl,
+          status: nextStatus,
           updatedAt: new Date().toISOString(),
         })
         .where(eq(schema.agents.id, id))
@@ -191,13 +208,30 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
         pointManagersAtOrchestrator(deps.db, ws.workspaceId, id);
       }
     });
-    if (body.config && body.status !== 'setting_up') {
-      try {
-        await registerAdapter(deps, ws.workspaceId, id, existing.adapterType as V1HarnessAdapterType, nextConfig);
-        deps.db.update(schema.agents).set({ status: body.isPaused ?? existing.isPaused ? 'paused' : 'online', lastHeartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
-      } catch (err) {
-        deps.logger.warn('agents.reregister_failed', { id, err: (err as Error).message });
-        deps.db.update(schema.agents).set({ status: 'offline', updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
+    if (body.status !== 'setting_up') {
+      if (nextIsPaused) {
+        await deps.adapters.unregister(id);
+        deps.db
+          .update(schema.agents)
+          .set({ status: 'paused', updatedAt: new Date().toISOString() })
+          .where(eq(schema.agents.id, id))
+          .run();
+      } else if (configChanged || pauseChanged) {
+        try {
+          await registerAdapter(deps, ws.workspaceId, id, existing.adapterType as V1HarnessAdapterType, nextConfig);
+          deps.db
+            .update(schema.agents)
+            .set({ status: 'online', lastHeartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+            .where(eq(schema.agents.id, id))
+            .run();
+        } catch (err) {
+          deps.logger.warn('agents.reregister_failed', { id, err: (err as Error).message });
+          deps.db
+            .update(schema.agents)
+            .set({ status: 'offline', updatedAt: new Date().toISOString() })
+            .where(eq(schema.agents.id, id))
+            .run();
+        }
       }
     }
     return c.json({ ok: true });
@@ -266,7 +300,11 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     if (!parsed.success) {
       throw new AgentisError('VALIDATION_FAILED', `agent ${id} uses unsupported adapter ${agent.adapterType}`);
     }
-    const result = await testHarnessConfig(parsed.data, (agent.config ?? {}) as Record<string, unknown>, { deep: true });
+    const repaired = await repairCliHarnessConfig(parsed.data, (agent.config ?? {}) as Record<string, unknown>);
+    if (repaired.changed) {
+      deps.db.update(schema.agents).set({ config: repaired.config, updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
+    }
+    const result = await testHarnessConfig(parsed.data, repaired.config, { deep: true });
     return c.json(result);
   });
 
@@ -335,6 +373,7 @@ async function registerAdapter(
   adapterType: V1HarnessAdapterType,
   config: Record<string, unknown>,
 ) {
+  config = (await repairCliHarnessConfig(adapterType, config)).config;
   await deps.adapters.unregister(agentId);
   if (adapterType === 'openclaw') {
     const gatewayUrl = normalizeOpenClawGatewayUrl(String(config.gatewayUrl ?? '')) ?? '';
@@ -483,7 +522,7 @@ function stringOf(value: unknown): string | null {
 }
 
 function cliCommandFromConfig(config: Record<string, unknown>): string | null {
-  return stringOf(config.binaryPath) ?? stringOf(config.command);
+  return stringOf(config.command) ?? stringOf(config.binaryPath);
 }
 
 function numberOf(value: unknown): number | undefined {

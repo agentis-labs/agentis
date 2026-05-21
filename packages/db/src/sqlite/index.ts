@@ -76,6 +76,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // PackagerService: agent personality fields.
   addColumn('agents', 'instructions', 'TEXT');
   addColumn('agents', 'avatar_glyph', 'TEXT');
+  addColumn('agents', 'avatar_url', 'TEXT');
   addColumn('agents', 'runtime_model', 'TEXT');
   addColumn('agents', 'role', 'TEXT');
   addColumn('agents', 'description', 'TEXT');

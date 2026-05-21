@@ -28,7 +28,7 @@ export function CanvasHudBar({
           {isFullscreen && (
             <span className="mr-1 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-text-primary">
               <RadioTower size={13} className="text-accent" />
-              Workspace Live
+              Agentis Workspace
             </span>
           )}
           <Metric value={counts.activeAgents} label="active" tone="accent" />
@@ -37,20 +37,26 @@ export function CanvasHudBar({
           <Metric value={counts.workflows} label="workflows" />
         </div>
         <div className="flex items-center gap-1.5">
+          {counts.attentionCount > 0 && (
+            <div className="inline-flex items-center gap-2 rounded-pill border border-warn/30 bg-warn-soft px-3 py-1.5 text-[11px] font-medium text-warn">
+              <AlertTriangle size={13} />
+              {formatAttentionSummary(counts)}
+            </div>
+          )}
           <HudButton label="Reset view" onClick={onResetView} icon={<RotateCcw size={14} />} />
           <HudButton label={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={onToggleFullscreen} icon={isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />} />
         </div>
       </div>
-      {isFullscreen && counts.attentionCount > 0 && (
-        <div className="mt-2 border-t border-line/50 pt-2">
-          <div className="inline-flex items-center gap-2 rounded-pill border border-warn/30 bg-warn-soft px-3 py-1.5 text-[11px] font-medium text-warn">
-            <AlertTriangle size={13} />
-            {counts.attentionCount} need operator attention
-          </div>
-        </div>
-      )}
     </div>
   );
+}
+
+function formatAttentionSummary(counts: FleetCounts): string {
+  if (counts.approvalCount > 0 && counts.failedRunCount > 0) {
+    return `${counts.approvalCount} approvals, ${counts.failedRunCount} failed runs`;
+  }
+  if (counts.approvalCount > 0) return `${counts.approvalCount} approvals pending`;
+  return `${counts.failedRunCount} failed runs`;
 }
 
 function Metric({ value, label, tone }: { value: number; label: string; tone?: 'accent' | 'warn' }) {

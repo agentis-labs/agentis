@@ -52,6 +52,8 @@ interface ChatPanelStore {
   selectThread: (t: ChatPanelStore['selectedThread']) => void;
   launchContext: ChatPanelLaunchContext | null;
   setLaunchContext: (context: ChatPanelLaunchContext | null) => void;
+  openRequestId: number;
+  markOpenRequested: () => void;
   resetForWorkspace: () => void;
 }
 
@@ -89,7 +91,9 @@ export const useChatPanelStore = create<ChatPanelStore>((set) => ({
   selectThread: (t) => set({ selectedThread: t }),
   launchContext: null,
   setLaunchContext: (context) => set({ launchContext: context }),
-  resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, launchContext: null }),
+  openRequestId: 0,
+  markOpenRequested: () => set((state) => ({ openRequestId: state.openRequestId + 1 })),
+  resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, launchContext: null, openRequestId: 0 }),
 }));
 
 // Global keyboard shortcut: ⌘/ toggles chat

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { and, desc, eq, inArray, lt } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -201,12 +201,22 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
     const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 100), 1), 500);
     const before = c.req.query('before') ?? null;
+    const beforeId = c.req.query('beforeId') ?? null;
     const messages = deps.db.select().from(schema.roomMessages)
       .where(and(
         eq(schema.roomMessages.roomId, room.id),
-        ...(before ? [lt(schema.roomMessages.createdAt, before)] : []),
+        ...(before
+          ? [
+              beforeId
+                ? or(
+                    lt(schema.roomMessages.createdAt, before),
+                    and(eq(schema.roomMessages.createdAt, before), lt(schema.roomMessages.id, beforeId)),
+                  )!
+                : lt(schema.roomMessages.createdAt, before),
+            ]
+          : []),
       ))
-      .orderBy(desc(schema.roomMessages.createdAt))
+      .orderBy(desc(schema.roomMessages.createdAt), desc(schema.roomMessages.id))
       .limit(limit)
       .all()
       .reverse();

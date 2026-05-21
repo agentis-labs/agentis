@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, lt } from 'drizzle-orm';
+import { and, desc, eq, lt, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type RealtimeEventName } from '@agentis/core';
@@ -78,15 +78,27 @@ export class ConversationStore {
       .get()!;
   }
 
-  messages(conversationId: string, limit = 50, before?: string | null) {
+  messages(conversationId: string, limit = 50, before?: string | null, beforeId?: string | null) {
     return this.deps.db
       .select()
       .from(schema.conversationMessages)
       .where(and(
         eq(schema.conversationMessages.conversationId, conversationId),
-        ...(before ? [lt(schema.conversationMessages.createdAt, before)] : []),
+        ...(before
+          ? [
+              beforeId
+                ? or(
+                    lt(schema.conversationMessages.createdAt, before),
+                    and(
+                      eq(schema.conversationMessages.createdAt, before),
+                      lt(schema.conversationMessages.id, beforeId),
+                    ),
+                  )!
+                : lt(schema.conversationMessages.createdAt, before),
+            ]
+          : []),
       ))
-      .orderBy(desc(schema.conversationMessages.createdAt))
+      .orderBy(desc(schema.conversationMessages.createdAt), desc(schema.conversationMessages.id))
       .limit(limit)
       .all()
       .reverse();

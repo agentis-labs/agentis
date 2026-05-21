@@ -6,9 +6,9 @@
  * generically — Agentis does not assume specific file types.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, MessageCircle, Save, Trash2, FileText } from 'lucide-react';
+import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload } from 'lucide-react';
 import { api } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
@@ -277,11 +277,13 @@ function IdentityTab({
 }) {
   const toast = useToast();
   const confirm = useConfirm();
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState(agent.name);
   const [role, setRole] = useState(agent.role ?? 'worker');
   const [description, setDescription] = useState(agent.description ?? '');
   const [reportsTo, setReportsTo] = useState(agent.reportsTo ?? '');
   const [spaceId, setSpaceId] = useState(agent.spaceId ?? '');
+  const [avatarUrl, setAvatarUrl] = useState(agent.avatarUrl ?? '');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -290,7 +292,23 @@ function IdentityTab({
     setDescription(agent.description ?? '');
     setReportsTo(agent.reportsTo ?? '');
     setSpaceId(agent.spaceId ?? '');
+    setAvatarUrl(agent.avatarUrl ?? '');
   }, [agent]);
+
+  function handleAvatarInput(file: File | undefined) {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Unsupported image', 'Use PNG, JPG, or WEBP.');
+      return;
+    }
+    if (file.size > 2_500_000) {
+      toast.error('Image too large', 'Use an image up to 2.5MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => setAvatarUrl(String(event.target?.result ?? ''));
+    reader.readAsDataURL(file);
+  }
 
   const needsSupervisor = role === 'manager' || role === 'worker';
   const dirty =
@@ -298,7 +316,8 @@ function IdentityTab({
     role !== (agent.role ?? 'worker') ||
     description !== (agent.description ?? '') ||
     (needsSupervisor ? reportsTo : '') !== (agent.reportsTo ?? '') ||
-    (needsSupervisor ? spaceId : '') !== (agent.spaceId ?? '');
+    (needsSupervisor ? spaceId : '') !== (agent.spaceId ?? '') ||
+    avatarUrl !== (agent.avatarUrl ?? '');
 
   async function save() {
     if (!name.trim()) {
@@ -326,6 +345,7 @@ function IdentityTab({
           description: description.trim() || null,
           reportsTo: needsSupervisor ? reportsTo || null : null,
           spaceId: needsSupervisor ? spaceId || null : null,
+          avatarUrl: avatarUrl || null,
           ...(replaceExistingOrchestrator ? { replaceExistingOrchestrator: true } : {}),
         }),
       });
@@ -341,17 +361,41 @@ function IdentityTab({
   return (
     <div className="max-w-xl space-y-5">
       <div className="flex items-center gap-4">
-        <div className="h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line bg-surface-2">
-          {agent.avatarUrl ? (
-            <img src={agent.avatarUrl} alt={agent.name} className="h-full w-full object-cover" />
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line bg-surface-2"
+          aria-label="Upload avatar image"
+        >
+          {avatarUrl ? (
+            <img src={avatarUrl} alt={agent.name} className="h-full w-full object-cover" />
           ) : (
             <span className="flex h-full w-full items-center justify-center text-[20px] font-bold text-text-primary">
               {agent.avatarGlyph || initials(agent.name)}
             </span>
           )}
-        </div>
+          <span className="absolute inset-0 hidden items-center justify-center bg-black/55 text-white group-hover:flex">
+            <Upload size={14} />
+          </span>
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={(event) => {
+            handleAvatarInput(event.target.files?.[0]);
+            event.target.value = '';
+          }}
+          className="hidden"
+        />
         <div className="text-[12px] text-text-muted">
-          The avatar is set from the agent's harness glyph.
+          {avatarUrl ? (
+            <button type="button" onClick={() => setAvatarUrl('')} className="text-text-secondary hover:text-text-primary">
+              Remove image
+            </button>
+          ) : (
+            'Upload an avatar image (optional).'
+          )}
         </div>
       </div>
 

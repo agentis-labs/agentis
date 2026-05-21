@@ -27,6 +27,7 @@ const bootstrapAgentSchema = z.object({
   config: z.record(z.unknown()).default({}),
   instructions: z.string().nullish(),
   avatarGlyph: z.string().max(8).nullish(),
+  avatarUrl: z.string().max(2_000_000).nullish(),
   runtimeModel: z.string().nullish(),
   role: roleSchema.default('orchestrator'),
   reportsTo: z.string().nullish(),
@@ -59,6 +60,7 @@ const importAgentSchema = z.object({
   monthlyBudgetCents: z.number().int().nonnegative().nullish(),
   colorHex: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullish(),
   avatarGlyph: z.string().max(8).nullish(),
+  avatarUrl: z.string().max(2_000_000).nullish(),
   config: z.record(z.unknown()).default({}),
   spaceId: z.string().nullish(),
 });

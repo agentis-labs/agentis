@@ -120,6 +120,8 @@ export interface FleetCounts {
   activeAgents: number;
   idleAgents: number;
   attentionCount: number;
+  approvalCount: number;
+  failedRunCount: number;
   workflows: number;
 }
 

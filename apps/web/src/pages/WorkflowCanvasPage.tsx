@@ -30,6 +30,7 @@ import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
 import { NodePalette } from '../components/canvas/NodePalette';
+import { NodeCommandPalette } from '../components/canvas/NodeCommandPalette';
 import { ContextInspector, type InspectorSelection } from '../components/canvas/ContextInspector';
 import { RunDrawer } from '../components/canvas/RunDrawer';
 import { CanvasEngine } from '../components/canvas/CanvasEngine';
@@ -130,6 +131,9 @@ export function WorkflowCanvasPage() {
   });
 
   const [selection, setSelection] = useState<InspectorSelection>({ kind: null });
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [integrations, setIntegrations] = useState<Array<{ service: string; name: string; operations: readonly string[]; icon?: string }>>([]);
+  const [reusableWorkflows, setReusableWorkflows] = useState<Array<{ id: string; title: string }>>([]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const overlayHostRef = useRef<HTMLDivElement | null>(null);
   const overlayManagerRef = useRef<AgentFocusOverlayManager | null>(null);
@@ -185,6 +189,31 @@ export function WorkflowCanvasPage() {
     try { localStorage.setItem(MINIMAP_KEY, showMinimap ? '1' : '0'); } catch { /* ignore */ }
   }, [showMinimap]);
 
+  // Cmd+K / Ctrl+K opens the command palette. Bound at the page level so it
+  // works regardless of which canvas element has focus.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  // Load data the command palette needs: integration connectors + reusable
+  // workflows. Both are best-effort — failures collapse to empty lists so
+  // the palette still surfaces built-in nodes.
+  useEffect(() => {
+    void api<{ integrations: Array<{ service: string; name: string; operations: readonly string[]; icon?: string }> }>('/v1/integrations')
+      .then((d) => setIntegrations(d.integrations ?? []))
+      .catch(() => setIntegrations([]));
+    void api<{ workflows: Array<{ id: string; title?: string; name?: string }> }>('/v1/workflows?isReusable=true')
+      .then((d) => setReusableWorkflows((d.workflows ?? []).map((wf) => ({ id: wf.id, title: wf.title ?? wf.name ?? 'Untitled workflow' }))))
+      .catch(() => setReusableWorkflows([]));
+  }, []);
+
   // Auto-bind unbound echo skill template (preserved from original)
   useEffect(() => {
     if (!wf) return;
@@ -212,6 +241,86 @@ export function WorkflowCanvasPage() {
   // wf.graph (for saves) inside the change handlers.
   const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState<Node>([]);
   const [flowEdges, setFlowEdges, onFlowEdgesChange] = useEdgesState<Edge>([]);
+
+  // ── Live per-node status overlay ──────────────────────────────────────
+  // The engine fires NODE_STARTED/COMPLETED/FAILED/RETRY_SCHEDULED on the
+  // run room for EVERY kind. Project them onto the canvas as a `liveStatus`
+  // field that AgentisNode reads to paint pulsing rings, checkmarks, and
+  // error borders. Clears automatically when a run terminates.
+  const liveStatusEvents = useMemo(
+    () => [
+      REALTIME_EVENTS.NODE_STARTED,
+      REALTIME_EVENTS.NODE_COMPLETED,
+      REALTIME_EVENTS.NODE_FAILED,
+      REALTIME_EVENTS.NODE_RETRY_SCHEDULED,
+      REALTIME_EVENTS.NODE_WAITING_FOR_INPUT,
+      REALTIME_EVENTS.LOOP_PROGRESS,
+      REALTIME_EVENTS.RUN_COMPLETED,
+      REALTIME_EVENTS.RUN_FAILED,
+    ],
+    [],
+  );
+  const updateLiveStatus = useCallback(
+    (nodeId: string, status: 'running' | 'completed' | 'failed' | 'retry' | 'waiting', extra?: Record<string, unknown>) => {
+      setFlowNodes((prev) =>
+        prev.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...(n.data ?? {}), liveStatus: status, liveExtra: extra } }
+            : n,
+        ),
+      );
+    },
+    [setFlowNodes],
+  );
+  const clearLiveNodeStatus = useCallback(() => {
+    // Fade after a short delay so users see the final state before it clears.
+    window.setTimeout(() => {
+      setFlowNodes((prev) =>
+        prev.map((n) => {
+          const d = (n.data ?? {}) as Record<string, unknown>;
+          if (!d.liveStatus) return n;
+          const { liveStatus: _ls, liveExtra: _le, ...rest } = d;
+          return { ...n, data: rest };
+        }),
+      );
+    }, 3500);
+  }, [setFlowNodes]);
+  useRealtime(liveStatusEvents, (env: RealtimeEnvelope) => {
+    const payload = (env.payload ?? {}) as {
+      runId?: string;
+      nodeId?: string;
+      completed?: number;
+      total?: number;
+    };
+    if (!activeRunId || payload.runId !== activeRunId) return;
+    if (env.event === REALTIME_EVENTS.RUN_COMPLETED || env.event === REALTIME_EVENTS.RUN_FAILED) {
+      clearLiveNodeStatus();
+      return;
+    }
+    if (!payload.nodeId) return;
+    switch (env.event) {
+      case REALTIME_EVENTS.NODE_STARTED:
+        updateLiveStatus(payload.nodeId, 'running');
+        break;
+      case REALTIME_EVENTS.NODE_COMPLETED:
+        updateLiveStatus(payload.nodeId, 'completed');
+        break;
+      case REALTIME_EVENTS.NODE_FAILED:
+        updateLiveStatus(payload.nodeId, 'failed');
+        break;
+      case REALTIME_EVENTS.NODE_RETRY_SCHEDULED:
+        updateLiveStatus(payload.nodeId, 'retry');
+        break;
+      case REALTIME_EVENTS.NODE_WAITING_FOR_INPUT:
+        updateLiveStatus(payload.nodeId, 'waiting');
+        break;
+      case REALTIME_EVENTS.LOOP_PROGRESS:
+        updateLiveStatus(payload.nodeId, 'running', { progress: { completed: payload.completed, total: payload.total } });
+        break;
+      default:
+        break;
+    }
+  });
 
   // Hydrate RF state once when the workflow loads (and on workflow ID change).
   // We compare by ID to avoid clobbering local edits on re-renders.
@@ -700,6 +809,48 @@ export function WorkflowCanvasPage() {
         />
       </div>
 
+      <NodeCommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        subflows={reusableWorkflows}
+        skills={skills}
+        integrations={integrations}
+        onPick={(nodeType, defaults) => {
+          if (!wf) return;
+          // Drop the picked node at the center of the canvas's logical
+          // viewport. Cleaner than guessing screen coords from Cmd+K.
+          const center = { x: 240, y: 160 };
+          const newId = `${nodeType}-${Date.now().toString(36)}`;
+          const label = (defaults?.label as string | undefined) ?? nodeType.replace(/_/g, ' ');
+          setFlowNodes((nds) => [
+            ...nds,
+            {
+              id: newId,
+              type: 'agentis',
+              position: center,
+              data: { label, kind: nodeType, type: nodeType, ...(defaults ?? {}) },
+            },
+          ]);
+          setWf((prev) => prev && {
+            ...prev,
+            graph: {
+              ...prev.graph,
+              nodes: [
+                ...prev.graph.nodes,
+                {
+                  id: newId,
+                  type: nodeType,
+                  title: label,
+                  position: center,
+                  config: { kind: nodeType, ...(defaults ?? {}) },
+                },
+              ],
+            },
+          });
+          queueSave();
+        }}
+      />
+
       {tab === 'runs' && (
         <div className="flex min-h-0 flex-1 flex-col overflow-auto">
           <WorkflowRunsTab workflowId={wf.id} onRun={() => setRunDialogOpen(true)} />
@@ -1021,36 +1172,92 @@ function VariablesDialog({
   );
 }
 
-function AgentisNode({ data }: { data: { label: string; kind: string; type: string; toolPreview?: string } }) {
+type LiveStatus = 'running' | 'completed' | 'failed' | 'retry' | 'waiting';
+type LiveExtra = { progress?: { completed?: number; total?: number } };
+
+function AgentisNode({ data }: {
+  data: {
+    label: string;
+    kind: string;
+    type: string;
+    toolPreview?: string;
+    liveStatus?: LiveStatus;
+    liveExtra?: LiveExtra;
+  };
+}) {
   const glyph = NODE_GLYPH[data.kind] ?? '•';
   const isTrigger = data.kind === 'trigger';
+  const status = data.liveStatus;
+  const progress = data.liveExtra?.progress;
+  // Border + glow per live state. Idle nodes keep the original look so the
+  // canvas doesn't twitch when no run is active.
+  const stateBorder =
+    status === 'running'  ? 'border-accent shadow-glow animate-pulse'
+    : status === 'completed' ? 'border-success/60'
+    : status === 'failed'    ? 'border-danger shadow-[0_0_0_1px_var(--color-danger,#ef4444)]'
+    : status === 'retry'     ? 'border-warn border-dashed'
+    : status === 'waiting'   ? 'border-warn'
+    : isTrigger ? 'border-accent/60 shadow-glow' : 'border-line';
   return (
     <div
       className={clsx(
-        'relative flex min-w-[160px] flex-col gap-1 rounded-node border bg-surface-2 px-3 py-2 shadow-card',
-        isTrigger ? 'border-accent/60 shadow-glow' : 'border-line',
+        'relative flex min-w-[160px] flex-col gap-1 rounded-node border bg-surface-2 px-3 py-2 shadow-card transition-colors',
+        stateBorder,
       )}
     >
       {!isTrigger && (
         <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-line !bg-surface" />
       )}
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-line !bg-surface" />
+      {/* Error handle on the bottom-right for nodes that can have catch
+          branches. Visible always so users can wire an error edge to it. */}
+      {!isTrigger && (
+        <Handle
+          type="source"
+          position={Position.Bottom}
+          id="error"
+          style={{ left: 'auto', right: 14 }}
+          className="!h-1.5 !w-1.5 !border-danger/60 !bg-surface"
+        />
+      )}
       <div className="flex items-center gap-2">
         <span
           className={clsx(
-            'flex h-7 w-7 items-center justify-center rounded-md text-sm',
+            'relative flex h-7 w-7 items-center justify-center rounded-md text-sm',
             isTrigger ? 'bg-accent-soft text-accent' : 'bg-surface text-text-muted',
           )}
         >
           {glyph}
+          {status === 'completed' && (
+            <span className="absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-full bg-success text-[8px] text-canvas">✓</span>
+          )}
+          {status === 'failed' && (
+            <span className="absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-full bg-danger text-[8px] text-canvas">×</span>
+          )}
+          {status === 'retry' && (
+            <span className="absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-full bg-warn text-[8px] text-canvas">↻</span>
+          )}
         </span>
-        <div className="leading-tight">
-          <div className="text-[13px] text-text-primary">{data.label}</div>
+        <div className="min-w-0 leading-tight">
+          <div className="truncate text-[13px] text-text-primary">{data.label}</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted">{data.type}</div>
         </div>
       </div>
       {data.toolPreview && (
         <Typewriter text={data.toolPreview} className="text-[10px] text-text-muted" />
+      )}
+      {progress && typeof progress.total === 'number' && typeof progress.completed === 'number' && progress.total > 0 && (
+        <div className="mt-0.5">
+          <div className="flex items-center justify-between text-[9px] text-text-muted">
+            <span>{progress.completed} / {progress.total}</span>
+          </div>
+          <div className="mt-0.5 h-0.5 w-full overflow-hidden rounded-full bg-line">
+            <div
+              className="h-full bg-accent transition-all duration-300"
+              style={{ width: `${Math.min(100, (progress.completed / progress.total) * 100)}%` }}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

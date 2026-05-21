@@ -63,6 +63,9 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         const agentId = String(args.agentId);
         const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
         if (!agent || agent.workspaceId !== ctx.workspaceId) throw new Error(`agent ${agentId} not found`);
+        if (agent.isPaused || agent.status === 'paused') {
+          return { dispatched: false, agentId, reason: 'agent_paused', message: 'This agent is in standby mode. Disable standby before dispatching tasks.' };
+        }
         const registration = deps.adapters.get(agentId);
         if (!registration) {
           return { dispatched: false, agentId, reason: 'adapter_unavailable', message: 'The agent exists but its harness is not connected.' };

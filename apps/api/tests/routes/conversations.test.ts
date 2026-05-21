@@ -34,7 +34,7 @@ function app() {
   ]);
 }
 
-function seedAgent() {
+function seedAgent(overrides: Partial<typeof schema.agents.$inferInsert> = {}) {
   const id = randomUUID();
   ctx.db
     .insert(schema.agents)
@@ -48,6 +48,7 @@ function seedAgent() {
       capabilityTags: [],
       config: {},
       status: 'offline',
+      ...overrides,
     })
     .run();
   return id;
@@ -82,6 +83,23 @@ describe('GET /v1/conversations/:agentId', () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('RESOURCE_NOT_FOUND');
+  });
+});
+
+describe('GET /v1/conversations/orchestrator', () => {
+  it('does not guess the orchestrator from an agent name', async () => {
+    seedAgent({ name: 'My Orchestrator Strategy Agent', role: 'worker' });
+    const res = await app().request('/v1/conversations/orchestrator', { headers: ctx.authHeaders });
+    expect(res.status).toBe(404);
+  });
+
+  it('opens the workspace orchestrator by role', async () => {
+    const agentId = seedAgent({ name: 'The Brain', role: 'orchestrator' });
+    const res = await app().request('/v1/conversations/orchestrator', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { agent: { id: string; role: string } };
+    expect(body.agent.id).toBe(agentId);
+    expect(body.agent.role).toBe('orchestrator');
   });
 });
 

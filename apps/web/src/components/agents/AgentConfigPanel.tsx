@@ -376,6 +376,7 @@ function RuntimeConnectPanel({
   const complete = phase === 'complete' || state.phase === 'connected';
   const failed = phase === 'error' || state.phase === 'failed';
   const missing = state.phase === 'missing';
+  const installEligible = state.phase === 'idle' || state.phase === 'missing' || state.phase === 'failed';
   const completedSteps = session?.steps.filter((step) => step.status === 'done').length ?? 0;
   const totalSteps = 4;
   const progress = complete ? 100 : Math.min(100, Math.round((completedSteps / totalSteps) * 100));
@@ -398,7 +399,7 @@ function RuntimeConnectPanel({
             <button type="button" onClick={onConnect} className="rounded-btn border border-line bg-canvas px-2 py-1 text-[11px] text-text-secondary hover:bg-surface-3 hover:text-text-primary">
               Find and connect
             </button>
-            {onInstall && (
+            {installEligible && onInstall && (
               <button type="button" onClick={onInstall} className="rounded-btn bg-accent px-2 py-1 text-[11px] font-medium text-canvas hover:bg-accent-hover">
                 Install
               </button>
@@ -459,7 +460,8 @@ function runtimeConfigFromDetection(config: RuntimeConfig, adapterType: AdapterT
     if (healthPath) next = { ...next, httpHealthPath: healthPath };
     return next;
   }
-  if (detection.binaryPath) next = setRuntimeBinaryPath(next, adapterType, detection.binaryPath);
+  const command = detectionCommand(detection);
+  if (command) next = setRuntimeBinaryPath(next, adapterType, command);
   if (detection.detectedModel) next = setRuntimeModel(next, adapterType, detection.detectedModel);
   return next;
 }
@@ -484,6 +486,13 @@ function setRuntimeModel(config: RuntimeConfig, adapterType: AdapterType, model:
 function detectionConfigString(detection: HarnessDetectionResult, key: string): string {
   const value = detection.config?.[key];
   return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function detectionCommand(detection: HarnessDetectionResult): string {
+  return detectionConfigString(detection, 'command')
+    || detectionConfigString(detection, 'binaryPath')
+    || detection.binaryPath
+    || '';
 }
 
 function missingRuntimeMessage(adapterType: AdapterType, detection?: HarnessDetectionResult): string {

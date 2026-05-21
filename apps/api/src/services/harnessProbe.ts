@@ -1,4 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import type { AdapterType } from '@agentis/core';
 import { resolveCommandPath, resolveSpawnTarget, withExpandedPath } from './pathExpander.js';
@@ -15,6 +18,8 @@ export interface HarnessDetectionResult {
   binaryPath?: string;
   detectedModel?: string;
   detectedVersion?: string;
+  authStatus?: 'authenticated' | 'unknown';
+  authDetail?: string;
   config?: Record<string, unknown>;
   installCommand?: string;
 }
@@ -23,8 +28,15 @@ interface ProbeResult {
   ok: boolean;
   detail?: string;
   error?: boolean;
+  command?: string;
   binaryPath?: string;
   version?: string;
+}
+
+interface AuthDetection {
+  status: 'authenticated' | 'unknown';
+  detail: string;
+  source?: string;
 }
 
 export interface HarnessCheck {
@@ -66,11 +78,13 @@ const CLI_HARNESSES: Array<{
 ];
 
 export async function detectHarnesses(env: NodeJS.ProcessEnv = process.env): Promise<HarnessDetectionResult[]> {
-  const envWithPath = withExpandedPath(env);
+  const envWithPath = runtimeProbeEnv(env);
   const cli = await Promise.all(
     CLI_HARNESSES.map(async (item) => {
       const probe = await probeBinaryCandidates(item.binaries, envWithPath);
       const detectedModel = detectModel(item.adapterType, probe.detail);
+      const auth = authDetectionFor(item.adapterType, envWithPath);
+      const command = probe.command ?? item.binaries[0];
       return {
         adapterType: item.adapterType,
         harness: item.harness,
@@ -79,7 +93,9 @@ export async function detectHarnesses(env: NodeJS.ProcessEnv = process.env): Pro
         binaryPath: probe.binaryPath,
         detectedVersion: probe.version,
         detectedModel,
-        config: probe.ok ? compactRecord({ binaryPath: probe.binaryPath, command: probe.binaryPath, model: detectedModel }) : undefined,
+        authStatus: auth?.status,
+        authDetail: auth?.detail,
+        config: probe.ok ? compactRecord({ binaryPath: command, command, detectedBinaryPath: probe.binaryPath, model: detectedModel }) : undefined,
         installCommand: item.installCommand,
       };
     }),
@@ -123,11 +139,11 @@ export async function testHarnessConfig(
   options: HarnessTestOptions = {},
 ): Promise<HarnessTestResult> {
   const checks: HarnessCheck[] = [];
-  const env = withExpandedPath(options.env ?? process.env);
+  const env = runtimeProbeEnv(options.env ?? process.env);
 
   if (adapterType === 'claude_code') {
     const command = cliCommandFromConfig(config, 'claude');
-    const binary = await binaryCheck(command, 'Claude Code binary', 'binary');
+    const binary = await binaryCheck(command, 'Claude Code binary', 'binary', env);
     checks.push(binary);
     checks.push(claudeAuthCheck(env));
     if (binary.level !== 'error' && options.deep) {
@@ -137,7 +153,7 @@ export async function testHarnessConfig(
   }
   if (adapterType === 'codex') {
     const command = cliCommandFromConfig(config, 'codex');
-    const binary = await binaryCheck(command, 'Codex binary', 'binary');
+    const binary = await binaryCheck(command, 'Codex binary', 'binary', env);
     checks.push(binary);
     checks.push(codexAuthCheck(env));
     if (binary.level !== 'error' && options.deep) {
@@ -146,11 +162,11 @@ export async function testHarnessConfig(
     return resultFromChecks(checks);
   }
   if (adapterType === 'cursor') {
-    checks.push(await binaryCheck(cliCommandFromConfig(config, 'agent'), 'Cursor binary', 'binary'));
+    checks.push(await binaryCheck(cliCommandFromConfig(config, 'agent'), 'Cursor binary', 'binary', env));
     return resultFromChecks(checks);
   }
   if (adapterType === 'hermes_agent') {
-    checks.push(await binaryCheck(cliCommandFromConfig(config, 'hermes'), 'Hermes Agent binary', 'binary'));
+    checks.push(await binaryCheck(cliCommandFromConfig(config, 'hermes'), 'Hermes Agent binary', 'binary', env));
     return resultFromChecks(checks);
   }
   if (adapterType === 'openclaw') {
@@ -177,8 +193,8 @@ export async function testHarnessConfig(
   return resultFromChecks(checks);
 }
 
-async function binaryCheck(binary: string, label: string, code = 'binary'): Promise<HarnessCheck> {
-  const probe = await probeBinary(binary, withExpandedPath());
+async function binaryCheck(binary: string, label: string, code = 'binary', env: NodeJS.ProcessEnv = runtimeProbeEnv()): Promise<HarnessCheck> {
+  const probe = await probeBinary(binary, env);
   if (probe.ok) {
     return {
       code,
@@ -203,35 +219,171 @@ async function binaryCheck(binary: string, label: string, code = 'binary'): Prom
  * Vertex, a raw API key, or an interactive `claude login` subscription.
  */
 function claudeAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_BEDROCK)) {
-    return { code: 'auth', level: 'info', message: 'Auth: Amazon Bedrock', detail: 'CLAUDE_CODE_USE_BEDROCK is set.' };
-  }
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_VERTEX)) {
-    return { code: 'auth', level: 'info', message: 'Auth: Google Vertex AI', detail: 'CLAUDE_CODE_USE_VERTEX is set.' };
-  }
-  if (firstNonEmpty(env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN)) {
-    return { code: 'auth', level: 'info', message: 'Auth: Anthropic API key', detail: 'ANTHROPIC_API_KEY is set.' };
+  const auth = detectClaudeAuth(env);
+  if (auth.status === 'authenticated') {
+    return { code: 'auth', level: 'info', message: `Auth: ${auth.source ?? 'Claude login'}`, detail: auth.detail };
   }
   return {
     code: 'auth',
     level: 'warn',
-    message: 'No API key detected — subscription login assumed',
-    detail: 'ANTHROPIC_API_KEY is not set in this environment.',
-    hint: 'If the live probe fails with a login error, run `claude login` in this environment.',
+    message: 'Claude auth was not detected',
+    detail: auth.detail,
+    hint: 'Run `claude login`, set ANTHROPIC_API_KEY, or configure Bedrock/Vertex env vars in this environment.',
   };
 }
 
 function codexAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
-  if (firstNonEmpty(env.OPENAI_API_KEY, env.CODEX_API_KEY)) {
-    return { code: 'auth', level: 'info', message: 'Auth: OpenAI API key', detail: 'OPENAI_API_KEY is set.' };
+  const auth = detectCodexAuth(env);
+  if (auth.status === 'authenticated') {
+    return { code: 'auth', level: 'info', message: `Auth: ${auth.source ?? 'Codex login'}`, detail: auth.detail };
   }
   return {
     code: 'auth',
     level: 'warn',
-    message: 'No API key detected — subscription login assumed',
-    detail: 'OPENAI_API_KEY is not set in this environment.',
-    hint: 'If the live probe fails with a login error, run `codex login` in this environment.',
+    message: 'Codex auth was not detected',
+    detail: auth.detail,
+    hint: 'Run `codex login`, `codex auth`, or set OPENAI_API_KEY in this environment.',
   };
+}
+
+function runtimeProbeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env };
+  for (const key of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_PARENT_SESSION']) {
+    delete next[key];
+  }
+  return withExpandedPath(next);
+}
+
+function authDetectionFor(adapterType: V1HarnessAdapterType, env: NodeJS.ProcessEnv): AuthDetection | undefined {
+  if (adapterType === 'claude_code') return detectClaudeAuth(env);
+  if (adapterType === 'codex') return detectCodexAuth(env);
+  return undefined;
+}
+
+function detectClaudeAuth(env: NodeJS.ProcessEnv): AuthDetection {
+  if (isTruthyEnv(env.CLAUDE_CODE_USE_BEDROCK)) {
+    return { status: 'authenticated', source: 'Amazon Bedrock', detail: 'CLAUDE_CODE_USE_BEDROCK is set.' };
+  }
+  if (isTruthyEnv(env.CLAUDE_CODE_USE_VERTEX)) {
+    return { status: 'authenticated', source: 'Google Vertex AI', detail: 'CLAUDE_CODE_USE_VERTEX is set.' };
+  }
+  if (firstNonEmpty(env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN)) {
+    return { status: 'authenticated', source: 'Anthropic API key', detail: 'ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is set.' };
+  }
+
+  const home = homeDirFromEnv(env);
+  const claudeConfig = readJsonObject(path.join(home, '.claude.json'));
+  const claudeEmail = claudeConfig
+    ? firstNonEmpty(
+      nestedString(claudeConfig, ['oauthAccount', 'emailAddress']),
+      nestedString(claudeConfig, ['oauthAccount', 'email']),
+    )
+    : undefined;
+  if (claudeEmail) {
+    return { status: 'authenticated', source: 'Claude subscription login', detail: `Logged in as ${claudeEmail}.` };
+  }
+
+  const credentialsPath = path.join(home, '.claude', '.credentials.json');
+  const credentials = readJsonObject(credentialsPath);
+  if (credentials) {
+    const accessToken = firstNonEmpty(
+      nestedString(credentials, ['claudeAiOauth', 'accessToken']),
+      nestedString(credentials, ['oauth', 'accessToken']),
+    );
+    const apiKey = firstNonEmpty(nestedString(credentials, ['apiKey']), nestedString(credentials, ['ANTHROPIC_API_KEY']));
+    if (accessToken) return { status: 'authenticated', source: 'Claude subscription login', detail: `Credentials found in ${credentialsPath}.` };
+    if (apiKey) return { status: 'authenticated', source: 'Anthropic API key', detail: `API key found in ${credentialsPath}.` };
+  }
+
+  return {
+    status: 'unknown',
+    detail: `No Claude auth env vars or local login files were found under ${home}.`,
+  };
+}
+
+function detectCodexAuth(env: NodeJS.ProcessEnv): AuthDetection {
+  if (firstNonEmpty(env.OPENAI_API_KEY, env.CODEX_API_KEY)) {
+    return { status: 'authenticated', source: 'OpenAI API key', detail: 'OPENAI_API_KEY or CODEX_API_KEY is set.' };
+  }
+
+  const home = homeDirFromEnv(env);
+  const codexHome = firstNonEmpty(env.CODEX_HOME) ?? path.join(home, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  const auth = readJsonObject(authPath);
+  if (auth) {
+    const accessToken = firstNonEmpty(
+      nestedString(auth, ['accessToken']),
+      nestedString(auth, ['tokens', 'access_token']),
+    );
+    const apiKey = nestedString(auth, ['OPENAI_API_KEY']);
+    if (apiKey) return { status: 'authenticated', source: 'OpenAI API key', detail: `API key found in ${authPath}.` };
+    if (accessToken) {
+      const email = emailFromJwt(nestedString(auth, ['tokens', 'id_token'])) ?? emailFromJwt(accessToken);
+      return {
+        status: 'authenticated',
+        source: 'Codex login',
+        detail: email ? `Logged in as ${email}.` : `Credentials found in ${authPath}.`,
+      };
+    }
+  }
+
+  return {
+    status: 'unknown',
+    detail: `No OpenAI env key or Codex login file was found under ${codexHome}.`,
+  };
+}
+
+function homeDirFromEnv(env: NodeJS.ProcessEnv): string {
+  return firstNonEmpty(env.USERPROFILE, env.HOME) ?? os.homedir();
+}
+
+function readJsonObject(filePath: string): Record<string, unknown> | null {
+  if (!existsSync(filePath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function nestedString(record: Record<string, unknown>, segments: string[]): string | undefined {
+  let current: unknown = record;
+  for (const segment of segments) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return typeof current === 'string' && current.trim().length > 0 ? current.trim() : undefined;
+}
+
+function emailFromJwt(token: string | undefined): string | undefined {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return undefined;
+  const profile = objectOf(payload['https://api.openai.com/profile']);
+  const auth = objectOf(payload['https://api.openai.com/auth']);
+  return firstNonEmpty(
+    stringOf(payload.email) ?? undefined,
+    stringOf(profile?.email) ?? undefined,
+    stringOf(auth?.chatgpt_user_email) ?? undefined,
+  );
+}
+
+function decodeJwtPayload(token: string | undefined): Record<string, unknown> | null {
+  if (!token) return null;
+  const encoded = token.split('.')[1];
+  if (!encoded) return null;
+  try {
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function objectOf(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
 /**
@@ -335,7 +487,7 @@ async function probeBinary(binary: string, env: NodeJS.ProcessEnv): Promise<Prob
   if (version.ok || binaryPath) {
     return {
       ok: true,
-      detail: firstNonEmpty(version.detail, binaryPath ?? undefined),
+      detail: version.ok ? firstNonEmpty(version.detail, binaryPath ?? undefined) : binaryPath ?? version.detail,
       binaryPath: binaryPath ?? undefined,
       version: version.ok ? parseVersion(version.detail) : undefined,
     };
@@ -353,7 +505,7 @@ async function probeBinaryCandidates(binaries: string[], env: NodeJS.ProcessEnv)
   for (const binary of binaries) {
     const probe = await probeBinary(binary, env);
     if (probe.ok) {
-      return probe.binaryPath ? probe : { ...probe, binaryPath: binary };
+      return { ...probe, command: binary, binaryPath: probe.binaryPath ?? binary };
     }
     if (!best || probe.error) best = probe;
   }
@@ -367,13 +519,15 @@ async function runProbe(command: string, args: string[], env: NodeJS.ProcessEnv,
     return { ok: true, detail: firstLine(stdout || stderr) };
   } catch (err) {
     const error = err as { code?: string | number; signal?: string; stdout?: string; stderr?: string; message?: string };
-    const missing = error.code === 'ENOENT' || error.code === 1;
+    const detail = error.code === 'ENOENT'
+      ? `Command not found in PATH: "${command}"`
+      : firstLine(error.stdout || error.stderr || error.message);
+    const missing = error.code === 'ENOENT'
+      || /not recognized as (an|a) (internal|external) command|command not found|not found in path/i.test(detail ?? '');
     return {
       ok: false,
       error: !missing,
-      detail: error.code === 'ENOENT'
-        ? `Command not found in PATH: "${command}"`
-        : firstLine(error.stdout || error.stderr || error.message),
+      detail,
     };
   }
 }
@@ -546,7 +700,7 @@ function stringOf(value: unknown): string | null {
 }
 
 function cliCommandFromConfig(config: Record<string, unknown>, fallback: string): string {
-  return stringOf(config.binaryPath) ?? stringOf(config.command) ?? fallback;
+  return stringOf(config.command) ?? stringOf(config.binaryPath) ?? fallback;
 }
 
 function recordStringOf(value: unknown): Record<string, string> | undefined {

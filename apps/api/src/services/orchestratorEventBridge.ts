@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -59,11 +59,11 @@ function workspaceFromPayload(payload: unknown): string | null {
 }
 
 function findOrchestratorAgent(db: AgentisSqliteDb, workspaceId: string) {
-  const agents = db.select().from(schema.agents).where(eq(schema.agents.workspaceId, workspaceId)).all();
-  return agents.find((agent) => agent.role === 'orchestrator')
-    ?? agents.find((agent) => /agentis|orchestrator/i.test(agent.name))
-    ?? agents[0]
-    ?? null;
+  return db
+    .select()
+    .from(schema.agents)
+    .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.role, 'orchestrator')))
+    .get() ?? null;
 }
 
 function buildProactivePayload(event: string, rawPayload: unknown, agentId: string | null) {

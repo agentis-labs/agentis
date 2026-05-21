@@ -140,6 +140,9 @@ export class TeamService {
           .where(eq(schema.workspaces.id, workspaceId))
           .run();
       }
+      this.db.delete(schema.rooms)
+        .where(and(eq(schema.rooms.workspaceId, workspaceId), eq(schema.rooms.teamId, teamId)))
+        .run();
       this.db.delete(schema.ambients).where(eq(schema.ambients.id, team.ambientId)).run();
     });
     this.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.TEAM_DELETED, { id: teamId });

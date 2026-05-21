@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,7 +8,7 @@ import { resolveCommandPath, resolveSpawnTarget } from '../../src/services/pathE
 
 describe('runtime command resolution', () => {
   it.runIf(process.platform === 'win32')('detects and launches Windows .cmd runtime shims', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'agentis-runtime-'));
+    const dir = mkdtempSync(join(tmpdir(), 'agentis runtime '));
     try {
       const shim = join(dir, 'claude.cmd');
       writeFileSync(shim, '@echo off\r\necho Claude Code 1.2.3\r\n', 'utf8');
@@ -22,6 +23,7 @@ describe('runtime command resolution', () => {
       const target = resolveSpawnTarget('claude', ['--version'], dir, env);
       expect(target.command.toLowerCase()).toContain('cmd.exe');
       expect(target.args.join(' ').toLowerCase()).toContain('claude.cmd');
+      expect(execFileSync(target.command, target.args, { encoding: 'utf8', env }).trim()).toBe('Claude Code 1.2.3');
 
       const detections = await detectHarnesses(env);
       const claude = detections.find((entry) => entry.adapterType === 'claude_code');
@@ -29,8 +31,35 @@ describe('runtime command resolution', () => {
         status: 'found',
       });
       expect(claude?.binaryPath?.toLowerCase()).toBe(shim.toLowerCase());
+      expect(claude?.config?.command).toBe('claude');
+      expect(claude?.config?.binaryPath).toBe('claude');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform === 'win32')('prefers the stable Codex Desktop CLI over versioned WindowsApps paths', () => {
+    const root = mkdtempSync(join(tmpdir(), 'agentis codex path '));
+    try {
+      const localAppData = join(root, 'Local');
+      const stable = join(localAppData, 'OpenAI', 'Codex', 'bin');
+      const windowsApps = join(root, 'WindowsApps', 'OpenAI.Codex_26.519.2081.0_x64__2p2nqsd0c76g0', 'app', 'resources');
+      const stableShim = join(stable, 'codex.cmd');
+      mkdirSync(stable, { recursive: true });
+      mkdirSync(windowsApps, { recursive: true });
+      writeFileSync(stableShim, '@echo off\r\necho codex-cli 1.2.3\r\n', 'utf8');
+      writeFileSync(join(windowsApps, 'codex.cmd'), '@echo off\r\necho inaccessible\r\n', 'utf8');
+      const env = {
+        ...process.env,
+        LOCALAPPDATA: localAppData,
+        PATH: windowsApps,
+        Path: windowsApps,
+        PATHEXT: '.CMD;.EXE;.BAT;.COM',
+      } satisfies NodeJS.ProcessEnv;
+
+      expect(resolveCommandPath('codex', root, env)?.toLowerCase()).toBe(stableShim.toLowerCase());
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

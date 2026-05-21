@@ -96,6 +96,15 @@ interface ChatMessage {
 
 const PAGE_SIZE = 50;
 
+function streamErrorMessage(data: unknown): string {
+  if (data && typeof data === 'object') {
+    const message = (data as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  if (typeof data === 'string' && data.trim()) return data.trim();
+  return 'The agent runtime reported an error. Check the runtime settings and try again.';
+}
+
 function normalizeAgentMessage(message: AgentMsg): ChatMessage {
   return {
     id: message.id,
@@ -164,6 +173,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   const preserveScrollRef = useRef(false);
   const typingTimer = useRef<number | null>(null);
   const autoSentDraftKeyRef = useRef<string | null>(null);
+  const consumedLaunchKeyRef = useRef<string | null>(null);
   const pendingViewportOverrideRef = useRef<ViewportContext | null>(initialViewportOverride ?? null);
   const toast = useToast();
   const confirm = useConfirm();
@@ -174,9 +184,12 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send` : `/v1/rooms/${id}/messages`;
   const confirmEndpoint = kind === 'agent' ? `/v1/conversations/${id}/confirm` : null;
 
-  async function loadPage(before?: string): Promise<ChatMessage[]> {
+  async function loadPage(before?: ChatMessage): Promise<ChatMessage[]> {
     const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
-    if (before) query.set('before', before);
+    if (before) {
+      query.set('before', before.createdAt);
+      query.set('beforeId', before.id);
+    }
     const path = `${endpoint}?${query.toString()}`;
     if (kind === 'agent') {
       const [threadData, agentData] = await Promise.all([
@@ -215,7 +228,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     preserveScrollRef.current = true;
     setLoadingOlder(true);
     try {
-      const page = await loadPage(messages[0]!.createdAt);
+      const page = await loadPage(messages[0]!);
       setMessages((prev) => prependUnique(prev, page));
       setHasMore(page.length === PAGE_SIZE);
     } catch (error) {
@@ -310,6 +323,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
               };
             }));
           } else if (event === 'error') {
+            const message = streamErrorMessage(data);
             setAgentTyping(false);
             setMessages((current) => current.map((message) => (
               message.id === messageId
@@ -325,6 +339,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
                   }
                 : message
             )));
+            toast.error('Agent could not complete the action', message);
           }
         },
       });
@@ -353,8 +368,20 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   }, [kind, id]);
 
   useEffect(() => {
-    setComposerInitialText(initialDraft ?? '');
-  }, [initialDraft, kind, id]);
+    setComposerInitialText('');
+    consumedLaunchKeyRef.current = null;
+    pendingViewportOverrideRef.current = initialViewportOverride ?? null;
+  }, [kind, id]);
+
+  useEffect(() => {
+    if (initialDraft === undefined && !initialViewportOverride) return;
+    const key = `${kind}:${id}:${initialDraft ?? ''}:${initialViewportOverride ? JSON.stringify(initialViewportOverride) : ''}:${autoSendInitialDraft ? 'auto' : 'manual'}`;
+    if (consumedLaunchKeyRef.current === key) return;
+    consumedLaunchKeyRef.current = key;
+    if (initialDraft !== undefined) setComposerInitialText(initialDraft);
+    pendingViewportOverrideRef.current = initialViewportOverride ?? null;
+    if (!autoSendInitialDraft) queueMicrotask(() => onInitialDraftUsed?.());
+  }, [autoSendInitialDraft, id, initialDraft, initialViewportOverride, kind, onInitialDraftUsed]);
 
   useEffect(() => {
     if (id === '__broadcast__') return undefined;
@@ -637,12 +664,16 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
                 : message
             )));
           } else if (event === 'error') {
+            const message = streamErrorMessage(data);
             setAgentTyping(false);
             setMessages((current) => current.map((message) => (
-              message.id === streamId || message.id === operatorMessage.id
-                ? { ...message, deliveryStatus: 'failed' }
-                : message
+              message.id === streamId
+                ? { ...message, text: message.text || streamErrorMessage(data), deliveryStatus: 'failed' }
+                : message.id === operatorMessage.id
+                  ? { ...message, deliveryStatus: 'delivered' }
+                  : message
             )));
+            toast.error('Agent could not reply', message);
           }
         },
       });
@@ -668,10 +699,6 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     void handleSend(initialDraft!);
     onInitialDraftUsed?.();
   }, [autoSendInitialDraft, handleSend, id, initialDraft, kind, onInitialDraftUsed]);
-
-  useEffect(() => {
-    pendingViewportOverrideRef.current = initialViewportOverride ?? null;
-  }, [id, initialViewportOverride, kind]);
 
   async function handleDelete(message: ChatMessage) {
     const ok = await confirm({

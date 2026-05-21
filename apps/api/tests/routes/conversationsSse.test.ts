@@ -27,6 +27,13 @@ class StreamingAdapter implements AgentAdapter {
   }
 }
 
+class FailingChatAdapter extends StreamingAdapter {
+  override async *chat(_messages: ChatMessage[], _tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
+    yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: 'missing codex binary' };
+    yield { type: 'done', finishReason: 'error' };
+  }
+}
+
 function seedAgent(ctx: TestContext) {
   const id = randomUUID();
   ctx.db.insert(schema.agents).values({
@@ -85,5 +92,34 @@ describe('conversations SSE', () => {
     const messages = conversations.messages(conversation.id, 10);
     expect(messages.map((message) => message.body)).toEqual(['hello', 'streamed reply']);
     expect(adapter.seenMessages[0]!.role).toBe('system');
+  });
+
+  it('streams adapter failures as errors without persisting them as assistant messages', async () => {
+    const agentId = seedAgent(ctx);
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new FailingChatAdapter());
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const app = ctx.buildApp([
+      {
+        path: '/v1/conversations',
+        app: buildConversationRoutes({ db: ctx.db, auth: ctx.auth, conversations, adapters, logger: ctx.logger }),
+      },
+    ]);
+
+    const res = await app.request(`/v1/conversations/${agentId}/send`, {
+      method: 'POST',
+      headers: { ...ctx.authHeaders, accept: 'text/event-stream' },
+      body: JSON.stringify({ body: 'hello' }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('event: error');
+    expect(text).toContain('missing codex binary');
+    expect(text).not.toContain('event: message');
+
+    const conversation = conversations.list(ctx.workspace.id)[0]!;
+    const messages = conversations.messages(conversation.id, 10);
+    expect(messages.map((message) => message.body)).toEqual(['hello']);
   });
 });

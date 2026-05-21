@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
+import type { ChatDelta, ChatMessage, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
 import { CodexAdapter } from '../../src/adapters/CodexAdapter.js';
 import type { Logger } from '../../src/logger.js';
 
@@ -48,7 +48,7 @@ describe('CodexAdapter', () => {
     child.stdout.write('{"type":"result","result":{"text":"done"}}\n');
     child.emit('exit', 0);
 
-    expect(spawnMock).toHaveBeenCalledWith('codex-test', ['--json', '--max-turns=3', '--model=codex', '--dangerously-bypass-approvals-and-sandbox'], expect.objectContaining({ cwd: 'C:/repo' }));
+    expect(spawnMock).toHaveBeenCalledWith('codex-test', ['exec', '--json', '--model=codex', '--dangerously-bypass-approvals-and-sandbox'], expect.objectContaining({ cwd: 'C:/repo' }));
     expect(events.map((event) => event.eventType)).toEqual(['task.started', 'task.progress', 'agent.tool_call', 'task.completed']);
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Working' }));
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'agent.tool_call', tool: 'shell', input: { cmd: 'pnpm test' } }));
@@ -66,6 +66,67 @@ describe('CodexAdapter', () => {
     await adapter.dispatchTask(task);
 
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.failed', error: 'codex_spawn_failed: missing binary' }));
+  });
+
+  it('does not yield chat spawn failures as assistant text', async () => {
+    spawnMock.mockImplementation(() => {
+      throw new Error('missing binary');
+    });
+    const adapter = new CodexAdapter({ agentId: 'agent-1', logger });
+    const deltas: ChatDelta[] = [];
+    const messages: ChatMessage[] = [{ role: 'user', content: 'hello' }];
+
+    for await (const delta of adapter.chat(messages, [])) {
+      deltas.push(delta);
+    }
+
+    expect(deltas.some((delta) => delta.type === 'text')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      name: 'adapter.chat',
+      error: expect.stringContaining('missing binary'),
+    }));
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
+  });
+
+  it('uses the Codex exec JSONL contract for chat without legacy CLI flags', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({
+      agentId: 'agent-1',
+      logger,
+      binaryPath: 'codex-test',
+      model: 'gpt-5.3-codex',
+      maxTurns: 12,
+      fastMode: true,
+    });
+    const messages: ChatMessage[] = [{ role: 'user', content: 'hello' }];
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat(messages, [])) {
+        deltas.push(delta);
+      }
+    })();
+
+    child.stdout.write('{"type":"assistant","text":"Hi"}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(spawnMock).toHaveBeenCalledWith('codex-test', [
+      'exec',
+      '--json',
+      '--model=gpt-5.3-codex',
+      '-c',
+      'model_reasoning_effort="minimal"',
+      '--dangerously-bypass-approvals-and-sandbox',
+    ], expect.any(Object));
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args[0]).toBe('exec');
+    expect(args[1]).toBe('--json');
+    expect(args.some((arg) => arg.startsWith('--max-turns'))).toBe(false);
+    expect(args).not.toContain('--fast');
+    expect(deltas).toContainEqual({ type: 'text', delta: 'Hi' });
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
 });
 

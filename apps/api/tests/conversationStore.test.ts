@@ -3,7 +3,8 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { AgentisError, REALTIME_EVENTS } from '@agentis/core';
-import { openSqlite, type AgentisSqliteDb } from '@agentis/db/sqlite';
+import { openSqlite, schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
+import { eq } from 'drizzle-orm';
 import { ConversationStore } from '../src/services/conversationStore.js';
 import { createInProcessEventBus, type EventBus } from '../src/event-bus.js';
 
@@ -107,5 +108,33 @@ describe('ConversationStore', () => {
     store.markRead('ws1', conv.id);
     const reloaded = store.list('ws1')[0]!;
     expect(reloaded.unreadCount).toBe(0);
+  });
+
+  it('uses id as a tiebreaker when paginating messages with the same timestamp', () => {
+    const conv = store.getOrCreateByAgent(baseGet);
+    const first = store.appendOutbound({
+      workspaceId: 'ws1',
+      conversationId: conv.id,
+      operatorId: 'u1',
+      body: 'first',
+    });
+    const second = store.appendMirrored({
+      workspaceId: 'ws1',
+      conversationId: conv.id,
+      sessionMessageId: 'sm-same-ms',
+      body: 'second',
+      authorType: 'agent',
+    });
+    db.update(schema.conversationMessages)
+      .set({ createdAt: '2026-01-01T00:00:00.000Z' })
+      .where(eq(schema.conversationMessages.conversationId, conv.id))
+      .run();
+
+    const newest = store.messages(conv.id, 1).at(0)!;
+    const older = store.messages(conv.id, 5, newest.createdAt, newest.id);
+
+    expect([first.id, second.id]).toContain(newest.id);
+    expect(older).toHaveLength(1);
+    expect(older[0]!.id).not.toBe(newest.id);
   });
 });

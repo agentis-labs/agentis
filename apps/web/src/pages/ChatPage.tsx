@@ -51,6 +51,8 @@ export function ChatPage() {
       setSelected((current) => current?.kind === 'agent' && current.id === agentId
         ? current
         : { kind: 'agent', id: agentId, name: 'Agent' });
+    } else {
+      setSelected(null);
     }
   }, [agentId]);
 

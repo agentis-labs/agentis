@@ -303,4 +303,84 @@ describe('agent hierarchy mutations', () => {
     expect(body.error.code).toBe('WORKSPACE_ORCHESTRATOR_EXISTS');
     expect(body.error.details?.id).toBe(orchestratorId);
   });
+
+  it('puts runtime in standby immediately when isPaused is enabled', async () => {
+    const api = mutationApp();
+    const created = await api.request('/v1/agents', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        name: 'HTTP Worker',
+        adapterType: 'http',
+        config: { dispatchUrl: 'https://example.com/dispatch' },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { agent: { id: string } };
+    const agentId = createdBody.agent.id;
+    expect(adapters.get(agentId)).toBeTruthy();
+
+    const patched = await api.request(`/v1/agents/${agentId}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ isPaused: true }),
+    });
+    expect(patched.status).toBe(200);
+    expect(adapters.get(agentId)).toBeUndefined();
+
+    const row = ctx.db
+      .select({ isPaused: schema.agents.isPaused, status: schema.agents.status })
+      .from(schema.agents)
+      .where(eq(schema.agents.id, agentId))
+      .get();
+    expect(row).toEqual(expect.objectContaining({ isPaused: true, status: 'paused' }));
+  });
+
+  it('reconnects runtime when leaving standby and persists operations fields', async () => {
+    const managerId = seedAgent();
+    const api = mutationApp();
+    const created = await api.request('/v1/agents', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        name: 'Paused Worker',
+        adapterType: 'http',
+        isPaused: true,
+        config: { dispatchUrl: 'https://example.com/dispatch' },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { agent: { id: string } };
+    const agentId = createdBody.agent.id;
+    expect(adapters.get(agentId)).toBeUndefined();
+
+    const patched = await api.request(`/v1/agents/${agentId}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        isPaused: false,
+        monthlyBudgetCents: 125_00,
+        reportsTo: managerId,
+      }),
+    });
+    expect(patched.status).toBe(200);
+    expect(adapters.get(agentId)).toBeTruthy();
+
+    const row = ctx.db
+      .select({
+        isPaused: schema.agents.isPaused,
+        status: schema.agents.status,
+        monthlyBudgetCents: schema.agents.monthlyBudgetCents,
+        reportsTo: schema.agents.reportsTo,
+      })
+      .from(schema.agents)
+      .where(eq(schema.agents.id, agentId))
+      .get();
+    expect(row).toEqual(expect.objectContaining({
+      isPaused: false,
+      status: 'online',
+      monthlyBudgetCents: 125_00,
+      reportsTo: managerId,
+    }));
+  });
 });

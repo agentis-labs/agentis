@@ -298,6 +298,8 @@ export function WorkspaceEcosystemCanvas({
     activeAgents: counts?.liveAgents ?? model.activeAgentIds.size,
     idleAgents: Math.max(0, agents.length - (counts?.liveAgents ?? model.activeAgentIds.size)),
     attentionCount: approvals.length + failedRuns.length,
+    approvalCount: approvals.length,
+    failedRunCount: failedRuns.length,
     workflows: data.workflows.length || activeRuns.length || fleet?.runs.active || 0,
   };
   const recentCompletions = useMemo<ComposerRecentCompletion[]>(
@@ -812,18 +814,21 @@ export function buildCanvasModel(
   const edges: CanvasEdge[] = [];
   const managerActiveWorkers = new Map<string, number>();
   const activeWorkflowIds = new Set(activeRuns.map((run) => run.workflowId));
-  const activeAgentIds = new Set(activeRuns.flatMap((run) => run.agents?.map((agent) => agent.id) ?? []));
-  for (const agent of agents) if (isLiveAgent(agent.status)) activeAgentIds.add(agent.id);
+  const availableAgentIds = new Set(agents.filter((agent) => isAvailableAgent(agent.status)).map((agent) => agent.id));
+  const workingAgentIds = new Set(activeRuns.flatMap((run) => run.agents?.map((agent) => agent.id) ?? []));
+  for (const agent of agents) if (isWorkingAgent(agent)) workingAgentIds.add(agent.id);
 
   const roles = classifyAgents(agents);
   const managerCount = Math.max(roles.managers.length, agents.length === 0 ? 2 : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0);
   const workerCount = Math.max(roles.workers.length, agents.length === 0 ? 4 : roles.workers.length === 0 ? Math.max(2, roles.managers.length) : 0);
   const managerPositions = distributeRow(managerCount, canvasSize.width, 350, NODE.manager.width);
   const workerPositions = distributeRow(workerCount, canvasSize.width, 530, NODE.worker.width);
+  const availableCommandSourceIds = new Set<string>();
 
   const orchestratorId = roles.orchestrator ? `agent-${roles.orchestrator.id}` : 'ghost-orchestrator';
   if (roles.orchestrator) {
-    nodes.push(agentNode(roles.orchestrator, 'orchestrator', { x: canvasSize.width / 2, y: 170 }, activeAgentIds, approvals, activeRuns));
+    nodes.push(agentNode(roles.orchestrator, 'orchestrator', { x: canvasSize.width / 2, y: 170 }, workingAgentIds, approvals, activeRuns));
+    if (availableAgentIds.has(roles.orchestrator.id)) availableCommandSourceIds.add(orchestratorId);
   } else {
     nodes.push(ghostNode('ghost-orchestrator', 'orchestrator', 'Orchestrator', 'commission your workspace orchestrator', { x: canvasSize.width / 2, y: 170 }, NODE.orchestrator));
   }
@@ -831,10 +836,11 @@ export function buildCanvasModel(
   const managerNodeIds: string[] = [];
   roles.managers.forEach((agent, index) => {
     const pos = managerPositions[index] ?? { x: canvasSize.width / 2, y: 350 };
-    const node = agentNode(agent, 'manager', pos, activeAgentIds, approvals, activeRuns);
+    const node = agentNode(agent, 'manager', pos, workingAgentIds, approvals, activeRuns);
     nodes.push(node);
     managerNodeIds.push(node.id);
-    edges.push(commandEdge(orchestratorId, node.id, activeAgentIds.has(agent.id)));
+    if (availableAgentIds.has(agent.id)) availableCommandSourceIds.add(node.id);
+    edges.push(commandEdge(orchestratorId, node.id, workingAgentIds.has(agent.id) && availableCommandSourceIds.has(orchestratorId)));
   });
   for (let index = roles.managers.length; index < managerCount; index += 1) {
     const id = `ghost-manager-${index}`;
@@ -847,12 +853,12 @@ export function buildCanvasModel(
   const workerNodeIds: string[] = [];
   roles.workers.forEach((agent, index) => {
     const pos = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
-    const node = agentNode(agent, 'worker', pos, activeAgentIds, approvals, activeRuns);
+    const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, activeRuns);
     nodes.push(node);
     workerNodeIds.push(node.id);
     const parentId = findParentManager(agent, managerNodeIds, roles.managers, index) ?? orchestratorId;
-    if (activeAgentIds.has(agent.id)) managerActiveWorkers.set(parentId, (managerActiveWorkers.get(parentId) ?? 0) + 1);
-    edges.push(commandEdge(parentId, node.id, activeAgentIds.has(agent.id)));
+    if (workingAgentIds.has(agent.id)) managerActiveWorkers.set(parentId, (managerActiveWorkers.get(parentId) ?? 0) + 1);
+    edges.push(commandEdge(parentId, node.id, workingAgentIds.has(agent.id) && availableCommandSourceIds.has(parentId)));
   });
   for (let index = roles.workers.length; index < workerCount; index += 1) {
     const id = `ghost-worker-${index}`;
@@ -863,7 +869,7 @@ export function buildCanvasModel(
   }
 
   for (const edge of edges) {
-    if (edge.type === 'command' && edge.from === orchestratorId && (managerActiveWorkers.get(edge.to) ?? 0) >= 2) {
+    if (edge.type === 'command' && edge.from === orchestratorId && edge.active && (managerActiveWorkers.get(edge.to) ?? 0) >= 2) {
       edge.busy = true;
     }
   }
@@ -891,7 +897,7 @@ export function buildCanvasModel(
     nodes,
     edges: dedupeEdges(edges),
     orchestratorId,
-    activeAgentIds,
+    activeAgentIds: availableAgentIds,
   };
 }
 
@@ -958,7 +964,7 @@ function CanvasNodeCard({
       onMouseLeave={onLeave}
       className={clsx(
         'home-node-enter absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border px-3 text-left shadow-card transition duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-muted focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
-        node.kind === 'orchestrator' && 'home-orchestrator-aura',
+        node.kind === 'orchestrator' && node.status !== 'offline' && node.status !== 'error' && 'home-orchestrator-aura',
         node.ghost && 'home-ghost-breathe',
         node.warn
           ? 'border-warn/40 bg-warn-soft'
@@ -1131,16 +1137,16 @@ function agentNode(
   agent: WorkspaceAgent,
   role: 'orchestrator' | 'manager' | 'worker',
   pos: Vec2,
-  activeAgentIds: Set<string>,
+  workingAgentIds: Set<string>,
   approvals: WorkspaceApproval[],
   activeRuns: WorkspaceActiveRun[],
 ): CanvasNode {
   const record = agent as unknown as Record<string, unknown>;
   const activeRun = activeRuns.find((run) => run.agents?.some((runAgent) => runAgent.id === agent.id));
-  const active = activeAgentIds.has(agent.id);
+  const active = workingAgentIds.has(agent.id);
   const approval = approvals.find((item) => item.agentName === agent.name);
   const size = role === 'orchestrator' ? NODE.orchestrator : role === 'manager' ? NODE.manager : NODE.worker;
-  const status = statusLabel(agent.status, active ? 'working' : 'idle');
+  const status = statusLabel(agent.status, active ? 'working' : isAvailableAgent(agent.status) ? 'online' : 'idle');
   return {
     id: `agent-${agent.id}`,
     kind: role,
@@ -1462,8 +1468,13 @@ function rankAgentStatus(status: string | undefined): number {
   return 0;
 }
 
-function isLiveAgent(status: string | undefined): boolean {
+function isAvailableAgent(status: string | undefined): boolean {
   return status === 'online' || status === 'active' || status === 'running' || status === 'busy';
+}
+
+function isWorkingAgent(agent: WorkspaceAgent): boolean {
+  if (agent.status === 'active' || agent.status === 'running' || agent.status === 'busy') return true;
+  return typeof agent.currentTaskId === 'string' && agent.currentTaskId.trim().length > 0;
 }
 
 function runProgress(run: WorkspaceActiveRun | undefined): number | undefined {

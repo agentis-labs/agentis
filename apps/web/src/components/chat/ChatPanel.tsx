@@ -10,7 +10,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Clock, ChevronLeft } from 'lucide-react';
 import clsx from 'clsx';
 import { useLocation, useNavigate } from 'react-router-dom';
-import type { ViewportContext } from '@agentis/core';
 import { useChatPanelStore } from './ChatPanelStore';
 import { ThreadView } from './ThreadView';
 import { SessionHistoryPanel } from './SessionHistoryPanel';
@@ -50,6 +49,7 @@ export function ChatPanel() {
     selectThread,
     launchContext,
     setLaunchContext,
+    openRequestId,
     resetForWorkspace,
   } = useChatPanelStore();
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -84,37 +84,8 @@ export function ChatPanel() {
   }, [resetForWorkspace]);
 
   useEffect(() => {
-    function onOpen(event: Event) {
-      const detail = (event as CustomEvent<{
-        agentId?: string;
-        roomId?: string;
-        initialDraft?: string;
-        initialViewportOverride?: ViewportContext | null;
-        viewportOverride?: ViewportContext | null;
-        autoSendInitialDraft?: boolean;
-        buildSession?: { appId?: string; slug?: string; name?: string };
-      }>).detail;
-      setState('docked');
-      setHistoryOpen(false);
-      setLaunchContext(detail?.initialDraft || detail?.viewportOverride || detail?.initialViewportOverride || detail?.buildSession
-        ? {
-            initialDraft: detail.initialDraft,
-            initialViewportOverride: detail.initialViewportOverride ?? detail.viewportOverride ?? null,
-            autoSendInitialDraft: detail.autoSendInitialDraft,
-            buildSession: detail.buildSession,
-          }
-        : null);
-      if (detail?.agentId) {
-        selectThread({ kind: 'agent', id: detail.agentId, name: 'Conversation' });
-      } else if (detail?.roomId) {
-        selectThread({ kind: 'room', id: detail.roomId, name: 'Room' });
-      } else {
-        selectThread(null);
-      }
-    }
-    window.addEventListener('agentis:chat-panel-open', onOpen);
-    return () => window.removeEventListener('agentis:chat-panel-open', onOpen);
-  }, [selectThread, setLaunchContext, setState]);
+    if (openRequestId > 0) setHistoryOpen(false);
+  }, [openRequestId]);
 
   if (state === 'hidden') return null;
 

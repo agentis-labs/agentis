@@ -4,6 +4,7 @@ import type { ComponentType } from 'react';
 import { Check, Download, ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../../lib/api';
 import { ClaudeIcon, CodexIcon, CursorIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
+import { HarnessInstallSlideOver } from './HarnessInstallSlideOver';
 
 export type AdapterType = 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'http';
 
@@ -130,8 +131,18 @@ export interface HarnessDetectionResult {
   binaryPath?: string;
   detectedModel?: string;
   detectedVersion?: string;
+  authStatus?: 'authenticated' | 'unknown';
+  authDetail?: string;
   config?: Record<string, unknown>;
   installCommand?: string;
+}
+
+interface HarnessInstallOption {
+  adapterType: AdapterType;
+  canAutoInstall: boolean;
+  installCommand?: string;
+  manualUrl?: string;
+  manualInstructions?: string;
 }
 
 const ADAPTERS: Array<{
@@ -177,6 +188,8 @@ export function RuntimePicker({
   const [gatewayUrlDraft, setGatewayUrlDraft] = useState('');
   const [gatewayConnecting, setGatewayConnecting] = useState(false);
   const [gatewayError, setGatewayError] = useState('');
+  const [installOptions, setInstallOptions] = useState<HarnessInstallOption[]>([]);
+  const [installingAdapter, setInstallingAdapter] = useState<AdapterType | null>(null);
   const userPickedRef = useRef(false);
 
   const detections = controlledDetections ?? internalDetections;
@@ -203,9 +216,25 @@ export function RuntimePicker({
     void refreshDetections();
   }, [controlledDetections]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void api<{ adapters: HarnessInstallOption[] }>('/v1/harness/install-options')
+      .then((result) => {
+        if (!cancelled) setInstallOptions(result.adapters ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setInstallOptions([]);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   const detectionByType = useMemo(
     () => new Map(detections.map((detection) => [detection.adapterType, detection])),
     [detections],
+  );
+  const installOptionByType = useMemo(
+    () => new Map(installOptions.map((option) => [option.adapterType, option])),
+    [installOptions],
   );
   const foundDetections = useMemo(
     () => detections.filter((detection) => detection.status === 'found'),
@@ -279,21 +308,22 @@ export function RuntimePicker({
         </div>
       ) : (
         <div className="space-y-4">
-          <RuntimeReadinessBanner
-            adapterType={adapterType}
-            detecting={detecting}
-            activeDetection={activeDetection}
-            foundDetections={foundDetections}
-          />
-          {!editing && foundDetections.length > 0 && (
-            <DetectedHarnesses detections={foundDetections} selectedAdapter={adapterType} onSelect={chooseAdapter} />
-          )}
+          {detecting && detections.length === 0 ? (
+            <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-text-muted">
+              <Loader2 size={12} className="animate-spin" />
+              Detecting runtimes on this machine...
+            </div>
+          ) : null}
           <HarnessGrid
             adapters={ADAPTERS}
             adapterType={adapterType}
             detectionByType={detectionByType}
+            installOptionByType={installOptionByType}
             detecting={detecting}
             onAdapterChange={chooseAdapter}
+            onInstallRequest={(nextAdapter) => {
+              setInstallingAdapter(nextAdapter);
+            }}
             editing={editing}
           />
           {adapterType === 'openclaw' && !openClawReady ? (
@@ -361,11 +391,6 @@ export function RuntimePicker({
               )}
             </div>
           ) : null}
-          {adapterType !== 'openclaw' && activeDetection && activeDetection.status !== 'found' && activeDetection.installCommand ? (
-            <div className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-text-muted">
-              <span className="text-text-primary">{activeAdapter.title}</span> not detected. Commissioning can continue; connect it from the Runtime tab when ready.
-            </div>
-          ) : null}
           {!editing && (
             <div className="flex items-center justify-end gap-2">
               <button
@@ -404,170 +429,39 @@ export function RuntimePicker({
         </div>
       ) : (
         <div className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-text-muted">
-          Additional options (max turns, env vars) available in the agent config tab after commissioning.
+          Additional options are available after commissioning.
         </div>
       )}
+      {installingAdapter ? (
+        <HarnessInstallSlideOver
+          adapterType={installingAdapter}
+          onClose={() => setInstallingAdapter(null)}
+          onInstalled={(result) => {
+            const nextConfig = prefillConfigFromInstall(runtimeConfig, installingAdapter, result);
+            if (nextConfig !== runtimeConfig) onConfigChange(nextConfig);
+            onAdapterChange(installingAdapter);
+            setInstallingAdapter(null);
+            void refreshDetections();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
 
-function DetectedHarnesses({
-  detections,
-  selectedAdapter,
-  onSelect,
-}: {
-  detections: HarnessDetectionResult[];
-  selectedAdapter: AdapterType;
-  onSelect: (value: AdapterType) => void;
-}) {
-  return (
-    <section className="space-y-2 rounded-lg border border-line bg-surface-2 p-3">
-      <div className="text-xs font-medium uppercase tracking-wider text-text-muted">Found on this machine</div>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {detections.map((detection) => {
-          const adapter = ADAPTERS.find((entry) => entry.id === detection.adapterType);
-          if (!adapter) return null;
-          const Icon = adapter.icon;
-          const selected = selectedAdapter === detection.adapterType;
-          return (
-            <button
-              key={detection.adapterType}
-              type="button"
-              onClick={() => onSelect(detection.adapterType)}
-              className={clsx(
-                'flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition',
-                selected ? 'border-accent bg-accent/10' : 'border-line hover:border-accent/40 hover:bg-surface-3',
-              )}
-            >
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-canvas text-text-primary">
-                <Icon className="h-5 w-5" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-sm font-medium text-text-primary">{adapter.title}</span>
-                <span className="mt-0.5 block truncate text-[11px] text-text-muted">
-                  {detection.detectedVersion ? `v${detection.detectedVersion}` : 'Installed'}
-                  {detection.binaryPath ? ` · ${detection.binaryPath}` : ''}
-                </span>
-              </span>
-              <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">Ready</span>
-            </button>
-          );
-        })}
-      </div>
-    </section>
-  );
+function detectionCommand(detection: HarnessDetectionResult): string {
+  return stringOf(detection.config?.command)
+    || stringOf(detection.config?.binaryPath)
+    || detection.binaryPath
+    || '';
 }
 
-/**
- * RuntimeReadinessBanner — the one-glance answer to "can this agent run?"
- * (AGENTS-PAGE-REDESIGN.md §4 — beautiful easiness).
- *
- *  - a runtime is detected & selected → green "ready", just continue
- *  - nothing installed              → non-blocking setup note
- *  - HTTP                           → nothing to install
- *  - OpenClaw                       → handled by the gateway card, banner hidden
- *
- * CRITICAL UX: Install is NEVER blocking. Detection tries to connect what is
- * already available; missing runtimes stay in setup until the operator chooses
- * the right install/connect path.
- */
-function RuntimeReadinessBanner({
-  adapterType,
-  detecting,
-  activeDetection,
-  foundDetections,
-}: {
-  adapterType: AdapterType;
-  detecting: boolean;
-  activeDetection: HarnessDetectionResult | undefined;
-  foundDetections: HarnessDetectionResult[];
-}) {
-  if (adapterType === 'openclaw') return null;
-
-  const title = ADAPTERS.find((adapter) => adapter.id === adapterType)?.title ?? 'Runtime';
-
-  if (detecting && !activeDetection && foundDetections.length === 0) {
-    return (
-      <div className="flex items-center gap-2.5 rounded-lg border border-line bg-surface-2 px-3.5 py-3 text-sm text-text-muted">
-        <Loader2 size={14} className="animate-spin" />
-        Scanning this machine for installed runtimes…
-      </div>
-    );
-  }
-
-  if (activeDetection?.status === 'found') {
-    const detail = [
-      activeDetection.detectedVersion ? `v${activeDetection.detectedVersion}` : null,
-      activeDetection.binaryPath,
-    ].filter(Boolean).join(' · ');
-    return (
-      <div className="rounded-lg border border-accent/30 bg-accent/10 px-3.5 py-3">
-        <div className="flex items-center gap-2">
-          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent/20 text-accent">
-            <Check size={12} />
-          </span>
-          <span className="text-sm font-medium text-text-primary">{title} is installed and ready</span>
-        </div>
-        <div className="mt-1 pl-7 text-xs text-text-muted">
-          {detail || 'Detected on this machine.'} — this agent comes online the moment you commission it.
-        </div>
-      </div>
-    );
-  }
-
-  if (adapterType === 'http') {
-    return (
-      <div className="rounded-lg border border-line bg-surface-2 px-3.5 py-3 text-sm text-text-muted">
-        HTTP agents call your existing endpoint — nothing to install. Add the URL in connection settings below.
-      </div>
-    );
-  }
-
-  const installTitle = ADAPTERS.find((adapter) => adapter.id === adapterType)?.title ?? title;
-
-  if (foundDetections.length > 0) {
-    const names = foundDetections
-      .map((detection) => ADAPTERS.find((adapter) => adapter.id === detection.adapterType)?.title ?? detection.harness)
-      .join(', ');
-    return (
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface-2 px-3.5 py-3">
-        <div className="min-w-0 flex-1 text-sm text-text-muted">
-          <span className="text-text-primary">{names}</span> {foundDetections.length === 1 ? 'is' : 'are'} ready to use — pick it below, or choose {title} and connect it after commissioning.
-        </div>
-      </div>
-    );
-  }
-
-  if (adapterType !== 'claude_code' && adapterType !== 'codex') {
-    return (
-      <div className="rounded-lg border border-line bg-surface-2 px-3.5 py-3.5">
-        <div className="flex items-center gap-2">
-          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-surface-3 text-text-muted">
-            <Download size={11} />
-          </span>
-          <span className="text-sm font-medium text-text-primary">{title} is not connected yet</span>
-        </div>
-        <div className="mt-1.5 pl-7 text-xs leading-relaxed text-text-muted">
-          You can still commission the agent now. It will stay in setup until this runtime is connected.
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3.5 py-3.5">
-      <div className="flex items-center gap-2">
-        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/15 text-cyan-400">
-          <Download size={11} />
-        </span>
-        <span className="text-sm font-medium text-text-primary">{installTitle} is not connected yet</span>
-      </div>
-      <div className="mt-1.5 pl-7 text-xs leading-relaxed text-text-muted">
-        Continue with commissioning. Agentis will check again and keep the agent in setup until this runtime is connected.
-      </div>
-      <div className="mt-2 pl-7 text-[11px] text-text-muted">or pick another runtime below</div>
-    </div>
-  );
+function runtimeDetectionDetail(detection: HarnessDetectionResult): string {
+  const command = detectionCommand(detection);
+  return [
+    detection.detectedVersion ? `v${detection.detectedVersion}` : 'Installed',
+    command || detection.detail,
+  ].filter(Boolean).join(' - ');
 }
 
 function HarnessModelPassthrough({
@@ -678,15 +572,19 @@ function HarnessGrid({
   adapters,
   adapterType,
   detectionByType,
+  installOptionByType,
   detecting,
   onAdapterChange,
+  onInstallRequest,
   editing,
 }: {
   adapters: typeof ADAPTERS;
   adapterType: AdapterType;
   detectionByType: Map<AdapterType, HarnessDetectionResult>;
+  installOptionByType: Map<AdapterType, HarnessInstallOption>;
   detecting: boolean;
   onAdapterChange: (value: AdapterType) => void;
+  onInstallRequest: (value: AdapterType) => void;
   editing?: boolean;
 }) {
   return (
@@ -695,6 +593,11 @@ function HarnessGrid({
         const Icon = adapter.icon;
         const selected = adapterType === adapter.id;
         const detection = detectionByType.get(adapter.id);
+        const installOption = installOptionByType.get(adapter.id);
+        const showInstallAction = !editing
+          && adapter.id !== 'http'
+          && detection?.status !== 'found'
+          && Boolean(installOption);
         return (
           <div
             key={adapter.id}
@@ -715,19 +618,63 @@ function HarnessGrid({
                 'rounded-full px-2 py-0.5 text-[10px]',
                 detection?.status === 'found' ? 'bg-accent/10 text-accent' : 'bg-surface-3 text-text-muted',
               )}>
-                {detecting && !detection ? 'Checking...' : detection?.status === 'found' ? 'Installed' : detection?.status === 'error' ? 'Error' : 'Not installed'}
+                {detecting && !detection ? 'Checking...' : detection?.status === 'found' ? (detection.authStatus === 'authenticated' ? 'Ready' : 'Installed') : detection?.status === 'error' ? 'Error' : 'Not installed'}
               </span>
             </button>
-            {!editing && adapter.id !== 'http' && detection?.status !== 'found' && (
-              <span className="inline-flex h-7 items-center justify-center rounded-btn border border-line bg-canvas px-2 text-[11px] font-medium text-text-muted">
-                {adapter.id === 'openclaw' ? 'Gateway' : adapter.id === 'claude_code' || adapter.id === 'codex' ? 'Install available' : 'Manual'}
-              </span>
-            )}
+            {showInstallAction ? (
+              <button
+                type="button"
+                onClick={() => onInstallRequest(adapter.id)}
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-btn border border-line bg-canvas px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+              >
+                {installOption?.canAutoInstall ? <Download size={11} /> : <ExternalLink size={11} />}
+                {installOption?.canAutoInstall ? 'Install' : 'Setup'}
+              </button>
+            ) : null}
           </div>
         );
       })}
     </div>
   );
+}
+
+function prefillConfigFromInstall(
+  config: RuntimeConfig,
+  adapterType: AdapterType,
+  result: { binaryPath?: string; detectedModel?: string },
+): RuntimeConfig {
+  const binaryPath = stringOf(result.binaryPath);
+  const detectedModel = stringOf(result.detectedModel);
+  if (!binaryPath && !detectedModel) return config;
+  if (adapterType === 'claude_code') {
+    return {
+      ...config,
+      claudeBinaryPath: config.claudeBinaryPath || binaryPath,
+      claudeModel: config.claudeModel || detectedModel || '',
+    };
+  }
+  if (adapterType === 'codex') {
+    return {
+      ...config,
+      codexBinaryPath: config.codexBinaryPath || binaryPath,
+      codexModel: config.codexModel || detectedModel || '',
+    };
+  }
+  if (adapterType === 'cursor') {
+    return {
+      ...config,
+      cursorBinaryPath: config.cursorBinaryPath || binaryPath,
+      cursorModel: config.cursorModel || detectedModel || '',
+    };
+  }
+  if (adapterType === 'hermes_agent') {
+    return {
+      ...config,
+      hermesBinaryPath: config.hermesBinaryPath || binaryPath,
+      hermesModel: config.hermesModel || detectedModel || '',
+    };
+  }
+  return config;
 }
 
 function prefillConfigFromDetection(config: RuntimeConfig, adapterType: AdapterType, detection: HarnessDetectionResult): RuntimeConfig {
@@ -744,34 +691,38 @@ function prefillConfigFromDetection(config: RuntimeConfig, adapterType: AdapterT
     };
   }
   if (adapterType === 'claude_code') {
-    if (!detection.binaryPath && !detection.detectedModel) return config;
+    const command = detectionCommand(detection);
+    if (!command && !detection.detectedModel) return config;
     return {
       ...config,
-      claudeBinaryPath: config.claudeBinaryPath || detection.binaryPath || '',
+      claudeBinaryPath: config.claudeBinaryPath || command,
       claudeModel: config.claudeModel || detection.detectedModel || '',
     };
   }
   if (adapterType === 'codex') {
-    if (!detection.binaryPath && !detection.detectedModel) return config;
+    const command = detectionCommand(detection);
+    if (!command && !detection.detectedModel) return config;
     return {
       ...config,
-      codexBinaryPath: config.codexBinaryPath || detection.binaryPath || '',
+      codexBinaryPath: config.codexBinaryPath || command,
       codexModel: config.codexModel || detection.detectedModel || '',
     };
   }
   if (adapterType === 'cursor') {
-    if (!detection.binaryPath && !detection.detectedModel) return config;
+    const command = detectionCommand(detection);
+    if (!command && !detection.detectedModel) return config;
     return {
       ...config,
-      cursorBinaryPath: config.cursorBinaryPath || detection.binaryPath || '',
+      cursorBinaryPath: config.cursorBinaryPath || command,
       cursorModel: config.cursorModel || detection.detectedModel || '',
     };
   }
   if (adapterType === 'hermes_agent') {
-    if (!detection.binaryPath && !detection.detectedModel) return config;
+    const command = detectionCommand(detection);
+    if (!command && !detection.detectedModel) return config;
     return {
       ...config,
-      hermesBinaryPath: config.hermesBinaryPath || detection.binaryPath || '',
+      hermesBinaryPath: config.hermesBinaryPath || command,
       hermesModel: config.hermesModel || detection.detectedModel || '',
     };
   }
@@ -888,10 +839,10 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<string, unknown>): RuntimeConfig {
   const base = { ...DEFAULT_RUNTIME_CONFIG };
   if (adapterType === 'openclaw') return { ...base, openclawGatewayId: stringOf(stored.gatewayId), openclawGatewayUrl: stringOf(stored.gatewayUrl), openclawModel: stringOf(stored.model), openclawDeviceTokenCredentialId: stringOf(stored.deviceTokenCredentialId), openclawAgentName: stringOf(stored.agentName), openclawSessionKeyStrategy: stringOf(stored.sessionKeyStrategy, DEFAULT_RUNTIME_CONFIG.openclawSessionKeyStrategy), openclawSessionKey: stringOf(stored.sessionKey), openclawTimeoutSec: stringOf(stored.timeoutSec, DEFAULT_RUNTIME_CONFIG.openclawTimeoutSec), openclawPayloadTemplate: jsonText(stored.payloadTemplate) };
-  if (adapterType === 'hermes_agent') return { ...base, hermesBinaryPath: stringOf(stored.binaryPath) || stringOf(stored.command), hermesCwd: stringOf(stored.cwd), hermesModel: stringOf(stored.model), hermesMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.hermesMaxTurns), hermesExtraArgs: arrayText(stored.extraArgs), hermesEnv: jsonText(stored.env), hermesTimeoutSec: stringOf(stored.timeoutSec), hermesGraceSec: stringOf(stored.graceSec) };
-  if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.binaryPath) || stringOf(stored.command), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
-  if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.binaryPath) || stringOf(stored.command), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBypassApprovalsAndSandbox: boolText(stored.dangerouslyBypassApprovalsAndSandbox, DEFAULT_RUNTIME_CONFIG.codexBypassApprovalsAndSandbox), codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
-  if (adapterType === 'cursor') return { ...base, cursorBinaryPath: stringOf(stored.binaryPath) || stringOf(stored.command), cursorCwd: stringOf(stored.cwd), cursorModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.cursorModel), cursorExtraArgs: arrayText(stored.extraArgs), cursorEnv: jsonText(stored.env), cursorTimeoutSec: stringOf(stored.timeoutSec) };
+  if (adapterType === 'hermes_agent') return { ...base, hermesBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), hermesCwd: stringOf(stored.cwd), hermesModel: stringOf(stored.model), hermesMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.hermesMaxTurns), hermesExtraArgs: arrayText(stored.extraArgs), hermesEnv: jsonText(stored.env), hermesTimeoutSec: stringOf(stored.timeoutSec), hermesGraceSec: stringOf(stored.graceSec) };
+  if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
+  if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBypassApprovalsAndSandbox: boolText(stored.dangerouslyBypassApprovalsAndSandbox, DEFAULT_RUNTIME_CONFIG.codexBypassApprovalsAndSandbox), codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
+  if (adapterType === 'cursor') return { ...base, cursorBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), cursorCwd: stringOf(stored.cwd), cursorModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.cursorModel), cursorExtraArgs: arrayText(stored.extraArgs), cursorEnv: jsonText(stored.env), cursorTimeoutSec: stringOf(stored.timeoutSec) };
   return { ...base, httpBaseUrl: stringOf(stored.baseUrl), httpAuthCredentialId: stringOf(stored.authCredentialId), httpSharedSecretCredentialId: stringOf(stored.sharedSecretCredentialId), httpDispatchPath: stringOf(stored.dispatchPath, DEFAULT_RUNTIME_CONFIG.httpDispatchPath), httpCancelPath: stringOf(stored.cancelPath), httpHealthPath: stringOf(stored.healthPath, DEFAULT_RUNTIME_CONFIG.httpHealthPath), httpMethod: stringOf(stored.method, DEFAULT_RUNTIME_CONFIG.httpMethod).toUpperCase(), httpHeaders: jsonText(stored.headers), httpPayloadTemplate: jsonText(stored.payloadTemplate), httpDispatchTimeoutMs: stringOf(stored.dispatchTimeoutMs, DEFAULT_RUNTIME_CONFIG.httpDispatchTimeoutMs) };
 }
 

@@ -107,8 +107,7 @@ export function ChatPanel({ mode = 'panel' }: Props) {
     setList(cv.conversations);
     setAgents(ag.agents);
     setTeams(teamRes.teams);
-    const nextRooms = await ensureGeneralRoom(roomRes.rooms);
-    setRooms(nextRooms);
+    setRooms(roomRes.rooms);
   }
 
   async function ensureGeneralRoom(existing: RoomRow[]): Promise<RoomRow[]> {

@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import type { WorkflowGraph, WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildRunRoutes } from '../../src/routes/runs.js';
 import { LedgerService } from '../../src/services/ledger.js';
@@ -40,6 +41,47 @@ function app() {
 function seedRun() {
   const wfId = randomUUID();
   const runId = randomUUID();
+  const graph: WorkflowGraph = {
+    version: 1,
+    nodes: [
+      {
+        id: 'writer',
+        type: 'agent_task',
+        title: 'Write summary',
+        position: { x: 0, y: 0 },
+        config: { kind: 'agent_task', prompt: 'Write a summary', capabilityTags: [], inputKeys: [], outputKeys: [] },
+      },
+    ],
+    edges: [],
+    viewport: { x: 0, y: 0, zoom: 1 },
+  };
+  const startedAt = '2026-05-20T10:00:00.000Z';
+  const completedAt = '2026-05-20T10:00:05.000Z';
+  const runState: WorkflowRunState = {
+    runId,
+    workflowId: wfId,
+    status: 'FAILED',
+    readyQueue: [],
+    waitingInputs: {},
+    nodeStates: {
+      writer: {
+        nodeId: 'writer',
+        status: 'FAILED',
+        startedAt,
+        completedAt,
+        inputData: { topic: 'Status update' },
+        outputData: { partial: 'Drafted intro' },
+        error: 'model timeout',
+      },
+    },
+    activeExecutions: {},
+    completedNodeIds: [],
+    failedNodeIds: ['writer'],
+    skippedNodeIds: [],
+    graphRevision: 0,
+    replanCount: 0,
+    lastLedgerSequence: 0,
+  };
   ctx.db
     .insert(schema.workflows)
     .values({
@@ -48,7 +90,7 @@ function seedRun() {
       ambientId: ctx.ambient.id,
       userId: ctx.user.id,
       title: 'WF',
-      graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+      graph,
       settings: {},
     })
     .run();
@@ -60,8 +102,10 @@ function seedRun() {
       ambientId: ctx.ambient.id,
       workflowId: wfId,
       userId: ctx.user.id,
-      status: 'CREATED',
-      runState: { runId, workflowId: wfId, status: 'CREATED', nodes: {} },
+      status: 'FAILED',
+      runState,
+      startedAt,
+      completedAt,
     })
     .run();
   return { wfId, runId };
@@ -72,8 +116,16 @@ describe('GET /v1/runs', () => {
     seedRun();
     const res = await app().request('/v1/runs', { headers: ctx.authHeaders });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { runs: unknown[] };
+    const body = (await res.json()) as {
+      runs: Array<{ workflowName?: string; failedNode?: string; durationMs?: number; finishedAt?: string | null }>;
+    };
     expect(body.runs).toHaveLength(1);
+    expect(body.runs[0]).toMatchObject({
+      workflowName: 'WF',
+      failedNode: 'Write summary',
+      durationMs: 5000,
+      finishedAt: '2026-05-20T10:00:05.000Z',
+    });
   });
 
   it('rejects without auth (401)', async () => {
@@ -83,10 +135,35 @@ describe('GET /v1/runs', () => {
 });
 
 describe('GET /v1/runs/:id', () => {
-  it('returns the run', async () => {
+  it('returns an operator-facing run detail payload', async () => {
     const { runId } = seedRun();
     const res = await app().request(`/v1/runs/${runId}`, { headers: ctx.authHeaders });
     expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      run: {
+        workflowName: string;
+        status: string;
+        durationMs: number;
+        nodes: Array<{
+          title: string;
+          status: string;
+          error?: string;
+          inputs?: { topic?: string };
+          outputSummary?: string;
+        }>;
+      };
+    };
+    expect(body.run.workflowName).toBe('WF');
+    expect(body.run.status).toBe('failed');
+    expect(body.run.durationMs).toBe(5000);
+    expect(body.run.nodes).toHaveLength(1);
+    expect(body.run.nodes[0]).toMatchObject({
+      title: 'Write summary',
+      status: 'failed',
+      error: 'model timeout',
+      inputs: { topic: 'Status update' },
+      outputSummary: 'partial',
+    });
   });
 
   it('returns 404 with WORKFLOW_RUN_NOT_FOUND for unknown id', async () => {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, Loader2, X } from 'lucide-react';
+import { AlertTriangle, Check, Loader2, Upload, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -214,12 +214,14 @@ export function AgentCreateWizard({
   const [playbook, setPlaybook] = useState('');
   const [capabilityTags, setCapabilityTags] = useState<string[]>([]);
   const [monthlyBudget, setMonthlyBudget] = useState('500');
+  const [avatarDataUrl, setAvatarDataUrl] = useState<string | null>(null);
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [channels, setChannels] = useState<Record<ChannelKind, ChannelDraft>>(cloneChannels());
   const [creating, setCreating] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<HarnessTestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+  const avatarFileRef = useRef<HTMLInputElement>(null);
 
   const orchestrator = useMemo(() => agents.find((agent) => agent.role === 'orchestrator') ?? null, [agents]);
   const managers = useMemo(() => agents.filter((agent) => agent.role === 'manager'), [agents]);
@@ -249,6 +251,7 @@ export function AgentCreateWizard({
     setPlaybook('');
     setCapabilityTags([]);
     setMonthlyBudget('500');
+    setAvatarDataUrl(null);
     setChannelsOpen(false);
     setChannels(cloneChannels());
     setTesting(false);
@@ -324,6 +327,21 @@ export function AgentCreateWizard({
 
   if (!open) return null;
 
+  function handleAvatarInput(file: File | undefined) {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Unsupported image', 'Use PNG, JPG, or WEBP.');
+      return;
+    }
+    if (file.size > 2_500_000) {
+      toast.error('Image too large', 'Use an image up to 2.5MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => setAvatarDataUrl(event.target?.result as string);
+    reader.readAsDataURL(file);
+  }
+
   async function refreshDetections() {
     setDetecting(true);
     try {
@@ -367,6 +385,7 @@ export function AgentCreateWizard({
           role,
           reportsTo: role === 'orchestrator' ? null : reportsTo || null,
           avatarGlyph: initials(name.trim()),
+          avatarUrl: avatarDataUrl || null,
           colorHex: ROLE_COLOR[role],
           adapterType,
           runtimeModel,
@@ -460,12 +479,34 @@ export function AgentCreateWizard({
             <div className="space-y-5">
               <section className="space-y-3">
                 <div className="flex items-center gap-4">
-                  <div
-                    className="flex h-16 w-16 items-center justify-center rounded-full border border-line bg-surface-2 text-base font-bold text-text-primary"
+                  <button
+                    type="button"
+                    onClick={() => avatarFileRef.current?.click()}
+                    className="group relative h-16 w-16 overflow-hidden rounded-full border border-line bg-surface-2 text-base font-bold text-text-primary"
                     style={{ boxShadow: `0 0 0 4px ${ROLE_COLOR[role]}22` }}
+                    aria-label="Upload avatar image"
                   >
-                    {initials(name)}
-                  </div>
+                    {avatarDataUrl ? (
+                      <img src={avatarDataUrl} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <span className="flex h-full w-full items-center justify-center">
+                        {initials(name)}
+                      </span>
+                    )}
+                    <span className="absolute inset-0 hidden items-center justify-center bg-black/55 text-white group-hover:flex">
+                      <Upload size={14} />
+                    </span>
+                  </button>
+                  <input
+                    ref={avatarFileRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={(event) => {
+                      handleAvatarInput(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                    className="hidden"
+                  />
                   <label className="min-w-0 flex-1">
                     <span className="text-xs font-medium text-text-secondary">Name</span>
                     <input
@@ -478,6 +519,11 @@ export function AgentCreateWizard({
                     />
                   </label>
                 </div>
+                {avatarDataUrl ? (
+                  <div className="text-[11px] text-text-muted">
+                    <button type="button" onClick={() => setAvatarDataUrl(null)} className="text-text-secondary hover:text-text-primary">Remove image</button>
+                  </div>
+                ) : null}
 
                 <label className="block space-y-1.5">
                   <span className="text-xs font-medium text-text-secondary">Description</span>

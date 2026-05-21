@@ -14,7 +14,13 @@ import { CodexAdapter } from '../adapters/CodexAdapter.js';
 import { CursorAdapter } from '../adapters/CursorAdapter.js';
 import { HermesAgentAdapter } from '../adapters/HermesAgentAdapter.js';
 import { assertSafeUrl } from './safeUrl.js';
-import { joinUrl, type V1HarnessAdapterType } from './harnessProbe.js';
+import { joinUrl, testHarnessConfig, type V1HarnessAdapterType } from './harnessProbe.js';
+import { repairCliHarnessConfig } from './harnessConfigRepair.js';
+
+export interface RegisterAdapterOptions {
+  skipConfigRepair?: boolean;
+  skipCliAvailabilityCheck?: boolean;
+}
 
 export interface AgentCommissionDeps {
   db: AgentisSqliteDb;
@@ -37,6 +43,7 @@ export interface CommissionAgentInput {
   config?: Record<string, unknown>;
   instructions?: string | null;
   avatarGlyph?: string | null;
+  avatarUrl?: string | null;
   runtimeModel?: string | null;
   role?: string | null;
   reportsTo?: string | null;
@@ -62,8 +69,10 @@ export async function commissionAgent(deps: AgentCommissionDeps, input: Commissi
   const colorHex = input.colorHex
     ?? CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)]
     ?? '#6366f1';
-  const config = input.config ?? {};
-  const insertedStatus = input.isPaused ? 'paused' : 'offline';
+  const repaired = await repairCliHarnessConfig(input.adapterType, input.config ?? {});
+  const config = repaired.config;
+  const isPaused = input.isPaused ?? false;
+  const insertedStatus = isPaused ? 'paused' : 'offline';
 
   deps.db
     .insert(schema.agents)
@@ -84,24 +93,27 @@ export async function commissionAgent(deps: AgentCommissionDeps, input: Commissi
       colorHex,
       instructions: input.instructions ?? null,
       avatarGlyph: input.avatarGlyph ?? null,
+      avatarUrl: input.avatarUrl ?? null,
       runtimeModel: input.runtimeModel ?? runtimeModelFromConfig(input.adapterType, config),
       role: input.role ?? null,
       reportsTo: input.reportsTo ?? null,
-      isPaused: input.isPaused ?? false,
+      isPaused,
       monthlyBudgetCents: input.monthlyBudgetCents ?? null,
       canvasPosition: input.canvasPosition ?? null,
     })
     .run();
 
-  try {
-    await registerAdapter(deps, input.workspaceId, id, input.adapterType, config);
-    deps.db
-      .update(schema.agents)
-      .set({ status: input.isPaused ? 'paused' : 'online', updatedAt: new Date().toISOString() })
-      .where(eq(schema.agents.id, id))
-      .run();
-  } catch (err) {
-    deps.logger.warn('agents.register_failed', { id, err: (err as Error).message });
+  if (!isPaused) {
+    try {
+      await registerAdapter(deps, input.workspaceId, id, input.adapterType, config);
+      deps.db
+        .update(schema.agents)
+        .set({ status: 'online', updatedAt: new Date().toISOString() })
+        .where(eq(schema.agents.id, id))
+        .run();
+    } catch (err) {
+      deps.logger.warn('agents.register_failed', { id, err: (err as Error).message });
+    }
   }
 
   const agentPayload = {
@@ -166,7 +178,9 @@ export async function registerAdapter(
   agentId: string,
   adapterType: V1HarnessAdapterType,
   config: Record<string, unknown>,
+  options: RegisterAdapterOptions = {},
 ) {
+  config = options.skipConfigRepair ? config : (await repairCliHarnessConfig(adapterType, config)).config;
   await deps.adapters.unregister(agentId);
   if (adapterType === 'openclaw') {
     const gatewayUrl = String(config.gatewayUrl ?? '');
@@ -219,9 +233,10 @@ export async function registerAdapter(
     return;
   }
   if (adapterType === 'codex') {
+    if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CodexAdapter({
       agentId,
-      binaryPath: stringOf(config.binaryPath) ?? undefined,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       maxTurns: numberOf(config.maxTurns),
@@ -238,9 +253,10 @@ export async function registerAdapter(
     return;
   }
   if (adapterType === 'cursor') {
+    if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CursorAdapter({
       agentId,
-      binaryPath: stringOf(config.binaryPath) ?? undefined,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       extraArgs: stringArrayOf(config.extraArgs),
@@ -253,9 +269,10 @@ export async function registerAdapter(
     return;
   }
   if (adapterType === 'hermes_agent') {
+    if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new HermesAgentAdapter({
       agentId,
-      binaryPath: stringOf(config.binaryPath) ?? undefined,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       maxTurns: numberOf(config.maxTurns),
@@ -269,9 +286,10 @@ export async function registerAdapter(
     deps.adapters.register(agentId, adapter);
     return;
   }
+  if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
   const adapter = new ClaudeCodeAdapter({
     agentId,
-    binaryPath: stringOf(config.binaryPath) ?? undefined,
+    binaryPath: cliCommandFromConfig(config) ?? undefined,
     cwd: stringOf(config.cwd) ?? undefined,
     model: stringOf(config.model) ?? undefined,
     maxTurns: numberOf(config.maxTurns),
@@ -283,6 +301,13 @@ export async function registerAdapter(
   });
   await adapter.connect();
   deps.adapters.register(agentId, adapter);
+}
+
+async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent'>, config: Record<string, unknown>) {
+  const result = await testHarnessConfig(adapterType, config);
+  if (result.status !== 'fail') return;
+  const firstError = result.checks.find((check) => check.level === 'error') ?? result.checks[0];
+  throw new AgentisError('VALIDATION_FAILED', firstError?.detail ? `${firstError.message} - ${firstError.detail}` : firstError?.message ?? 'Harness binary not found');
 }
 
 export function runtimeModelFromConfig(adapterType: V1HarnessAdapterType, config: Record<string, unknown>): string | null {
@@ -301,6 +326,10 @@ function httpUrlFromConfig(config: Record<string, unknown>, pathKey: string, url
 
 function stringOf(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function cliCommandFromConfig(config: Record<string, unknown>): string | null {
+  return stringOf(config.command) ?? stringOf(config.binaryPath);
 }
 
 function numberOf(value: unknown): number | undefined {

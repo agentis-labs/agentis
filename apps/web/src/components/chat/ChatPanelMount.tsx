@@ -7,6 +7,7 @@ const LazyChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m
 interface ChatPanelOpenDetail {
   agentId?: string;
   roomId?: string;
+  name?: string;
   initialDraft?: string;
   initialViewportOverride?: ViewportContext | null;
   viewportOverride?: ViewportContext | null;
@@ -20,11 +21,13 @@ export function ChatPanelMount() {
   const setState = useChatPanelStore((store) => store.setState);
   const selectThread = useChatPanelStore((store) => store.selectThread);
   const setLaunchContext = useChatPanelStore((store) => store.setLaunchContext);
+  const markOpenRequested = useChatPanelStore((store) => store.markOpenRequested);
 
   useEffect(() => {
     function onOpen(event: Event) {
       const detail = (event as CustomEvent<ChatPanelOpenDetail>).detail;
       setState('docked');
+      markOpenRequested();
       setLaunchContext(detail?.initialDraft || detail?.viewportOverride || detail?.initialViewportOverride || detail?.buildSession
         ? {
             initialDraft: detail.initialDraft,
@@ -34,16 +37,16 @@ export function ChatPanelMount() {
           }
         : null);
       if (detail?.agentId) {
-        selectThread({ kind: 'agent', id: detail.agentId, name: 'Conversation' });
+        selectThread({ kind: 'agent', id: detail.agentId, name: detail.name ?? 'Conversation' });
       } else if (detail?.roomId) {
-        selectThread({ kind: 'room', id: detail.roomId, name: 'Room' });
+        selectThread({ kind: 'room', id: detail.roomId, name: detail.name ?? 'Room' });
       } else {
         selectThread(null);
       }
     }
     window.addEventListener('agentis:chat-panel-open', onOpen);
     return () => window.removeEventListener('agentis:chat-panel-open', onOpen);
-  }, [selectThread, setLaunchContext, setState]);
+  }, [markOpenRequested, selectThread, setLaunchContext, setState]);
 
   if (state === 'hidden') return null;
 

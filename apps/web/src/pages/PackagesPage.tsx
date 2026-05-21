@@ -26,7 +26,7 @@ interface Package {
   id: string;
   name: string;
   slug: string;
-  kind: 'skill' | 'workflow' | 'agent' | 'integration' | 'agentis';
+  kind: 'skill' | 'workflow' | 'agent' | 'integration' | 'app';
   version?: string;
   description?: string;
   isTemplate?: boolean;
@@ -61,7 +61,7 @@ const TYPE_ICONS: Record<Package['kind'], LucideIcon> = {
   workflow: WorkflowIcon,
   agent:    Bot,
   integration: PackageIcon,
-  agentis:  PackageIcon,
+  app:      PackageIcon,
 };
 
 export function PackagesPage() {

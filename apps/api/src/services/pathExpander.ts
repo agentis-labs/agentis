@@ -72,24 +72,47 @@ function currentPathEntries(env: NodeJS.ProcessEnv): string[] {
   return raw.split(path.delimiter).filter(Boolean);
 }
 
+function windowsPreferredCandidates(env: NodeJS.ProcessEnv): string[] {
+  const userProfile = env.USERPROFILE ?? os.homedir();
+  const localAppData = env.LOCALAPPDATA ?? path.join(userProfile, 'AppData', 'Local');
+  return existing([
+    // Codex Desktop exposes a stable, user-writable CLI here. Prefer it over
+    // versioned WindowsApps package paths, which can exist but fail with EPERM.
+    path.join(localAppData, 'OpenAI', 'Codex', 'bin'),
+  ]);
+}
+
 function windowsCandidates(env: NodeJS.ProcessEnv): string[] {
   const userProfile = env.USERPROFILE ?? os.homedir();
   const appData = env.APPDATA ?? path.join(userProfile, 'AppData', 'Roaming');
   const localAppData = env.LOCALAPPDATA ?? path.join(userProfile, 'AppData', 'Local');
   const npmPrefix = env.npm_config_prefix ?? env.NPM_CONFIG_PREFIX;
   const systemRoot = env.SystemRoot ?? process.env.SystemRoot ?? 'C:\\Windows';
+  const programData = env.ProgramData ?? process.env.ProgramData ?? 'C:\\ProgramData';
   return existing([
     path.join(systemRoot, 'System32'),
     systemRoot,
     path.join(systemRoot, 'System32', 'Wbem'),
     npmPrefix,
     path.join(appData, 'npm'),
+    path.join(appData, 'npm', 'node_modules', '.bin'),
     path.join(localAppData, 'npm'),
     path.join(userProfile, 'AppData', 'Roaming', 'npm'),
     path.join(localAppData, 'pnpm'),
     path.join(appData, 'pnpm'),
+    path.join(localAppData, 'Microsoft', 'WindowsApps'),
     path.join(userProfile, '.local', 'bin'),
+    path.join(userProfile, '.npm-global'),
+    path.join(userProfile, '.npm-global', 'bin'),
+    path.join(userProfile, '.volta', 'bin'),
+    path.join(userProfile, '.bun', 'bin'),
+    path.join(userProfile, '.cargo', 'bin'),
+    path.join(userProfile, '.claude', 'local'),
+    path.join(userProfile, '.claude', 'local', 'node_modules', '.bin'),
+    path.join(userProfile, '.codex', 'bin'),
     path.join(userProfile, 'scoop', 'shims'),
+    path.join(programData, 'chocolatey', 'bin'),
+    path.join(localAppData, 'Programs', 'nodejs'),
     'C:\\Program Files\\nodejs',
     ...claudeShellSnapshotPathCandidates(userProfile),
   ]);
@@ -133,8 +156,13 @@ export function defaultPathForPlatform(): string {
 export function buildExpandedPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = currentPathEntries(env);
   const fallback = base.length > 0 ? [] : defaultPathForPlatform().split(path.delimiter);
+  const preferred = process.platform === 'win32' ? windowsPreferredCandidates(env) : [];
   const candidates = process.platform === 'win32' ? windowsCandidates(env) : unixCandidates(env);
-  return dedupe([...base, ...fallback, ...candidates]).join(path.delimiter);
+  return dedupe([...preferred, ...base, ...fallback, ...candidates]).join(path.delimiter);
+}
+
+export function expandedPathEntries(env: NodeJS.ProcessEnv = process.env): string[] {
+  return buildExpandedPath(env).split(path.delimiter).filter(Boolean);
 }
 
 export function withExpandedPath(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -185,12 +213,6 @@ export function resolveCommandPath(command: string, cwd = process.cwd(), env: No
   return null;
 }
 
-function quoteForCmd(arg: string): string {
-  if (!arg.length) return '""';
-  const escaped = arg.replace(/"/g, '""');
-  return /[\s"&<>|^()]/.test(escaped) ? `"${escaped}"` : escaped;
-}
-
 function resolveWindowsCmdShell(env: NodeJS.ProcessEnv): string {
   const systemRoot = env.SystemRoot ?? process.env.SystemRoot ?? 'C:\\Windows';
   return path.join(systemRoot, 'System32', 'cmd.exe');
@@ -209,10 +231,9 @@ export function resolveSpawnTarget(
   if (process.platform !== 'win32') return { command: executable, args };
 
   if (/\.(cmd|bat)$/i.test(executable)) {
-    const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(' ');
     return {
       command: resolveWindowsCmdShell(expandedEnv),
-      args: ['/d', '/s', '/c', commandLine],
+      args: ['/d', '/s', '/c', 'call', executable, ...args],
     };
   }
 
