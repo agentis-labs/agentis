@@ -33,6 +33,7 @@ import { NodePalette } from '../components/canvas/NodePalette';
 import { NodeCommandPalette } from '../components/canvas/NodeCommandPalette';
 import { WorkflowContractsPanel, type WorkflowContractValue } from '../components/canvas/WorkflowContractsPanel';
 import { EventChainsPanel } from '../components/canvas/EventChainsPanel';
+import { PhaseLayer } from '../components/canvas/PhaseLayer';
 import { ContextInspector, type InspectorSelection } from '../components/canvas/ContextInspector';
 import { RunDrawer } from '../components/canvas/RunDrawer';
 import { CanvasEngine } from '../components/canvas/CanvasEngine';
@@ -795,7 +796,14 @@ export function WorkflowCanvasPage() {
             minimapPosition="bottom-left"
             backgroundGap={20}
             backgroundColor="#1c2028"
-          />
+          >
+            {wf && Array.isArray((wf.graph as unknown as { phases?: unknown }).phases) && (
+              <PhaseLayer
+                phases={(wf.graph as unknown as { phases: Array<{ id: string; name: string; color: string; nodeIds: string[] }> }).phases}
+                nodes={flowNodes.map((n) => ({ id: n.id, position: n.position }))}
+              />
+            )}
+          </CanvasEngine>
           {hasKnowledgeNode && knowledgeBaseCount === 0 && <KnowledgeCanvasCallout onOpen={() => nav('/knowledge')} />}
           <RunDrawer runId={activeRunId} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
           {contextMenu && (

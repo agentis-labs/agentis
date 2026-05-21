@@ -1,16 +1,16 @@
 import { useMemo } from 'react';
+import { ViewportPortal } from '@xyflow/react';
 
 /**
  * PhaseLayer — colored region backgrounds that group canvas nodes into
- * logical phases. Renders behind nodes as an absolutely-positioned SVG layer
- * so the React Flow viewport transforms apply cleanly.
+ * logical phases. Rendered through React Flow's `ViewportPortal` so the
+ * regions live in flow coordinates and pan/zoom with the nodes.
  *
  * A "phase" is a named bag of node ids with a color. The layer computes a
  * bounding rect around the contained nodes (with padding), draws a tinted
- * rectangle + label, and lets the canvas keep rendering its own nodes on top.
- * Large workflows (50+ nodes) become legible because operators can read the
- * graph as "first this phase, then that one" instead of as an indecipherable
- * spaghetti.
+ * region + label behind the nodes. Large workflows (50+ nodes) become legible
+ * because operators can read the graph as "first this phase, then that one"
+ * instead of as indecipherable spaghetti.
  *
  * The shape (`WorkflowPhase`) mirrors what brain-apps' AppLayoutSection will
  * use — keep this dumb and dependency-free.
@@ -84,60 +84,54 @@ export function PhaseLayer({ phases, nodes, padding = 24, onPhaseClick }: PhaseL
 
   if (rects.length === 0) return null;
 
+  // ViewportPortal renders children into the flow's transformed coordinate
+  // space — so absolute positions in flow units pan/zoom with the nodes.
+  // Each region is its own absolutely-positioned div behind the nodes.
   return (
-    <div
-      // React Flow renders viewport transforms on the parent; we just sit
-      // inside the same coordinate space at z-index 0 so nodes (z-index 5+)
-      // render on top of our region tint.
-      style={{ position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' }}
-    >
-      <svg width="100%" height="100%" style={{ position: 'absolute', inset: 0, overflow: 'visible' }}>
-        {rects.map((rect) => (
-          <g key={rect.spec.id}>
-            <rect
-              x={rect.x}
-              y={rect.y}
-              width={rect.width}
-              height={rect.height}
-              fill={rect.spec.color}
-              fillOpacity={0.08}
-              stroke={rect.spec.color}
-              strokeOpacity={0.35}
-              strokeWidth={1}
-              strokeDasharray="6 4"
-              rx={12}
-              ry={12}
-            />
-            <foreignObject
-              x={rect.x + 12}
-              y={rect.y + 8}
-              width={Math.max(180, rect.width - 24)}
-              height={24}
-              style={{ overflow: 'visible' }}
-            >
-              <div
-                onClick={() => onPhaseClick?.(rect.spec.id)}
-                style={{
-                  pointerEvents: 'auto',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '2px 8px',
-                  borderRadius: 999,
-                  background: rect.spec.color,
-                  color: 'var(--color-canvas, #0c0d10)',
-                  fontSize: 11,
-                  fontWeight: 600,
-                  cursor: onPhaseClick ? 'pointer' : 'default',
-                  userSelect: 'none',
-                }}
-              >
-                {rect.spec.name}
-              </div>
-            </foreignObject>
-          </g>
-        ))}
-      </svg>
-    </div>
+    <ViewportPortal>
+      {rects.map((rect) => (
+        <div
+          key={rect.spec.id}
+          style={{
+            position: 'absolute',
+            transform: `translate(${rect.x}px, ${rect.y}px)`,
+            width: rect.width,
+            height: rect.height,
+            background: rect.spec.color,
+            opacity: 0.08,
+            border: `1px dashed ${rect.spec.color}`,
+            borderRadius: 12,
+            pointerEvents: 'none',
+            zIndex: 0,
+          }}
+        />
+      ))}
+      {rects.map((rect) => (
+        <div
+          key={`${rect.spec.id}-label`}
+          onClick={() => onPhaseClick?.(rect.spec.id)}
+          style={{
+            position: 'absolute',
+            transform: `translate(${rect.x + 12}px, ${rect.y + 8}px)`,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '2px 8px',
+            borderRadius: 999,
+            background: rect.spec.color,
+            color: 'var(--color-canvas, #0c0d10)',
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: onPhaseClick ? 'pointer' : 'default',
+            userSelect: 'none',
+            pointerEvents: onPhaseClick ? 'auto' : 'none',
+            zIndex: 1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {rect.spec.name}
+        </div>
+      ))}
+    </ViewportPortal>
   );
 }
