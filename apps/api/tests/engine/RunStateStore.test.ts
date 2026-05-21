@@ -32,7 +32,13 @@ beforeEach(() => {
       runState: {},
       inputs: {},
       outputs: {},
-    })
+      // Seed an explicit, clearly-past updatedAt so the "bumps updatedAt"
+      // assertion compares two JS-sourced ISO strings instead of mixing
+      // SQLite's strftime('now') with JS Date.now() — those two clock
+      // sources can skew on coarse-timer platforms (Windows ~15ms) and
+      // flake the comparison.
+      updatedAt: '2000-01-01T00:00:00.000Z',
+    } as never)
     .run();
 });
 
@@ -77,14 +83,11 @@ describe('RunStateStore', () => {
   });
 
   it('save() also bumps updatedAt', () => {
+    // Baseline is the seeded year-2000 timestamp, so save()'s wall-clock
+    // updatedAt is unambiguously newer — no cross-clock-source flake.
     const before = db.select().from(schema.workflowRuns).all()[0]!.updatedAt;
-    // Tiny delay to ensure ISO timestamp difference; resolution is ms.
-    const start = Date.now();
-    while (Date.now() - start < 5) {
-      /* spin */
-    }
     store.save(makeState());
     const after = db.select().from(schema.workflowRuns).all()[0]!.updatedAt;
-    expect(after >= before).toBe(true);
+    expect(after > before).toBe(true);
   });
 });
