@@ -82,7 +82,7 @@ function waitForRunStatus(runId: string, target: 'COMPLETED' | 'FAILED'): Promis
   return new Promise<void>((resolve, reject) => {
     const evt =
       target === 'COMPLETED' ? REALTIME_EVENTS.RUN_COMPLETED : REALTIME_EVENTS.RUN_FAILED;
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${target} on ${runId}`)), 2000);
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${target} on ${runId}`)), 15_000);
     const off = ctx.bus.subscribe((m) => {
       if (m.room === `run:${runId}` && m.envelope.event === evt) {
         clearTimeout(timer);

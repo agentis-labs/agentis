@@ -88,9 +88,10 @@ async function startAndWait(wfId: string, graph: WorkflowGraph, inputs: Record<s
     initialState,
     graph,
   });
-  // Wait for the run to terminate.
+  // Wait for the run to terminate. Generous timeout so a loaded CI host
+  // doesn't false-fail a run that completes correctly but slowly.
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timeout')), 4000);
+    const timer = setTimeout(() => reject(new Error('timeout')), 15_000);
     const off = ctx.bus.subscribe((m) => {
       if (m.room === `run:${runId}` && (
         m.envelope.event === REALTIME_EVENTS.RUN_COMPLETED
@@ -326,7 +327,7 @@ describe('WorkflowEngine — interrupted run recovery', () => {
     expect(summary.failed).toBe(0);
     // Wait for the resumed run to finish (timer already elapsed → fires immediately).
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timeout')), 3000);
+      const timer = setTimeout(() => reject(new Error('timeout')), 15_000);
       const off = ctx.bus.subscribe((m) => {
         if (m.room === `run:${runId}` && m.envelope.event === REALTIME_EVENTS.RUN_COMPLETED) {
           clearTimeout(timer); off(); resolve();

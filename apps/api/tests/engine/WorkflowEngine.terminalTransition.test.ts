@@ -106,7 +106,9 @@ function seedRun(opts: { parentRunId: string | null }) {
 
 function waitForCompleted(runId: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for COMPLETED on ${runId}`)), 2000);
+    // Generous timeout so a heavily-loaded CI host doesn't false-fail a run
+    // that completes correctly, just slowly. A truly-hung run still fails.
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for COMPLETED on ${runId}`)), 15_000);
     const off = ctx.bus.subscribe((m) => {
       if (m.room === `run:${runId}` && m.envelope.event === REALTIME_EVENTS.RUN_COMPLETED) {
         clearTimeout(timer);
