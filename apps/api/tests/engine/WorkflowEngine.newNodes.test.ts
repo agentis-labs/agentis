@@ -265,6 +265,93 @@ describe('WorkflowEngine — workflow_store node', () => {
   });
 });
 
+describe('WorkflowEngine — interrupted run recovery', () => {
+  function seedInterruptedRun(opts: {
+    activeExecutions: Record<string, unknown>;
+  }): { wfId: string; runId: string } {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'W', type: 'wait', title: 'Pause', position: { x: 200, y: 0 }, config: { kind: 'wait', delayMs: 100 } },
+        { id: 'X', type: 'transform', title: 'After', position: { x: 400, y: 0 }, config: { kind: 'transform', expression: '({ done: true })', isOutput: true } },
+      ],
+      edges: [
+        { id: 'e1', source: 'T', target: 'W' },
+        { id: 'e2', source: 'W', target: 'X' },
+      ],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = randomUUID();
+    const state = {
+      runId,
+      workflowId: wfId,
+      status: 'RUNNING',
+      readyQueue: [],
+      waitingInputs: { X: { requiredInputs: ['W'], receivedInputs: {}, sourceNodeIds: ['W'] } },
+      nodeStates: {
+        T: { nodeId: 'T', status: 'COMPLETED' },
+        W: { nodeId: 'W', status: 'RUNNING' },
+        X: { nodeId: 'X', status: 'PENDING' },
+      },
+      activeExecutions: opts.activeExecutions,
+      completedNodeIds: ['T'],
+      failedNodeIds: [],
+      skippedNodeIds: [],
+      graphRevision: 1,
+      replanCount: 0,
+      lastLedgerSequence: 0,
+    };
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId: wfId,
+      userId: ctx.user.id,
+      status: 'RUNNING',
+      runState: state,
+    }).run();
+    return { wfId, runId };
+  }
+
+  it('resumes a wait-only interrupted run (timer already elapsed → completes)', async () => {
+    const { runId } = seedInterruptedRun({
+      activeExecutions: {
+        W: { taskId: 'wait:W', nodeId: 'W', executorType: 'wait', executorRef: 'timer:100ms', startedAt: new Date().toISOString(), wakeAt: new Date(Date.now() - 1000).toISOString(), inputData: { from: 'trigger' } },
+      },
+    });
+    const summary = await engine.recoverInterruptedRuns();
+    expect(summary.resumed).toBe(1);
+    expect(summary.failed).toBe(0);
+    // Wait for the resumed run to finish (timer already elapsed → fires immediately).
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), 3000);
+      const off = ctx.bus.subscribe((m) => {
+        if (m.room === `run:${runId}` && m.envelope.event === REALTIME_EVENTS.RUN_COMPLETED) {
+          clearTimeout(timer); off(); resolve();
+        }
+      });
+    });
+    const row = loadRun(runId);
+    expect(row.status).toBe('COMPLETED');
+    const state = row.runState as { completedNodeIds: string[] };
+    expect(state.completedNodeIds).toContain('X');
+  });
+
+  it('fails a run with non-recoverable external work in flight', async () => {
+    const { runId } = seedInterruptedRun({
+      activeExecutions: {
+        A: { taskId: 'task-1', nodeId: 'A', executorType: 'agent', executorRef: 'agent-xyz', startedAt: new Date().toISOString() },
+      },
+    });
+    const summary = await engine.recoverInterruptedRuns();
+    expect(summary.resumed).toBe(0);
+    expect(summary.failed).toBe(1);
+    expect(loadRun(runId).status).toBe('FAILED');
+  });
+});
+
 describe('WorkflowEngine — output contract enforcement', () => {
   it('downgrades to COMPLETED_WITH_CONTRACT_VIOLATION when the output is missing a required field', async () => {
     const graph: WorkflowGraph = {

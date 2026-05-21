@@ -179,6 +179,99 @@ export class WorkflowEngine {
   }
 
   /**
+   * Recover runs interrupted by a process restart.
+   *
+   * Called once at boot. The in-memory `#runs` map is empty after a restart,
+   * so any run left in `RUNNING` would hang forever. We split them:
+   *
+   *   - RESUMABLE: a run whose ONLY in-flight work is `wait` timers. The wait
+   *     node's sole effect is the delay, and we persisted `wakeAt` + inputs,
+   *     so we can rebuild the context, re-arm the timer for the remaining
+   *     delay (firing immediately if it already elapsed), and re-enter the
+   *     dispatch loop. This makes "wait an hour, then send" survive restarts.
+   *
+   *   - NON-RECOVERABLE: a run with an in-flight agent / skill / http /
+   *     integration / subflow / evaluator execution. We can't know whether
+   *     that external work completed, so re-dispatching risks double
+   *     side-effects. These are failed loud with a clear reason.
+   *
+   * Returns a summary so bootstrap can log it.
+   */
+  async recoverInterruptedRuns(): Promise<{ resumed: number; failed: number }> {
+    const running = this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.status, 'RUNNING'))
+      .all();
+    let resumed = 0;
+    let failed = 0;
+    for (const run of running) {
+      const state = run.runState as unknown as WorkflowRunState | null;
+      const activeExecs = state?.activeExecutions ? Object.values(state.activeExecutions) : [];
+      const allWaits = activeExecs.length > 0 && activeExecs.every((e) => e.executorType === 'wait');
+      if (!allWaits || !run.workflowId || !state) {
+        // Non-recoverable — fail loud.
+        this.deps.db
+          .update(schema.workflowRuns)
+          .set({ status: 'FAILED', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .where(eq(schema.workflowRuns.id, run.id))
+          .run();
+        failed += 1;
+        continue;
+      }
+      try {
+        const graph = this.#loadWorkflowGraph(run.workflowId);
+        const ctx: RunningContext = {
+          runId: run.id,
+          workflowId: run.workflowId,
+          workspaceId: run.workspaceId,
+          ambientId: run.ambientId,
+          conversationId: run.conversationId ?? null,
+          userId: run.userId,
+          graph,
+          downstreamEdges: buildDownstreamEdges(graph),
+          state,
+          eventsSinceSnapshot: 0,
+          inflightDispatches: 0,
+          swarms: new Map(),
+          selfHealAttempts: new Map(),
+        };
+        this.#runs.set(ctx.runId, ctx);
+        // Re-arm each wait timer for its remaining delay.
+        for (const exec of activeExecs) {
+          const wakeAt = (exec as unknown as { wakeAt?: string }).wakeAt;
+          const inputData = ((exec as unknown as { inputData?: Record<string, unknown> }).inputData) ?? {};
+          const remaining = wakeAt ? Math.max(0, new Date(wakeAt).getTime() - Date.now()) : 0;
+          const fire = () => {
+            delete ctx.state.activeExecutions[exec.nodeId];
+            void (async () => {
+              await this.#completeNode(ctx, exec.nodeId, inputData);
+              void this.#tick(ctx);
+            })();
+          };
+          if (remaining <= 0) {
+            queueMicrotask(fire);
+          } else {
+            const timer = setTimeout(fire, remaining);
+            timer.unref?.();
+          }
+        }
+        this.deps.logger.info('engine.run_resumed', { runId: run.id, waits: activeExecs.length });
+        resumed += 1;
+      } catch (err) {
+        this.deps.logger.warn('engine.run_resume_failed', { runId: run.id, err: (err as Error).message });
+        this.deps.db
+          .update(schema.workflowRuns)
+          .set({ status: 'FAILED', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .where(eq(schema.workflowRuns.id, run.id))
+          .run();
+        failed += 1;
+      }
+    }
+    return { resumed, failed };
+  }
+
+  /**
    * Dry-run a single node in isolation.
    *
    * Builds an ephemeral RunningContext that does NOT persist to the database

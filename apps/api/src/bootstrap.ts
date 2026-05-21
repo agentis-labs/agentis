@@ -13,8 +13,6 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { eq } from 'drizzle-orm';
-import { schema } from '@agentis/db/sqlite';
 import { loadEnv, type AgentisEnv } from './env.js';
 import { createLogger, type Logger } from './logger.js';
 import { loadOrCreateSecrets, type AgentisSecrets } from './secrets.js';
@@ -423,37 +421,17 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       jobQueue.start();
       runCompaction.start();
 
-      // Reclaim runs that were RUNNING when the previous process died. The
-      // engine's in-memory #runs map is empty after a restart — those runs
-      // would hang in RUNNING forever otherwise. We mark them FAILED with a
-      // clear reason so operators can see and replay them. A future v1.1
-      // ships durable run resume; today's contract is "fail loud, not
-      // silent."
+      // Recover runs interrupted by the previous process. Wait-only runs are
+      // resumed (timers re-armed for their remaining delay); runs with
+      // non-recoverable external work in flight are failed loud. See
+      // WorkflowEngine.recoverInterruptedRuns.
       try {
-        const orphaned = sqlite
-          .select({ id: schema.workflowRuns.id })
-          .from(schema.workflowRuns)
-          .where(eq(schema.workflowRuns.status, 'RUNNING'))
-          .all();
-        if (orphaned.length > 0) {
-          for (const row of orphaned) {
-            sqlite
-              .update(schema.workflowRuns)
-              .set({
-                status: 'FAILED',
-                completedAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              })
-              .where(eq(schema.workflowRuns.id, row.id))
-              .run();
-          }
-          logger.warn('agentis.orphan_runs_failed', {
-            count: orphaned.length,
-            reason: 'previous engine died mid-run; restart cannot resume non-persisted state',
-          });
+        const recovery = await engine.recoverInterruptedRuns();
+        if (recovery.resumed > 0 || recovery.failed > 0) {
+          logger.info('agentis.run_recovery', recovery);
         }
       } catch (err) {
-        logger.warn('agentis.orphan_scan_failed', { err: (err as Error).message });
+        logger.warn('agentis.run_recovery_failed', { err: (err as Error).message });
       }
       const url = `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`;
       logger.info('agentis.listening', { url });
