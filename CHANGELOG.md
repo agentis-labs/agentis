@@ -64,8 +64,13 @@ merge.
 - `RunCompactionService` — daily compaction of terminal-run state
   (>30 days) and ledger pruning (>90 days).
 - Wait nodes persist `wakeAt` + inputs before arming the timer.
-- Boot-time orphan reclamation — runs left `RUNNING` by a dead process
-  are failed-loud with a structured log instead of hanging forever.
+- **Durable wait-resume** — `recoverInterruptedRuns()` at boot rebuilds
+  runs whose only in-flight work is `wait` timers and re-arms them for
+  their remaining delay. "Wait an hour, then send" now survives a
+  restart. Runs with in-flight external work (agent/skill/http/
+  integration/subflow) fail loud rather than risk double side-effects.
+- Loop nodes persist per-chunk progress for refresh-safe UI + future
+  resume groundwork.
 
 #### Fixed
 - `safeExpression` strict-mode crash (`eval`/`arguments` as parameter
@@ -75,8 +80,12 @@ merge.
 - Subflow parent notification ordering vs. `RUN_COMPLETED`.
 
 #### Deferred to a future engine pass
-- True durable run resume (rebuild in-memory run state after restart).
-- Loop crash recovery (resume mid-iteration).
+- Loop crash recovery (resume a half-finished loop mid-iteration).
+  Requires per-iteration idempotency keys to be safe — re-running
+  iterations would double-fire their side effects — so it's a design
+  task, not a quick add. Today a loop interrupted by a restart fails
+  loud and the operator replays it; per-chunk progress is persisted as
+  groundwork.
 
 ## [1.0.0] — 2026-05-20
 

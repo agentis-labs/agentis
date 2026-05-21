@@ -1875,6 +1875,23 @@ export class WorkflowEngine {
         total: items.length,
         errors: errors.length,
       });
+
+      // Persist per-chunk progress onto the loop node's state. This survives a
+      // page refresh (the canvas reads it back) and gives a future
+      // idempotent-resume the cursor it needs. NOTE: we deliberately do NOT
+      // auto-resume a half-finished loop after a restart — re-running
+      // iterations would double-fire their side effects (agent/http/integration
+      // calls). Safe loop resume requires per-iteration idempotency keys, which
+      // is a separate design. Until then a loop interrupted by a restart fails
+      // loud and the operator replays it.
+      const loopNs = ctx.state.nodeStates[node.id];
+      if (loopNs) {
+        loopNs.outputData = {
+          ...(loopNs.outputData ?? {}),
+          _loopProgress: { completed: chunkEnd, total: items.length, errors: errors.length },
+        };
+        await this.#persistRun(ctx);
+      }
     }
 
     delete ctx.state.activeExecutions[node.id];
