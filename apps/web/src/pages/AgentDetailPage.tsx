@@ -66,11 +66,13 @@ interface AgentDetail {
 }
 
 interface InstructionFile {
+  key: string;
   name: string;
   description?: string;
   content: string;
   readonly?: boolean;
-  source: 'harness' | 'platform';
+  source: 'workspace' | 'runtime' | 'platform';
+  path?: string;
 }
 
 interface RunHistoryEntry {
@@ -492,9 +494,9 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
       toast.error('File already exists', fileName);
       return;
     }
-    const created: InstructionFile = { name: fileName, content: '', source: 'platform' };
+    const created: InstructionFile = { key: `platform:${fileName}`, name: fileName, content: '', source: 'platform' };
     setFiles((arr) => [...arr, created]);
-    setActive(fileName);
+    setActive(created.key);
     setDraft('');
     setNewFileName(null);
   }
@@ -510,17 +512,20 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
         setFiles(list);
         const first = list[0];
         if (first) {
-          setActive(first.name);
+          setActive(first.key);
           setDraft(first.content);
+        } else {
+          setActive(null);
+          setDraft('');
         }
       } catch {
         if (cancelled) return;
         const sys = agent.systemPrompt ?? '';
         const fallback: InstructionFile[] = sys
-          ? [{ name: 'system.md', content: sys, source: 'platform', description: 'System prompt' }]
+          ? [{ key: 'platform:system.md', name: 'system.md', content: sys, source: 'platform', description: 'System prompt' }]
           : [];
         setFiles(fallback);
-        if (fallback[0]) { setActive(fallback[0].name); setDraft(fallback[0].content); }
+        if (fallback[0]) { setActive(fallback[0].key); setDraft(fallback[0].content); }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -528,18 +533,18 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
     return () => { cancelled = true; };
   }, [agent.id, agent.systemPrompt]);
 
-  const activeFile = files.find((f) => f.name === active);
+  const activeFile = files.find((f) => f.key === active);
 
   async function save() {
     if (!activeFile) return;
     setSaving(true);
     try {
-      await api(`/v1/agents/${agent.id}/instructions/${encodeURIComponent(activeFile.name)}`, {
+      await api(`/v1/agents/${agent.id}/instructions/${encodeURIComponent(activeFile.key)}`, {
         method: 'PUT',
         body: JSON.stringify({ content: draft }),
       });
       toast.success('Saved', activeFile.name);
-      setFiles((arr) => arr.map((f) => f.name === activeFile.name ? { ...f, content: draft } : f));
+      setFiles((arr) => arr.map((f) => f.key === activeFile.key ? { ...f, content: draft } : f));
     } catch (e) { toast.error('Failed to save', String(e)); }
     finally { setSaving(false); }
   }
@@ -584,11 +589,11 @@ function InstructionsTab({ agent }: { agent: AgentDetail }) {
       <aside className="space-y-1">
         {files.map((f) => (
           <button
-            key={f.name}
+            key={f.key}
             type="button"
-            onClick={() => { setActive(f.name); setDraft(f.content); }}
+            onClick={() => { setActive(f.key); setDraft(f.content); }}
             className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
-              active === f.name
+              active === f.key
                 ? 'bg-surface-2 text-text-primary'
                 : 'text-text-muted hover:bg-surface-2 hover:text-text-primary'
             }`}

@@ -26,6 +26,8 @@ export interface ToolCallPillData {
   status: ToolCallStatus;
   /** Optional duration in ms (rendered on success). */
   durationMs?: number | null;
+  /** Tool input arguments. */
+  args?: unknown;
   /** Result payload (any shape). */
   result?: unknown;
   /** Error message when status = 'error'. */

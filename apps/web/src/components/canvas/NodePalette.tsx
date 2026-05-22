@@ -23,7 +23,7 @@ export interface PaletteNodeType {
   defaults?: Record<string, unknown>;
 }
 
-export type PaletteTier = 'control' | 'data' | 'intel' | 'knowledge' | 'human';
+export type PaletteTier = 'control' | 'data' | 'intel' | 'knowledge' | 'output' | 'human';
 
 export interface PaletteSection {
   tier: PaletteTier;
@@ -77,6 +77,15 @@ const SECTIONS: PaletteSection[] = [
     ],
   },
   {
+    tier: 'output',
+    title: 'Output & native',
+    nodes: [
+      { type: 'return_output', label: 'Return Output', glyph: '▣', description: 'Declare the rendered result (html/markdown/table/json/text)', defaults: { renderAs: 'json' } },
+      { type: 'artifact_save', label: 'Save Artifact',  glyph: '⭳', description: 'Persist a file artifact to the workspace', defaults: { name: 'output.txt' } },
+      { type: 'browser',       label: 'Browser',        glyph: '◐', description: 'Render HTML / screenshot / PDF in real Chromium', defaults: { operation: 'serve_html' } },
+    ],
+  },
+  {
     tier: 'human',
     title: 'Human gates',
     nodes: [
@@ -108,6 +117,7 @@ export function NodePalette({
     data: false,
     intel: false,
     knowledge: true,
+    output: false,
     human: true,
   });
 

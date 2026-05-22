@@ -14,6 +14,7 @@ import { promises as dns } from 'node:dns';
 import net from 'node:net';
 import type {
   AgentAdapter,
+  AdapterCapabilities,
   AdapterHealthStatus,
   NormalizedAgentEvent,
   NormalizedTask,
@@ -65,6 +66,14 @@ export class HermesAdapter implements AgentAdapter {
       isHealthy: this.#breaker.state() !== 'open',
       checkedAt: new Date().toISOString(),
       ...(this.#breaker.state() === 'open' ? { error: 'circuit_breaker_open' } : {}),
+    };
+  }
+
+  capabilities(): AdapterCapabilities {
+    return {
+      interactiveChat: true,
+      toolCalling: true,
+      toolForwarding: 'native',
     };
   }
 
@@ -134,7 +143,7 @@ export class HermesAdapter implements AgentAdapter {
             ? {
                 tools: tools.map((t) => ({
                   type: 'function',
-                  function: { name: t.name, description: t.description, parameters: t.parameters },
+                  function: { name: t.name, description: formatToolDescription(t), parameters: t.parameters },
                 })),
                 tool_choice: 'auto',
               }
@@ -722,4 +731,13 @@ function extractToolCallsFull(
       arguments: parsedArgs,
     };
   });
+}
+
+function formatToolDescription(tool: ToolDefinition): string {
+  if (!tool.examples?.length) return tool.description;
+  const examples = tool.examples.slice(0, 2).map((example, index) => {
+    const input = safeJson(example.input).replace(/\s+/g, ' ');
+    return `${index + 1}. ${example.description}: ${input}`;
+  }).join(' ');
+  return `${tool.description}\nExamples: ${examples}`;
 }

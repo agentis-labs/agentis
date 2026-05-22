@@ -8,20 +8,21 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { Clock } from 'lucide-react';
+import { Clock, Plus, Minimize2 } from 'lucide-react';
 import type { ViewportContext } from '@agentis/core';
 import { ThreadView } from '../components/chat/ThreadView';
 import { SessionHistoryPanel } from '../components/chat/SessionHistoryPanel';
 import {
-  ChatScopeBadge,
   formatChatScopeDescriptor,
-  formatChatScopeName,
   formatChatScopePlaceholder,
 } from '../components/chat/scopeIdentity';
 import { api } from '../lib/api';
 import { usePrimaryChatScopes } from '../components/chat/usePrimaryChatScopes';
+import { useChatPanelStore } from '../components/chat/ChatPanelStore';
+import { clearDraft } from '../components/ChatPanel/Composer';
+import { RoomCreateDialog } from '../components/chat/RoomCreateDialog';
 
-type Selected = { kind: 'room' | 'agent'; id: string; name: string };
+type Selected = { kind: 'room' | 'agent'; id: string; name: string; conversationId?: string | null; archivedAt?: string | null };
 type ChatRouteState = { viewportOverride?: ViewportContext | null };
 
 export function ChatPage() {
@@ -36,7 +37,9 @@ export function ChatPage() {
   const routeState = (location.state as ChatRouteState | null) ?? null;
   const [selected, setSelected] = useState<Selected | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [roomCreateOpen, setRoomCreateOpen] = useState(false);
   const { loading, orchestrator, scopes, workspaceName, missingOrchestrator } = usePrimaryChatScopes();
+  const { setState: setPanelState } = useChatPanelStore();
 
   const currentThread = selected ?? (orchestrator ? { kind: 'agent' as const, id: orchestrator.id, name: orchestrator.name } : null);
   const currentScope = currentThread?.kind === 'agent'
@@ -68,6 +71,18 @@ export function ChatPage() {
     : undefined;
   const initialDraft = appCreationDraft ?? (routedDraft || undefined);
 
+  function requestNewChat() {
+    if (!currentThread) return;
+    clearDraft(`${currentThread.kind}:${currentThread.id}`);
+    if (currentThread.kind === 'agent') {
+      window.dispatchEvent(new CustomEvent('agentis:chat-new-conversation', {
+        detail: { kind: currentThread.kind, id: currentThread.id },
+      }));
+      return;
+    }
+    setRoomCreateOpen(true);
+  }
+
   return (
     <div className="flex h-full">
       <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-surface">
@@ -89,9 +104,9 @@ export function ChatPage() {
           {historyOpen ? (
             <SessionHistoryPanel
               onBack={() => setHistoryOpen(false)}
-              onOpenAgent={(id, name) => {
+              onOpenAgent={(id, name, options) => {
                 setHistoryOpen(false);
-                setSelected({ kind: 'agent', id, name });
+                setSelected({ kind: 'agent', id, name, conversationId: options?.conversationId ?? null, archivedAt: options?.archivedAt ?? null });
                 nav(`/chat/agent/${id}`, { replace: true });
               }}
               onOpenRoom={(id, name) => {
@@ -114,50 +129,18 @@ export function ChatPage() {
             <EmptyOrchestratorState onOpenAgents={() => nav('/agents')} compact />
           ) : (
             <div className="p-3">
-              <div className="mb-2 text-[10px] font-medium uppercase tracking-wider text-text-muted">Workspace scopes</div>
-              <div className="space-y-1.5">
-                {scopes.map((scope) => {
-                  const active = currentThread?.kind === 'agent' && currentThread.id === scope.id;
-                  return (
-                    <button
-                      key={scope.id}
-                      type="button"
-                      onClick={() => {
-                        setHistoryOpen(false);
-                        if (scope.role === 'orchestrator') {
-                          setSelected(null);
-                          nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
-                        } else {
-                          setSelected({ kind: 'agent', id: scope.id, name: scope.name });
-                          nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
-                        }
-                      }}
-                      className={
-                        active
-                          ? 'flex w-full items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-left text-accent'
-                          : 'flex w-full items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-left text-text-primary hover:bg-surface-3'
-                      }
-                    >
-                      <ChatScopeBadge role={scope.role} active={active} size={12} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] font-medium">
-                          {formatChatScopeName(scope)}
-                        </span>
-                        <span className={active ? 'block truncate text-[11px] text-accent/80' : 'block truncate text-[11px] text-text-muted'}>
-                          {formatChatScopeDescriptor(scope, workspaceName)}
-                        </span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                onClick={() => setHistoryOpen(true)}
-                className="mt-3 w-full rounded-btn border border-line bg-surface px-3 py-2 text-[12px] text-text-secondary hover:bg-surface-2 hover:text-text-primary"
-              >
-                Browse conversation history
-              </button>
+              {selected && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelected(null);
+                    nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
+                  }}
+                  className="mt-2 w-full rounded-btn border border-line bg-surface-2 px-3 py-2 text-[12px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                >
+                  Back to {orchestrator?.name ?? 'orchestrator'}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -181,24 +164,50 @@ export function ChatPage() {
                           : 'Direct thread'}
                 </div>
               </div>
-              {showingSecondaryThread && (
+              <div className="flex items-center gap-2">
+                {showingSecondaryThread && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelected(null);
+                      nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
+                    }}
+                    className="rounded-btn border border-line bg-surface-2 px-3 py-1.5 text-[11px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  >
+                    Back to {orchestrator?.name ?? 'orchestrator'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={requestNewChat}
+                  aria-label="New chat"
+                  title="New chat"
+                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                >
+                  <Plus size={14} />
+                </button>
                 <button
                   type="button"
                   onClick={() => {
-                    setSelected(null);
-                    nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
+                    setPanelState('docked');
+                    nav('/');
                   }}
-                  className="rounded-btn border border-line bg-surface-2 px-3 py-1.5 text-[11px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  aria-label="Minimize to panel"
+                  title="Minimize to panel"
+                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
                 >
-                  Back to {orchestrator?.name ?? 'orchestrator'}
+                  <Minimize2 size={14} />
                 </button>
-              )}
+              </div>
             </header>
             <div className="min-h-0 flex-1">
               <ThreadView
+                key={`${currentThread.kind}:${currentThread.id}:${currentThread.conversationId ?? 'active'}`}
                 kind={currentThread.kind}
                 id={currentThread.id}
                 name={currentThread.name}
+                conversationId={currentThread.kind === 'agent' ? currentThread.conversationId ?? null : null}
+                archivedAt={currentThread.kind === 'agent' ? currentThread.archivedAt ?? null : null}
                 initialDraft={initialDraft}
                 initialViewportOverride={routeState?.viewportOverride ?? null}
                 autoSendInitialDraft={autoSendInitialDraft && !appCreationMode}
@@ -210,6 +219,11 @@ export function ChatPage() {
                       : undefined
                 }
                 emptyBody={appCreationMode ? 'Describe the app you want. The orchestrator can design it, confirm the plan, and create it for you.' : undefined}
+                onConversationReset={(conversationId) => {
+                  if (currentThread.kind !== 'agent') return;
+                  setSelected({ kind: 'agent', id: currentThread.id, name: currentThread.name, conversationId, archivedAt: null });
+                  nav(`/chat/agent/${currentThread.id}`, { replace: true });
+                }}
               />
             </div>
           </>
@@ -230,6 +244,16 @@ export function ChatPage() {
           </div>
         )}
       </section>
+      <RoomCreateDialog
+        open={roomCreateOpen}
+        onClose={() => setRoomCreateOpen(false)}
+        onCreated={(room) => {
+          setRoomCreateOpen(false);
+          setHistoryOpen(false);
+          setSelected({ kind: 'room', id: room.id, name: room.name });
+          nav('/chat', { replace: true });
+        }}
+      />
     </div>
   );
 }

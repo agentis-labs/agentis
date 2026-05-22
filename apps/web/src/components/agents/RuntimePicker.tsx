@@ -5,6 +5,7 @@ import { Check, Download, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { api } from '../../lib/api';
 import { ClaudeIcon, CodexIcon, CursorIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
 import { HarnessInstallSlideOver } from './HarnessInstallSlideOver';
+import { ModelChooser } from './ModelChooser';
 
 export type AdapterType = 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'http';
 
@@ -67,6 +68,7 @@ export interface RuntimeConfig {
   httpHeaders: string;
   httpPayloadTemplate: string;
   httpDispatchTimeoutMs: string;
+  httpModel: string;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
@@ -121,6 +123,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   httpHeaders: '',
   httpPayloadTemplate: '',
   httpDispatchTimeoutMs: '30000',
+  httpModel: '',
 };
 
 export interface HarnessDetectionResult {
@@ -473,30 +476,20 @@ function HarnessModelPassthrough({
   config: RuntimeConfig;
   onConfigChange: (value: RuntimeConfig) => void;
 }) {
-  if (adapterType === 'http' || adapterType === 'openclaw') return null;
-
   const modelKey = adapterType === 'claude_code' ? 'claudeModel'
     : adapterType === 'codex' ? 'codexModel'
     : adapterType === 'cursor' ? 'cursorModel'
-    : 'hermesModel';
+    : adapterType === 'hermes_agent' ? 'hermesModel'
+    : adapterType === 'openclaw' ? 'openclawModel'
+    : 'httpModel';
   const value = config[modelKey];
 
-  const placeholder = adapterType === 'claude_code' ? 'e.g. claude-sonnet-4-6 (leave blank for default)'
-    : adapterType === 'codex' ? 'e.g. gpt-5.3-codex (leave blank for default)'
-    : adapterType === 'cursor' ? 'e.g. auto (leave blank for default)'
-    : 'e.g. hermes-auto (leave blank for default)';
-
   return (
-    <div className="space-y-1.5 rounded-lg border border-line bg-surface-2 p-3">
-      <div className="text-xs font-medium uppercase tracking-wider text-text-muted">Model override</div>
-      <input
-        value={value}
-        onChange={(event) => onConfigChange({ ...config, [modelKey]: event.target.value })}
-        placeholder={placeholder}
-        className={inputCls}
-      />
-      <div className="text-[11px] text-text-muted">Optional. Leave blank to use the harness default model.</div>
-    </div>
+    <ModelChooser
+      adapterType={adapterType}
+      value={value}
+      onChange={(next) => onConfigChange({ ...config, [modelKey]: next })}
+    />
   );
 }
 
@@ -843,7 +836,7 @@ export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<s
   if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBypassApprovalsAndSandbox: boolText(stored.dangerouslyBypassApprovalsAndSandbox, DEFAULT_RUNTIME_CONFIG.codexBypassApprovalsAndSandbox), codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'cursor') return { ...base, cursorBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), cursorCwd: stringOf(stored.cwd), cursorModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.cursorModel), cursorExtraArgs: arrayText(stored.extraArgs), cursorEnv: jsonText(stored.env), cursorTimeoutSec: stringOf(stored.timeoutSec) };
-  return { ...base, httpBaseUrl: stringOf(stored.baseUrl), httpAuthCredentialId: stringOf(stored.authCredentialId), httpSharedSecretCredentialId: stringOf(stored.sharedSecretCredentialId), httpDispatchPath: stringOf(stored.dispatchPath, DEFAULT_RUNTIME_CONFIG.httpDispatchPath), httpCancelPath: stringOf(stored.cancelPath), httpHealthPath: stringOf(stored.healthPath, DEFAULT_RUNTIME_CONFIG.httpHealthPath), httpMethod: stringOf(stored.method, DEFAULT_RUNTIME_CONFIG.httpMethod).toUpperCase(), httpHeaders: jsonText(stored.headers), httpPayloadTemplate: jsonText(stored.payloadTemplate), httpDispatchTimeoutMs: stringOf(stored.dispatchTimeoutMs, DEFAULT_RUNTIME_CONFIG.httpDispatchTimeoutMs) };
+  return { ...base, httpBaseUrl: stringOf(stored.baseUrl), httpAuthCredentialId: stringOf(stored.authCredentialId), httpSharedSecretCredentialId: stringOf(stored.sharedSecretCredentialId), httpDispatchPath: stringOf(stored.dispatchPath, DEFAULT_RUNTIME_CONFIG.httpDispatchPath), httpCancelPath: stringOf(stored.cancelPath), httpHealthPath: stringOf(stored.healthPath, DEFAULT_RUNTIME_CONFIG.httpHealthPath), httpMethod: stringOf(stored.method, DEFAULT_RUNTIME_CONFIG.httpMethod).toUpperCase(), httpHeaders: jsonText(stored.headers), httpPayloadTemplate: jsonText(stored.payloadTemplate), httpDispatchTimeoutMs: stringOf(stored.dispatchTimeoutMs, DEFAULT_RUNTIME_CONFIG.httpDispatchTimeoutMs), httpModel: stringOf(stored.model) };
 }
 
 export function runtimeConfigToAdapterConfig(adapterType: AdapterType, config: RuntimeConfig): Record<string, unknown> {
@@ -852,12 +845,12 @@ export function runtimeConfigToAdapterConfig(adapterType: AdapterType, config: R
   if (adapterType === 'claude_code') return compact({ binaryPath: config.claudeBinaryPath, command: config.claudeBinaryPath, cwd: config.claudeCwd, model: config.claudeModel, maxTurns: positiveNumber(config.claudeMaxTurns), allowedTools: splitCsv(config.claudeAllowedTools), extraArgs: splitArgs(config.claudeExtraArgs), env: jsonStringRecord(config.claudeEnv), timeoutSec: positiveNumber(config.claudeTimeoutSec) });
   if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), dangerouslyBypassApprovalsAndSandbox: boolValue(config.codexBypassApprovalsAndSandbox), extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
   if (adapterType === 'cursor') return compact({ binaryPath: config.cursorBinaryPath, command: config.cursorBinaryPath, cwd: config.cursorCwd, model: config.cursorModel, extraArgs: splitArgs(config.cursorExtraArgs), env: jsonStringRecord(config.cursorEnv), timeoutSec: positiveNumber(config.cursorTimeoutSec) });
-  return compact({ baseUrl: config.httpBaseUrl, authCredentialId: config.httpAuthCredentialId, sharedSecretCredentialId: config.httpSharedSecretCredentialId, dispatchPath: config.httpDispatchPath, cancelPath: config.httpCancelPath, healthPath: config.httpHealthPath, method: config.httpMethod, headers: jsonStringRecord(config.httpHeaders), payloadTemplate: jsonObject(config.httpPayloadTemplate), dispatchTimeoutMs: positiveNumber(config.httpDispatchTimeoutMs) });
+  return compact({ baseUrl: config.httpBaseUrl, authCredentialId: config.httpAuthCredentialId, sharedSecretCredentialId: config.httpSharedSecretCredentialId, dispatchPath: config.httpDispatchPath, cancelPath: config.httpCancelPath, healthPath: config.httpHealthPath, method: config.httpMethod, headers: jsonStringRecord(config.httpHeaders), payloadTemplate: jsonObject(config.httpPayloadTemplate), dispatchTimeoutMs: positiveNumber(config.httpDispatchTimeoutMs), model: config.httpModel });
 }
 
 export function runtimeModelFor(adapterType: AdapterType, config: RuntimeConfig): string | null {
   if (adapterType === 'openclaw') return config.openclawModel || null;
-  if (adapterType === 'http') return null;
+  if (adapterType === 'http') return config.httpModel || null;
   if (adapterType === 'hermes_agent') return config.hermesModel || null;
   if (adapterType === 'claude_code') return config.claudeModel || null;
   if (adapterType === 'codex') return config.codexModel || DEFAULT_RUNTIME_CONFIG.codexModel;
@@ -870,7 +863,7 @@ export function runtimeLabelFor(adapterType: AdapterType, config: RuntimeConfig)
   if (adapterType === 'claude_code') return config.claudeModel || 'Claude Code';
   if (adapterType === 'codex') return config.codexModel || DEFAULT_RUNTIME_CONFIG.codexModel;
   if (adapterType === 'cursor') return config.cursorModel || DEFAULT_RUNTIME_CONFIG.cursorModel;
-  return 'HTTP / Webhook';
+  return config.httpModel || 'HTTP / Webhook';
 }
 
 export function isV1AdapterType(value: string): value is AdapterType {

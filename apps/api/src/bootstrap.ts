@@ -45,6 +45,7 @@ import { ViewportStore } from './services/viewportStore.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
 import { AdapterManager } from './adapters/AdapterManager.js';
+import { HermesAdapter } from './adapters/HermesAdapter.js';
 import { WorkflowEngine } from './engine/WorkflowEngine.js';
 import { ActiveWorkflowRegistry } from './engine/ActiveWorkflowRegistry.js';
 import { TriggerRuntime } from './engine/TriggerRuntime.js';
@@ -75,6 +76,9 @@ import { buildBudgetRoutes } from './routes/budgets.js';
 import { BudgetService } from './services/budget.js';
 import { defaultConnectorRegistry } from '@agentis/integrations';
 import { WorkflowStoreService } from './services/workflowStore.js';
+import { WorkspaceVolumeService } from './services/workspaceVolume.js';
+import { WorkspaceIntelligenceService } from './services/workspaceIntelligence.js';
+import { BrowserPool } from './services/browserPool.js';
 import { EvaluatorRuntime } from './services/evaluatorRuntime.js';
 import { buildTerminalRoutes } from './routes/terminal.js';
 import { buildCredentialRoutes } from './routes/credentials.js';
@@ -93,6 +97,7 @@ import { buildPackageRoutes } from './routes/packages.js';
 import { PackagerService } from './services/packager.js';
 import { hydrateAgentRuntimes } from './services/agentRuntimeHydrator.js';
 import { buildArtifactRoutes } from './routes/artifacts.js';
+import { buildWorkspaceContextRoutes } from './routes/workspaceContext.js';
 import { buildIssueRoutes } from './routes/issues.js';
 import { buildKnowledgeBaseRoutes } from './routes/knowledgeBases.js';
 import { buildToolRoutes } from './routes/tools.js';
@@ -165,6 +170,13 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const teamService = new TeamService(sqlite, bus);
   const budgetService = new BudgetService({ db: sqlite, bus, approvals });
   const workflowStoreService = new WorkflowStoreService(sqlite);
+  // Layer 1 — Workspace Intelligence: persistent context files on the Volume,
+  // injected into every agent_task + the build_workflow synthesis prompt.
+  const workspaceVolume = new WorkspaceVolumeService(env.AGENTIS_DATA_DIR);
+  const workspaceIntelligence = new WorkspaceIntelligenceService(workspaceVolume);
+  // Native Playwright runtime for `browser` nodes (lazy: Chromium installs on
+  // first use if absent). Headless Chromium, capped by AGENTIS_BROWSER_CONCURRENCY.
+  const browserPool = new BrowserPool(logger);
 
   // EvaluatorRuntime — only constructed when an LLM endpoint is configured.
   // Without these env vars, `evaluator` nodes throw at dispatch time and
@@ -217,6 +229,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     workflowStore: workflowStoreService,
     evaluatorRuntime,
     vault: credentialVault,
+    workspaceIntelligence,
+    browserPool,
     telemetry,
   });
   const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations });
@@ -259,9 +273,38 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     replay,
     knowledgeBases: knowledgeBaseService,
     evaluatorRuntime,
+    workspaceIntelligence,
   });
   ChatToolExecutor.configure({ registry: toolRegistry, logger });
-  ChatSessionExecutor.configure({ db: sqlite, logger, bus, adapters });
+
+  // Workflow-dispatched agents get a concise awareness manifest of the
+  // platform tools (mcp-exposed subset) so CLI agents running a node know the
+  // Agentis surface exists (CHAT-10X-VISION §4.4.2). Awareness only — workflow
+  // dispatch is fire-and-forget; interactive execution stays on the chat path.
+  adapters.setToolManifestProvider(() =>
+    toolRegistry.catalog({ mcpOnly: true }).tools.map((tool) => ({ name: tool.id, description: tool.description })),
+  );
+
+  // Orchestrator chat runtime (fast path) — opt-in. Gives the operator-facing
+  // chat a native function-calling brain even when the selected agent runs on a
+  // slow marker-protocol CLI (Codex / Claude Code). Falls back to the evaluator
+  // endpoint; when neither is configured, chat uses the agent's own adapter.
+  const orchestratorBaseUrl = env.AGENTIS_ORCHESTRATOR_BASE_URL ?? env.AGENTIS_EVALUATOR_BASE_URL;
+  const orchestratorModel = env.AGENTIS_ORCHESTRATOR_MODEL ?? env.AGENTIS_EVALUATOR_MODEL;
+  const orchestratorRuntime = (orchestratorBaseUrl && orchestratorModel)
+    ? new HermesAdapter({
+        agentId: 'orchestrator-runtime',
+        baseUrl: orchestratorBaseUrl,
+        model: orchestratorModel,
+        apiKey: env.AGENTIS_ORCHESTRATOR_API_KEY ?? env.AGENTIS_EVALUATOR_API_KEY,
+        logger,
+      })
+    : undefined;
+  logger.info('chat.orchestrator_runtime', {
+    enabled: Boolean(orchestratorRuntime),
+    model: orchestratorRuntime ? orchestratorModel : null,
+  });
+  ChatSessionExecutor.configure({ db: sqlite, logger, bus, adapters, orchestratorRuntime });
 
   const orchestratorBridge = new OrchestratorEventBridge({ db: sqlite, bus, logger });
   orchestratorBridge.start();
@@ -324,6 +367,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/skills', buildSkillRoutes({ db: sqlite, auth }));
   app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, bus, logger }));
   app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus }));
+  app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
   app.route('/v1/issues', buildIssueRoutes({ db: sqlite, auth, issues, replay, engine }));
   app.route('/v1/knowledge-bases', buildKnowledgeBaseRoutes({ db: sqlite, auth, knowledge: knowledgeBaseService }));
   app.route('/v1/tools', buildToolRoutes({ db: sqlite, auth, toolRegistry }));
@@ -337,7 +381,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge }));
   app.route('/v1/credentials', buildCredentialRoutes({ db: sqlite, auth, vault: credentialVault }));
   app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
-  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore }));
+  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus }));
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));
   app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge }));
@@ -445,6 +489,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       eventChain.shutdown();
       orchestratorBridge.stop();
       channelBridge.shutdown();
+      await browserPool.shutdown().catch((err) => logger.warn('agentis.shutdown.browser', { err: (err as Error).message }));
       await registry.shutdown().catch((err) => logger.warn('agentis.shutdown.registry', { err: (err as Error).message }));
       for (const reg of adapters.list()) {
         await adapters.unregister(reg.agentId).catch(() => {});

@@ -14,6 +14,14 @@
  * string names, so the dialect swap stays type-safe.
  */
 
+// Versioned migration runner surface (used by the `agentis migrate` CLI and
+// tests). Re-exported here so `@agentis/db` consumers don't reach into deep
+// module paths.
+export { runSqliteMigrations, getSqliteMigrationStatus } from './migrate.js';
+export type { MigrationStatus, RunSqliteMigrationsResult } from './migrate.js';
+export { SQLITE_MIGRATIONS } from './sqlite/migrations.js';
+export type { Migration } from './sqlite/migrations.js';
+
 export type AgentisDbMode = 'embedded' | 'standard';
 
 export interface ModeDetectionEnv {

@@ -34,6 +34,29 @@ class FailingChatAdapter extends StreamingAdapter {
   }
 }
 
+class ConfirmationOnlyAdapter extends StreamingAdapter {
+  override async *chat(_messages: ChatMessage[], _tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
+    yield {
+      type: 'confirmation_required',
+      turnId: randomUUID(),
+      toolCall: { id: 'tool_run', name: 'agentis.workflow.run', args: { workflowId: 'wf_1' } },
+      title: 'Run workflow?',
+      body: 'This will start a real workflow run.',
+      impact: {
+        summary: 'This will start a real workflow run in the current workspace.',
+        details: ['Workflow: wf_1'],
+        riskLevel: 'medium',
+        reversible: false,
+        externalSideEffects: true,
+      },
+      confirmLabel: 'Run workflow',
+      cancelLabel: 'Cancel',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    yield { type: 'done', finishReason: 'stop' };
+  }
+}
+
 function seedAgent(ctx: TestContext) {
   const id = randomUUID();
   ctx.db.insert(schema.agents).values({
@@ -121,5 +144,44 @@ describe('conversations SSE', () => {
     const conversation = conversations.list(ctx.workspace.id)[0]!;
     const messages = conversations.messages(conversation.id, 10);
     expect(messages.map((message) => message.body)).toEqual(['hello']);
+  });
+
+  it('persists confirmation cards even when the assistant has no text yet', async () => {
+    const agentId = seedAgent(ctx);
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new ConfirmationOnlyAdapter());
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const app = ctx.buildApp([
+      {
+        path: '/v1/conversations',
+        app: buildConversationRoutes({ db: ctx.db, auth: ctx.auth, conversations, adapters, logger: ctx.logger }),
+      },
+    ]);
+
+    const res = await app.request(`/v1/conversations/${agentId}/send`, {
+      method: 'POST',
+      headers: { ...ctx.authHeaders, accept: 'text/event-stream' },
+      body: JSON.stringify({ body: 'run it' }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('confirmation_required');
+    expect(text).toContain('event: message');
+
+    const conversation = conversations.list(ctx.workspace.id)[0]!;
+    const messages = conversations.messages(conversation.id, 10);
+    expect(messages.map((message) => message.body)).toEqual(['run it', 'Run workflow?']);
+    expect(messages[1]!.metadata).toMatchObject({
+      source: 'chat_loop',
+      confirmation: {
+        title: 'Run workflow?',
+        status: 'pending',
+        impact: {
+          riskLevel: 'medium',
+          externalSideEffects: true,
+        },
+      },
+    });
   });
 });

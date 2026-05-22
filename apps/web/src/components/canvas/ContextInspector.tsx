@@ -37,6 +37,9 @@ const KIND_LABEL: Record<string, string> = {
   wait: 'Wait / Timer',
   variables: 'Variables',
   scratchpad: 'Scratchpad',
+  return_output: 'Return Output',
+  artifact_save: 'Save Artifact',
+  browser: 'Browser',
 };
 
 export function ContextInspector({
@@ -323,6 +326,12 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <ParallelForm data={data} update={update} />;
     case 'artifact_collect':
       return <ArtifactCollectForm data={data} update={update} />;
+    case 'return_output':
+      return <ReturnOutputForm data={data} update={update} upstream={upstream} />;
+    case 'artifact_save':
+      return <ArtifactSaveForm data={data} update={update} />;
+    case 'browser':
+      return <BrowserForm data={data} update={update} upstream={upstream} />;
     default:
       // Fallback: render generic key/value editors for unknown kinds.
       return <GenericForm data={data} update={update} />;
@@ -1166,6 +1175,111 @@ function ArtifactCollectForm({ data, update }: { data: Record<string, unknown>; 
             className="rounded border-line bg-surface-2 accent-accent"
           />
           <span className="text-[12px] text-text-primary">Hold for operator review</span>
+        </label>
+      </Field>
+    </>
+  );
+}
+
+// ─── Output surface & native browser ────────────────────────────────────────
+
+function ReturnOutputForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
+  return (
+    <>
+      <Field label="Render as" hint="How the Output tab renders this result.">
+        <select className={selectCls} value={asStr(data.renderAs) || 'json'} onChange={(e) => update({ renderAs: e.target.value })}>
+          <option value="html">HTML — live sandboxed preview</option>
+          <option value="markdown">Markdown — rendered</option>
+          <option value="table">Table — rows</option>
+          <option value="json">JSON — collapsible</option>
+          <option value="text">Text — plain</option>
+        </select>
+      </Field>
+      <Field label="Title (optional)" hint="Heading shown above the rendered output.">
+        <input type="text" className={inputCls} value={asStr(data.title)} placeholder="Weekly digest" onChange={(e) => update({ title: e.target.value || undefined })} />
+      </Field>
+      <Field label="Value path (optional)" hint="Dot path into the input to render. Blank = whole input. Type `{{` to pick.">
+        <TemplatedTextField
+          placeholder="nodes.summary.text"
+          value={asStr(data.valuePath)}
+          onChange={(next) => update({ valuePath: next || undefined })}
+          upstream={upstream}
+        />
+      </Field>
+    </>
+  );
+}
+
+function ArtifactSaveForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="File name" hint="e.g. report.html, leads.csv — extension drives the artifact type.">
+        <input type="text" className={inputCls} value={asStr(data.name)} placeholder="report.html" onChange={(e) => update({ name: e.target.value })} />
+      </Field>
+      <Field label="Artifact type (optional)" hint="Override the type inferred from the file name.">
+        <select className={selectCls} value={asStr(data.artifactType) || ''} onChange={(e) => update({ artifactType: e.target.value || undefined })}>
+          <option value="">Auto-detect</option>
+          <option value="html">HTML</option>
+          <option value="image">Image</option>
+          <option value="document">Document</option>
+          <option value="code">Code</option>
+          <option value="data">Data</option>
+        </select>
+      </Field>
+      <Field label="Content path (optional)" hint="Dot path into the input for the content to save. Blank = whole input as JSON.">
+        <input type="text" className={inputCls} value={asStr(data.contentPath)} placeholder="nodes.render.content" onChange={(e) => update({ contentPath: e.target.value || undefined })} />
+      </Field>
+      <Field label="Title path (optional)" hint="Dot path into the input for an artifact title.">
+        <input type="text" className={inputCls} value={asStr(data.titlePath)} placeholder="nodes.meta.title" onChange={(e) => update({ titlePath: e.target.value || undefined })} />
+      </Field>
+    </>
+  );
+}
+
+function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
+  const op = asStr(data.operation) || 'serve_html';
+  const usesHtml = op === 'serve_html' || op === 'screenshot' || op === 'pdf';
+  const usesUrl = op === 'screenshot' || op === 'pdf' || op === 'navigate' || op === 'extract_text';
+  return (
+    <>
+      <Field label="Operation" hint="Native Chromium runs headless; Chromium auto-installs on first use.">
+        <select className={selectCls} value={op} onChange={(e) => update({ operation: e.target.value })}>
+          <option value="serve_html">serve_html — render HTML + screenshot</option>
+          <option value="screenshot">screenshot — capture a URL/HTML → PNG</option>
+          <option value="pdf">pdf — print a URL/HTML → PDF</option>
+          <option value="navigate">navigate — load URL, return title/text</option>
+          <option value="extract_text">extract_text — text under a selector</option>
+        </select>
+      </Field>
+      {usesUrl && (
+        <Field label="URL" hint="Type `{{` to insert a variable.">
+          <TemplatedTextField placeholder="https://example.com" value={asStr(data.url)} onChange={(next) => update({ url: next })} upstream={upstream} />
+        </Field>
+      )}
+      {usesHtml && (
+        <>
+          <Field label="HTML path (optional)" hint="Dot path into the input for the HTML string (chains after a transform).">
+            <input type="text" className={inputCls} value={asStr(data.htmlPath)} placeholder="content" onChange={(e) => update({ htmlPath: e.target.value || undefined })} />
+          </Field>
+          <Field label="Inline HTML (optional)" hint="Used when no HTML path is set.">
+            <TemplatedTextField multiline mono rows={4} placeholder="<h1>Hello World</h1>" value={asStr(data.html)} onChange={(next) => update({ html: next || undefined })} upstream={upstream} />
+          </Field>
+        </>
+      )}
+      {op === 'extract_text' && (
+        <Field label="Selector" hint="CSS selector to extract (defaults to body).">
+          <input type="text" className={inputCls} value={asStr(data.selector)} placeholder="main article" onChange={(e) => update({ selector: e.target.value || undefined })} />
+        </Field>
+      )}
+      <Field label="Open visible window">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={data.headless === false}
+            onChange={(e) => update({ headless: e.target.checked ? false : undefined })}
+            className="rounded border-line bg-surface-2 accent-accent"
+          />
+          <span className="text-[12px] text-text-primary">Show a real browser window on the host (else headless)</span>
         </label>
       </Field>
     </>

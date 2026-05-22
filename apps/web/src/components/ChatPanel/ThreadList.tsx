@@ -6,7 +6,7 @@
  * pinned to the top of "Direct Threads" with a `◎ Orchestrator` label
  * and the Agentis platform-badge dot next to its avatar.
  */
-import { Hash, Megaphone, MessageCircle, Plus, Sparkles } from 'lucide-react';
+import { Hash, Megaphone, MessageCircle, Plus } from 'lucide-react';
 import type { AgentRow, ConversationRow, RoomRow, TeamRow } from './ChatPanel';
 
 function isOrchestrator(agent: AgentRow): boolean {
@@ -104,15 +104,6 @@ export function ThreadList({ list, agents, rooms, teams, onSelect, onSelectRoom,
                     <button type="button" onClick={() => onSelect(thread.agentId)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-surface-2">
                       <span className="relative mt-1 shrink-0">
                         <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: thread.agentColor }} />
-                        {orch && (
-                          <span
-                            aria-hidden
-                            className="absolute -right-1 -top-1 grid h-3 w-3 place-items-center rounded-full border border-canvas bg-accent text-[7px] font-bold text-canvas"
-                            title="Agentis orchestrator"
-                          >
-                            <Sparkles size={6} />
-                          </span>
-                        )}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-2">

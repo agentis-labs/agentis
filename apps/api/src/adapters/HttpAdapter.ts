@@ -11,9 +11,13 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type {
   AgentAdapter,
+  AdapterCapabilities,
   AdapterHealthStatus,
+  ChatDelta,
+  ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
+  ToolDefinition,
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
@@ -25,10 +29,14 @@ export interface HttpAdapterOptions {
   dispatchUrl: string;
   cancelUrl?: string;
   healthUrl?: string;
+  chatUrl?: string;
+  supportsTools?: boolean;
+  model?: string;
   method?: 'POST' | 'GET' | 'PUT' | 'PATCH';
   headers?: Record<string, string>;
   payloadTemplate?: Record<string, unknown>;
   dispatchTimeoutMs?: number;
+  chatTimeoutMs?: number;
   /** Shared secret used for both outbound auth header and inbound HMAC. */
   sharedSecret?: string;
   authToken?: string;
@@ -70,6 +78,20 @@ export class HttpAdapter implements AgentAdapter {
     } catch (err) {
       return { isHealthy: false, error: (err as Error).message, checkedAt: new Date().toISOString() };
     }
+  }
+
+  capabilities(): AdapterCapabilities {
+    const interactiveChat = Boolean(this.opts.chatUrl);
+    return {
+      interactiveChat,
+      toolCalling: interactiveChat && this.opts.supportsTools === true,
+      toolForwarding: interactiveChat && this.opts.supportsTools === true ? 'http_contract' : 'none',
+      ...(!interactiveChat
+        ? { limitations: ['HTTP adapter has no chatUrl/chatPath configured, so it can only run workflow tasks.'] }
+        : this.opts.supportsTools !== true
+          ? { limitations: ['HTTP chat endpoint is configured, but supportsTools is not enabled.'] }
+          : {}),
+    };
   }
 
   onEvent(handler: (e: NormalizedAgentEvent) => void): void {
@@ -117,6 +139,64 @@ export class HttpAdapter implements AgentAdapter {
       });
     } catch {
       // ignore
+    }
+  }
+
+  async *chat(messages: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
+    if (!this.opts.chatUrl) {
+      yield { type: 'text', delta: 'This HTTP agent has no chat endpoint configured yet. Add `chatUrl` or `baseUrl + chatPath` to enable interactive chat.' };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
+    const safe = await assertSafeUrl(this.opts.chatUrl, {
+      allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      this.opts.chatTimeoutMs ?? this.opts.dispatchTimeoutMs ?? CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
+    ).unref?.();
+    try {
+      const response = await this.#breaker.exec(() => fetch(safe, {
+        method: 'POST',
+        headers: {
+          ...this.#headers(),
+          accept: 'text/event-stream, application/json',
+        },
+        body: JSON.stringify({
+          ...(this.opts.payloadTemplate ?? {}),
+          agentId: this.opts.agentId,
+          model: this.opts.model,
+          messages,
+          tools: this.opts.supportsTools === true ? tools : [],
+          supportsTools: this.opts.supportsTools === true,
+        }),
+        signal: controller.signal,
+      }));
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        yield {
+          type: 'tool_result',
+          id: 'adapter',
+          name: 'adapter.chat',
+          result: null,
+          error: `HTTP chat failed status=${response.status}${body ? ` ${body.slice(0, 256)}` : ''}`,
+        };
+        yield { type: 'done', finishReason: 'error' };
+        return;
+      }
+      yield* parseHttpChatResponse(response);
+    } catch (err) {
+      yield {
+        type: 'tool_result',
+        id: 'adapter',
+        name: 'adapter.chat',
+        result: null,
+        error: (err as Error).message,
+      };
+      yield { type: 'done', finishReason: 'error' };
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
@@ -195,4 +275,179 @@ function verifySignature(rawBody: string, header: string, secret: string): boole
   } catch {
     return false;
   }
+}
+
+async function* parseHttpChatResponse(response: Response): AsyncIterable<ChatDelta> {
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType.includes('text/event-stream')) {
+    yield* parseHttpChatStream(response);
+    return;
+  }
+  const json = await response.json().catch(() => null) as unknown;
+  yield* normalizeHttpChatJson(json);
+}
+
+async function* parseHttpChatStream(response: Response): AsyncIterable<ChatDelta> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    yield { type: 'done', finishReason: 'error' };
+    return;
+  }
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let sawDone = false;
+  while (true) {
+    const read = await reader.read();
+    buffer += decoder.decode(read.value ?? new Uint8Array(), { stream: !read.done });
+    let sepIdx: number;
+    while ((sepIdx = buffer.search(/\r?\n\r?\n/)) !== -1) {
+      const block = buffer.slice(0, sepIdx);
+      buffer = buffer.slice(sepIdx + (buffer[sepIdx] === '\r' ? 4 : 2));
+      for (const delta of parseHttpStreamBlock(block)) {
+        if (delta.type === 'done') sawDone = true;
+        yield delta;
+      }
+    }
+    if (read.done) break;
+  }
+  for (const delta of parseHttpStreamBlock(buffer)) {
+    if (delta.type === 'done') sawDone = true;
+    yield delta;
+  }
+  if (!sawDone) yield { type: 'done', finishReason: 'stop' };
+}
+
+function* parseHttpStreamBlock(block: string): Iterable<ChatDelta> {
+  const trimmed = block.trim();
+  if (!trimmed) return;
+  const dataLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim());
+  const payloads = dataLines.length > 0 ? dataLines : [trimmed];
+  for (const payload of payloads) {
+    if (!payload || payload === '[DONE]') {
+      yield { type: 'done', finishReason: 'stop' };
+      continue;
+    }
+    try {
+      yield* normalizeHttpChatJson(JSON.parse(payload) as unknown);
+    } catch {
+      yield { type: 'text', delta: payload };
+    }
+  }
+}
+
+function* normalizeHttpChatJson(value: unknown): Iterable<ChatDelta> {
+  const object = objectOf(value);
+  if (!object) {
+    yield { type: 'done', finishReason: 'error' };
+    return;
+  }
+  const deltas = object.deltas;
+  if (Array.isArray(deltas)) {
+    let sawDone = false;
+    for (const delta of deltas) {
+      const normalized = normalizeDelta(delta);
+      if (!normalized) continue;
+      if (normalized.type === 'done') sawDone = true;
+      yield normalized;
+    }
+    if (!sawDone) yield { type: 'done', finishReason: 'stop' };
+    return;
+  }
+
+  const directDelta = normalizeDelta(object);
+  if (directDelta && object.type) {
+    yield directDelta;
+    return;
+  }
+
+  const text = firstString(object.text, object.content, object.message);
+  if (text) yield { type: 'text', delta: text };
+
+  const rawToolCalls = object.toolCalls ?? object.tool_calls ?? object.tools;
+  const toolCalls = extractToolCalls(rawToolCalls);
+  for (const call of toolCalls) {
+    yield { type: 'tool_call', id: call.id, name: call.name, args: call.args };
+  }
+
+  const choice = Array.isArray(object.choices) ? object.choices[0] : null;
+  const choiceObject = objectOf(choice);
+  if (choiceObject) {
+    const message = objectOf(choiceObject.message);
+    const choiceText = firstString(message?.content, choiceObject.text);
+    if (choiceText) yield { type: 'text', delta: choiceText };
+    for (const call of extractToolCalls(message?.tool_calls ?? choiceObject.tool_calls)) {
+      yield { type: 'tool_call', id: call.id, name: call.name, args: call.args };
+      toolCalls.push(call);
+    }
+  }
+
+  const finish = firstString(object.finishReason, object.finish_reason, choiceObject?.finish_reason);
+  yield { type: 'done', finishReason: finish === 'tool_calls' || toolCalls.length > 0 ? 'tool_calls' : finish === 'error' ? 'error' : 'stop' };
+}
+
+function normalizeDelta(value: unknown): ChatDelta | null {
+  const object = objectOf(value);
+  if (!object) return null;
+  const type = firstString(object.type);
+  if (type === 'text') return { type: 'text', delta: firstString(object.delta, object.text, object.content) ?? '' };
+  if (type === 'thinking') return { type: 'thinking', delta: firstString(object.delta, object.text, object.content) ?? '' };
+  if (type === 'tool_call') {
+    return {
+      type: 'tool_call',
+      id: firstString(object.id) ?? `tc_${Math.random().toString(36).slice(2)}`,
+      name: firstString(object.name, object.tool, object.toolName) ?? 'tool',
+      args: object.args ?? object.arguments ?? object.input ?? {},
+    };
+  }
+  if (type === 'tool_result') {
+    return {
+      type: 'tool_result',
+      id: firstString(object.id) ?? `tr_${Math.random().toString(36).slice(2)}`,
+      name: firstString(object.name, object.tool, object.toolName) ?? 'tool',
+      result: object.result ?? null,
+      ...(object.error ? { error: String(object.error) } : {}),
+    };
+  }
+  if (type === 'done') {
+    const reason = firstString(object.finishReason, object.finish_reason);
+    return { type: 'done', finishReason: reason === 'tool_calls' || reason === 'error' || reason === 'max_turns' ? reason : 'stop' };
+  }
+  return null;
+}
+
+function extractToolCalls(value: unknown): Array<{ id: string; name: string; args: unknown }> {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const object = objectOf(item);
+    const fn = objectOf(object?.function);
+    const rawArgs = fn?.arguments ?? object?.arguments ?? object?.args ?? object?.input ?? {};
+    let parsedArgs: unknown = rawArgs;
+    if (typeof rawArgs === 'string') {
+      try {
+        parsedArgs = JSON.parse(rawArgs) as unknown;
+      } catch {
+        parsedArgs = rawArgs;
+      }
+    }
+    return {
+      id: firstString(object?.id) ?? `tc_${Math.random().toString(36).slice(2)}`,
+      name: firstString(fn?.name, object?.name, object?.tool, object?.toolName) ?? 'tool',
+      args: parsedArgs,
+    };
+  });
+}
+
+function objectOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return undefined;
 }

@@ -100,4 +100,69 @@ describe('runSqliteMigrations', () => {
       sqlite.close();
     }
   });
+
+  it('normalizes a legacy NOT-NULL-without-default workflows.concurrency_overflow column', () => {
+    const path = tempDbPath();
+
+    // 1. Reproduce the exact legacy drift: concurrency_overflow NOT NULL, no default.
+    const legacy = new Database(path);
+    legacy.exec(`
+CREATE TABLE workflows (
+  id                    TEXT PRIMARY KEY,
+  workspace_id          TEXT NOT NULL,
+  ambient_id            TEXT,
+  user_id               TEXT NOT NULL,
+  registry_entry_id     TEXT,
+  registry_version      TEXT,
+  title                 TEXT NOT NULL,
+  summary               TEXT,
+  intended_behavior     TEXT,
+  graph                 TEXT NOT NULL,
+  settings              TEXT NOT NULL DEFAULT '{}',
+  is_from_registry      INTEGER NOT NULL DEFAULT 0,
+  max_concurrent_runs   INTEGER,
+  concurrency_overflow  TEXT NOT NULL,
+  tags                  TEXT NOT NULL DEFAULT '[]',
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+`);
+    legacy
+      .prepare('INSERT INTO workflows (id, workspace_id, user_id, title, graph, concurrency_overflow) VALUES (?,?,?,?,?,?)')
+      .run('wf-legacy', 'ws-1', 'user-1', 'Legacy WF', '{}', 'queue');
+    // Confirm the legacy constraint actually bites when the column is omitted.
+    expect(() =>
+      legacy
+        .prepare('INSERT INTO workflows (id, workspace_id, user_id, title, graph) VALUES (?,?,?,?,?)')
+        .run('wf-fail', 'ws-1', 'user-1', 'Should fail', '{}'),
+    ).toThrow(/NOT NULL constraint failed: workflows\.concurrency_overflow/);
+    legacy.close();
+
+    // 2. Open through the runtime path — runs the embedded migrations incl. the rebuild.
+    const { sqlite } = openSqlite({ path });
+    try {
+      const col = (sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }>).find((c) => c.name === 'concurrency_overflow');
+      expect(col?.notnull).toBe(1);
+      expect(col?.dflt_value?.replace(/'/g, '')).toBe('queue');
+
+      // Legacy row survives the rebuild.
+      const legacyRow = sqlite.prepare("SELECT concurrency_overflow AS v FROM workflows WHERE id = 'wf-legacy'").get() as { v: string };
+      expect(legacyRow.v).toBe('queue');
+
+      // Inserting WITHOUT the column now succeeds and defaults to 'queue'
+      // (FK off to isolate the column behaviour from parent-row requirements).
+      sqlite.pragma('foreign_keys = OFF');
+      sqlite
+        .prepare('INSERT INTO workflows (id, workspace_id, user_id, title, graph) VALUES (?,?,?,?,?)')
+        .run('wf-new', 'ws-1', 'user-1', 'New WF', '{}');
+      const newRow = sqlite.prepare("SELECT concurrency_overflow AS v FROM workflows WHERE id = 'wf-new'").get() as { v: string };
+      expect(newRow.v).toBe('queue');
+    } finally {
+      sqlite.close();
+    }
+  });
 });

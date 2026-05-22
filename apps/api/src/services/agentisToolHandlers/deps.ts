@@ -18,6 +18,7 @@ import type { ActivityFeedService } from '../activityFeed.js';
 import type { PartialReplayService } from '../partialReplay.js';
 import type { KnowledgeBaseService } from '../knowledgeBase.js';
 import type { EvaluatorRuntime } from '../evaluatorRuntime.js';
+import type { WorkspaceIntelligenceService } from '../workspaceIntelligence.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -33,4 +34,6 @@ export interface ToolHandlerDeps {
   knowledgeBases?: KnowledgeBaseService;
   /** Optional — used by NL workflow synthesis for structured-output LLM calls. */
   evaluatorRuntime?: EvaluatorRuntime;
+  /** Optional — Layer 1 workspace context injected into build_workflow synthesis. */
+  workspaceIntelligence?: WorkspaceIntelligenceService;
 }

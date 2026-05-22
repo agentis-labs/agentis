@@ -11,13 +11,20 @@
  *   anything else → raw JSON code block
  */
 
-import { Bot, Database, FileText, GitBranch, PauseCircle, Braces } from 'lucide-react';
+import { useState } from 'react';
+import clsx from 'clsx';
+import { Bot, Database, FileText, GitBranch, PauseCircle, Braces, Globe, Monitor, Tablet, Smartphone, ExternalLink } from 'lucide-react';
+import { ChatMarkdown } from '../chat/ChatMarkdown';
+
+export type OutputRenderAs = 'html' | 'markdown' | 'table' | 'json' | 'text';
 
 export interface FinalNodeOutput {
   nodeId: string;
   nodeTitle: string;
   kind: string;
   value: unknown;
+  /** Viewer hint from a `return_output` node (Layer 6). */
+  renderAs?: OutputRenderAs;
 }
 
 const TEXT_KEYS = ['text', 'content', 'output', 'result', 'message', 'response', 'answer', 'summary', 'description', 'body', 'details', 'markdown'];
@@ -42,6 +49,23 @@ function extractText(value: unknown): string | null {
     if (nested) return nested;
   }
   return null;
+}
+
+/** Pull an HTML string out of a return_output value: a string, or `{content|html|body}`. */
+function extractHtml(value: unknown): string | null {
+  if (typeof value === 'string') return value.trim() ? value : null;
+  if (!isRecord(value)) return null;
+  for (const key of ['content', 'html', 'body', 'text']) {
+    const v = value[key];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return null;
+}
+
+function looksLikeHtml(value: unknown): boolean {
+  if (isRecord(value) && value.type === 'html' && typeof value.content === 'string') return true;
+  const html = extractHtml(value);
+  return Boolean(html && /<[a-z!][\s\S]*>/i.test(html));
 }
 
 function firstString(value: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -143,6 +167,64 @@ function TextBlock({ text }: { text: string }) {
   return (
     <div className="max-h-96 overflow-auto whitespace-pre-wrap rounded-input border border-line bg-surface-2 p-4 text-[13px] leading-relaxed text-text-primary">
       {text}
+    </div>
+  );
+}
+
+const DEVICE_WIDTHS = { desktop: '100%', tablet: '768px', mobile: '375px' } as const;
+type DeviceMode = keyof typeof DEVICE_WIDTHS;
+
+/**
+ * LiveHTMLRenderer — renders HTML output in a sandboxed iframe (Layer 6).
+ * `sandbox="allow-scripts"` WITHOUT `allow-same-origin` keeps the page
+ * origin-isolated: no access to the parent DOM, cookies, or localStorage.
+ */
+function LiveHTMLRenderer({ html }: { html: string }) {
+  const [device, setDevice] = useState<DeviceMode>('desktop');
+  const openInTab = () => {
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  };
+  return (
+    <div className="overflow-hidden rounded-input border border-line bg-surface-2">
+      <div className="flex items-center gap-1 border-b border-line bg-surface px-2 py-1.5">
+        <Globe size={13} className="text-text-muted" />
+        <span className="mr-auto text-[11px] font-medium text-text-muted">Rendered HTML</span>
+        {([['desktop', Monitor], ['tablet', Tablet], ['mobile', Smartphone]] as const).map(([mode, Icon]) => (
+          <button
+            key={mode}
+            type="button"
+            onClick={() => setDevice(mode)}
+            aria-label={`${mode} preview`}
+            aria-pressed={device === mode}
+            className={clsx(
+              'rounded p-1 hover:bg-surface-2',
+              device === mode ? 'text-accent' : 'text-text-muted',
+            )}
+          >
+            <Icon size={14} />
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={openInTab}
+          aria-label="Open in new tab"
+          className="rounded p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        >
+          <ExternalLink size={14} />
+        </button>
+      </div>
+      <div className="flex justify-center bg-white p-2">
+        <iframe
+          title="HTML output preview"
+          sandbox="allow-scripts"
+          srcDoc={html}
+          className="h-[420px] rounded border border-line bg-white transition-[width]"
+          style={{ width: DEVICE_WIDTHS[device] }}
+        />
+      </div>
     </div>
   );
 }
@@ -339,12 +421,80 @@ function SmartArtifact({ value }: { value: unknown }) {
   return text ? <TextBlock text={text} /> : <JsonBlock value={displayValue} />;
 }
 
+/** Render a value according to an explicit `renderAs` viewer hint (Layer 6). */
+function renderByRenderAs(renderAs: OutputRenderAs, value: unknown): React.ReactNode {
+  switch (renderAs) {
+    case 'html': {
+      const html = extractHtml(value);
+      return html ? <LiveHTMLRenderer html={html} /> : <SmartArtifact value={value} />;
+    }
+    case 'markdown': {
+      const md = extractText(value);
+      return md != null
+        ? <div className="rounded-input border border-line bg-surface-2 p-4 text-[13px] leading-relaxed text-text-primary"><ChatMarkdown text={md} /></div>
+        : <SmartArtifact value={value} />;
+    }
+    case 'table':
+      return <TableArtifact value={value} />;
+    case 'text': {
+      const t = extractText(value);
+      return t != null ? <TextBlock text={t} /> : <JsonBlock value={value} />;
+    }
+    case 'json':
+    default:
+      return <JsonBlock value={value} />;
+  }
+}
+
+const RENDER_AS_GLYPH: Record<OutputRenderAs, React.ReactNode> = {
+  html: <Globe size={14} />,
+  markdown: <FileText size={14} />,
+  table: <Database size={14} />,
+  json: <Braces size={14} />,
+  text: <FileText size={14} />,
+};
+
 export function RunOutputCard({ output }: { output: FinalNodeOutput }) {
   const { kind, value } = output;
   const text = extractText(value);
 
   let body: React.ReactNode;
   let glyph: React.ReactNode = <Braces size={14} />;
+
+  // Explicit viewer hint from a return_output node wins. Otherwise, auto-detect
+  // HTML payloads (legacy `{type:'html',content}` shape) so they render live
+  // instead of as raw source.
+  const renderAs: OutputRenderAs | null =
+    output.renderAs ?? (kind === 'return_output' && looksLikeHtml(value) ? 'html' : null);
+  if (renderAs) {
+    return (
+      <div>
+        <div className="mb-2 flex items-center gap-2 text-[12px] text-text-muted">
+          <span className="text-text-muted">{RENDER_AS_GLYPH[renderAs]}</span>
+          <span className="font-medium text-text-secondary">{output.nodeTitle}</span>
+          <span className="font-mono text-[11px] uppercase tracking-wide">{renderAs}</span>
+        </div>
+        {renderByRenderAs(renderAs, value)}
+      </div>
+    );
+  }
+
+  // No explicit hint: auto-detect a live HTML payload from any node.
+  if (looksLikeHtml(value)) {
+    const html = extractHtml(value);
+    if (html) {
+      return (
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-[12px] text-text-muted">
+            <span className="text-text-muted"><Globe size={14} /></span>
+            <span className="font-medium text-text-secondary">{output.nodeTitle}</span>
+            <span className="font-mono text-[11px] uppercase tracking-wide">html</span>
+          </div>
+          <LiveHTMLRenderer html={html} />
+        </div>
+      );
+    }
+  }
 
   switch (kind) {
     case 'response': {

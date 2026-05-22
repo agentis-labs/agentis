@@ -255,8 +255,8 @@ export const workflows = sqliteTable('workflows', {
   settings: text('settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   isFromRegistry: integer('is_from_registry', { mode: 'boolean' }).notNull().default(false),
   maxConcurrentRuns: integer('max_concurrent_runs'),
-  /** queue | drop | error. */
-  concurrencyOverflow: text('concurrency_overflow'),
+  /** queue | reject | replace_oldest. NOT NULL DEFAULT 'queue' so an omitted value can never trip the constraint. */
+  concurrencyOverflow: text('concurrency_overflow').notNull().default('queue'),
   tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
   ...baseTimestamps(),
 });
@@ -637,6 +637,8 @@ export const conversations = sqliteTable('conversations', {
     .references(() => agents.id, { onDelete: 'cascade' }),
   /** OpenClaw Gateway session id when mirrored; null for Agentis-originated threads. */
   mirroredSessionId: text('mirrored_session_id'),
+  title: text('title'),
+  archivedAt: text('archived_at'),
   unreadCount: integer('unread_count').notNull().default(0),
   lastMessageAt: text('last_message_at'),
   ...baseTimestamps(),

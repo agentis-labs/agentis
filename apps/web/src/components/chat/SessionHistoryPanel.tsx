@@ -4,8 +4,11 @@ import clsx from 'clsx';
 import { api } from '../../lib/api';
 
 interface ConversationRow {
+  id: string;
   agentId: string;
   agentName: string;
+  title?: string | null;
+  archivedAt?: string | null;
   lastMessageAt: string | null;
   lastMessagePreview: string | null;
   unread?: number;
@@ -21,27 +24,15 @@ interface RoomRow {
   unreadCount?: number;
 }
 
-interface AgentRow {
-  id: string;
-  name: string;
-  status?: string;
-}
-
 type HistoryEntry = {
   id: string;
   kind: 'agent' | 'room' | 'broadcast';
   title: string;
+  subtitle?: string;
   preview: string;
   at: string;
   unread: number;
-  onOpen: () => void;
-};
-
-type AgentStarter = {
-  id: string;
-  title: string;
-  subtitle: string;
-  status: string;
+  archivedAt?: string | null;
   onOpen: () => void;
 };
 
@@ -65,13 +56,12 @@ export function SessionHistoryPanel({
   onOpenBroadcast,
 }: {
   onBack: () => void;
-  onOpenAgent: (agentId: string, name: string) => void;
+  onOpenAgent: (agentId: string, name: string, options?: { conversationId?: string | null; archivedAt?: string | null }) => void;
   onOpenRoom: (roomId: string, name: string) => void;
   onOpenBroadcast: () => void;
 }) {
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [rooms, setRooms] = useState<RoomRow[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>([]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<HistoryFilter>('all');
   const [loading, setLoading] = useState(true);
@@ -82,15 +72,13 @@ export function SessionHistoryPanel({
     async function load() {
       setLoading(true);
       try {
-        const [conversationRes, roomRes, agentRes] = await Promise.allSettled([
+        const [conversationRes, roomRes] = await Promise.allSettled([
           api<{ conversations: ConversationRow[] }>('/v1/conversations'),
           api<{ rooms: RoomRow[] }>('/v1/rooms'),
-          api<{ agents: AgentRow[] }>('/v1/agents'),
         ]);
         if (cancelled) return;
         if (conversationRes.status === 'fulfilled') setConversations(conversationRes.value.conversations ?? []);
         if (roomRes.status === 'fulfilled') setRooms(roomRes.value.rooms ?? []);
-        if (agentRes.status === 'fulfilled') setAgents(agentRes.value.agents ?? []);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -98,9 +86,11 @@ export function SessionHistoryPanel({
 
     void load();
     window.addEventListener('agentis:workspace-changed', load);
+    window.addEventListener('agentis:chat-history-changed', load);
     return () => {
       cancelled = true;
       window.removeEventListener('agentis:workspace-changed', load);
+      window.removeEventListener('agentis:chat-history-changed', load);
     };
   }, []);
 
@@ -108,41 +98,22 @@ export function SessionHistoryPanel({
     const threadEntries = conversations
       .filter((conversation) => Boolean(conversation.lastMessageAt))
       .map<HistoryEntry>((conversation) => ({
-      id: `agent-${conversation.agentId}`,
+      id: `agent-${conversation.id}`,
       kind: 'agent',
-      title: conversation.agentName,
+      title: conversation.archivedAt ? conversation.title?.trim() || conversation.agentName : conversation.agentName,
+      subtitle: conversation.archivedAt ? conversation.agentName : 'Current conversation',
       preview: conversation.lastMessagePreview?.trim() || 'Direct conversation',
       at: conversation.lastMessageAt ?? EMPTY_DATE,
       unread: conversation.unread ?? 0,
-      onOpen: () => onOpenAgent(conversation.agentId, conversation.agentName),
+      archivedAt: conversation.archivedAt,
+      onOpen: () => onOpenAgent(conversation.agentId, conversation.agentName, {
+        conversationId: conversation.id,
+        archivedAt: conversation.archivedAt,
+      }),
       }));
 
-    const roomEntries = rooms
-      .filter((room) => Boolean(room.lastMessageAt))
-      .map<HistoryEntry>((room) => ({
-      id: `room-${room.id}`,
-      kind: room.kind === 'workspace' ? 'broadcast' : 'room',
-      title: room.kind === 'workspace' ? 'Fleet broadcast' : room.name,
-      preview: room.lastMessagePreview?.trim() || (room.kind === 'workspace' ? 'Workspace-wide updates' : `${room.kind} room`),
-      at: room.lastMessageAt ?? EMPTY_DATE,
-      unread: room.unreadCount ?? 0,
-      onOpen: () => (room.kind === 'workspace' ? onOpenBroadcast() : onOpenRoom(room.id, room.name)),
-      }));
-
-    return [...threadEntries, ...roomEntries].sort((left, right) => right.at.localeCompare(left.at));
-  }, [conversations, onOpenAgent, onOpenBroadcast, onOpenRoom, rooms]);
-
-  const agentStarters = useMemo<AgentStarter[]>(() => {
-    return [...agents]
-      .sort((left, right) => compareAgentStatus(left.status, right.status) || left.name.localeCompare(right.name))
-      .map((agent) => ({
-        id: agent.id,
-        title: agent.name,
-        subtitle: describeAgentStatus(agent.status),
-        status: agent.status ?? 'offline',
-        onOpen: () => onOpenAgent(agent.id, agent.name),
-      }));
-  }, [agents, onOpenAgent]);
+    return threadEntries.sort((left, right) => right.at.localeCompare(left.at));
+  }, [conversations, onOpenAgent]);
 
   const roomStarters = useMemo<RoomStarter[]>(() => {
     const next = rooms.map<RoomStarter>((room) => ({
@@ -175,12 +146,6 @@ export function SessionHistoryPanel({
     return false;
   });
 
-  const filteredAgents = agentStarters.filter((entry) => {
-    if (filter !== 'all' && filter !== 'agent') return false;
-    if (!normalizedQuery) return true;
-    return `${entry.title} ${entry.subtitle}`.toLowerCase().includes(normalizedQuery);
-  });
-
   const filteredRooms = roomStarters.filter((entry) => {
     if (filter === 'agent' || filter === 'recent') return false;
     if (filter === 'room' && entry.kind !== 'room') return false;
@@ -206,7 +171,7 @@ export function SessionHistoryPanel({
     return groups;
   }, [filteredRecent]);
 
-  const isEmpty = !loading && recentGroups.length === 0 && filteredAgents.length === 0 && filteredRooms.length === 0;
+  const isEmpty = !loading && recentGroups.length === 0 && filteredRooms.length === 0;
 
   return (
     <div className="flex h-full flex-col bg-surface">
@@ -220,8 +185,8 @@ export function SessionHistoryPanel({
           <ChevronLeft size={16} />
         </button>
         <div className="min-w-0 flex-1">
-          <div className="text-subheading text-text-primary">Session history</div>
-          <div className="text-[10px] text-text-muted">Recent conversations and room activity</div>
+          <div className="text-subheading text-text-primary">Chat history</div>
+          <div className="text-[10px] text-text-muted">Saved agent sessions and room activity</div>
         </div>
       </header>
 
@@ -231,7 +196,7 @@ export function SessionHistoryPanel({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search sessions, agents, or rooms"
+            placeholder="Search conversations or rooms"
             className="min-w-0 flex-1 bg-transparent text-text-primary outline-none placeholder:text-text-muted"
           />
         </label>
@@ -264,13 +229,13 @@ export function SessionHistoryPanel({
             <Clock3 size={24} className="text-text-muted opacity-60" />
             <div className="text-[13px] font-medium text-text-primary">Nothing matches this view</div>
             <div className="max-w-[220px] text-[12px] text-text-muted">
-              Try a different search, or switch filters to start a direct chat or open a room.
+              Try a different search or switch filters.
             </div>
           </div>
         ) : (
           <div className="space-y-4 px-3 py-3">
             {recentGroups.length > 0 && (filter === 'all' || filter === 'recent' || filter === 'agent' || filter === 'room' || filter === 'broadcast') && (
-              <Section title="Resume recent" subtitle="Pick up where you left off">
+              <Section title="Conversations" subtitle="Active and saved sessions">
                 <div className="space-y-3">
                   {recentGroups.map((group) => (
                     <div key={group.label}>
@@ -288,25 +253,8 @@ export function SessionHistoryPanel({
               </Section>
             )}
 
-            {filteredAgents.length > 0 && (
-              <Section title="Start a direct chat" subtitle="Open a thread with any agent">
-                <div className="overflow-hidden rounded-md border border-line/60 bg-surface-2/30">
-                  {filteredAgents.map((entry) => (
-                    <StarterRow
-                      key={entry.id}
-                      icon={<MessageCircle size={14} />}
-                      title={entry.title}
-                      subtitle={entry.subtitle}
-                      unread={0}
-                      onOpen={entry.onOpen}
-                    />
-                  ))}
-                </div>
-              </Section>
-            )}
-
             {filteredRooms.length > 0 && (
-              <Section title="Open a room" subtitle="Jump into existing rooms or broadcast">
+              <Section title="Rooms" subtitle="Open existing rooms or broadcast">
                 <div className="overflow-hidden rounded-md border border-line/60 bg-surface-2/30">
                   {filteredRooms.map((entry) => (
                     <StarterRow
@@ -373,7 +321,8 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
             </span>
           )}
         </span>
-        <span className="mt-0.5 block truncate text-[11px] text-text-muted">{entry.preview}</span>
+        {entry.subtitle && <span className="mt-0.5 block truncate text-[11px] text-text-muted">{entry.subtitle}</span>}
+        <span className="mt-0.5 block truncate text-[11px] text-text-muted/90">{entry.preview}</span>
         <span className="mt-1 block text-[10px] text-text-muted/80">{formatAt(entry.at)}</span>
       </span>
     </button>

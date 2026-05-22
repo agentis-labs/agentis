@@ -128,6 +128,80 @@ describe('CodexAdapter', () => {
     expect(deltas).toContainEqual({ type: 'text', delta: 'Hi' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
+
+  it('turns AGENTIS_TOOL_CALL markers into chat tool calls', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test' });
+    const messages: ChatMessage[] = [{ role: 'user', content: 'build hello world' }];
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat(messages, [{
+        name: 'agentis.build_workflow',
+        description: 'Build a workflow.',
+        parameters: {
+          type: 'object',
+          properties: { description: { type: 'string' } },
+          required: ['description'],
+        },
+      }])) {
+        deltas.push(delta);
+      }
+    })();
+
+    child.stdout.write('{"type":"assistant","text":"AGENTIS_TOOL_CALL {\\"name\\":\\"agentis.build_workflow\\",\\"arguments\\":{\\"description\\":\\"Hello World\\"}}"}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_call',
+      name: 'agentis.build_workflow',
+      args: { description: 'Hello World' },
+    }));
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
+  });
+
+  it('parses tool-call markers even when Windows taskkill noise follows, and never leaks PID spam', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test' });
+    const messages: ChatMessage[] = [{ role: 'user', content: 'build hello world LP' }];
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat(messages, [{
+        name: 'agentis.build_workflow',
+        description: 'Build a workflow.',
+        parameters: {
+          type: 'object',
+          properties: { description: { type: 'string' } },
+          required: ['description'],
+        },
+      }])) {
+        deltas.push(delta);
+      }
+    })();
+
+    // Assistant emits the marker as a JSON event...
+    child.stdout.write('{"type":"assistant","text":"AGENTIS_TOOL_CALL {\\"name\\":\\"agentis.build_workflow\\",\\"arguments\\":{\\"description\\":\\"Hello World LP\\"}}"}\n');
+    // ...then the Codex sandbox teardown prints taskkill output as raw stdout
+    // (the exact spam from the bug report, Portuguese locale).
+    child.stdout.write('ÊXITO: o processo com PID 12388 (processo filho de PID 6616) foi finalizado.\n');
+    child.stdout.write('ÊXITO: o processo com PID 6616 (processo filho de PID 17788) foi finalizado.\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_call',
+      name: 'agentis.build_workflow',
+      args: { description: 'Hello World LP' },
+    }));
+    const text = deltas
+      .filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text')
+      .map((delta) => delta.delta)
+      .join('');
+    expect(text).not.toMatch(/PID|XITO|AGENTIS_TOOL_CALL/);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
+  });
 });
 
 function fakeChildProcess() {

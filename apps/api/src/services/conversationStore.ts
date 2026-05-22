@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, lt, or } from 'drizzle-orm';
+import { and, desc, eq, isNull, lt, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type RealtimeEventName } from '@agentis/core';
@@ -23,12 +23,14 @@ export interface ConversationStoreDeps {
 export class ConversationStore {
   constructor(private readonly deps: ConversationStoreDeps) {}
 
-  list(workspaceId: string) {
+  list(workspaceId: string, options: { includeArchived?: boolean } = {}) {
     return this.deps.db
       .select()
       .from(schema.conversations)
-      .where(eq(schema.conversations.workspaceId, workspaceId))
-      .orderBy(desc(schema.conversations.lastMessageAt))
+      .where(options.includeArchived
+        ? eq(schema.conversations.workspaceId, workspaceId)
+        : and(eq(schema.conversations.workspaceId, workspaceId), isNull(schema.conversations.archivedAt)))
+      .orderBy(desc(schema.conversations.lastMessageAt), desc(schema.conversations.createdAt))
       .all();
   }
 
@@ -46,6 +48,7 @@ export class ConversationStore {
         and(
           eq(schema.conversations.workspaceId, args.workspaceId),
           eq(schema.conversations.agentId, args.agentId),
+          isNull(schema.conversations.archivedAt),
         ),
       )
       .get();
@@ -67,6 +70,8 @@ export class ConversationStore {
       userId: args.userId,
       agentId: args.agentId,
       mirroredSessionId: args.mirroredSessionId ?? null,
+      title: null,
+      archivedAt: null,
       unreadCount: 0,
       lastMessageAt: null,
     };
@@ -236,6 +241,59 @@ export class ConversationStore {
       .run();
   }
 
+  getById(workspaceId: string, conversationId: string) {
+    return this.#loadConversation(workspaceId, conversationId);
+  }
+
+  startNewConversation(args: {
+    workspaceId: string;
+    ambientId: string | null;
+    userId: string;
+    agentId: string;
+  }) {
+    const current = this.getOrCreateByAgent(args);
+    const latestMessages = this.messages(current.id, 2);
+    if (latestMessages.length === 0) return current;
+
+    const now = new Date().toISOString();
+    const firstOperator = this.deps.db
+      .select()
+      .from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, current.id),
+        eq(schema.conversationMessages.authorType, 'operator'),
+      ))
+      .orderBy(schema.conversationMessages.createdAt, schema.conversationMessages.id)
+      .limit(1)
+      .get();
+    this.deps.db
+      .update(schema.conversations)
+      .set({
+        title: conversationTitle(firstOperator?.body ?? latestMessages[0]?.body ?? null),
+        archivedAt: now,
+        unreadCount: 0,
+        updatedAt: now,
+      })
+      .where(eq(schema.conversations.id, current.id))
+      .run();
+
+    const row = {
+      id: randomUUID(),
+      workspaceId: args.workspaceId,
+      ambientId: args.ambientId,
+      userId: args.userId,
+      agentId: args.agentId,
+      mirroredSessionId: null,
+      title: null,
+      archivedAt: null,
+      unreadCount: 0,
+      lastMessageAt: null,
+    };
+    this.deps.db.insert(schema.conversations).values(row).run();
+    return this.#loadConversation(args.workspaceId, row.id);
+  }
+
   #append(args: {
     conversationId: string;
     workspaceId: string;
@@ -318,4 +376,10 @@ export class ConversationStore {
     }
     return conversation;
   }
+}
+
+function conversationTitle(body: string | null): string {
+  const text = (body ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return 'Previous conversation';
+  return text.length > 64 ? `${text.slice(0, 61).trim()}...` : text;
 }

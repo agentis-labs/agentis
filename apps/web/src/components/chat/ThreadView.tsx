@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Loader2, Pencil, Plug, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, Trash2, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { REALTIME_EVENTS, type ChatDelta, type ViewportContext } from '@agentis/core';
@@ -10,8 +10,15 @@ import { useConfirm } from '../shared/ConfirmDialog';
 import { Skeleton } from '../shared/Skeleton';
 import { rtSubscribe, useRealtime } from '../../lib/realtime';
 import { Composer } from '../ChatPanel/Composer';
-import { ToolCallPill, type ToolCallPillData } from '../ChatPanel/ToolCallPill';
+import type { ToolCallPillData } from '../ChatPanel/ToolCallPill';
 import { ProactiveCard, type ProactiveCardData } from '../ChatPanel/ProactiveCard';
+import { AgentModelSelector } from './AgentModelSelector';
+import { ChatMarkdown } from './ChatMarkdown';
+import { useChatPanelStore } from './ChatPanelStore';
+import { ThinkingBubble } from './ThinkingBubble';
+import { ExecutionFeed } from './ExecutionFeed';
+import { PlanList, derivePlanItems, extractPlan } from './PlanList';
+import { StickyProgressBanner } from './StickyProgressBanner';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -20,9 +27,12 @@ interface ThreadViewProps {
   initialDraft?: string;
   initialViewportOverride?: ViewportContext | null;
   autoSendInitialDraft?: boolean;
+  conversationId?: string | null;
+  archivedAt?: string | null;
   composerPlaceholder?: string;
   emptyBody?: string;
   onInitialDraftUsed?: () => void;
+  onConversationReset?: (conversationId: string) => void;
 }
 
 type AgentMsg = {
@@ -68,6 +78,13 @@ interface ConfirmationCardData {
   };
   title: string;
   body: string;
+  impact?: {
+    summary: string;
+    details?: string[];
+    riskLevel?: 'low' | 'medium' | 'high' | 'danger';
+    reversible?: boolean;
+    externalSideEffects?: boolean;
+  };
   confirmLabel: string;
   cancelLabel: string;
   expiresAt: string;
@@ -94,6 +111,17 @@ interface ChatMessage {
   deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
 }
 
+interface AgentRuntimeInfo {
+  adapterType?: string | null;
+  runtimeModel?: string | null;
+  adapterCapabilities?: {
+    interactiveChat: boolean;
+    toolCalling: boolean;
+    toolForwarding?: string;
+    limitations?: string[];
+  } | null;
+}
+
 const PAGE_SIZE = 50;
 
 function streamErrorMessage(data: unknown): string {
@@ -103,6 +131,13 @@ function streamErrorMessage(data: unknown): string {
   }
   if (typeof data === 'string' && data.trim()) return data.trim();
   return 'The agent runtime reported an error. Check the runtime settings and try again.';
+}
+
+function taskLabel(message: string): string {
+  const firstLine = message.trim().split('\n')[0] ?? '';
+  const clean = firstLine.replace(/\s+/g, ' ').trim();
+  if (!clean) return 'Working…';
+  return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean;
 }
 
 function normalizeAgentMessage(message: AgentMsg): ChatMessage {
@@ -132,6 +167,12 @@ function sortMessages(messages: ChatMessage[]): ChatMessage[] {
   return [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }
 
+function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
+  const byId = new Map<string, ChatMessage>();
+  for (const message of sortMessages(messages)) byId.set(message.id, message);
+  return Array.from(byId.values());
+}
+
 function upsertMessage(messages: ChatMessage[], next: ChatMessage): ChatMessage[] {
   let found = false;
   const updated = messages.map((message) => {
@@ -139,7 +180,7 @@ function upsertMessage(messages: ChatMessage[], next: ChatMessage): ChatMessage[
     found = true;
     return next;
   });
-  return sortMessages(found ? updated : [...updated, next]);
+  return dedupeMessages(found ? updated : [...updated, next]);
 }
 
 function prependUnique(messages: ChatMessage[], older: ChatMessage[]): ChatMessage[] {
@@ -148,25 +189,98 @@ function prependUnique(messages: ChatMessage[], older: ChatMessage[]): ChatMessa
 }
 
 function mergeMessage(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
-  if (messages.some((message) => message.id === incoming.id)) return messages;
+  if (messages.some((message) => message.id === incoming.id)) {
+    return upsertMessage(messages, incoming);
+  }
   if (incoming.authorKind === 'operator') {
     const optimisticIndex = messages.findIndex(
       (message) => message.id.startsWith('tmp-') && message.authorKind === 'operator' && message.text === incoming.text,
     );
     if (optimisticIndex >= 0) {
-      return messages.map((message, index) => (index === optimisticIndex ? incoming : message));
+      return dedupeMessages(messages.map((message, index) => (index === optimisticIndex ? incoming : message)));
     }
   }
-  return sortMessages([...messages, incoming]);
+  if (incoming.authorKind === 'agent') {
+    const streamingIndex = messages.findIndex((message) => {
+      if (!message.id.startsWith('stream-') || message.authorKind !== 'agent') return false;
+      const currentText = message.text.trim();
+      return currentText.length === 0 || currentText === incoming.text;
+    });
+    if (streamingIndex >= 0) {
+      const replaced = messages.map((message, index) => (index === streamingIndex ? incoming : message));
+      return dedupeMessages(replaced);
+    }
+  }
+  return dedupeMessages([...messages, incoming]);
 }
 
-export function ThreadView({ kind, id, name, initialDraft, initialViewportOverride, autoSendInitialDraft, composerPlaceholder, emptyBody, onInitialDraftUsed }: ThreadViewProps) {
+function harnessLabel(adapterType?: string | null): string {
+  if (adapterType === 'codex') return 'Codex';
+  if (adapterType === 'claude_code') return 'Claude Code';
+  if (adapterType === 'cursor') return 'Cursor';
+  if (adapterType === 'hermes_agent') return 'Hermes Agent';
+  if (adapterType === 'openclaw') return 'OpenClaw';
+  if (adapterType === 'http') return 'HTTP';
+  return 'Runtime';
+}
+
+function formatAssistantLabel(name: string, runtime: AgentRuntimeInfo | null): string {
+  const runtimeModel = runtime?.runtimeModel?.trim()
+    || defaultRuntimeModel(runtime?.adapterType)
+    || harnessLabel(runtime?.adapterType);
+  return `${name} - ${runtimeModel}`;
+}
+
+function runtimeCapabilityWarning(runtime: AgentRuntimeInfo | null): { title: string; body: string } | null {
+  const capabilities = runtime?.adapterCapabilities;
+  if (!capabilities) return null;
+  const limitation = capabilities.limitations?.find((item) => item.trim())?.trim();
+  if (!capabilities.interactiveChat) {
+    return {
+      title: 'Runtime is task-only',
+      body: limitation ?? 'This agent can run workflow tasks, but it is not wired into the live chat loop yet.',
+    };
+  }
+  if (!capabilities.toolCalling) {
+    return {
+      title: 'Chat tools unavailable',
+      body: limitation ?? 'This runtime can chat, but it cannot execute Agentis tools from chat yet. Build and run requests may stay advisory.',
+    };
+  }
+  return null;
+}
+
+function defaultRuntimeModel(adapterType?: string | null): string | null {
+  if (adapterType === 'codex') return 'gpt-5.3-codex';
+  if (adapterType === 'claude_code') return 'claude-sonnet-4-6';
+  if (adapterType === 'cursor') return 'auto';
+  if (adapterType === 'hermes_agent') return 'hermes-auto';
+  if (adapterType === 'openclaw') return 'gateway-default';
+  if (adapterType === 'http') return 'provider-default';
+  return null;
+}
+
+export function ThreadView({
+  kind,
+  id,
+  name,
+  initialDraft,
+  initialViewportOverride,
+  autoSendInitialDraft,
+  conversationId,
+  archivedAt,
+  composerPlaceholder,
+  emptyBody,
+  onInitialDraftUsed,
+  onConversationReset,
+}: ThreadViewProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [agentNoAdapter, setAgentNoAdapter] = useState(false);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [agentTyping, setAgentTyping] = useState(false);
   const [composerInitialText, setComposerInitialText] = useState(initialDraft ?? '');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -175,6 +289,9 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   const autoSentDraftKeyRef = useRef<string | null>(null);
   const consumedLaunchKeyRef = useRef<string | null>(null);
   const pendingViewportOverrideRef = useRef<ViewportContext | null>(initialViewportOverride ?? null);
+  const openedCanvasWorkflowIdsRef = useRef<Set<string>>(new Set());
+  const setActiveTask = useChatPanelStore((store) => store.setActiveTask);
+  const updateActiveTask = useChatPanelStore((store) => store.updateActiveTask);
   const toast = useToast();
   const confirm = useConfirm();
   const awareness = useViewportAwareness();
@@ -183,9 +300,26 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
   const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send` : `/v1/rooms/${id}/messages`;
   const confirmEndpoint = kind === 'agent' ? `/v1/conversations/${id}/confirm` : null;
+  const readOnly = kind === 'agent' && Boolean(archivedAt);
+
+  useEffect(() => {
+    if (kind !== 'agent') return;
+    function onModelUpdated(event: Event) {
+      const detail = (event as CustomEvent<{ agentId?: string; model?: string | null }>).detail;
+      if (detail?.agentId !== id) return;
+        setAgentRuntime((current) => ({
+          adapterType: current?.adapterType ?? null,
+          runtimeModel: detail.model ?? defaultRuntimeModel(current?.adapterType),
+          adapterCapabilities: current?.adapterCapabilities ?? null,
+        }));
+    }
+    window.addEventListener('agentis:agent-model-updated', onModelUpdated);
+    return () => window.removeEventListener('agentis:agent-model-updated', onModelUpdated);
+  }, [id, kind]);
 
   async function loadPage(before?: ChatMessage): Promise<ChatMessage[]> {
     const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    if (kind === 'agent' && conversationId) query.set('conversationId', conversationId);
     if (before) {
       query.set('before', before.createdAt);
       query.set('beforeId', before.id);
@@ -194,9 +328,20 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     if (kind === 'agent') {
       const [threadData, agentData] = await Promise.all([
         api<{ messages: AgentMsg[] }>(path),
-        api<{ agent: { adapterType?: string | null } }>(`/v1/agents/${id}`).catch(() => ({ agent: { adapterType: null } })),
+        api<{ agent: { adapterType?: string | null; runtimeModel?: string | null; adapterCapabilities?: AgentRuntimeInfo['adapterCapabilities']; config?: Record<string, unknown> | null } }>(`/v1/agents/${id}`)
+          .catch(() => ({ agent: { adapterType: null, runtimeModel: null, adapterCapabilities: null, config: null } })),
       ]);
-      if (!before) setAgentNoAdapter(!agentData.agent?.adapterType);
+      if (!before) {
+        setAgentNoAdapter(!agentData.agent?.adapterType);
+        const selectedModel = typeof agentData.agent?.config?.model === 'string'
+          ? agentData.agent.config.model
+          : agentData.agent?.runtimeModel ?? defaultRuntimeModel(agentData.agent?.adapterType);
+        setAgentRuntime({
+          adapterType: agentData.agent?.adapterType ?? null,
+          runtimeModel: selectedModel ?? null,
+          adapterCapabilities: agentData.agent?.adapterCapabilities ?? null,
+        });
+      }
       return (threadData.messages ?? []).map(normalizeAgentMessage);
     }
     const data = await api<{ messages: RoomMsg[] }>(path);
@@ -213,7 +358,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     setLoading(true);
     try {
       const page = await loadPage();
-      setMessages(page);
+      setMessages(dedupeMessages(page));
       setHasMore(page.length === PAGE_SIZE);
     } catch {
       setMessages([]);
@@ -241,14 +386,14 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   async function handleConfirmationAction(messageId: string, confirmation: ConfirmationCardData, confirmed: boolean) {
     if (!confirmEndpoint) return;
     const toolStartedAt = new Map<string, number>();
-    const baseText = messages.find((message) => message.id === messageId)?.text.trim() ?? '';
     let streamedBody = '';
+    const streamId = 'stream-' + Date.now();
 
+    // Set the original confirmation card status to 'approving'
     setMessages((current) => current.map((message) => (
       message.id === messageId
         ? {
             ...message,
-            deliveryStatus: 'sending',
             metadata: {
               ...(message.metadata ?? {}),
               confirmation: { ...confirmation, status: 'approving' },
@@ -256,6 +401,18 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
           }
         : message
     )));
+
+    // Create and append the new decoupled streaming bubble
+    const streamingMessage: ChatMessage = {
+      id: streamId,
+      authorId: id,
+      authorKind: 'agent',
+      text: '',
+      createdAt: new Date().toISOString(),
+      deliveryStatus: 'sending',
+      metadata: { source: 'chat_loop' },
+    };
+    setMessages((current) => dedupeMessages([...current, streamingMessage]));
     setAgentTyping(true);
 
     try {
@@ -269,109 +426,138 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
             if (delta.type === 'text') {
               streamedBody += delta.delta;
               setMessages((current) => current.map((message) => (
-                message.id === messageId
+                message.id === streamId
                   ? {
                       ...message,
-                      text: [baseText, streamedBody.trim()].filter(Boolean).join('\n\n'),
+                      text: streamedBody,
                       deliveryStatus: 'sending',
                     }
                   : message
               )));
             } else if (delta.type === 'tool_call') {
               toolStartedAt.set(delta.id, performance.now());
-              applyToolCallDelta(messageId, delta);
+              applyToolCallDelta(streamId, delta);
             } else if (delta.type === 'tool_result') {
-              applyToolResultDelta(messageId, delta, toolStartedAt);
+              applyToolResultDelta(streamId, delta, toolStartedAt);
             } else if (delta.type === 'confirmation_required') {
-              applyConfirmationDelta(messageId, delta);
+              applyConfirmationDelta(streamId, delta);
             } else if (delta.type === 'done') {
               setAgentTyping(false);
-              setMessages((current) => current.map((message) => (
-                message.id === messageId
-                  ? {
-                      ...message,
-                      deliveryStatus: delta.finishReason === 'error' ? 'failed' : 'delivered',
-                      metadata: {
-                        ...(message.metadata ?? {}),
-                        confirmation: message.metadata?.confirmation
-                          ? {
-                              ...message.metadata.confirmation,
-                              status: delta.finishReason === 'error'
-                                ? 'failed'
-                                : confirmed
-                                  ? 'approved'
-                                  : 'cancelled',
-                            }
-                          : undefined,
-                      },
-                    }
-                  : message
-              )));
+              setMessages((current) => current.map((message) => {
+                if (message.id === messageId) {
+                  return {
+                    ...message,
+                    metadata: {
+                      ...(message.metadata ?? {}),
+                      confirmation: message.metadata?.confirmation
+                        ? {
+                            ...message.metadata.confirmation,
+                            status: delta.finishReason === 'error'
+                              ? 'failed'
+                              : confirmed
+                                ? 'approved'
+                                : 'cancelled',
+                          }
+                        : undefined,
+                    },
+                  };
+                }
+                if (message.id === streamId) {
+                  return {
+                    ...message,
+                    deliveryStatus: delta.finishReason === 'error' ? 'failed' : 'delivered',
+                  };
+                }
+                return message;
+              }));
             }
           } else if (event === 'message') {
             const persisted = normalizeAgentMessage(data as AgentMsg);
             setMessages((current) => current.map((message) => {
-              if (message.id !== messageId) return message;
-              return {
-                ...persisted,
-                metadata: {
-                  ...persisted.metadata,
-                  toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
-                  thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
-                  confirmation: message.metadata?.confirmation,
-                },
-              };
+              if (message.id === messageId) return message;
+              if (message.id === streamId) {
+                return {
+                  ...persisted,
+                  metadata: {
+                    ...persisted.metadata,
+                    toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
+                    thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
+                  },
+                };
+              }
+              return message;
             }));
           } else if (event === 'error') {
             const message = streamErrorMessage(data);
             setAgentTyping(false);
-            setMessages((current) => current.map((message) => (
-              message.id === messageId
-                ? {
-                    ...message,
-                    deliveryStatus: 'failed',
-                    metadata: {
-                      ...(message.metadata ?? {}),
-                      confirmation: message.metadata?.confirmation
-                        ? { ...message.metadata.confirmation, status: 'failed' }
-                        : undefined,
-                    },
-                  }
-                : message
-            )));
+            setMessages((current) => current.map((msg) => {
+              if (msg.id === messageId) {
+                return {
+                  ...msg,
+                  metadata: {
+                    ...(msg.metadata ?? {}),
+                    confirmation: msg.metadata?.confirmation
+                      ? { ...msg.metadata.confirmation, status: 'failed' }
+                      : undefined,
+                  },
+                };
+              }
+              if (msg.id === streamId) {
+                return {
+                  ...msg,
+                  deliveryStatus: 'failed',
+                };
+              }
+              return msg;
+            }));
             toast.error('Agent could not complete the action', message);
           }
         },
       });
     } catch (error) {
       setAgentTyping(false);
-      setMessages((current) => current.map((message) => (
-        message.id === messageId
-          ? {
-              ...message,
-              deliveryStatus: 'failed',
-              metadata: {
-                ...(message.metadata ?? {}),
-                confirmation: message.metadata?.confirmation
-                  ? { ...message.metadata.confirmation, status: 'failed' }
-                  : undefined,
-              },
-            }
-          : message
-      )));
+      setMessages((current) => current.map((msg) => {
+        if (msg.id === messageId) {
+          return {
+            ...msg,
+            metadata: {
+              ...(msg.metadata ?? {}),
+              confirmation: msg.metadata?.confirmation
+                ? { ...msg.metadata.confirmation, status: 'failed' }
+                : undefined,
+            },
+          };
+        }
+        if (msg.id === streamId) {
+          return {
+            ...msg,
+            deliveryStatus: 'failed',
+          };
+        }
+        return msg;
+      }));
       toast.error('Failed to confirm action', apiErrorMessage(error));
     }
   }
 
   useEffect(() => {
     void loadInitial();
-  }, [kind, id]);
+  }, [kind, id, conversationId]);
+
+  // Drop any "agent working" progress card we own when leaving this thread
+  // (switching agents, navigating to fullscreen /chat, or unmounting). The
+  // server turn keeps running and its result still arrives via realtime, but
+  // the card must never orphan into an undismissable stuck state.
+  useEffect(() => () => {
+    const store = useChatPanelStore.getState();
+    if (store.activeTask?.agentId === id) store.setActiveTask(null);
+  }, [id]);
 
   useEffect(() => {
     setComposerInitialText('');
     consumedLaunchKeyRef.current = null;
     pendingViewportOverrideRef.current = initialViewportOverride ?? null;
-  }, [kind, id]);
+  }, [kind, id, conversationId]);
 
   useEffect(() => {
     if (initialDraft === undefined && !initialViewportOverride) return;
@@ -400,6 +586,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     REALTIME_EVENTS.ROOM_MESSAGE_UPDATED,
     REALTIME_EVENTS.ROOM_MESSAGE_DELETED,
   ], (env) => {
+    if (readOnly) return;
     if (id === '__broadcast__') return;
     const payload = env.payload as {
       id?: string;
@@ -414,7 +601,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
         return;
       }
       if (payload.message) {
-        setMessages((prev) => upsertMessage(prev, normalizeAgentMessage(payload.message as AgentMsg)));
+        setMessages((prev) => mergeMessage(prev, normalizeAgentMessage(payload.message as AgentMsg)));
       }
       return;
     }
@@ -454,6 +641,19 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     setMessages((current) => mergeMessage(current, message));
   });
 
+  useRealtime([REALTIME_EVENTS.CANVAS_BUILD_COMPLETE], (env) => {
+    if (kind !== 'agent') return;
+    const payload = env.payload as { agentId?: string | null; workflowId?: string; runId?: string } | undefined;
+    const workflowId = payload?.workflowId;
+    if (!workflowId) return;
+    if (payload?.agentId && payload.agentId !== id) return;
+    if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
+    openedCanvasWorkflowIdsRef.current.add(workflowId);
+    window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, runId: payload?.runId ?? null } }));
+    navigate(`/workflows/${workflowId}`);
+    toast.success('Workflow opened on canvas');
+  });
+
   useEffect(() => {
     if (preserveScrollRef.current) {
       preserveScrollRef.current = false;
@@ -482,6 +682,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
       id: delta.id,
       name: delta.name,
       status: 'running',
+      args: delta.args,
     };
     setMessages((current) => current.map((message) => {
       if (message.id !== streamId) return message;
@@ -507,10 +708,12 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     setMessages((current) => current.map((message) => {
       if (message.id !== streamId) return message;
       const existing = message.metadata?.toolCalls ?? [];
+      const previous = existing.find((entry) => entry.id === delta.id);
       const nextPill: ToolCallPillData = {
         id: delta.id,
         name: delta.name,
         status: delta.error ? 'error' : 'success',
+        args: previous?.args,
         result: delta.result,
         error: delta.error,
         durationMs,
@@ -533,6 +736,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
       toolCall: delta.toolCall,
       title: delta.title,
       body: delta.body,
+      impact: delta.impact,
       confirmLabel: delta.confirmLabel,
       cancelLabel: delta.cancelLabel,
       expiresAt: delta.expiresAt,
@@ -553,6 +757,10 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
   }
 
   async function handleSend(text: string, options?: { useViewportContext?: boolean }) {
+    if (readOnly) {
+      toast.warn('Past conversation', 'Use the + button in the header to start a fresh conversation.');
+      return;
+    }
     const value = text.trim();
     if (!value) return;
 
@@ -589,10 +797,13 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
       metadata: { source: 'chat_loop' },
     };
 
-    setMessages((current) => [...current, operatorMessage, streamingMessage]);
+    setMessages((current) => dedupeMessages([...current, operatorMessage, streamingMessage]));
     setAgentTyping(true);
+    setActiveTask({ agentId: id, agentName: name, label: taskLabel(value), done: 0, total: 0, startedAt: Date.now() });
 
     const toolStartedAt = new Map<string, number>();
+    let toolTotal = 0;
+    let toolDone = 0;
 
     try {
       let streamedBody = '';
@@ -632,13 +843,18 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
               )));
             } else if (delta.type === 'tool_call') {
               toolStartedAt.set(delta.id, performance.now());
+              toolTotal += 1;
+              updateActiveTask({ total: toolTotal });
               applyToolCallDelta(streamId, delta);
             } else if (delta.type === 'tool_result') {
+              toolDone += 1;
+              updateActiveTask({ done: toolDone });
               applyToolResultDelta(streamId, delta, toolStartedAt);
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
             } else if (delta.type === 'done') {
               setAgentTyping(false);
+              setActiveTask(null);
               setMessages((current) => current.map((message) => (
                 message.id === streamId
                   ? { ...message, deliveryStatus: delta.finishReason === 'error' ? 'failed' : 'delivered' }
@@ -647,25 +863,27 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
             }
           } else if (event === 'message') {
             const persisted = normalizeAgentMessage(data as AgentMsg);
-            setMessages((current) => current.map((message) => {
-              if (message.id !== streamId) return message;
-              return {
-                ...persisted,
-                metadata: {
-                  ...persisted.metadata,
-                  toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
-                  thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
-                },
-              };
-            }));
-            setMessages((current) => current.map((message) => (
-              message.id === operatorMessage.id
-                ? { ...message, deliveryStatus: 'delivered' }
-                : message
-            )));
+            setMessages((current) => {
+              const merged: ChatMessage[] = current.map((message): ChatMessage => {
+                if (message.id === streamId) {
+                  return {
+                    ...persisted,
+                    metadata: {
+                      ...persisted.metadata,
+                      toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
+                      thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
+                    },
+                  };
+                }
+                if (message.id === operatorMessage.id) return { ...message, deliveryStatus: 'delivered' as const };
+                return message;
+              });
+              return dedupeMessages(merged);
+            });
           } else if (event === 'error') {
             const message = streamErrorMessage(data);
             setAgentTyping(false);
+            setActiveTask(null);
             setMessages((current) => current.map((message) => (
               message.id === streamId
                 ? { ...message, text: message.text || streamErrorMessage(data), deliveryStatus: 'failed' }
@@ -680,6 +898,7 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
       pendingViewportOverrideRef.current = null;
     } catch (error) {
       setAgentTyping(false);
+      setActiveTask(null);
       setMessages((current) => current.map((message) => (
         message.id === streamId || message.id === operatorMessage.id
           ? { ...message, deliveryStatus: 'failed' }
@@ -688,6 +907,32 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
       toast.error('Failed to send', apiErrorMessage(error));
     }
   }
+
+  async function startNewConversation() {
+    if (kind !== 'agent') return;
+    try {
+      const result = await api<{ conversationId: string }>(`/v1/conversations/${id}/new`, { method: 'POST' });
+      setMessages([]);
+      setHasMore(false);
+      setLoading(false);
+      setAgentTyping(false);
+      onConversationReset?.(result.conversationId);
+      window.dispatchEvent(new CustomEvent('agentis:chat-history-changed'));
+      toast.success('New conversation ready');
+    } catch (error) {
+      toast.error('Could not start a new conversation', apiErrorMessage(error));
+    }
+  }
+
+  useEffect(() => {
+    function onNewConversation(event: Event) {
+      const detail = (event as CustomEvent<{ kind?: string; id?: string }>).detail;
+      if (detail?.kind !== kind || detail?.id !== id) return;
+      void startNewConversation();
+    }
+    window.addEventListener('agentis:chat-new-conversation', onNewConversation);
+    return () => window.removeEventListener('agentis:chat-new-conversation', onNewConversation);
+  });
 
   useEffect(() => {
     const nextKey = autoSendInitialDraft && initialDraft?.trim()
@@ -749,13 +994,44 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
     }
   }
 
+  async function handleCancelRun(runId: string) {
+    try {
+      await api(`/v1/runs/${runId}/cancel`, { method: 'POST' });
+      toast.success('Run cancellation request sent');
+      const store = useChatPanelStore.getState();
+      if (store.activeTask?.agentId === id) store.setActiveTask(null);
+    } catch (error) {
+      toast.error('Failed to cancel run', apiErrorMessage(error));
+    }
+  }
+
   const awarenessActive = kind === 'agent'
     && awareness.context.surface !== 'chat'
     && awareness.context.surface !== 'unknown';
+  const activeToolCalls = messages
+    .filter((message) => message.deliveryStatus === 'sending' || message.metadata?.toolCalls?.some((call) => call.status === 'running'))
+    .flatMap((message) => message.metadata?.toolCalls ?? []);
+  const activeRunId = messages.find(
+    (m) => (m.deliveryStatus === 'sending' || m.metadata?.toolCalls?.some((tc) => tc.status === 'running')) && m.metadata?.runId
+  )?.metadata?.runId;
+  const runtimeWarning = kind === 'agent' && !agentNoAdapter
+    ? runtimeCapabilityWarning(agentRuntime)
+    : null;
+  // When an assistant bubble is mid-stream it shows its own in-bubble typing
+  // indicator, so the standalone "is thinking…" footer would be a duplicate.
+  const streamingAgentActive = messages.some(
+    (message) => message.authorKind === 'agent' && message.deliveryStatus === 'sending',
+  );
 
   return (
     <div className="flex h-full flex-col">
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3">
+        <StickyProgressBanner
+          toolCalls={activeToolCalls}
+          activeRunId={activeRunId}
+          onCancelRun={handleCancelRun}
+          onJumpToLatest={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })}
+        />
         {loading ? (
           <div className="space-y-2">
             <Skeleton height={36} />
@@ -784,19 +1060,25 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
               <MessageBubble
                 key={message.id}
                 msg={message}
+                assistantLabel={kind === 'agent' ? formatAssistantLabel(name, agentRuntime) : undefined}
                 onDelete={() => void handleDelete(message)}
                 onCopy={() => void handleCopy(message)}
                 isEditing={editingId === message.id}
+                readOnly={readOnly}
                 onStartEdit={() => setEditingId(message.id)}
                 onSaveEdit={(text) => void handleEditSave(message, text)}
                 onCancelEdit={() => setEditingId(null)}
                 onConfirmAction={(confirmation, approved) => void handleConfirmationAction(message.id, confirmation, approved)}
+                onCancelRun={handleCancelRun}
               />
             ))}
           </ul>
         )}
-        {agentTyping && kind === 'agent' && (
-          <div className="mt-2 px-1 text-[11px] italic text-text-muted">{name} is thinking...</div>
+        {agentTyping && kind === 'agent' && !streamingAgentActive && (
+          <div className="mt-2 flex items-center gap-2 px-1 text-[11px] italic text-text-muted">
+            <TypingDots />
+            <span>{name} is thinking…</span>
+          </div>
         )}
       </div>
 
@@ -811,38 +1093,78 @@ export function ThreadView({ kind, id, name, initialDraft, initialViewportOverri
         </div>
       )}
 
-      <Composer
-        key={`${kind}:${id}:${composerInitialText}`}
-        onSend={handleSend}
-        awareness={{ label: awareness.label, active: awarenessActive }}
-        initialText={composerInitialText}
-        placeholder={composerPlaceholder}
-      />
+      {runtimeWarning && (
+        <div className="border-t border-warn/20 bg-[linear-gradient(135deg,rgba(245,158,11,0.10),rgba(20,184,166,0.06))] px-3 py-2.5">
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" />
+            <div className="min-w-0">
+              <div className="text-[12px] font-medium text-text-primary">{runtimeWarning.title}</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-text-muted">{runtimeWarning.body}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {readOnly ? (
+        <div className="border-t border-line bg-surface-2 px-3 py-2 text-[12px] text-text-muted">
+          This is a saved conversation. Use the + button in the header to start a fresh chat with {name}.
+        </div>
+      ) : (
+        <Composer
+          key={`${kind}:${id}:${composerInitialText}`}
+          onSend={handleSend}
+          awareness={{ label: awareness.label, active: awarenessActive }}
+          initialText={composerInitialText}
+          placeholder={composerPlaceholder}
+          draftKey={`${kind}:${id}`}
+          footer={
+            kind === 'agent' ? (
+              <AgentModelSelector agentId={id} compact />
+            ) : undefined
+          }
+        />
+      )}
     </div>
   );
 }
 
 function MessageBubble({
   msg,
+  assistantLabel,
   onDelete,
   onCopy,
   isEditing,
+  readOnly,
   onStartEdit,
   onSaveEdit,
   onCancelEdit,
   onConfirmAction,
+  onCancelRun,
 }: {
   msg: ChatMessage;
+  assistantLabel?: string;
   onDelete: () => void;
   onCopy: () => void;
   isEditing: boolean;
+  readOnly: boolean;
   onStartEdit: () => void;
   onSaveEdit: (text: string) => void;
   onCancelEdit: () => void;
   onConfirmAction: (confirmation: ConfirmationCardData, approved: boolean) => void;
+  onCancelRun?: (runId: string) => void;
 }) {
   const isOperator = msg.authorKind === 'operator';
   const [editDraft, setEditDraft] = useState(msg.text);
+  const statusLabel = isOperator && msg.deliveryStatus === 'sending'
+    ? 'sending'
+    : msg.deliveryStatus === 'failed'
+      ? 'failed'
+      : null;
+  const streaming = msg.deliveryStatus === 'sending';
+  const parsedPlan = !isOperator && !isEditing ? extractPlan(msg.text) : null;
+  const bodyBeforePlan = parsedPlan ? parsedPlan.before : msg.text;
+  const bodyAfterPlan = parsedPlan?.after ?? '';
+  const toolCalls = msg.metadata?.toolCalls ?? [];
 
   useEffect(() => {
     if (isEditing) setEditDraft(msg.text);
@@ -854,7 +1176,7 @@ function MessageBubble({
         <span className="px-1 text-[11px] text-text-muted">{msg.authorName}</span>
       )}
       <div className="flex items-start gap-1.5">
-        {isOperator && (
+        {isOperator && !readOnly && (
           <MessageActions onCopy={onCopy} onDelete={onDelete} onEdit={onStartEdit} />
         )}
         <div
@@ -864,20 +1186,27 @@ function MessageBubble({
               ? 'bg-accent-soft text-text-primary'
               : msg.authorKind === 'system'
                 ? 'border border-dashed border-line bg-surface-2 text-text-muted'
-                : 'bg-surface-2 text-text-primary',
+                : 'bg-surface-2 text-text-primary shadow-[0_18px_35px_-30px_rgba(0,0,0,0.7)]',
           )}
         >
-          {msg.metadata?.thinking && (
-            <div className="mb-2 border-l-2 border-line/60 pl-2 text-[11px] italic text-text-muted">
-              {msg.metadata.thinking}
-            </div>
+          {!isOperator && msg.metadata?.thinking && (
+            <ThinkingBubble text={msg.metadata.thinking} streaming={streaming && !msg.text.trim()} />
           )}
-          {msg.metadata?.toolCalls && msg.metadata.toolCalls.length > 0 && (
-            <div className="mb-2 space-y-1">
-              {msg.metadata.toolCalls.map((toolCall) => (
-                <ToolCallPill key={toolCall.id} data={toolCall} />
-              ))}
-            </div>
+          {!isEditing && bodyBeforePlan && (
+            isOperator ? (
+              <div className="mb-2 whitespace-pre-wrap break-words">{bodyBeforePlan}</div>
+            ) : (
+              <div className="mb-2 break-words">
+                <ChatMarkdown text={bodyBeforePlan} />
+                {streaming && !bodyAfterPlan ? <StreamingCursor /> : null}
+              </div>
+            )
+          )}
+          {!isOperator && parsedPlan && (
+            <PlanList items={derivePlanItems(parsedPlan.items, toolCalls, streaming)} />
+          )}
+          {!isOperator && toolCalls.length > 0 && (
+            <ExecutionFeed toolCalls={toolCalls} streaming={streaming} />
           )}
           {msg.metadata?.confirmation && (
             <ConfirmationCard
@@ -897,6 +1226,15 @@ function MessageBubble({
               <Link to={`/runs/${msg.metadata.runId}`} className="font-medium text-accent hover:underline">Open run</Link>
               {msg.metadata.workflowId && (
                 <Link to={`/workflows/${msg.metadata.workflowId}`} className="font-medium text-accent hover:underline">Workflow</Link>
+              )}
+              {onCancelRun && msg.metadata.runId && (!msg.metadata.runStatus || ['running', 'pending'].includes(msg.metadata.runStatus)) && (
+                <button
+                  type="button"
+                  onClick={() => onCancelRun(msg.metadata!.runId!)}
+                  className="font-medium text-danger hover:underline ml-auto"
+                >
+                  Stop run
+                </button>
               )}
             </div>
           )}
@@ -935,15 +1273,26 @@ function MessageBubble({
                 </button>
               </div>
             </div>
-          ) : msg.text ? (
-            <div className="whitespace-pre-wrap break-words">{msg.text}</div>
-          ) : msg.metadata?.card || msg.metadata?.confirmation || (msg.metadata?.toolCalls && msg.metadata.toolCalls.length > 0) ? null : (
+          ) : bodyAfterPlan ? (
+            isOperator ? (
+              <div className="whitespace-pre-wrap break-words">{bodyAfterPlan}</div>
+            ) : (
+              <div className="break-words">
+                <ChatMarkdown text={bodyAfterPlan} />
+                {streaming ? <StreamingCursor /> : null}
+              </div>
+            )
+          ) : (msg.metadata?.card || msg.metadata?.confirmation || toolCalls.length > 0 || bodyBeforePlan || (!isOperator && msg.metadata?.thinking)) ? null : streaming && !isOperator ? (
+            <TypingDots />
+          ) : !isOperator ? null : (
             <div className="text-[12px] italic text-text-muted">No text content</div>
           )}
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-text-muted">
+          <div className="mt-1.5 border-t border-line/30 pt-1 flex flex-wrap items-center gap-1.5 text-[10px] font-mono tracking-wider text-text-muted">
             <span>{new Date(msg.createdAt).toLocaleTimeString()}</span>
-            {msg.source && <span className="rounded bg-canvas px-1">via {msg.source}</span>}
-            {msg.deliveryStatus && msg.deliveryStatus !== 'sent' && <span>{msg.deliveryStatus}</span>}
+            {!isOperator && msg.authorKind === 'agent' && assistantLabel && (
+              <span className="rounded bg-canvas px-1">{assistantLabel}</span>
+            )}
+            {statusLabel && <span className={clsx('uppercase font-bold', statusLabel === 'sending' ? 'text-accent' : 'text-danger')}>{statusLabel}</span>}
           </div>
         </div>
         {!isOperator && <MessageActions onCopy={onCopy} onDelete={onDelete} />}
@@ -961,28 +1310,94 @@ function ConfirmationCard({
   onApprove: () => void;
   onCancel: () => void;
 }) {
-  const expired = data.status === 'pending' && Number.isFinite(Date.parse(data.expiresAt)) && Date.parse(data.expiresAt) <= Date.now();
+  const [now, setNow] = useState(Date.now());
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const expiresAtMs = Date.parse(data.expiresAt);
+  const hasExpiry = Number.isFinite(expiresAtMs);
+  const expired = data.status === 'pending' && hasExpiry && expiresAtMs <= now;
   const disabled = data.status !== 'pending' || expired;
+  const impact = data.impact ?? inferConfirmationImpact(data);
+  const riskLevel = impact.riskLevel ?? 'medium';
+  const risk = confirmationRiskStyle(riskLevel);
+  const details = impact.details?.filter(Boolean) ?? [];
+  const auditPreview = formatConfirmationJson(data.toolCall.args);
+
+  useEffect(() => {
+    if (data.status !== 'pending' || !hasExpiry) return undefined;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [data.status, hasExpiry]);
+
   return (
-    <div className="mb-2 rounded-md border border-warn/40 bg-warn-soft p-2 text-[12px] text-text-primary" data-testid="chat-confirmation-card">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="font-semibold">{data.title}</div>
-          <div className="mt-0.5 font-mono text-[10px] text-text-muted">{data.toolCall.name}</div>
+    <div className={clsx(
+      'mb-2 overflow-hidden rounded-2xl border bg-canvas/80 text-[12px] text-text-primary shadow-[0_24px_55px_-42px_rgba(0,0,0,0.85)]',
+      risk.container,
+    )} data-testid="chat-confirmation-card">
+      <div className="relative p-3">
+        <div className={clsx('pointer-events-none absolute inset-x-0 top-0 h-1', risk.bar)} />
+        <div className="flex items-start gap-2.5">
+          <div className={clsx('mt-0.5 rounded-xl border p-2', risk.icon)}>
+            {riskLevel === 'danger' || riskLevel === 'high'
+              ? <AlertTriangle size={15} />
+              : <ShieldCheck size={15} />}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <div className="font-semibold">{data.title}</div>
+              <span className={clsx('rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]', risk.badge)}>
+                {riskLevel} risk
+              </span>
+            </div>
+            <div className="mt-1 text-[12px] leading-relaxed text-text-secondary">{impact.summary}</div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-text-muted">
+              <span className="font-mono">{data.toolCall.name}</span>
+              <span className="inline-flex items-center gap-1">
+                <Clock3 size={11} />
+                {expired ? 'Expired' : hasExpiry ? `${formatRemainingTime(expiresAtMs - now)} left` : data.status}
+              </span>
+              {impact.reversible !== undefined && (
+                <span>{impact.reversible ? 'Reversible' : 'Not automatically reversible'}</span>
+              )}
+              {impact.externalSideEffects && <span>May trigger external side effects</span>}
+            </div>
+          </div>
+          <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-text-muted">
+            {expired ? 'expired' : data.status}
+          </span>
         </div>
-        <span className="rounded bg-canvas px-1.5 py-0.5 text-[10px] text-text-muted">
-          {expired ? 'expired' : data.status}
-        </span>
-      </div>
-      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-canvas/70 p-2 font-mono text-[10px] text-text-secondary">
-        {data.body}
-      </pre>
-      <div className="mt-2 flex flex-wrap gap-1.5">
+
+        {details.length > 0 && (
+          <div className="mt-3 grid gap-1.5">
+            {details.slice(0, 4).map((detail) => (
+              <div key={detail} className="flex gap-2 rounded-xl border border-line/60 bg-surface/60 px-2.5 py-1.5 text-[11px] text-text-secondary">
+                <span className={clsx('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', risk.dot)} />
+                <span>{detail}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setDetailsOpen((value) => !value)}
+          className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-line/60 bg-surface/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted transition hover:bg-surface-2 hover:text-text-primary"
+          aria-expanded={detailsOpen}
+        >
+          <FileText size={11} />
+          {detailsOpen ? 'Hide audit payload' : 'Show audit payload'}
+        </button>
+        {detailsOpen && (
+          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-line/70 bg-canvas/80 p-2 font-mono text-[10px] leading-relaxed text-text-secondary">
+            {auditPreview}
+          </pre>
+        )}
+
+        <div className="mt-3 flex flex-wrap gap-1.5">
         <button
           type="button"
           onClick={onApprove}
           disabled={disabled}
-          className="inline-flex h-7 items-center gap-1.5 rounded-btn bg-accent px-2.5 text-[11px] font-semibold text-canvas transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-[11px] font-semibold text-canvas transition hover:bg-accent-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {data.status === 'approving' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
           {data.confirmLabel}
@@ -991,14 +1406,78 @@ function ConfirmationCard({
           type="button"
           onClick={onCancel}
           disabled={disabled}
-          className="inline-flex h-7 items-center gap-1.5 rounded-btn border border-line bg-surface px-2.5 text-[11px] font-semibold text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface px-3 text-[11px] font-semibold text-text-secondary transition hover:bg-surface-2 hover:text-text-primary active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <X size={12} />
           {data.cancelLabel}
         </button>
+        {disabled && expired && (
+          <span className="inline-flex h-8 items-center text-[11px] text-text-muted">Send the request again to refresh approval.</span>
+        )}
+        </div>
       </div>
     </div>
   );
+}
+
+function inferConfirmationImpact(data: ConfirmationCardData): NonNullable<ConfirmationCardData['impact']> {
+  return {
+    summary: data.body.split('\n').find((line) => line.trim()) ?? 'This action changes platform state.',
+    details: [],
+    riskLevel: 'medium',
+    reversible: false,
+    externalSideEffects: false,
+  };
+}
+
+function confirmationRiskStyle(level: NonNullable<NonNullable<ConfirmationCardData['impact']>['riskLevel']>) {
+  const styles = {
+    low: {
+      container: 'border-accent/25',
+      bar: 'bg-accent/70',
+      badge: 'bg-accent/10 text-accent',
+      icon: 'border-accent/25 bg-accent/10 text-accent',
+      dot: 'bg-accent',
+    },
+    medium: {
+      container: 'border-warn/35',
+      bar: 'bg-warn/80',
+      badge: 'bg-warn-soft text-warn',
+      icon: 'border-warn/35 bg-warn-soft text-warn',
+      dot: 'bg-warn',
+    },
+    high: {
+      container: 'border-warn/50',
+      bar: 'bg-warn',
+      badge: 'bg-warn-soft text-warn',
+      icon: 'border-warn/50 bg-warn-soft text-warn',
+      dot: 'bg-warn',
+    },
+    danger: {
+      container: 'border-danger/45',
+      bar: 'bg-danger',
+      badge: 'bg-danger/10 text-danger',
+      icon: 'border-danger/40 bg-danger/10 text-danger',
+      dot: 'bg-danger',
+    },
+  };
+  return styles[level];
+}
+
+function formatRemainingTime(ms: number): string {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes <= 0) return `${rest}s`;
+  return `${minutes}m ${rest.toString().padStart(2, '0')}s`;
+}
+
+function formatConfirmationJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function asAppThreadHandoff(value: unknown): AppThreadHandoff | null {
@@ -1012,6 +1491,25 @@ function asAppThreadHandoff(value: unknown): AppThreadHandoff | null {
     carriedMessage: typeof record.carriedMessage === 'string' ? record.carriedMessage : null,
     reason: typeof record.reason === 'string' ? record.reason : null,
   };
+}
+
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-1 py-1" role="status" aria-label="Assistant is responding">
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-muted/80 [animation-delay:-0.3s]" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-muted/80 [animation-delay:-0.15s]" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-muted/80" />
+    </span>
+  );
+}
+
+function StreamingCursor() {
+  return (
+    <span
+      className="ml-0.5 inline-block h-3.5 w-[2px] translate-y-[2px] animate-pulse rounded-sm bg-accent align-middle"
+      aria-hidden
+    />
+  );
 }
 
 function MessageActions({

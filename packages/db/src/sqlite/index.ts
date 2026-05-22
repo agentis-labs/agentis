@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import * as schema from './schema.js';
 import { EMBEDDED_INIT_SQL } from './embedded-sql.js';
+import { runSqliteMigrations } from '../migrate.js';
 
 export type AgentisSqliteDb = BetterSQLite3Database<typeof schema>;
 
@@ -16,7 +17,16 @@ export interface SqliteOpenOptions {
 
 /**
  * Open the embedded SQLite database, ensure the directory exists, apply WAL,
- * enable foreign keys, and run hand-authored migrations idempotently.
+ * enable foreign keys, and run migrations idempotently.
+ *
+ * Two migration layers run, in order:
+ *   1. runEmbeddedMigrations — authoritative for the actual V1 schema: it
+ *      execs EMBEDDED_INIT_SQL and applies the idempotent drift-patch
+ *      ALTERs/rebuilds that keep pre-existing databases current.
+ *   2. runSqliteMigrations — the versioned schema_migrations layer. Because
+ *      step 1 already created the core tables, it backfills version 1 (the
+ *      init) rather than re-running it, then applies any future versioned
+ *      migrations. This is the authoritative *record* of applied versions.
  */
 export function openSqlite(options: SqliteOpenOptions): { db: AgentisSqliteDb; sqlite: Database.Database } {
   mkdirSync(dirname(options.path), { recursive: true });
@@ -27,6 +37,7 @@ export function openSqlite(options: SqliteOpenOptions): { db: AgentisSqliteDb; s
 
   if (options.migrate !== false) {
     runEmbeddedMigrations(sqlite);
+    runSqliteMigrations(sqlite);
   }
 
   const db = drizzle(sqlite, { schema });
@@ -72,6 +83,13 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Company OS layer (migration v2): conversation messages can be linked to an
   // issue. embedded-sql.ts predates this column — patch the drift here.
   addColumn('conversation_messages', 'issue_id', 'TEXT');
+  addColumn('conversations', 'title', 'TEXT');
+  addColumn('conversations', 'archived_at', 'TEXT');
+  sqlite.exec(`
+DROP INDEX IF EXISTS uq_conversation_agent;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_agent_active ON conversations(workspace_id, agent_id) WHERE archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_id, agent_id, archived_at, last_message_at);
+`);
 
   // PackagerService: agent personality fields.
   addColumn('agents', 'instructions', 'TEXT');
@@ -92,9 +110,16 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
 
   // PackagerService: workflow concurrency + tagging.
   addColumn('workflows', 'max_concurrent_runs', 'INTEGER');
-  addColumn('workflows', 'concurrency_overflow', 'TEXT');
+  addColumn('workflows', 'concurrency_overflow', "TEXT NOT NULL DEFAULT 'queue'");
   addColumn('workflows', 'tags', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('workflows', 'intended_behavior', 'TEXT');
+  // Normalize the concurrency_overflow column on databases created before it had
+  // a default: older schemas added it NOT NULL with no default, so every insert
+  // that omitted it failed with a NOT NULL constraint error. Rebuild the table
+  // to NOT NULL DEFAULT 'queue' and backfill NULLs. Idempotent (no-op once
+  // normalized). Must run after the addColumn calls above so the source table
+  // has every column.
+  migrateWorkflowsConcurrencyOverflow(sqlite);
   sqlite.exec(`
 CREATE TABLE IF NOT EXISTS workflow_run_queue (
   id TEXT PRIMARY KEY,
@@ -291,6 +316,68 @@ PRAGMA foreign_keys = ON;
 CREATE INDEX IF NOT EXISTS idx_runs_workflow ON workflow_runs(workflow_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON workflow_runs(workspace_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_workspace_created ON workflow_runs(workspace_id, created_at DESC);
+`);
+}
+
+function migrateWorkflowsConcurrencyOverflow(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{
+    name: string;
+    notnull: number;
+    dflt_value: string | null;
+  }>;
+  if (columns.length === 0) return; // table doesn't exist yet
+
+  const overflow = columns.find((column) => column.name === 'concurrency_overflow');
+  const alreadyNormalized = Boolean(
+    overflow
+      && overflow.notnull === 1
+      && typeof overflow.dflt_value === 'string'
+      && overflow.dflt_value.replace(/'/g, '').trim() === 'queue',
+  );
+  if (alreadyNormalized) return;
+
+  const names = new Set(columns.map((column) => column.name));
+  // Tolerate very old DBs that predate some columns by substituting a literal.
+  const pick = (name: string, fallback: string) => (names.has(name) ? name : fallback);
+  const overflowExpr = names.has('concurrency_overflow')
+    ? "COALESCE(concurrency_overflow, 'queue')"
+    : "'queue'";
+
+  sqlite.exec(`
+PRAGMA foreign_keys = OFF;
+CREATE TABLE workflows_next (
+  id                    TEXT PRIMARY KEY,
+  workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  ambient_id            TEXT REFERENCES ambients(id) ON DELETE SET NULL,
+  user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  registry_entry_id     TEXT,
+  registry_version      TEXT,
+  title                 TEXT NOT NULL,
+  summary               TEXT,
+  intended_behavior     TEXT,
+  graph                 TEXT NOT NULL,
+  settings              TEXT NOT NULL DEFAULT '{}',
+  is_from_registry      INTEGER NOT NULL DEFAULT 0,
+  max_concurrent_runs   INTEGER,
+  concurrency_overflow  TEXT NOT NULL DEFAULT 'queue',
+  tags                  TEXT NOT NULL DEFAULT '[]',
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO workflows_next (
+  id, workspace_id, ambient_id, user_id, registry_entry_id, registry_version,
+  title, summary, intended_behavior, graph, settings, is_from_registry,
+  max_concurrent_runs, concurrency_overflow, tags, created_at, updated_at
+)
+SELECT
+  id, workspace_id, ambient_id, user_id, ${pick('registry_entry_id', 'NULL')}, ${pick('registry_version', 'NULL')},
+  title, summary, ${pick('intended_behavior', 'NULL')}, graph, settings, ${pick('is_from_registry', '0')},
+  ${pick('max_concurrent_runs', 'NULL')}, ${overflowExpr}, ${pick('tags', "'[]'")}, created_at, updated_at
+FROM workflows;
+DROP TABLE workflows;
+ALTER TABLE workflows_next RENAME TO workflows;
+PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS idx_workflows_workspace ON workflows(workspace_id);
 `);
 }
 

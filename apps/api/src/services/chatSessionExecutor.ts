@@ -16,6 +16,15 @@ export interface ChatSessionExecutorDeps {
   logger?: Logger;
   bus?: EventBus;
   adapters?: AdapterManager;
+  /**
+   * Optional native function-calling runtime used to answer chat turns for
+   * agents whose own adapter forwards tools via the slow marker protocol
+   * (Codex / Claude Code CLIs re-spawn a process per tool round). When set,
+   * those turns are token-streamed through this runtime instead — the fast path
+   * — while keeping the selected agent's persona, context, and attribution.
+   * Unset = every agent uses its own adapter, unchanged.
+   */
+  orchestratorRuntime?: AgentAdapter;
 }
 
 export interface ChatTurnOptions {
@@ -50,6 +59,25 @@ export class ChatSessionExecutor {
   }
 
   /**
+   * Resolve which adapter actually answers a chat turn. Agents whose runtime
+   * forwards tools via the marker protocol (Codex / Claude Code CLIs) are slow
+   * and re-spawn per tool round; when an `orchestratorRuntime` is configured we
+   * transparently answer their turns through it instead. Everything else uses
+   * its own adapter. The swap is invisible to the operator — same persona,
+   * same context, same attribution.
+   */
+  static #resolveChatAdapter(adapter: AgentAdapter): AgentAdapter {
+    const runtime = this.#deps.orchestratorRuntime;
+    if (!runtime || runtime === adapter) return adapter;
+    const forwarding = adapter.capabilities?.().toolForwarding;
+    if (forwarding === 'marker_protocol' && runtime.chat) {
+      this.#deps.logger?.debug?.('chat.fast_path.engaged', { from: adapter.adapterType });
+      return runtime;
+    }
+    return adapter;
+  }
+
+  /**
    * Build the tool catalog for a turn. When the db is wired we surface the
    * workspace's workflows as discrete `workflow.<id>` tools so the
    * orchestrator can call them directly with typed parameters. Capped at 40
@@ -58,7 +86,7 @@ export class ChatSessionExecutor {
    */
   static #buildCatalog(ctx: ChatTurnContext): ToolDefinition[] {
     const db = this.#deps.db;
-    if (!db || !ctx.workspaceId) return CHAT_TOOL_CATALOG;
+    if (!db || !ctx.workspaceId) return this.#filterToRegistered(CHAT_TOOL_CATALOG);
     try {
       const rows = db
         .select({
@@ -74,19 +102,38 @@ export class ChatSessionExecutor {
         // Most-recently-edited first so the cap keeps the workflows the
         // operator is actively working on.
         .sort((a, b) => (a.updatedAt > b.updatedAt ? -1 : 1));
-      if (rows.length === 0) return CHAT_TOOL_CATALOG;
-      return buildWorkspaceToolCatalog(
+      if (rows.length === 0) return this.#filterToRegistered(CHAT_TOOL_CATALOG);
+      return this.#filterToRegistered(buildWorkspaceToolCatalog(
         rows.slice(0, 40).map((r) => ({
           id: r.id,
           title: r.title,
           summary: r.summary,
           inputContract: (r.graph as { inputContract?: { fields?: Array<{ key: string; type?: string; required?: boolean; description?: string }> } } | null)?.inputContract ?? null,
         })),
-      );
+      ));
     } catch (err) {
       this.#deps.logger?.warn('chat.catalog.dynamic_failed', { err: (err as Error).message });
-      return CHAT_TOOL_CATALOG;
+      return this.#filterToRegistered(CHAT_TOOL_CATALOG);
     }
+  }
+
+  /**
+   * Drop any advertised tool the registry can't actually execute, so the model
+   * never wastes a turn calling a phantom tool (e.g. `agentis.knowledge.search`
+   * advertised in the static catalog but not registered). Dynamic `workflow.<id>`
+   * tools are always kept (the executor rewrites them to agentis.workflow.run).
+   * If the registry isn't configured yet, returns the catalog unfiltered rather
+   * than hiding everything.
+   */
+  static #filterToRegistered(tools: ToolDefinition[]): ToolDefinition[] {
+    const registered = ChatToolExecutor.registeredIds();
+    if (registered.size === 0) return tools;
+    const kept = tools.filter((tool) => tool.name.startsWith('workflow.') || registered.has(tool.name));
+    const dropped = tools.length - kept.length;
+    if (dropped > 0) {
+      this.#deps.logger?.debug?.('chat.catalog.filtered_unregistered', { dropped });
+    }
+    return kept;
   }
 
   static async *turn(
@@ -102,8 +149,11 @@ export class ChatSessionExecutor {
     const tools = options.tools ?? this.#buildCatalog(ctx);
     const viewport = options.viewport ?? ctx.viewport ?? null;
 
-    if (!adapter.chat) {
-      yield { type: 'text', delta: 'This agent adapter is connected for workflow tasks, but it does not expose interactive chat yet.' };
+    adapter = this.#resolveChatAdapter(adapter);
+    const capabilities = adapter.capabilities?.();
+    if (!adapter.chat || capabilities?.interactiveChat === false) {
+      const reason = capabilities?.limitations?.[0];
+      yield { type: 'text', delta: reason ?? 'This agent adapter is connected for workflow tasks, but it does not expose interactive chat yet.' };
       yield { type: 'done', finishReason: 'stop' };
       return;
     }
@@ -138,6 +188,7 @@ export class ChatSessionExecutor {
     confirmed: boolean,
     guard: { workspaceId: string; userId: string; conversationId: string },
   ): AsyncIterable<ChatDelta> {
+    adapter = this.#resolveChatAdapter(adapter);
     this.#cleanupPendingConfirmations();
     const pending = this.#pendingConfirmations.get(turnId);
     if (!pending) {
@@ -163,8 +214,9 @@ export class ChatSessionExecutor {
       return;
     }
 
-    if (!adapter.chat) {
-      yield { type: 'text', delta: 'This agent cannot resume the confirmed action because its adapter does not expose interactive chat.' };
+    const capabilities = adapter.capabilities?.();
+    if (!adapter.chat || capabilities?.interactiveChat === false) {
+      yield { type: 'text', delta: capabilities?.limitations?.[0] ?? 'This agent cannot resume the confirmed action because its adapter does not expose interactive chat.' };
       yield { type: 'done', finishReason: 'error' };
       return;
     }
@@ -328,6 +380,7 @@ export class ChatSessionExecutor {
   static #buildConfirmationDelta(turnId: string, call: ChatToolCall, expiresAt: number): Extract<ChatDelta, { type: 'confirmation_required' }> {
     const title = confirmationTitle(call.name);
     const definition = ChatToolExecutor.definition(call.name);
+    const impact = confirmationImpact(call.name, call.arguments, definition?.description);
     const args = safeJson(call.arguments);
     const clippedArgs = args.length > 900 ? `${args.slice(0, 900)}...` : args;
     return {
@@ -335,7 +388,13 @@ export class ChatSessionExecutor {
       turnId,
       toolCall: { id: call.id, name: call.name, args: call.arguments },
       title,
-      body: `${definition?.description ?? 'This action changes platform state.'}\n\nArguments:\n${clippedArgs}`,
+      body: [
+        impact.summary,
+        '',
+        ...(impact.details.length > 0 ? ['Action details:', ...impact.details.map((detail) => `- ${detail}`), ''] : []),
+        `Arguments:\n${clippedArgs}`,
+      ].join('\n'),
+      impact,
       confirmLabel: confirmationConfirmLabel(call.name),
       cancelLabel: 'Cancel',
       expiresAt: new Date(expiresAt).toISOString(),
@@ -375,7 +434,11 @@ export class ChatSessionExecutor {
       }));
     const adapterHealth = this.#deps.adapters?.list()
       .filter((registration) => agentInventory.some((agentRow) => agentRow.id === registration.agentId))
-      .map((registration) => ({ agentId: registration.agentId, adapterType: registration.adapterType })) ?? [];
+      .map((registration) => ({
+        agentId: registration.agentId,
+        adapterType: registration.adapterType,
+        capabilities: registration.adapter.capabilities?.() ?? null,
+      })) ?? [];
     return {
       workspaceName: workspace?.name,
       agentName: agent?.name,
@@ -523,6 +586,102 @@ function confirmationConfirmLabel(toolName: string): string {
     'agentis.ephemeral.run': 'Run once',
   };
   return labels[toolName] ?? 'Confirm';
+}
+
+function confirmationImpact(toolName: string, args: unknown, fallbackDescription?: string): {
+  summary: string;
+  details: string[];
+  riskLevel: 'low' | 'medium' | 'high' | 'danger';
+  reversible: boolean;
+  externalSideEffects: boolean;
+} {
+  const record = recordFromUnknown(args);
+  const details: string[] = [];
+  const workflowId = stringFrom(record.workflowId);
+  const runId = stringFrom(record.runId);
+  const approvalId = stringFrom(record.approvalId);
+  const decision = stringFrom(record.decision);
+  const dynamicWorkflowId = toolName.startsWith('workflow.') ? toolName.slice('workflow.'.length) : null;
+
+  if (workflowId || dynamicWorkflowId) details.push(`Workflow: ${workflowId ?? dynamicWorkflowId}`);
+  if (runId) details.push(`Run: ${runId}`);
+  if (approvalId) details.push(`Approval: ${approvalId}`);
+  if (decision) details.push(`Decision: ${decision}`);
+
+  if (toolName === 'agentis.workflow.run' || toolName.startsWith('workflow.')) {
+    return {
+      summary: 'This will start a real workflow run in the current workspace.',
+      details: [
+        ...details,
+        'The workflow may execute agents, skills, integrations, or checkpoints depending on its graph.',
+      ],
+      riskLevel: 'medium',
+      reversible: false,
+      externalSideEffects: true,
+    };
+  }
+
+  if (toolName === 'agentis.ephemeral.run') {
+    return {
+      summary: 'This will execute a temporary workflow graph once without saving it first.',
+      details: [
+        ...details,
+        'Any side effects inside the graph still happen during the run.',
+      ],
+      riskLevel: 'medium',
+      reversible: false,
+      externalSideEffects: true,
+    };
+  }
+
+  if (toolName === 'agentis.run.cancel') {
+    return {
+      summary: 'This will stop an active workflow run and mark unfinished nodes as cancelled.',
+      details,
+      riskLevel: 'high',
+      reversible: false,
+      externalSideEffects: false,
+    };
+  }
+
+  if (toolName === 'agentis.approval.resolve') {
+    return {
+      summary: `This will ${decision === 'reject' ? 'reject' : 'approve'} a pending human approval.`,
+      details: [
+        ...details,
+        'The waiting workflow may immediately continue or stop based on this decision.',
+      ],
+      riskLevel: decision === 'reject' ? 'danger' : 'high',
+      reversible: false,
+      externalSideEffects: true,
+    };
+  }
+
+  if (toolName === 'agentis.app.create') {
+    return {
+      summary: 'This will create a deployed Agentis app and associated platform resources.',
+      details,
+      riskLevel: 'medium',
+      reversible: true,
+      externalSideEffects: false,
+    };
+  }
+
+  return {
+    summary: fallbackDescription ?? 'This action changes platform state.',
+    details,
+    riskLevel: 'medium',
+    reversible: false,
+    externalSideEffects: false,
+  };
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function stringFrom(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function safeJson(value: unknown): string {

@@ -30,10 +30,12 @@ async function collect(iterable: AsyncIterable<ChatDelta>): Promise<ChatDelta[]>
 }
 
 let mutatingToolCalls = 0;
+let autoMutatingToolCalls = 0;
 
 describe('ChatSessionExecutor', () => {
   beforeEach(() => {
     mutatingToolCalls = 0;
+    autoMutatingToolCalls = 0;
     const registry = new AgentisToolRegistry({ logger: createLogger({ level: 'error' }) });
     registry.register(
       {
@@ -55,6 +57,20 @@ describe('ChatSessionExecutor', () => {
       },
       async (args) => {
         mutatingToolCalls += 1;
+        return { wrote: args.value };
+      },
+    );
+    registry.register(
+      {
+        id: 'agentis.auto_write_test',
+        family: 'build',
+        description: 'Test auto-executed write action.',
+        inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
+        mutating: true,
+        autoExecute: true,
+      },
+      async (args) => {
+        autoMutatingToolCalls += 1;
         return { wrote: args.value };
       },
     );
@@ -145,6 +161,11 @@ describe('ChatSessionExecutor', () => {
     );
 
     expect(confirmation).toBeTruthy();
+    expect(confirmation!.impact).toEqual(expect.objectContaining({
+      summary: 'Test write action.',
+      riskLevel: 'medium',
+      reversible: false,
+    }));
     expect(initial.some((delta) => delta.type === 'tool_result')).toBe(false);
     expect(mutatingToolCalls).toBe(0);
 
@@ -154,5 +175,88 @@ describe('ChatSessionExecutor', () => {
     expect(resumed.some((delta) => delta.type === 'tool_result' && delta.name === 'agentis.write_test')).toBe(true);
     expect(resumed).toContainEqual({ type: 'text', delta: 'write complete' });
     expect(adapter.calls).toHaveLength(2);
+  });
+
+  it('auto-executes mutating tools that explicitly opt in', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'tool_call', id: 'tool_auto', name: 'agentis.auto_write_test', args: { value: 'built' } };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'auto write complete' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'build this', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_auto',
+    }));
+
+    expect(autoMutatingToolCalls).toBe(1);
+    expect(deltas.some((delta) => delta.type === 'confirmation_required')).toBe(false);
+    expect(deltas.some((delta) => delta.type === 'tool_result' && delta.name === 'agentis.auto_write_test')).toBe(true);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'auto write complete' });
+  });
+
+  it('answers marker-protocol (CLI) agents through the orchestrator runtime fast path', async () => {
+    const cliAdapter: AgentAdapter = {
+      adapterType: 'codex',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: true, checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: true, toolCalling: true, toolForwarding: 'marker_protocol' as const };
+      },
+      async *chat() {
+        yield { type: 'text', delta: 'FROM_SLOW_CLI' };
+        yield { type: 'done', finishReason: 'stop' as const };
+      },
+    };
+    const runtime = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'FROM_FAST_RUNTIME' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    ChatSessionExecutor.configure({ orchestratorRuntime: runtime });
+
+    const deltas = await collect(ChatSessionExecutor.turn(cliAdapter, [], 'hi', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_fast',
+    }));
+
+    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_FAST_RUNTIME' });
+    expect(deltas.some((delta) => delta.type === 'text' && delta.delta === 'FROM_SLOW_CLI')).toBe(false);
+    expect(runtime.calls).toHaveLength(1);
+  });
+
+  it('does not divert native adapters when an orchestrator runtime is configured', async () => {
+    const native = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'FROM_NATIVE' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    const runtime = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'FROM_RUNTIME' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    ChatSessionExecutor.configure({ orchestratorRuntime: runtime });
+
+    const deltas = await collect(ChatSessionExecutor.turn(native, [], 'hi', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_native',
+    }));
+
+    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_NATIVE' });
+    expect(runtime.calls).toHaveLength(0);
   });
 });

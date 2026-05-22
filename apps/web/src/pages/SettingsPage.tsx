@@ -18,7 +18,7 @@ import { Skeleton } from '../components/shared/Skeleton';
 import { ThemeToggle } from '../components/shared/ThemeToggle';
 import { StatusBadge } from '../components/shared/StatusBadge';
 
-type Tab = 'profile' | 'workspace' | 'connections' | 'security' | 'budget';
+type Tab = 'profile' | 'workspace' | 'connections' | 'security' | 'budget' | 'runtimes';
 
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -39,6 +39,7 @@ export function SettingsPage() {
           { value: 'connections', label: 'Connections' },
           { value: 'security',    label: 'Security' },
           { value: 'budget',      label: 'Budget' },
+          { value: 'runtimes',    label: 'Runtimes' },
         ]}
         className="px-6"
       />
@@ -48,6 +49,92 @@ export function SettingsPage() {
         {tab === 'connections' && <ConnectionsTab />}
         {tab === 'security' && <SecurityTab />}
         {tab === 'budget' && <BudgetTab />}
+        {tab === 'runtimes' && <RuntimesTab />}
+      </div>
+    </div>
+  );
+}
+
+// Runtimes tab — tool-availability matrix per adapter type. Mirrors the
+// capabilities each adapter declares server-side (apps/api/src/adapters/*),
+// so operators can see at a glance which runtimes can drive platform tools
+// from chat and which run in relay mode. (CHAT-10X-VISION §4.4.3)
+type ToolSupport = 'native' | 'marker' | 'http' | 'relay' | 'none';
+
+interface RuntimeRow {
+  type: string;
+  label: string;
+  interactiveChat: boolean;
+  support: ToolSupport;
+  note: string;
+}
+
+const RUNTIME_MATRIX: RuntimeRow[] = [
+  { type: 'hermes', label: 'Hermes', interactiveChat: true, support: 'native', note: 'OpenAI-compatible. Streams native tool calls token-by-token. Best chat experience.' },
+  { type: 'local_llm', label: 'Local LLM', interactiveChat: true, support: 'native', note: 'Ollama / LM Studio / vLLM. Native tool calls when the served model supports them.' },
+  { type: 'http', label: 'HTTP', interactiveChat: true, support: 'http', note: 'Tools forwarded over the HTTP contract when the endpoint sets supportsTools. Otherwise relay.' },
+  { type: 'codex', label: 'Codex CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Slower (re-spawns per tool round). Use the orchestrator fast path for native speed.' },
+  { type: 'claude_code', label: 'Claude Code CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Same fast-path recommendation as Codex.' },
+  { type: 'openclaw', label: 'OpenClaw', interactiveChat: false, support: 'relay', note: 'Session-event relay. Chat is mirrored; platform tool calls run on the gateway, not the chat loop.' },
+  { type: 'hermes_agent', label: 'Hermes Agent', interactiveChat: false, support: 'none', note: 'Task runtime for workflow nodes. No interactive chat surface.' },
+  { type: 'cursor', label: 'Cursor', interactiveChat: false, support: 'none', note: 'Task runtime only. No interactive chat / tool forwarding yet.' },
+];
+
+const SUPPORT_META: Record<ToolSupport, { label: string; cls: string }> = {
+  native: { label: 'Native', cls: 'bg-accent-soft text-accent' },
+  http: { label: 'Conditional', cls: 'bg-info-soft text-info' },
+  marker: { label: 'Marker', cls: 'bg-warn-soft text-warn' },
+  relay: { label: 'Relay', cls: 'bg-surface-3 text-text-muted' },
+  none: { label: 'None', cls: 'bg-surface-3 text-text-muted' },
+};
+
+function RuntimesTab() {
+  return (
+    <div className="max-w-3xl space-y-4">
+      <div>
+        <h2 className="text-subheading text-text-primary">Runtime tool support</h2>
+        <p className="mt-1 text-[13px] text-text-muted">
+          Which agent runtimes can drive Agentis platform tools (build workflows, run, dispatch, etc.) directly from chat.
+          Runtimes marked <span className="font-medium text-warn">Marker</span> work but re-spawn a process per tool round —
+          configure the orchestrator fast path (<code className="rounded bg-canvas/70 px-1 font-mono text-[11px]">AGENTIS_ORCHESTRATOR_BASE_URL</code>)
+          to answer their chats through a native runtime instead.
+        </p>
+      </div>
+      <div className="overflow-hidden rounded-card border border-line">
+        <table className="w-full text-left text-[13px]">
+          <thead className="bg-surface-2 text-[11px] uppercase tracking-wide text-text-muted">
+            <tr>
+              <th className="px-3 py-2 font-medium">Runtime</th>
+              <th className="px-3 py-2 font-medium">Chat</th>
+              <th className="px-3 py-2 font-medium">Tools</th>
+              <th className="px-3 py-2 font-medium">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {RUNTIME_MATRIX.map((row) => {
+              const meta = SUPPORT_META[row.support];
+              return (
+                <tr key={row.type} className="border-t border-line align-top">
+                  <td className="px-3 py-2.5">
+                    <div className="font-medium text-text-primary">{row.label}</div>
+                    <div className="font-mono text-[10px] text-text-muted">{row.type}</div>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className={clsx('inline-flex items-center rounded-full px-2 py-0.5 text-[11px]', row.interactiveChat ? 'bg-accent-soft text-accent' : 'bg-surface-3 text-text-muted')}>
+                      {row.interactiveChat ? 'Interactive' : 'Relay only'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className={clsx('inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium', meta.cls)}>
+                      {meta.label}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5 text-[12px] text-text-muted">{row.note}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

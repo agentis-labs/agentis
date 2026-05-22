@@ -20,6 +20,9 @@ export const NODE_GLYPH: Record<string, string> = {
   subflow: '⊞',
   scratchpad: '◈',
   knowledge: '◇',
+  return_output: '▣',
+  artifact_save: '⭳',
+  browser: '◐',
 };
 
 export interface WorkflowNodeData {

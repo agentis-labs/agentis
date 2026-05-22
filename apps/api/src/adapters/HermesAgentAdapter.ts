@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type {
   AgentAdapter,
+  AdapterCapabilities,
   AdapterHealthStatus,
   NormalizedAgentEvent,
   NormalizedTask,
@@ -39,6 +40,15 @@ export class HermesAgentAdapter implements AgentAdapter {
 
   async healthCheck(): Promise<AdapterHealthStatus> {
     return { isHealthy: true, checkedAt: new Date().toISOString() };
+  }
+
+  capabilities(): AdapterCapabilities {
+    return {
+      interactiveChat: false,
+      toolCalling: false,
+      toolForwarding: 'none',
+      limitations: ['Hermes CLI agent currently supports workflow task dispatch, not interactive Agentis chat tools.'],
+    };
   }
 
   onEvent(handler: (event: NormalizedAgentEvent) => void): void {

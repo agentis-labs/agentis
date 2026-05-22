@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from 'react';
 import type { ViewportContext } from '@agentis/core';
 import { useChatPanelStore } from './ChatPanelStore';
+import { FloatingTaskProgress } from './FloatingTaskProgress';
 
 const LazyChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })));
 
@@ -48,7 +49,7 @@ export function ChatPanelMount() {
     return () => window.removeEventListener('agentis:chat-panel-open', onOpen);
   }, [markOpenRequested, selectThread, setLaunchContext, setState]);
 
-  if (state === 'hidden') return null;
+  if (state === 'hidden') return <FloatingTaskProgress />;
 
   return (
     <Suspense fallback={<ChatPanelFallback width={dockedWidth} />}>

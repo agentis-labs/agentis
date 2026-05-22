@@ -34,6 +34,16 @@ export interface HomeWorkflow {
   coverUrl?: string | null;
   avatarUrl?: string | null;
   settings?: Record<string, unknown> | null;
+  graph?: {
+    nodes?: Array<{
+      id: string;
+      type: string;
+      title: string;
+      position?: { x: number; y: number };
+      config?: { kind: string; [k: string]: any };
+    }>;
+    edges?: Array<{ id: string; source: string; target: string }>;
+  } | null;
 }
 
 export interface HomeKnowledgeBase {
@@ -62,6 +72,7 @@ export interface CanvasNode {
   height: number;
   active?: boolean;
   warn?: boolean;
+  outOfCredits?: boolean;
   ghost?: boolean;
   role?: 'orchestrator' | 'manager' | 'worker';
   status?: string;

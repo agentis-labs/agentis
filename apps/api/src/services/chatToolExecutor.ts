@@ -27,8 +27,21 @@ export class ChatToolExecutor {
     return this.#deps?.registry.get(name);
   }
 
+  /**
+   * The set of tool ids the registry can actually execute. Used to filter the
+   * advertised chat catalog so the model never sees (and wastes a turn calling)
+   * a tool that isn't registered. Empty when the registry isn't configured —
+   * callers must treat empty as "don't filter" to avoid hiding everything.
+   */
+  static registeredIds(): Set<string> {
+    if (!this.#deps) return new Set();
+    return new Set(this.#deps.registry.catalog().tools.map((tool) => tool.id));
+  }
+
   static requiresConfirmation(name: string): boolean {
-    return Boolean(this.definition(name)?.mutating);
+    if (name.startsWith('workflow.')) return true;
+    const definition = this.definition(name);
+    return Boolean(definition?.mutating && !definition.autoExecute);
   }
 
   /**

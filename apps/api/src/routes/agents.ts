@@ -9,7 +9,7 @@
 
 import { Hono } from 'hono';
 import { and, eq, inArray } from 'drizzle-orm';
-import { CONSTANTS } from '@agentis/core';
+import { AgentisError, CONSTANTS, type AdapterCapabilities } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -22,6 +22,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { buildAgentMutationRoutes } from './agentMutations.js';
 import { PLAYBOOK_LIBRARY } from '../data/playbook-library.js';
+import { listAgentInstructionFiles, resolveWritableInstructionFile, writeInstructionFile } from '../services/agentInstructionFiles.js';
 
 export interface AgentRoutesDeps {
   db: AgentisSqliteDb;
@@ -190,6 +191,53 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
     return c.json({ entries: PLAYBOOK_LIBRARY });
   });
 
+  app.get('/:id/instructions', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const agent = deps.db
+      .select()
+      .from(schema.agents)
+      .where(and(eq(schema.agents.id, id), eq(schema.agents.workspaceId, ws.workspaceId)))
+      .get();
+    if (!agent) {
+      return c.json({ error: { code: 'RESOURCE_NOT_FOUND', message: 'agent not found' } }, 404);
+    }
+    return c.json({ files: listAgentInstructionFiles(agent) });
+  });
+
+  app.put('/:id/instructions/:key', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const key = decodeURIComponent(c.req.param('key'));
+    const body = (await c.req.json().catch(() => ({}))) as { content?: unknown };
+    if (typeof body.content !== 'string') {
+      throw new AgentisError('VALIDATION_FAILED', 'Instruction content must be a string.');
+    }
+    const agent = deps.db
+      .select()
+      .from(schema.agents)
+      .where(and(eq(schema.agents.id, id), eq(schema.agents.workspaceId, ws.workspaceId)))
+      .get();
+    if (!agent) {
+      return c.json({ error: { code: 'RESOURCE_NOT_FOUND', message: 'agent not found' } }, 404);
+    }
+
+    const target = resolveWritableInstructionFile(agent, key);
+    if (!target) {
+      throw new AgentisError('VALIDATION_FAILED', 'Instruction file is not writable from Agentis.');
+    }
+    if (target.kind === 'platform') {
+      deps.db
+        .update(schema.agents)
+        .set({ instructions: body.content, updatedAt: new Date().toISOString() })
+        .where(eq(schema.agents.id, id))
+        .run();
+    } else {
+      writeInstructionFile(target, body.content);
+    }
+    return c.json({ ok: true });
+  });
+
   app.get('/:id', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
@@ -217,13 +265,15 @@ const HEARTBEAT_STALE_MS = CONSTANTS.AGENT_HEARTBEAT_INTERVAL_MS * 4;
 function presentAgent<T extends { id: string; status: string; lastHeartbeatAt?: string | null; isPaused?: boolean | null }>(
   agent: T,
   adapters: AdapterManager,
-): T {
+): T & { adapterCapabilities?: AdapterCapabilities | null } {
   const status = derivedAgentStatus(agent, adapters);
+  const registration = adapters.get(agent.id);
   return {
     ...agent,
     status,
+    ...(registration ? { adapterCapabilities: registration.adapter.capabilities?.() ?? null } : {}),
     ...(status === 'offline' ? { currentTaskId: null } : {}),
-  } as T;
+  } as T & { adapterCapabilities?: AdapterCapabilities | null };
 }
 
 function derivedAgentStatus(

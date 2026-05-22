@@ -146,6 +146,7 @@ export function promoteEphemeralWorkflow(deps: { db: AgentisSqliteDb }, input: {
     intendedBehavior: input.summary?.trim() || null,
     graph,
     settings: { promotedFromRunId: run.id, promotedAt: now },
+    concurrencyOverflow: 'queue' as const,
   };
   deps.db.insert(schema.workflows).values(workflow).run();
   return { workflow };

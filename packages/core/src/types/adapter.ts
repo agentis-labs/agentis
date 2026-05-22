@@ -15,11 +15,23 @@ export interface AgentAdapter {
   connect(config: AgentAdapterConfig): Promise<void>;
   disconnect(): Promise<void>;
   healthCheck(): Promise<AdapterHealthStatus>;
+  capabilities?(): AdapterCapabilities;
   dispatchTask(task: NormalizedTask): Promise<void>;
   chat?(history: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta>;
   cancelTask(taskId: string): Promise<void>;
   createPersistentListener?(trigger: TriggerConfig): Promise<TriggerListenerHandle>;
   onEvent(handler: (event: NormalizedAgentEvent) => void): void;
+}
+
+export interface AdapterCapabilities {
+  /** Can this runtime participate in the interactive chat loop? */
+  interactiveChat: boolean;
+  /** Can this runtime ask Agentis to execute tools from chat? */
+  toolCalling: boolean;
+  /** How tool calls are transported from the runtime back into Agentis. */
+  toolForwarding: 'native' | 'marker_protocol' | 'http_contract' | 'session_event' | 'none';
+  /** Human-readable caveats shown in settings/diagnostics. */
+  limitations?: string[];
 }
 
 export type AgentAdapterConfig =
@@ -103,10 +115,15 @@ export interface HttpAdapterConfig {
   dispatchPath: string;
   cancelPath?: string;
   healthPath?: string;
+  chatPath?: string;
+  chatUrl?: string;
+  supportsTools?: boolean;
+  model?: string;
   method?: 'POST' | 'GET' | 'PUT' | 'PATCH';
   headers?: Record<string, string>;
   payloadTemplate?: Record<string, unknown>;
   dispatchTimeoutMs: number;
+  chatTimeoutMs?: number;
 }
 
 export interface AdapterHealthStatus {
@@ -142,6 +159,20 @@ export interface NormalizedTask {
   capabilityTags: string[];
   timeoutMs: number;
   callbackUrl?: string;
+  /**
+   * Awareness manifest of the Agentis platform tools available in this
+   * workspace, injected by AdapterManager.dispatchTask so an agent running a
+   * workflow node knows the platform surface exists (CHAT-10X-VISION §4.4.2).
+   * Adapters format this for their LLM. Note: workflow-node dispatch is
+   * fire-and-forget — this is awareness only; interactive tool execution
+   * happens on the chat() path, not here.
+   */
+  toolManifest?: ToolManifestEntry[];
+}
+
+export interface ToolManifestEntry {
+  name: string;
+  description: string;
 }
 
 export type NormalizedAgentEvent =

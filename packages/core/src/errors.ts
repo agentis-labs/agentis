@@ -68,6 +68,9 @@ export type AgentisErrorCode =
   | 'BUDGET_LIMIT_EXCEEDED'
   // Tenancy / safety
   | 'CROSS_WORKSPACE_ACCESS'
+  | 'WORKSPACE_VOLUME_PATH_ESCAPE'
+  // Browser / native runtime
+  | 'BROWSER_OPERATION_FAILED'
   | 'OPERATION_RATE_LIMITED'
   | 'INTERNAL_ERROR';
 
@@ -118,6 +121,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
       return 401;
     case 'AUTH_FORBIDDEN':
     case 'CROSS_WORKSPACE_ACCESS':
+    case 'WORKSPACE_VOLUME_PATH_ESCAPE':
     case 'SKILL_REGISTRY_PERMISSION_NOT_ACKNOWLEDGED':
       return 403;
     case 'RESOURCE_NOT_FOUND':
@@ -161,6 +165,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'SKILL_RUNTIME_UNAVAILABLE':
     case 'CHANNEL_BRIDGE_UNAVAILABLE':
     case 'INTEGRATION_OPERATION_FAILED':
+    case 'BROWSER_OPERATION_FAILED':
       return 503;
     case 'ADAPTER_TIMEOUT':
     case 'SKILL_TIMEOUT':

@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type {
   AgentAdapter,
+  AdapterCapabilities,
   AdapterHealthStatus,
   ChatDelta,
   ChatMessage,
@@ -19,6 +20,10 @@ import type {
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { buildMarkerToolPrompt, extractMarkerToolCalls, formatToolManifestAwareness, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
+
+/** Safety cap for one interactive chat turn when no explicit timeout is configured. */
+const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
 
 export interface CodexAdapterOptions {
   agentId: string;
@@ -53,6 +58,14 @@ export class CodexAdapter implements AgentAdapter {
 
   async healthCheck(): Promise<AdapterHealthStatus> {
     return { isHealthy: true, checkedAt: new Date().toISOString() };
+  }
+
+  capabilities(): AdapterCapabilities {
+    return {
+      interactiveChat: true,
+      toolCalling: true,
+      toolForwarding: 'marker_protocol',
+    };
   }
 
   onEvent(handler: (event: NormalizedAgentEvent) => void): void {
@@ -208,10 +221,14 @@ export class CodexAdapter implements AgentAdapter {
       yield { type: 'done', finishReason: 'error' };
       return;
     }
-    if (this.opts.timeoutSec && this.opts.timeoutSec > 0) {
-      timeout = setTimeout(() => controller.abort(), this.opts.timeoutSec * 1000);
-      timeout.unref?.();
-    }
+    // A single interactive chat turn must be bounded even when the agent config
+    // sets no timeout — otherwise a CLI that goes off exploring its sandbox can
+    // hang the conversation indefinitely (no spinner end, no dismiss).
+    const chatTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
+      ? this.opts.timeoutSec * 1000
+      : DEFAULT_CHAT_TURN_TIMEOUT_MS;
+    timeout = setTimeout(() => controller.abort(), chatTimeoutMs);
+    timeout.unref?.();
     let stderrText = '';
     childProcess.stderr?.on('data', (data) => {
       const chunk = String(data);
@@ -225,6 +242,9 @@ export class CodexAdapter implements AgentAdapter {
       if (timeout) clearTimeout(timeout);
     });
     let buffer = '';
+    let transcript = '';
+    let rawFallback = '';
+    const pendingToolCalls: ChatDelta[] = [];
     childProcess.stdout?.on('data', (chunk) => {
       buffer += String(chunk);
       let newlineIndex: number;
@@ -234,13 +254,24 @@ export class CodexAdapter implements AgentAdapter {
         if (!line) continue;
         try {
           const event = JSON.parse(line) as CodexJsonEvent;
-          const text = extractText(event);
-          if (text) queue.push({ type: 'text', delta: text });
-          const toolCall = extractToolCall(event);
-          if (toolCall) queue.push({ type: 'tool_call', id: randomUUID(), name: toolCall.tool, args: toolCall.input });
-          if (isCompletionEvent(event)) queue.push({ type: 'done', finishReason: 'stop' });
+          if (isReasoningEvent(event)) {
+            // Reasoning streams live into the ThinkingBubble rather than being
+            // mixed into the final answer text (CHAT-10X-VISION §3.3).
+            const reasoning = extractText(event);
+            if (reasoning) queue.push({ type: 'thinking', delta: reasoning });
+          } else {
+            const text = extractText(event);
+            if (text) transcript += text;
+            const toolCall = extractToolCall(event);
+            if (toolCall) pendingToolCalls.push({ type: 'tool_call', id: randomUUID(), name: toolCall.tool, args: toolCall.input });
+          }
         } catch {
-          queue.push({ type: 'text', delta: line });
+          // Codex runs in --json mode, so every meaningful token arrives as a
+          // JSON event. Non-JSON lines are environment noise (e.g. Windows
+          // taskkill output: "ÊXITO: o processo com PID … foi finalizado").
+          // Never surface them as assistant text — retain a filtered copy only
+          // as a fallback for the rare case where the model emits no JSON.
+          if (!isProcessNoiseLine(line)) rawFallback += `${line}\n`;
         }
       }
     });
@@ -255,8 +286,20 @@ export class CodexAdapter implements AgentAdapter {
           result: null,
           error: details ? `Codex exited ${code}: ${details}` : `Codex exited ${code}`,
         });
+        queue.push({ type: 'done', finishReason: 'error' });
+        queue.close();
+        return;
       }
-      queue.push({ type: 'done', finishReason: code === 0 ? 'stop' : 'error' });
+
+      const source = transcript.trim().length > 0 ? transcript : stripProcessNoise(rawFallback);
+      const { calls: markerCalls, cleaned } = extractMarkerToolCalls(source);
+      if (cleaned) queue.push({ type: 'text', delta: cleaned });
+      const allToolCalls: ChatDelta[] = [
+        ...pendingToolCalls,
+        ...markerCalls.map((call) => ({ type: 'tool_call' as const, id: randomUUID(), name: call.name, args: call.args })),
+      ];
+      for (const call of allToolCalls) queue.push(call);
+      queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop' });
       queue.close();
     });
     childProcess.stdin?.end(buildCodexChatPrompt(messages, tools));
@@ -323,6 +366,7 @@ function buildCodexPrompt(task: NormalizedTask): string {
     `Task: ${task.title}`,
     '',
     task.description,
+    formatToolManifestAwareness(task.toolManifest),
     '',
     'Input data:',
     safeJson(task.inputData),
@@ -363,6 +407,20 @@ function isCompletionEvent(event: CodexJsonEvent): boolean {
   return type === 'result' || type === 'done' || type.includes('completed') || type.includes('finished');
 }
 
+/**
+ * Whether a Codex JSONL event carries chain-of-thought rather than the final
+ * answer. Routed to `thinking` deltas so the UI renders it in the collapsible
+ * ThinkingBubble instead of the answer body. Deliberately conservative so the
+ * plain `{"type":"assistant"}` message contract is unaffected.
+ */
+function isReasoningEvent(event: CodexJsonEvent): boolean {
+  const type = String(event.type ?? '').toLowerCase();
+  if (type.includes('reason') || type.includes('think')) return true;
+  const item = objectOf(event.item);
+  const itemType = String(item?.type ?? '').toLowerCase();
+  return itemType.includes('reason') || itemType.includes('think');
+}
+
 function extractOutput(event: CodexJsonEvent, transcript: string): Record<string, unknown> {
   const result = objectOf(event.result) ?? objectOf(event.output);
   if (result) return result;
@@ -391,14 +449,29 @@ function firstString(...values: unknown[]): string | undefined {
 
 function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {
   return [
-    'Agentis interactive chat session. Use tool calls when the Codex CLI supports them; otherwise explain the next action clearly.',
-    '',
-    'Available tools:',
-    safeJson(tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))),
+    buildMarkerToolPrompt(tools),
     '',
     'Conversation:',
-    safeJson(messages),
+    formatMessagesForCodex(messages),
   ].join('\n');
+}
+
+function formatMessagesForCodex(messages: ChatMessage[]): string {
+  return messages.map((message) => {
+    const content = typeof message.content === 'string' ? message.content : safeJson(message.content);
+    if (message.role === 'tool') {
+      return `TOOL RESULT (${message.toolCallId ?? 'unknown'}):\n${content}`;
+    }
+    if (message.role === 'assistant' && message.toolCalls?.length) {
+      return [
+        'ASSISTANT:',
+        content,
+        'REQUESTED TOOLS:',
+        safeJson(message.toolCalls),
+      ].join('\n');
+    }
+    return `${message.role.toUpperCase()}:\n${content}`;
+  }).join('\n\n---\n\n');
 }
 
 function createChatQueue() {

@@ -12,9 +12,15 @@
  *     Enter to send.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { ArrowUp } from 'lucide-react';
 import { api } from '../../lib/api';
+
+// Module-level draft cache — survives component unmount (panel close/reopen)
+const _draftCache = new Map<string, string>();
+export function clearDraft(key: string): void {
+  _draftCache.delete(key);
+}
 
 interface Props {
   onSend: (text: string, options?: { useViewportContext?: boolean }) => Promise<void> | void;
@@ -24,6 +30,8 @@ interface Props {
   };
   initialText?: string;
   placeholder?: string;
+  footer?: React.ReactNode;
+  draftKey?: string;
 }
 
 interface Suggestion {
@@ -52,13 +60,26 @@ const SLASH_COMMANDS: SlashCommand[] = [
 const TRIGGERS = ['/', '@', '#'] as const;
 type Trigger = (typeof TRIGGERS)[number];
 
-export function Composer({ onSend, awareness, initialText, placeholder }: Props) {
-  const [text, setText] = useState(initialText ?? '');
+export function Composer({ onSend, awareness, initialText, placeholder, footer, draftKey }: Props) {
+  const [text, setText] = useState<string>(() => {
+    if (draftKey) {
+      const cached = _draftCache.get(draftKey);
+      if (cached !== undefined) return cached;
+    }
+    return initialText ?? '';
+  });
   const [active, setActive] = useState<{ trigger: Trigger; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [useViewportContext, setUseViewportContext] = useState(true);
   const lastSent = useRef<string>('');
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const adjustHeight = useCallback(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+  }, []);
 
   // Suggestion sources — agents for @, workflows/runs for #, slash for /.
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
@@ -135,8 +156,10 @@ export function Composer({ onSend, awareness, initialText, placeholder }: Props)
   function onChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const v = e.target.value;
     setText(v);
+    if (draftKey) _draftCache.set(draftKey, v);
     const caret = e.target.selectionStart ?? v.length;
     setActive(detectTrigger(v, caret));
+    adjustHeight();
   }
 
   function acceptSuggestion(s: Suggestion) {
@@ -174,6 +197,7 @@ export function Composer({ onSend, awareness, initialText, placeholder }: Props)
     }
     lastSent.current = value;
     setText('');
+    if (draftKey) _draftCache.delete(draftKey);
     await onSend(value, { useViewportContext });
     setUseViewportContext(true);
   }
@@ -214,9 +238,9 @@ export function Composer({ onSend, awareness, initialText, placeholder }: Props)
   }
 
   return (
-    <div className="relative shrink-0 border-t border-line bg-surface p-2">
+    <div className="relative shrink-0 border-t border-line bg-surface px-3 py-2">
       {active && suggestions.length > 0 && (
-        <div className="absolute bottom-full left-2 right-2 mb-1 max-h-56 overflow-y-auto rounded-lg border border-line bg-surface shadow-card">
+        <div className="absolute bottom-full left-0 right-0 mx-3 mb-1 max-h-56 overflow-y-auto rounded-lg border border-line bg-surface shadow-card">
           <ul>
             {suggestions.map((s, i) => (
               <li key={s.id}>
@@ -251,7 +275,7 @@ export function Composer({ onSend, awareness, initialText, placeholder }: Props)
           </button>
         </div>
       )}
-      <div className="flex items-end gap-2">
+      <div className="relative">
         <textarea
           ref={taRef}
           value={text}
@@ -259,17 +283,21 @@ export function Composer({ onSend, awareness, initialText, placeholder }: Props)
           onKeyDown={onKeyDown}
           rows={1}
           placeholder={placeholder ?? 'Message · / for commands · @ for agents · # for refs'}
-          className="max-h-32 min-h-[36px] flex-1 resize-none rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-text-primary outline-none focus:border-accent"
+          className="w-full resize-none rounded-xl border border-line bg-canvas pb-9 pl-3 pr-3 pt-3 text-sm text-text-primary outline-none transition-[border-color] focus:border-accent"
+          style={{ minHeight: '44px', maxHeight: '200px', overflowY: 'auto' }}
         />
-        <button
-          type="button"
-          onClick={() => void send()}
-          disabled={!text.trim()}
-          aria-label="Send message"
-          className="grid h-9 w-9 place-items-center rounded-md bg-accent text-canvas disabled:opacity-50"
-        >
-          <Send size={14} />
-        </button>
+        <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 px-2 py-1.5">
+          <div className="min-w-0 flex-1">{footer}</div>
+          <button
+            type="button"
+            onClick={() => void send()}
+            disabled={!text.trim()}
+            aria-label="Send message"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-accent text-canvas transition-opacity disabled:opacity-30"
+          >
+            <ArrowUp size={13} />
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -48,13 +48,30 @@ interface ChatPanelStore {
   setDockedWidth: (width: number) => void;
   unreadCount: number;
   setUnreadCount: (n: number) => void;
-  selectedThread: { kind: 'room' | 'agent'; id: string; name: string } | null;
+  selectedThread: { kind: 'room' | 'agent'; id: string; name: string; conversationId?: string | null; archivedAt?: string | null } | null;
   selectThread: (t: ChatPanelStore['selectedThread']) => void;
   launchContext: ChatPanelLaunchContext | null;
   setLaunchContext: (context: ChatPanelLaunchContext | null) => void;
   openRequestId: number;
   markOpenRequested: () => void;
+  /**
+   * The agent task currently executing in chat (multi-step build/run). Drives
+   * the pulsing badge on the header button and the FloatingTaskProgress card
+   * shown when the panel is closed mid-task. Null when nothing is running.
+   */
+  activeTask: ActiveTaskState | null;
+  setActiveTask: (task: ActiveTaskState | null) => void;
+  updateActiveTask: (patch: Partial<ActiveTaskState>) => void;
   resetForWorkspace: () => void;
+}
+
+export interface ActiveTaskState {
+  agentId: string;
+  agentName: string;
+  label: string;
+  done: number;
+  total: number;
+  startedAt: number;
 }
 
 export interface ChatPanelLaunchContext {
@@ -93,13 +110,19 @@ export const useChatPanelStore = create<ChatPanelStore>((set) => ({
   setLaunchContext: (context) => set({ launchContext: context }),
   openRequestId: 0,
   markOpenRequested: () => set((state) => ({ openRequestId: state.openRequestId + 1 })),
-  resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, launchContext: null, openRequestId: 0 }),
+  activeTask: null,
+  setActiveTask: (task) => set({ activeTask: task }),
+  updateActiveTask: (patch) => set((state) => (state.activeTask ? { activeTask: { ...state.activeTask, ...patch } } : {})),
+  resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, launchContext: null, openRequestId: 0, activeTask: null }),
 }));
 
 // Global keyboard shortcut: ⌘/ toggles chat
 if (typeof window !== 'undefined') {
   window.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+      const target = e.target as Element;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (target as HTMLElement).isContentEditable) return;
       e.preventDefault();
       useChatPanelStore.getState().toggle();
     }

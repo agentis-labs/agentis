@@ -15,6 +15,7 @@ import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realt
 import { formatDuration, relativeTime, type WorkflowRunSummary } from './runFormat';
 import { RunOutputCard, type FinalNodeOutput } from './RunOutputCard';
 import { WorkflowRecordBrowser, type RecordTable } from './WorkflowRecordBrowser';
+import { WorkflowArtifactGrid, type RunArtifact } from './WorkflowArtifactGrid';
 
 const STATUS_DOT: Record<WorkflowRunSummary['status'], string> = {
   running: 'bg-accent animate-pulse-dot',
@@ -40,19 +41,36 @@ export function WorkflowOutputTab({
   const nav = useNavigate();
   const [data, setData] = useState<OutputResponse | null>(null);
   const [tables, setTables] = useState<RecordTable[]>([]);
+  const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const ctaRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [output, records] = await Promise.all([
-        api<OutputResponse>(`/v1/workflows/${workflowId}/output`),
-        api<{ tables: RecordTable[] }>(`/v1/workflows/${workflowId}/records`),
-      ]);
+      const output = await api<OutputResponse>(`/v1/workflows/${workflowId}/output`);
       setData(output);
-      setTables(records.tables);
       setError(null);
+      // Artifacts the run produced (artifact_save / artifact_collect). Optional
+      // surface — never let it fail the whole output view.
+      if (output.lastRun?.id) {
+        try {
+          const res = await api<{ artifacts: RunArtifact[] }>(`/v1/artifacts?runId=${output.lastRun.id}`);
+          setArtifacts(res.artifacts ?? []);
+        } catch {
+          setArtifacts([]);
+        }
+      } else {
+        setArtifacts([]);
+      }
+      // Record tables are an optional, secondary surface — their endpoint may
+      // not exist for every workflow. Never let it fail the whole output view.
+      try {
+        const records = await api<{ tables: RecordTable[] }>(`/v1/workflows/${workflowId}/records`);
+        setTables(records.tables ?? []);
+      } catch {
+        setTables([]);
+      }
     } catch (e) {
       setError((e as { message?: string })?.message ?? String(e));
     } finally {
@@ -171,6 +189,8 @@ export function WorkflowOutputTab({
           </div>
         )}
       </section>
+
+      {!error && !loading && <WorkflowArtifactGrid artifacts={artifacts} />}
 
       {tables.length > 0 && (
         <section role="region" aria-label="Accumulated records">

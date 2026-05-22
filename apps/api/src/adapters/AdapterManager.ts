@@ -22,6 +22,7 @@ import type {
   AdapterType,
   NormalizedAgentEvent,
   NormalizedTask,
+  ToolManifestEntry,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
@@ -34,16 +35,28 @@ export interface AdapterRegistration {
   adapter: AgentAdapter;
 }
 
+export type ToolManifestProvider = (agentId: string, adapterType: AdapterType) => ToolManifestEntry[];
+
 export class AdapterManager {
   readonly #adapters = new Map<string, AdapterRegistration>();
   readonly #handlers = new Set<AdapterEventHandler>();
   readonly #telemetry: Telemetry;
+  #toolManifestProvider: ToolManifestProvider | null = null;
 
   constructor(
     private readonly logger: Logger,
     telemetry: Telemetry = noopTelemetry,
   ) {
     this.#telemetry = telemetry;
+  }
+
+  /**
+   * Register a provider that supplies the platform tool-awareness manifest for
+   * workflow-dispatched tasks. Wired in bootstrap from the tool registry so the
+   * manager stays decoupled from it. (CHAT-10X-VISION §4.4.2.)
+   */
+  setToolManifestProvider(provider: ToolManifestProvider | null): void {
+    this.#toolManifestProvider = provider;
   }
 
   register(agentId: string, adapter: AgentAdapter): void {
@@ -94,9 +107,20 @@ export class AdapterManager {
         `No adapter registered for agent ${agentId}.`,
       );
     }
+    // Inject the platform tool-awareness manifest unless the caller already set
+    // one. Best-effort: a provider failure must never block dispatch.
+    let effectiveTask = task;
+    if (!task.toolManifest && this.#toolManifestProvider) {
+      try {
+        const manifest = this.#toolManifestProvider(agentId, reg.adapterType);
+        if (manifest.length > 0) effectiveTask = { ...task, toolManifest: manifest };
+      } catch (err) {
+        this.logger.warn('adapter.tool_manifest_failed', { agentId, err: (err as Error).message });
+      }
+    }
     await this.#telemetry.span(
       'adapter.dispatch',
-      () => reg.adapter.dispatchTask(task),
+      () => reg.adapter.dispatchTask(effectiveTask),
       {
         'agentis.agent_id': agentId,
         'agentis.adapter_type': reg.adapterType,

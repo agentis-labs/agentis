@@ -7,9 +7,6 @@
  * generators that consume the .sql file directly (e.g. drizzle-kit).
  */
 export const EMBEDDED_INIT_SQL = String.raw`
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-
 CREATE TABLE IF NOT EXISTS users (
   id              TEXT PRIMARY KEY,
   username        TEXT NOT NULL UNIQUE,
@@ -182,7 +179,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   settings              TEXT NOT NULL DEFAULT '{}',
   is_from_registry      INTEGER NOT NULL DEFAULT 0,
   max_concurrent_runs   INTEGER,
-  concurrency_overflow  TEXT,
+  concurrency_overflow  TEXT NOT NULL DEFAULT 'queue',
   tags                  TEXT NOT NULL DEFAULT '[]',
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -412,12 +409,13 @@ CREATE TABLE IF NOT EXISTS conversations (
   user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   agent_id              TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   mirrored_session_id   TEXT,
+  title                 TEXT,
+  archived_at           TEXT,
   unread_count          INTEGER NOT NULL DEFAULT 0,
   last_message_at       TEXT,
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_agent ON conversations(workspace_id, agent_id);
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
   id                  TEXT PRIMARY KEY,
@@ -487,6 +485,26 @@ CREATE TABLE IF NOT EXISTS installed_registry_artifacts (
   installed_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_registry_install_ws ON installed_registry_artifacts(workspace_id);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  run_id          TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  workflow_id     TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+  agent_id        TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  conversation_id TEXT,
+  node_id         TEXT,
+  type            TEXT NOT NULL DEFAULT 'document',
+  title           TEXT NOT NULL,
+  content         TEXT NOT NULL DEFAULT '',
+  thumbnail_url   TEXT,
+  metadata        TEXT NOT NULL DEFAULT '{}',
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_workspace_created ON artifacts(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   id                TEXT PRIMARY KEY,

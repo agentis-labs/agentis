@@ -35,6 +35,7 @@ export function AgentisEdge(props: EdgeProps) {
   const label = (data as { label?: string } | undefined)?.label ?? '';
   const xray = (data as { xray?: { costLabel: string; tokenLabel: string } } | undefined)?.xray;
   const edgeType = (data as { type?: 'default' | 'error' | 'condition' } | undefined)?.type ?? 'default';
+  const onDelete = (data as { onDelete?: (edgeId: string) => void } | undefined)?.onDelete;
 
   // Edge-type styling. Error edges render dashed in red to make catch branches
   // visually distinct from the success path; condition edges get a subtle
@@ -103,7 +104,7 @@ export function AgentisEdge(props: EdgeProps) {
             transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
             pointerEvents: 'all',
           }}
-          className="nodrag nopan"
+          className="nodrag nopan group flex items-center gap-1"
           onDoubleClick={(e) => {
             e.stopPropagation();
             setEditing(true);
@@ -170,8 +171,27 @@ export function AgentisEdge(props: EdgeProps) {
               tabIndex={0}
               aria-label="Add edge label"
               title="Double-click to add label"
-              className="block h-3 w-6 rounded-full border border-dashed border-line/60 bg-surface/40 opacity-0 transition hover:opacity-100"
+              className="block h-3 w-6 rounded-full border border-dashed border-line/60 bg-surface/40 opacity-0 transition group-hover:opacity-100"
             />
+          )}
+          {onDelete && !editing && (
+            <button
+              type="button"
+              aria-label="Delete connection"
+              title="Delete connection"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(id);
+              }}
+              className={clsx(
+                'flex h-4 w-4 shrink-0 items-center justify-center rounded-full border bg-surface text-[11px] leading-none transition',
+                selected
+                  ? 'border-danger text-danger opacity-100'
+                  : 'border-line text-text-muted opacity-0 group-hover:opacity-100 hover:border-danger hover:text-danger',
+              )}
+            >
+              ×
+            </button>
           )}
         </div>
       </EdgeLabelRenderer>

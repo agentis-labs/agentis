@@ -1,7 +1,7 @@
 
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-
+-- Connection-level pragmas (journal_mode, foreign_keys) are applied by
+-- openSqlite() on the connection, not here: journal_mode = WAL cannot run
+-- inside the transaction that wraps a versioned migration.
 CREATE TABLE IF NOT EXISTS users (
   id              TEXT PRIMARY KEY,
   username        TEXT NOT NULL UNIQUE,

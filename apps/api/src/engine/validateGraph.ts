@@ -102,6 +102,15 @@ export function validateWorkflowGraph(
           throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (guardrails) must declare at least one rule`);
         }
         break;
+      case 'browser': {
+        const op = node.config.operation;
+        if (op === 'navigate' || op === 'extract_text' || op === 'screenshot' || op === 'pdf') {
+          if (!node.config.url && !node.config.html && !node.config.htmlPath) {
+            throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (browser ${op}) requires url, html, or htmlPath`);
+          }
+        }
+        break;
+      }
       case 'loop':
         if (!node.config.bodyWorkflowId) {
           throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (loop) missing bodyWorkflowId`);

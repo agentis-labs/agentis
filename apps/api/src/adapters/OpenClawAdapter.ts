@@ -21,6 +21,7 @@
 
 import type {
   AgentAdapter,
+  AdapterCapabilities,
   AdapterHealthStatus,
   NormalizedAgentEvent,
   NormalizedTask,
@@ -123,6 +124,17 @@ export class OpenClawAdapter implements AgentAdapter {
       isHealthy: this.#ws?.readyState === 1 && this.#breaker.state() !== 'open',
       checkedAt: new Date().toISOString(),
       ...(this.#breaker.state() === 'open' ? { error: 'circuit_breaker_open' } : {}),
+    };
+  }
+
+  capabilities(): AdapterCapabilities {
+    return {
+      interactiveChat: false,
+      toolCalling: false,
+      toolForwarding: 'session_event',
+      limitations: [
+        'OpenClaw mirrors gateway session messages, but it is not yet wired into the Agentis chat tool-execution loop.',
+      ],
     };
   }
 

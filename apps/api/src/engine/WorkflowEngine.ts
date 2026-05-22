@@ -51,8 +51,12 @@ import {
   type GuardrailsNodeConfig,
   type LoopNodeConfig,
   type ParallelNodeConfig,
+  type ReturnOutputNodeConfig,
+  type ArtifactSaveNodeConfig,
+  type BrowserNodeConfig,
   type WorkflowEdge,
   type WorkflowGraphPatch,
+  specialistForRole,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -71,6 +75,9 @@ import type { ConnectorRegistry } from '@agentis/integrations';
 import type { WorkflowStoreService } from '../services/workflowStore.js';
 import type { EvaluatorRuntime } from '../services/evaluatorRuntime.js';
 import type { CredentialVault } from '../services/credentialVault.js';
+import type { WorkspaceIntelligenceService } from '../services/workspaceIntelligence.js';
+import type { BrowserPool } from '../services/browserPool.js';
+import type { SpecialistAgentService } from '../services/specialistAgents.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
@@ -99,6 +106,12 @@ export interface EngineDeps {
   evaluatorRuntime?: EvaluatorRuntime;
   /** Credential vault — required for `integration` nodes that need decrypted credentials. */
   vault?: CredentialVault;
+  /** Workspace Intelligence — injects WORKSPACE.md/MEMORY.md context into agent_task prompts (Layer 1). */
+  workspaceIntelligence?: WorkspaceIntelligenceService;
+  /** Native Playwright runtime — required for `browser` nodes. */
+  browserPool?: BrowserPool;
+  /** Specialist agent library — resolves `agent_task.agentRole` → agentId (Layer 2). */
+  specialists?: SpecialistAgentService;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
   telemetry?: Telemetry;
 }
@@ -407,6 +420,15 @@ export class WorkflowEngine {
           break;
         case 'filter':
           output = this.#executeFilter(node.config as FilterNodeConfig, args.inputs, tctx);
+          break;
+        case 'return_output':
+          output = this.#executeReturnOutput(node.config as ReturnOutputNodeConfig, args.inputs, tctx);
+          break;
+        case 'artifact_save':
+          output = await this.#executeArtifactSave(ctx, node, resolvedConfig as ArtifactSaveNodeConfig, args.inputs);
+          break;
+        case 'browser':
+          output = await this.#executeBrowser(ctx, node, resolvedConfig as BrowserNodeConfig, args.inputs);
           break;
         case 'integration':
           output = await this.#executeIntegration(ctx, node, resolvedConfig as IntegrationNodeConfig, args.inputs);
@@ -836,6 +858,21 @@ export class WorkflowEngine {
         await this.#completeNode(ctx, node.id, result);
         return;
       }
+      case 'return_output': {
+        const result = this.#executeReturnOutput(node.config as ReturnOutputNodeConfig, item.inputData, tctx);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'artifact_save': {
+        const result = await this.#executeArtifactSave(ctx, node, resolvedConfig as ArtifactSaveNodeConfig, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'browser': {
+        const result = await this.#executeBrowser(ctx, node, resolvedConfig as BrowserNodeConfig, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
       case 'integration': {
         const result = await this.#executeIntegration(ctx, node, resolvedConfig as IntegrationNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
@@ -1022,18 +1059,44 @@ export class WorkflowEngine {
       startedAt: new Date().toISOString(),
     };
 
+    // Layer 1: prepend the workspace context block (WORKSPACE.md + relevant
+    // MEMORY.md patterns) so no agent call starts from zero (Principle #2).
+    const prompt = await this.#withWorkspaceContext(ctx, config.prompt);
+
     await this.deps.adapters.dispatchTask({
       taskId,
       runId: ctx.runId,
       workflowId: ctx.workflowId,
       nodeId: node.id,
       title: node.title,
-      description: config.prompt,
+      description: prompt,
       inputData,
       scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
       capabilityTags: config.capabilityTags,
       timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
     }, config.agentId);
+  }
+
+  /**
+   * Prepend the workspace context block to an agent prompt (Layer 1). Best
+   * effort: a context-read failure must never block a dispatch, so we log and
+   * fall back to the raw prompt.
+   */
+  async #withWorkspaceContext(ctx: RunningContext, prompt: string): Promise<string> {
+    if (!this.deps.workspaceIntelligence) return prompt;
+    try {
+      const block = await this.deps.workspaceIntelligence.buildContextBlock(ctx.workspaceId, {
+        workflowId: ctx.workflowId,
+      });
+      return block ? `${block}\n\n${prompt}` : prompt;
+    } catch (err) {
+      this.deps.logger.warn('engine.workspace_context.failed', {
+        runId: ctx.runId,
+        workspaceId: ctx.workspaceId,
+        err: (err as Error).message,
+      });
+      return prompt;
+    }
   }
 
   // ────────────────────────────────────────────────────────────
@@ -1460,6 +1523,170 @@ export class WorkflowEngine {
     // Filter emits a single payload tagged with the result so downstream nodes
     // can either read the boolean or use sourceHandle gating (`pass`/`skip`).
     return { passed, input: inputData };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Output surface — return_output / artifact_save (Layer 6)
+  // ────────────────────────────────────────────────────────────
+
+  /**
+   * Terminal output node. Selects the value to render and tags it with the
+   * `renderAs` viewer hint. The Output API surfaces `renderAs`/`value` to the
+   * web Output Surface, which dispatches to the matching viewer (iframe for
+   * html, table for rows, etc.).
+   */
+  #executeReturnOutput(
+    config: ReturnOutputNodeConfig,
+    inputData: Record<string, unknown>,
+    tctx: TemplateContext,
+  ): Record<string, unknown> {
+    const renderAs = config.renderAs ?? 'json';
+    const value = config.valuePath
+      ? readTemplatePath(tctx, config.valuePath) ?? readDotPath(inputData, config.valuePath)
+      : inputData;
+    return {
+      renderAs,
+      ...(config.title ? { title: config.title } : {}),
+      value: value ?? null,
+    };
+  }
+
+  /**
+   * Persist a value as a workspace artifact (immutable run receipt). V1 stores
+   * content inline in the `artifacts` table — the same store used by
+   * `artifact_collect`. Returns an artifact ref so downstream nodes and the
+   * Output gallery can reference it.
+   */
+  async #executeArtifactSave(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ArtifactSaveNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const name = (config.name ?? 'artifact').trim() || 'artifact';
+    const rawContent = config.contentPath ? readDotPath(inputData, config.contentPath) : inputData;
+    const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent ?? null, null, 2);
+    const title = config.titlePath ? String(readDotPath(inputData, config.titlePath) ?? name) : name;
+    const type = config.artifactType ?? inferArtifactType(name, content);
+    const artifact = this.#persistArtifact(ctx, node, { name, title, type, content, savedBy: 'artifact_save' });
+    return { artifact, artifactId: artifact.id };
+  }
+
+  /**
+   * Insert an artifact row (immutable run receipt). Shared by `artifact_save`
+   * and the `browser` node. Content is stored inline (V1); binary payloads
+   * (screenshots/PDFs) are persisted as `data:` URLs so the Output gallery can
+   * preview + download them without a separate blob endpoint.
+   */
+  #persistArtifact(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    args: { name: string; title?: string; type: 'html' | 'image' | 'document' | 'code' | 'data'; content: string; savedBy: string },
+  ): { id: string; name: string; title: string; type: string; contentType: string; size: number } {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const title = (args.title ?? args.name).slice(0, 200);
+    // testNode() uses a synthetic `test-…` runId with no workflow_runs row —
+    // null the FK so dry-running an artifact_save/browser node from the canvas
+    // Test tab doesn't trip the run_id foreign key.
+    const runId = ctx.runId.startsWith('test-') ? null : ctx.runId;
+    try {
+      this.deps.db
+        .insert(schema.artifacts)
+        .values({
+          id,
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          type: args.type,
+          title,
+          content: args.content,
+          thumbnailUrl: null,
+          runId,
+          workflowId: ctx.workflowId,
+          agentId: null,
+          conversationId: null,
+          nodeId: node.id,
+          metadata: { name: args.name, savedBy: args.savedBy },
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+    } catch (err) {
+      this.deps.logger.warn('artifact.persist_failed', {
+        runId: ctx.runId, nodeId: node.id, message: (err as Error).message,
+      });
+      throw new AgentisError('INTERNAL_ERROR', `artifact persist failed: ${(err as Error).message}`);
+    }
+    return { id, name: args.name, title, type: args.type, contentType: contentTypeFor(args.name, args.type), size: args.content.length };
+  }
+
+  /**
+   * Native browser node (Layer 3 §3.2). Renders HTML / navigates URLs via the
+   * BrowserPool (headless Chromium) and persists screenshots/PDFs as artifacts.
+   */
+  async #executeBrowser(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: BrowserNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.browserPool) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'browser node present but BrowserPool not wired');
+    }
+    const html = config.html
+      ?? (config.htmlPath ? asString(readDotPath(inputData, config.htmlPath)) : extractInputHtml(inputData));
+    const opts = {
+      url: config.url,
+      html: html || undefined,
+      selector: config.selector,
+      fullPage: config.fullPage,
+      headless: config.headless,
+      viewport: config.viewport,
+      timeout: config.timeout,
+    };
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `browser:${node.id}`,
+      nodeId: node.id,
+      executorType: 'browser',
+      executorRef: config.operation,
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      switch (config.operation) {
+        case 'serve_html':
+        case 'screenshot': {
+          const png = await this.deps.browserPool.screenshot(opts);
+          const name = config.artifactName ?? (config.operation === 'serve_html' ? 'page.png' : 'screenshot.png');
+          const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+          const artifact = this.#persistArtifact(ctx, node, { name, type: 'image', content: dataUrl, savedBy: 'browser' });
+          if (config.operation === 'serve_html') {
+            // Emit both the live HTML (for a downstream return_output iframe) and
+            // the screenshot artifact card.
+            return { type: 'html', content: html ?? '', screenshot: artifact, artifactId: artifact.id };
+          }
+          return { screenshot: artifact, artifactId: artifact.id };
+        }
+        case 'pdf': {
+          const pdf = await this.deps.browserPool.pdf(opts);
+          const name = config.artifactName ?? 'document.pdf';
+          const dataUrl = `data:application/pdf;base64,${pdf.toString('base64')}`;
+          const artifact = this.#persistArtifact(ctx, node, { name, type: 'document', content: dataUrl, savedBy: 'browser' });
+          return { pdf: artifact, artifactId: artifact.id };
+        }
+        case 'navigate': {
+          const r = await this.deps.browserPool.navigate(opts);
+          return { title: r.title, text: r.text, html: r.html };
+        }
+        case 'extract_text': {
+          const text = await this.deps.browserPool.extractText(opts);
+          return { text };
+        }
+        default:
+          throw new AgentisError('VALIDATION_FAILED', `browser: unknown operation ${(config as { operation: string }).operation}`);
+      }
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
   }
 
   // ────────────────────────────────────────────────────────────
@@ -2753,6 +2980,52 @@ function redactUrl(url: string): string {
   } catch {
     return url.length > 60 ? `${url.slice(0, 60)}…` : url;
   }
+}
+
+function asString(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+/** Pull an HTML string out of a node input: a string, or `{content|html|body}`. */
+function extractInputHtml(inputData: Record<string, unknown>): string {
+  for (const key of ['content', 'html', 'body']) {
+    const v = inputData[key];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return '';
+}
+
+/** Best-effort artifact class from a filename + content shape. */
+function inferArtifactType(name: string, content: string): 'html' | 'image' | 'document' | 'code' | 'data' {
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  if (ext === 'html' || ext === 'htm') return 'html';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return 'image';
+  if (['json', 'csv', 'tsv', 'yaml', 'yml'].includes(ext)) return 'data';
+  if (['js', 'ts', 'tsx', 'jsx', 'py', 'go', 'rs', 'java', 'css'].includes(ext)) return 'code';
+  if (['md', 'markdown', 'txt', 'pdf', 'docx'].includes(ext)) return 'document';
+  const trimmed = content.trim();
+  if (/^<!doctype html|^<html|^<h\d|^<div|^<body/i.test(trimmed)) return 'html';
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'data';
+  return 'document';
+}
+
+/** MIME type from filename + coarse artifact class. */
+function contentTypeFor(name: string, type: 'html' | 'image' | 'document' | 'code' | 'data'): string {
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  const byExt: Record<string, string> = {
+    html: 'text/html', htm: 'text/html', md: 'text/markdown', markdown: 'text/markdown',
+    json: 'application/json', csv: 'text/csv', pdf: 'application/pdf',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', svg: 'image/svg+xml', txt: 'text/plain',
+  };
+  if (byExt[ext]) return byExt[ext];
+  if (type === 'html') return 'text/html';
+  if (type === 'image') return 'image/png';
+  if (type === 'data') return 'application/json';
+  if (type === 'code') return 'text/x-code-file';
+  return 'text/plain';
 }
 
 function readDotPath(obj: unknown, path: string): unknown {

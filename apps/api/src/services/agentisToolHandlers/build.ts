@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
-import type { RealtimeEventName, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
+import type { RealtimeEventName, SkillManifest, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
@@ -31,6 +31,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           required: ['name', 'graph'],
         },
         mutating: true,
+        autoExecute: true,
       },
       handler: async (args, ctx) => {
         const id = randomUUID();
@@ -46,6 +47,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             title: String(args.name),
             summary: args.description ? String(args.description) : null,
             graph,
+            concurrencyOverflow: 'queue',
             createdAt: now,
             updatedAt: now,
           })
@@ -138,6 +140,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           required: ['description'],
         },
         mutating: true,
+        autoExecute: true,
       },
       handler: async (args, ctx) => {
         const description = String(args.description ?? '').trim();
@@ -170,6 +173,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             summary: description,
             graph: emptyGraph,
             settings: {},
+            concurrencyOverflow: 'queue',
             createdAt: now,
             updatedAt: now,
           }).run();
@@ -422,6 +426,16 @@ function capitalize(value: string): string {
 
 function buildWorkflowDraft(description: string, deps: ToolHandlerDeps, workspaceId: string): WorkflowGraph {
   const lower = description.toLowerCase();
+  const htmlPageOutput = inferHtmlPageOutput(description);
+  if (htmlPageOutput) {
+    const wantsBrowser = /\b(browser|open|screenshot|render|preview)\b/i.test(lower);
+    return buildStaticOutputGraph(htmlPageOutput, { browser: wantsBrowser });
+  }
+  const fixedOutput = inferFixedOutput(description);
+  if (fixedOutput) {
+    return buildStaticOutputGraph(fixedOutput);
+  }
+
   const nodes: WorkflowNode[] = [
     {
       id: 'trigger_manual',
@@ -506,6 +520,159 @@ function inferCapabilityTags(description: string): string[] {
   return Array.from(tags);
 }
 
+function inferHtmlPageOutput(description: string): Record<string, unknown> | null {
+  const normalized = description.replace(/[â€œâ€]/g, '"').replace(/[â€˜â€™]/g, "'");
+  const lower = normalized.toLowerCase();
+  const requestsPage =
+    /\b(html|browser|web page|webpage|landing page)\b/.test(lower)
+    || /\blp\b/.test(lower);
+  const requestsHeading = /\bh1\b/.test(lower) || /<h1[\s>]/i.test(normalized);
+  if (!requestsPage || !requestsHeading) return null;
+
+  const heading = inferRequestedHeading(normalized);
+  if (!heading) return null;
+
+  return {
+    type: 'html',
+    title: heading,
+    content: `<h1>${escapeHtml(heading)}</h1>`,
+  };
+}
+
+function inferRequestedHeading(description: string): string | null {
+  const inlineTag = description.match(/<h1[^>]*>\s*([^<]+?)\s*<\/h1>/i)?.[1]?.trim();
+  if (inlineTag) return inlineTag;
+
+  if (/hello\s+world/i.test(description)) return 'Hello World';
+
+  if (/\bh1\b/i.test(description)) {
+    const quoted = description.match(/["']([^"']{1,120})["']/)?.[1]?.trim();
+    if (quoted) return quoted;
+  }
+
+  return null;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildStaticOutputGraph(output: Record<string, unknown>, opts: { browser?: boolean } = {}): WorkflowGraph {
+  // Pick the viewer hint from the produced shape so the Output Surface renders
+  // it correctly (Layer 6): html → sandboxed iframe, single-`text` → text card,
+  // anything else → JSON viewer.
+  const renderAs: 'html' | 'text' | 'json' =
+    output.type === 'html' && typeof output.content === 'string'
+      ? 'html'
+      : Object.keys(output).length === 1 && typeof output.text === 'string'
+        ? 'text'
+        : 'json';
+
+  const nodes: WorkflowNode[] = [
+    {
+      id: 'trigger_manual',
+      type: 'trigger',
+      title: 'Manual Trigger',
+      position: { x: 0, y: 80 },
+      config: { kind: 'trigger', triggerType: 'manual' },
+    },
+    {
+      // Deterministic producer of the static payload (no LLM tax).
+      id: 'produce_output',
+      type: 'transform',
+      title: 'Produce Output',
+      position: { x: 280, y: 80 },
+      config: { kind: 'transform', expression: JSON.stringify(output) },
+    },
+  ];
+  const edges: WorkflowGraph['edges'] = [
+    { id: 'edge_trigger_manual_produce_output', source: 'trigger_manual', target: 'produce_output' },
+  ];
+
+  // "open a browser and show ..." → render the HTML in real Chromium and capture
+  // a screenshot artifact, then feed the live HTML to return_output.
+  const useBrowser = Boolean(opts.browser) && renderAs === 'html';
+  let returnSource = 'produce_output';
+  let returnX = 560;
+  if (useBrowser) {
+    nodes.push({
+      id: 'browser_render',
+      type: 'browser',
+      title: 'Open in Browser',
+      position: { x: 560, y: 80 },
+      config: { kind: 'browser', operation: 'serve_html', htmlPath: 'content', fullPage: true },
+    });
+    edges.push({ id: 'edge_produce_output_browser_render', source: 'produce_output', target: 'browser_render' });
+    returnSource = 'browser_render';
+    returnX = 840;
+  }
+
+  nodes.push({
+    id: 'return_output',
+    type: 'return_output',
+    title: 'Return Output',
+    position: { x: returnX, y: 80 },
+    config: {
+      kind: 'return_output',
+      renderAs,
+      ...(typeof output.title === 'string' ? { title: output.title } : {}),
+    },
+  });
+  edges.push({ id: `edge_${returnSource}_return_output`, source: returnSource, target: 'return_output' });
+
+  return { version: 1, nodes, edges, viewport: { x: 0, y: 0, zoom: 1 } };
+}
+
+function inferFixedOutput(description: string): Record<string, unknown> | null {
+  const normalized = description.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+  const objectMatch = normalized.match(/\{[\s\S]{1,500}\}/);
+  if (objectMatch && /fixed|return|output|hello world/i.test(normalized)) {
+    const parsed = parseSimpleObjectLiteral(objectMatch[0]);
+    if (parsed) return parsed;
+  }
+
+  const quotedMessage = normalized.match(/(?:return|returns|respond|responds|output|outputs)\s+(?:a\s+)?(?:fixed\s+)?(?:message|text|string)?(?:\s+like|\s+with|:)?\s*["']([^"']+)["']/i);
+  if (quotedMessage?.[1]) return { text: quotedMessage[1] };
+
+  if (/hello\s+world/i.test(normalized)) {
+    const message = normalized.match(/workflow is working/i)?.[0] ?? 'Workflow is working';
+    return { text: message };
+  }
+
+  return null;
+}
+
+function parseSimpleObjectLiteral(source: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(source) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to a tiny object-literal parser for common `{ text: "..." }` requests.
+  }
+
+  const pairs = [...source.matchAll(/([A-Za-z_$][\w$]*|"[^"]+"|'[^']+')\s*:\s*("[^"]*"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null)/g)];
+  if (pairs.length === 0) return null;
+  const output: Record<string, unknown> = {};
+  for (const pair of pairs) {
+    const key = String(pair[1] ?? '').replace(/^["']|["']$/g, '');
+    const raw = String(pair[2] ?? '');
+    if (!key) continue;
+    if (raw === 'true') output[key] = true;
+    else if (raw === 'false') output[key] = false;
+    else if (raw === 'null') output[key] = null;
+    else if (/^-?\d/.test(raw)) output[key] = Number(raw);
+    else output[key] = raw.slice(1, -1);
+  }
+  return Object.keys(output).length > 0 ? output : null;
+}
+
 function nodeReason(node: WorkflowNode): string {
   const reasons: Record<string, string> = {
     trigger: 'Entry point: this starts the workflow.',
@@ -517,6 +684,10 @@ function nodeReason(node: WorkflowNode): string {
     router: 'Branches execution based on conditions.',
     merge: 'Collects branch results before continuing.',
     subflow: 'Calls another workflow as a reusable subflow.',
+    transform: 'Shapes data deterministically — no LLM tokens.',
+    return_output: 'Declares the rendered result the operator sees.',
+    artifact_save: 'Saves a file artifact to the workspace.',
+    browser: 'Renders HTML / captures a screenshot in real Chromium.',
   };
   return reasons[node.config.kind] ?? `${node.config.kind} node`;
 }
@@ -577,9 +748,39 @@ async function synthesizeWithLlm(
   const knowledgeBases = deps.knowledgeBases
     ? deps.knowledgeBases.listKnowledgeBases(workspaceId).map((kb) => ({ id: kb.id, name: kb.name }))
     : [];
+  const skills = deps.db
+    .select()
+    .from(schema.skills)
+    .where(eq(schema.skills.workspaceId, workspaceId))
+    .all()
+    .map((skill) => {
+      const manifest = skill.manifest as Partial<SkillManifest>;
+      return {
+        id: skill.id,
+        name: skill.name,
+        slug: skill.slug,
+        runtime: skill.runtime,
+        entrypoint: typeof manifest.entrypoint === 'string' ? manifest.entrypoint : skill.slug,
+        capabilityTags: Array.isArray(manifest.capabilityTags) ? manifest.capabilityTags.filter((tag): tag is string => typeof tag === 'string') : [],
+        inputSchema: manifest.inputSchema ?? {},
+        outputSchema: manifest.outputSchema ?? {},
+      };
+    });
+
+  // Layer 1: inject workspace context so synthesis respects the stack,
+  // conventions, and learned patterns (Principle #2).
+  let workspaceContext = '';
+  if (deps.workspaceIntelligence) {
+    try {
+      workspaceContext = await deps.workspaceIntelligence.buildContextBlock(workspaceId);
+    } catch (err) {
+      deps.logger.warn('build_workflow.context.failed', { err: (err as Error).message });
+    }
+  }
 
   const systemPrompt = SYNTHESIS_SYSTEM_PROMPT;
   const userPrompt = [
+    workspaceContext ? `${workspaceContext}\n` : '',
     `DESCRIPTION:\n${description}`,
     agents.length > 0
       ? `\nAVAILABLE AGENTS (use the id verbatim if you reference one):\n${agents.slice(0, 12).map((a) => `- ${a.id}: ${a.name} (tags: ${(a.capabilityTags as string[] | undefined)?.join(', ') ?? 'none'})`).join('\n')}`
@@ -587,6 +788,9 @@ async function synthesizeWithLlm(
     knowledgeBases.length > 0
       ? `\nAVAILABLE KNOWLEDGE BASES:\n${knowledgeBases.slice(0, 8).map((kb) => `- ${kb.id}: ${kb.name}`).join('\n')}`
       : '',
+    skills.length > 0
+      ? `\nAVAILABLE SKILLS (use the skill id verbatim for skill_task.skillId):\n${skills.slice(0, 16).map((skill) => `- ${skill.id}: ${skill.name} slug=${skill.slug} runtime=${skill.runtime} entrypoint=${skill.entrypoint} tags=${skill.capabilityTags.join(', ') || 'none'} inputSchema=${JSON.stringify(skill.inputSchema)} outputSchema=${JSON.stringify(skill.outputSchema)}`).join('\n')}`
+      : '\nNo workspace skills are installed. Do not create skill_task nodes unless a real skillId is provided.',
   ].filter(Boolean).join('\n');
 
   const result = await deps.evaluatorRuntime.completeStructured<{ graph?: unknown }>({
@@ -624,6 +828,8 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '  data:    transform, filter, integration, http_request, workflow_store, scratchpad',
   '  intel:   agent_task, skill_task, agent_swarm, evaluator, guardrails',
   '  know:    knowledge, artifact_collect',
+  '  output:  return_output, artifact_save',
+  '  native:  browser',
   '  human:   checkpoint',
   '',
   'Required config fields per kind (anything else is optional):',
@@ -647,6 +853,9 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '  parallel:       { kind: "parallel", waitFor, onBranchError, mergeStrategy }',
   '  agent_swarm:    { kind: "agent_swarm", prompt, inputArrayPath, maxParallel, mergeStrategy, capabilityTags, outputKey }',
   '  artifact_collect: { kind: "artifact_collect", collectionName }',
+  '  return_output:  { kind: "return_output", renderAs: "html"|"markdown"|"table"|"json"|"text", title?, valuePath? }',
+  '  artifact_save:  { kind: "artifact_save", name, artifactType?, contentPath?, titlePath? }',
+  '  browser:        { kind: "browser", operation: "serve_html"|"screenshot"|"pdf"|"navigate"|"extract_text", url?, html?, htmlPath?, selector? }',
   '',
   'Variable templates: any string field accepts `{{trigger.foo}}`, `{{nodes.<id>.path}}`,',
   '`{{scratchpad.key}}`, `{{store.key}}`, and inside loops `{{loop.item}}` / `{{loop.index}}`.',
@@ -658,6 +867,16 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '- Every workflow starts with exactly one trigger node.',
   '- Prefer deterministic primitives (transform/filter/http_request/integration) over agent_task',
   '  whenever the step does NOT require reasoning. Saves cost and is more reliable.',
+  '- Every workflow ends in a `return_output` node — it declares the rendered result the operator sees.',
+  '  Pick renderAs by the result type: html page → "html", report/prose → "markdown", row data → "table",',
+  '  structured object → "json", short message → "text".',
+  '- For fixed responses such as "Hello World", use trigger -> transform (produces the value) -> return_output.',
+  '- For HTML page / landing page / browser-preview requests, use trigger -> transform that returns',
+  '  { type: "html", title, content: "<h1>...</h1>" } -> return_output with renderAs: "html".',
+  '- Use `artifact_save` to persist a file (report.html, data.csv) the operator can download.',
+  '- For "open a browser" / "screenshot" / live page rendering, use a `browser` node:',
+  '  produce HTML in a transform, then browser serve_html with htmlPath:"content", then return_output renderAs:"html".',
+  '- Use skill_task only with a real skillId from AVAILABLE SKILLS. Never invent skill IDs.',
   '- Use `evaluator` after an `agent_task` whenever output quality matters; route its FAIL handle',
   '  back to the agent_task with the critique embedded via `{{nodes.<EVALID>.critique}}`.',
   '- Use `checkpoint` only when human review is genuinely needed (irreversible action, high spend).',

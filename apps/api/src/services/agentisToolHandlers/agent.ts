@@ -72,7 +72,8 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         }
 
         const task = String(args.task);
-        if (registration.adapter.chat) {
+        const capabilities = registration.adapter.capabilities?.();
+        if (registration.adapter.chat && capabilities?.interactiveChat !== false) {
           const messages: ChatMessage[] = [
             { role: 'system', content: agent.instructions ?? `You are ${agent.name}, an Agentis agent.` },
             { role: 'user', content: task },

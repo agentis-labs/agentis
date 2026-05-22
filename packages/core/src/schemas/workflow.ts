@@ -15,10 +15,16 @@ const triggerConfigSchema = z.object({
   triggerId: z.string().uuid().optional(),
 });
 
+const agentRoleSchema = z.enum([
+  'planner', 'researcher', 'coder', 'reviewer', 'analyst',
+  'writer', 'monitor', 'architect', 'debugger', 'deployer',
+]);
+
 const agentTaskConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('agent_task'),
   agentId: z.string().uuid().optional(),
+  agentRole: agentRoleSchema.optional(),
   agentPackageRef: z.string().optional(),
   capabilityTags: z.array(z.string()).default([]),
   prompt: z.string().min(1),
@@ -90,6 +96,38 @@ const scratchpadConfigSchema = z.object({
   valuePath: z.string().optional(),
 });
 
+const returnOutputConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('return_output'),
+  renderAs: z.enum(['html', 'markdown', 'table', 'json', 'text']).optional(),
+  title: z.string().max(255).optional(),
+  valuePath: z.string().optional(),
+});
+
+const artifactSaveConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('artifact_save'),
+  name: z.string().min(1),
+  artifactType: z.enum(['html', 'image', 'document', 'code', 'data']).optional(),
+  contentPath: z.string().optional(),
+  titlePath: z.string().optional(),
+});
+
+const browserConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('browser'),
+  operation: z.enum(['serve_html', 'screenshot', 'pdf', 'navigate', 'extract_text']),
+  url: z.string().optional(),
+  html: z.string().optional(),
+  htmlPath: z.string().optional(),
+  selector: z.string().optional(),
+  fullPage: z.boolean().optional(),
+  headless: z.boolean().optional(),
+  viewport: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+  timeout: z.number().int().positive().optional(),
+  artifactName: z.string().optional(),
+});
+
 // Permissive config: accepts any object with a `kind` string. Concrete kinds
 // (triggerConfigSchema, etc.) are validated by the engine when a node actually
 // runs — at edit-time we don't want to reject draft workflows that still have
@@ -123,6 +161,9 @@ export const workflowNodeConfigSchema = z.union([
   checkpointConfigSchema,
   subflowConfigSchema,
   scratchpadConfigSchema,
+  returnOutputConfigSchema,
+  artifactSaveConfigSchema,
+  browserConfigSchema,
   fallbackConfigSchema,
 ]);
 
@@ -142,6 +183,7 @@ export const workflowEdgeSchema = z.object({
   target: z.string().min(1),
   targetHandle: z.string().optional(),
   condition: z.string().optional(),
+  type: z.enum(['default', 'error', 'condition']).optional(),
 });
 
 export const workflowGraphSchema = z.object({

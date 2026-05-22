@@ -88,7 +88,7 @@ export function useAgentLiveFeed(
   const liveAgentIds = useMemo(() => {
     const ids = new Set<string>();
     for (const run of activeRuns) for (const a of run.agents ?? []) ids.add(a.id);
-    for (const agent of agents) if (isLiveStatus(agent.status)) ids.add(agent.id);
+    for (const agent of agents) if (isWorkingStatus(agent.status)) ids.add(agent.id);
     return Array.from(ids).sort();
   }, [agents, activeRuns]);
 
@@ -183,7 +183,7 @@ function buildSections(
     const approval =
       approvals.find((a) => a.agentName && a.agentName === agent.name) ??
       (run ? approvals.find((a) => a.runId && a.runId === run.id) : undefined);
-    const active = Boolean(run) || isLiveStatus(agent.status);
+    const active = Boolean(run);
     const fresh = stream && now - stream.lastAt < DONE_RETENTION_MS;
     if (!active && !approval && !fresh) continue;
     if (approval) usedApprovalIds.add(approval.id);
@@ -274,8 +274,8 @@ function roleRank(agent: WorkspaceAgent): number {
   return role === 'orchestrator' ? 0 : role === 'manager' ? 1 : 2;
 }
 
-function isLiveStatus(status: string | undefined): boolean {
-  return status === 'online' || status === 'active' || status === 'running' || status === 'busy';
+function isWorkingStatus(status: string | undefined): boolean {
+  return status === 'active' || status === 'running' || status === 'busy';
 }
 
 function runProgress(run: WorkspaceActiveRun | undefined): { done: number; total: number } | undefined {

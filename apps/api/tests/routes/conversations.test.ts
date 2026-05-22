@@ -137,3 +137,38 @@ describe('POST /v1/conversations/:agentId/read', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('POST /v1/conversations/:agentId/new', () => {
+  it('archives the current thread and starts a fresh active one', async () => {
+    const agentId = seedAgent();
+
+    const sendRes = await app().request(`/v1/conversations/${agentId}/send`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ body: 'hello' }),
+    });
+    expect(sendRes.status).toBe(200);
+
+    const resetRes = await app().request(`/v1/conversations/${agentId}/new`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+    });
+    expect(resetRes.status).toBe(200);
+
+    const threadRes = await app().request(`/v1/conversations/${agentId}`, { headers: ctx.authHeaders });
+    expect(threadRes.status).toBe(200);
+    const body = (await threadRes.json()) as { messages: Array<{ body: string }> };
+    expect(body.messages).toEqual([]);
+
+    const historyRes = await app().request('/v1/conversations', { headers: ctx.authHeaders });
+    const history = (await historyRes.json()) as {
+      conversations: Array<{ id: string; archivedAt: string | null; lastMessagePreview: string | null }>;
+    };
+    const archived = history.conversations.find((conversation) => conversation.archivedAt);
+    expect(archived?.lastMessagePreview).toBe('hello');
+
+    const archivedRes = await app().request(`/v1/conversations/${agentId}?conversationId=${archived!.id}`, { headers: ctx.authHeaders });
+    const archivedBody = (await archivedRes.json()) as { messages: Array<{ body: string }> };
+    expect(archivedBody.messages.map((message) => message.body)).toContain('hello');
+  });
+});

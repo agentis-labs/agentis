@@ -94,6 +94,7 @@ export function buildWorkflowRoutes(deps: {
         intendedBehavior: body.intendedBehavior?.trim() || null,
         graph,
         settings: body.settings,
+        concurrencyOverflow: 'queue',
       })
       .run();
     // 10.14: auto-save into the Packages library
@@ -360,6 +361,8 @@ interface FinalNodeOutput {
   nodeTitle: string;
   kind: string;
   value: unknown;
+  /** Viewer hint for the Output Surface (Layer 6). Set by `return_output` nodes. */
+  renderAs?: 'html' | 'markdown' | 'table' | 'json' | 'text';
 }
 
 type CompletedNodeOutput = {
@@ -385,7 +388,12 @@ function buildFinalNodeOutputs(graph: WorkflowGraph, state: WorkflowRunState): F
 
   const completedById = new Map(completed.map((item) => [item.nid, item] as const));
   const declaredOutputNodes = (graph.nodes ?? [])
-    .filter((node) => (node.config as { isOutput?: unknown })?.isOutput === true);
+    .filter((node) => {
+      const cfg = node.config as { isOutput?: unknown; kind?: string };
+      // `return_output` nodes are always part of the output surface; the legacy
+      // `isOutput: true` flag on any node remains supported.
+      return cfg?.isOutput === true || cfg?.kind === 'return_output';
+    });
   if (declaredOutputNodes.length > 0) {
     return declaredOutputNodes
       .map((node) => completedById.get(node.id))
@@ -410,13 +418,26 @@ function formatFinalNodeOutput(
   nodeById: Map<string, WorkflowGraph['nodes'][number]>,
 ): FinalNodeOutput {
   const node = nodeById.get(nodeId);
-  const kind =
-    (node?.config as { kind?: string } | undefined)?.kind ?? node?.type ?? 'unknown';
+  const cfg = (node?.config as { kind?: string; renderAs?: FinalNodeOutput['renderAs'] } | undefined) ?? undefined;
+  const kind = cfg?.kind ?? node?.type ?? 'unknown';
+  const out = nodeState.outputData ?? null;
+  // `return_output` unwraps to its rendered value + carries the renderAs hint.
+  if (kind === 'return_output' && out && typeof out === 'object') {
+    const o = out as { renderAs?: FinalNodeOutput['renderAs']; value?: unknown };
+    return {
+      nodeId,
+      nodeTitle: node?.title ?? nodeId,
+      kind,
+      value: 'value' in o ? o.value : out,
+      renderAs: o.renderAs ?? cfg?.renderAs ?? 'json',
+    };
+  }
   return {
     nodeId,
     nodeTitle: node?.title ?? nodeId,
     kind,
-    value: nodeState.outputData ?? null,
+    value: out,
+    ...(cfg?.renderAs ? { renderAs: cfg.renderAs } : {}),
   };
 }
 

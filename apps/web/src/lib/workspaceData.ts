@@ -22,6 +22,8 @@ export interface WorkspaceAgent {
   currentTaskId?: string | null;
   description?: string | null;
   lastHeartbeatAt?: string | null;
+  monthlyBudgetCents?: number | null;
+  currentMonthSpendCents?: number;
 }
 
 export interface WorkspaceApproval {

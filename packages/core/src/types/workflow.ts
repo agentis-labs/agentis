@@ -7,6 +7,8 @@
  * Mirrors V1-SPEC §6.2 and §6.3.
  */
 
+import type { AgentRole } from './specialist.js';
+
 export type WorkflowNodeType =
   // Control flow
   | 'trigger'
@@ -32,8 +34,19 @@ export type WorkflowNodeType =
   // Knowledge & enrichment
   | 'knowledge'
   | 'artifact_collect'
+  // Output surface — Layer 6
+  | 'return_output'
+  | 'artifact_save'
+  // Native browser control — Layer 3 §3.2
+  | 'browser'
   // Human interaction
   | 'checkpoint';
+
+/**
+ * How a node's output should be rendered on the operator-facing Output Surface
+ * (WORKFLOW-10X-MASTERPLAN §6). Drives viewer selection in the web Output tab.
+ */
+export type OutputRenderAs = 'html' | 'markdown' | 'table' | 'json' | 'text';
 
 export interface WorkflowGraph {
   version: 1;
@@ -125,6 +138,9 @@ export type WorkflowNodeConfig = (
   | GuardrailsNodeConfig
   | LoopNodeConfig
   | ParallelNodeConfig
+  | ReturnOutputNodeConfig
+  | ArtifactSaveNodeConfig
+  | BrowserNodeConfig
 ) & WorkflowOutputConfig;
 
 /** Trigger node config. */
@@ -151,6 +167,12 @@ export interface AgentRetryPolicy {
 export interface AgentTaskNodeConfig {
   kind: 'agent_task';
   agentId?: string;
+  /**
+   * Reference a specialist by role; the engine resolves it to the workspace's
+   * agent carrying that role at dispatch time (Layer 2 §2.2). `agentId` wins
+   * when both are set.
+   */
+  agentRole?: AgentRole;
   agentPackageRef?: string;
   capabilityTags: string[];
   prompt: string;
@@ -174,6 +196,8 @@ export interface AgentSwarmNodeConfig {
   capabilityTags: string[];
   /** Optional explicit agent — otherwise resolved by capability tags. */
   agentId?: string;
+  /** Optional specialist role; resolved to a workspace agent at dispatch (Layer 2). */
+  agentRole?: AgentRole;
   outputKey: string;
 }
 
@@ -411,6 +435,86 @@ export interface ParallelNodeConfig {
 }
 
 // ────────────────────────────────────────────────────────────
+// Output surface — Layer 6
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Terminal output node. Declares the run's operator-facing result and how to
+ * render it. Always part of the output surface (treated as `isOutput`). The
+ * resolved value is what the Output tab renders via the viewer registry.
+ *
+ * This replaces the older "transform + isOutput" idiom for declaring output —
+ * a `return_output` node makes the intent explicit and carries `renderAs` so
+ * the Output Surface picks the right viewer (iframe for html, table for rows…).
+ */
+export interface ReturnOutputNodeConfig {
+  kind: 'return_output';
+  /** Viewer hint for the Output Surface. Defaults to `'json'`. */
+  renderAs?: OutputRenderAs;
+  /** Optional human label shown above the rendered output. */
+  title?: string;
+  /**
+   * Dot path into the node input selecting the value to render. When omitted,
+   * the whole merged input is the output. Supports `{{variable}}` templates too.
+   */
+  valuePath?: string;
+}
+
+/**
+ * Persist a value as a workspace artifact (immutable run receipt). V1 stores
+ * content inline in the `artifacts` table (same store as `artifact_collect`);
+ * a future ArtifactStore backend swaps in transparently. Emits an artifact ref
+ * downstream so subsequent nodes / the Output tab can reference it.
+ */
+export interface ArtifactSaveNodeConfig {
+  kind: 'artifact_save';
+  /** Artifact filename, e.g. "report.html". Supports `{{variable}}`. */
+  name: string;
+  /** Coarse artifact class used by the Output gallery / viewers. */
+  artifactType?: 'html' | 'image' | 'document' | 'code' | 'data';
+  /** Dot path into input for the content to persist. Defaults to whole input (JSON-encoded). */
+  contentPath?: string;
+  /** Dot path into input for an optional title. */
+  titlePath?: string;
+}
+
+// ────────────────────────────────────────────────────────────
+// Native browser control — Layer 3 §3.2
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Native Playwright-backed browser node. Renders HTML / navigates URLs and
+ * produces artifacts (screenshot PNG, PDF) — no external screenshot service.
+ * Runs in the engine's BrowserPool (headless Chromium, capped concurrency).
+ */
+export interface BrowserNodeConfig {
+  kind: 'browser';
+  operation:
+    | 'serve_html'      // render an HTML string, screenshot it, emit html + image artifact
+    | 'screenshot'      // screenshot a URL (or inline html) → image artifact
+    | 'pdf'             // print a URL (or inline html) to PDF → document artifact
+    | 'navigate'        // load a URL, return { title, text, html }
+    | 'extract_text';   // load a URL/html, return visible text under selector
+  /** Target URL. Supports `{{variable}}` interpolation. */
+  url?: string;
+  /** Inline HTML to render (serve_html / screenshot / pdf). Supports templates. */
+  html?: string;
+  /** Dot path into the node input to read the HTML from (chains after a transform). */
+  htmlPath?: string;
+  /** CSS selector for extract_text (defaults to body). */
+  selector?: string;
+  /** Full-page screenshot (default true). */
+  fullPage?: boolean;
+  /** Open a visible browser window on the operator's desktop (default false → headless). */
+  headless?: boolean;
+  viewport?: { width: number; height: number };
+  /** Per-op timeout (default 30000ms). */
+  timeout?: number;
+  /** Artifact filename for the produced screenshot/pdf. */
+  artifactName?: string;
+}
+
+// ────────────────────────────────────────────────────────────
 // Run state
 // ────────────────────────────────────────────────────────────
 
@@ -484,7 +588,8 @@ export interface ActiveExecution {
     | 'http'
     | 'integration'
     | 'evaluator'
-    | 'loop';
+    | 'loop'
+    | 'browser';
   executorRef: string;
   startedAt: string;
   heartbeatAt?: string;

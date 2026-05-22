@@ -40,6 +40,13 @@ export interface ChatConfirmationRequest {
   };
   title: string;
   body: string;
+  impact?: {
+    summary: string;
+    details?: string[];
+    riskLevel?: 'low' | 'medium' | 'high' | 'danger';
+    reversible?: boolean;
+    externalSideEffects?: boolean;
+  };
   confirmLabel: string;
   cancelLabel: string;
   expiresAt: string;
@@ -73,6 +80,11 @@ export type JsonSchemaObject = {
 export interface ToolDefinition {
   name: string;
   description: string;
+  examples?: Array<{
+    description: string;
+    input: Record<string, unknown>;
+    expectedOutput?: unknown;
+  }>;
   parameters: {
     type: 'object';
     properties: Record<string, JsonSchemaObject>;
@@ -162,8 +174,19 @@ export interface AgentisToolDefinition {
   inputSchema: unknown;
   outputSchema?: unknown;
   mutating: boolean;
+  /**
+   * Mutating tools default to confirmation in chat. Set autoExecute for
+   * reversible, operator-requested creation/build actions that should happen
+   * immediately, with the result still visible in the execution feed.
+   */
+  autoExecute?: boolean;
   mcpExposed?: boolean;
   requires?: string[];
+  examples?: Array<{
+    description: string;
+    input: Record<string, unknown>;
+    expectedOutput?: unknown;
+  }>;
 }
 
 export interface AgentisToolContext {

@@ -12,6 +12,7 @@ import { schema } from '@agentis/db/sqlite';
 import { buildAgentRoutes } from '../../src/routes/agents.js';
 import { buildAgentMutationRoutes } from '../../src/routes/agentMutations.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
+import { HttpAdapter } from '../../src/adapters/HttpAdapter.js';
 import { ConversationStore } from '../../src/services/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -204,6 +205,35 @@ describe('GET /v1/agents/:id', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { agent: { id: string } };
     expect(body.agent.id).toBe(id);
+  });
+
+  it('surfaces registered adapter tool capabilities for diagnostics', async () => {
+    const id = seedAgent();
+    adapters.register(id, new HttpAdapter({
+      agentId: id,
+      dispatchUrl: 'https://example.com/dispatch',
+      chatUrl: 'https://example.com/chat',
+      supportsTools: true,
+      logger: ctx.logger,
+    }));
+
+    const res = await app().request(`/v1/agents/${id}`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      agent: {
+        id: string;
+        adapterCapabilities?: {
+          interactiveChat: boolean;
+          toolCalling: boolean;
+          toolForwarding: string;
+        };
+      };
+    };
+    expect(body.agent.adapterCapabilities).toEqual({
+      interactiveChat: true,
+      toolCalling: true,
+      toolForwarding: 'http_contract',
+    });
   });
 
   it('returns 404 RESOURCE_NOT_FOUND for unknown id', async () => {

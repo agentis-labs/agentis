@@ -27,9 +27,10 @@ import {
   BookOpen, ExternalLink, FileSignature, GitBranch,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { api, workspace as workspaceStore } from '../lib/api';
+import { api, apiErrorMessage, workspace as workspaceStore } from '../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
 import { NodePalette } from '../components/canvas/NodePalette';
+import { AgentisEdge } from '../components/canvas/AgentisEdge';
 import { NodeCommandPalette } from '../components/canvas/NodeCommandPalette';
 import { WorkflowContractsPanel, type WorkflowContractValue } from '../components/canvas/WorkflowContractsPanel';
 import { EventChainsPanel } from '../components/canvas/EventChainsPanel';
@@ -143,7 +144,6 @@ export function WorkflowCanvasPage() {
   const overlayHostRef = useRef<HTMLDivElement | null>(null);
   const overlayManagerRef = useRef<AgentFocusOverlayManager | null>(null);
   const saveTimerRef = useRef<number | null>(null);
-  const syncFrameRef = useRef<number | null>(null);
   const lastSavedFingerprintRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -247,6 +247,15 @@ export function WorkflowCanvasPage() {
   const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState<Node>([]);
   const [flowEdges, setFlowEdges, onFlowEdgesChange] = useEdgesState<Edge>([]);
 
+  // Stable edge-delete handle threaded into each edge's `data.onDelete` so the
+  // hover × affordance in AgentisEdge can remove a connection. The concrete
+  // implementation is installed once queueSave exists (see below); routing it
+  // through a ref keeps the callback identity stable across renders, which lets
+  // us thread it at hydration time without re-running that effect.
+  const deleteEdgeRef = useRef<(edgeId: string) => void>(() => {});
+  const handleEdgeDelete = useCallback((edgeId: string) => { deleteEdgeRef.current(edgeId); }, []);
+  const edgeTypes = useMemo(() => ({ agentis: AgentisEdge }), []);
+
   // ── Live per-node status overlay ──────────────────────────────────────
   // The engine fires NODE_STARTED/COMPLETED/FAILED/RETRY_SCHEDULED on the
   // run room for EVERY kind. Project them onto the canvas as a `liveStatus`
@@ -347,6 +356,7 @@ export function WorkflowCanvasPage() {
         id: e.id,
         source: e.source,
         target: e.target,
+        type: 'agentis',
         animated: false,
         // Carry the edge-type discriminant through to the renderer (used by
         // AgentisEdge for error-edge dashed-red styling) along with any
@@ -355,21 +365,35 @@ export function WorkflowCanvasPage() {
           type: (e as { type?: 'default' | 'error' | 'condition' }).type ?? 'default',
           label: (e as { label?: string }).label,
           condition: (e as { condition?: string }).condition,
+          onDelete: handleEdgeDelete,
         },
       })),
     );
-  }, [wf, setFlowNodes, setFlowEdges]);
+  }, [wf, setFlowNodes, setFlowEdges, handleEdgeDelete]);
 
   // Auto-save: debounce 1.2s for snappy feedback, save on unmount.
-  // Use a ref-based latest reference so debounced callbacks don't capture
-  // stale `wf` state during rapid drags.
+  //
+  // saveNow reads the *live* React Flow state through refs rather than a
+  // captured closure. The previous design synced flow→graph inside a
+  // requestAnimationFrame whose closure captured a one-render-stale `syncAndSave`,
+  // so every mutation persisted the *previous* mutation's graph (1st edit lost,
+  // 2nd saved the 1st, …). Reading from refs at fire time means a handler can
+  // setFlowNodes/setFlowEdges and queueSave() in the same tick and still persist
+  // its own change.
   const wfRef = useRef<WorkflowDetail | null>(null);
+  const flowNodesRef = useRef<Node[]>(flowNodes);
+  const flowEdgesRef = useRef<Edge[]>(flowEdges);
   useEffect(() => { wfRef.current = wf; }, [wf]);
+  useEffect(() => { flowNodesRef.current = flowNodes; }, [flowNodes]);
+  useEffect(() => { flowEdgesRef.current = flowEdges; }, [flowEdges]);
 
   const saveNow = useCallback(async (graph?: WorkflowDetail['graph'], title?: string) => {
     const current = wfRef.current;
     if (!current) return;
-    const nextGraph = graph ?? current.graph;
+    // Default: rebuild the graph from the current React Flow state merged with
+    // the node configs held in wf.graph. Callers that already hold an
+    // authoritative graph (node-config edits, contracts, …) pass it explicitly.
+    const nextGraph = graph ?? buildGraphFromFlow(current.graph, flowNodesRef.current, flowEdgesRef.current);
     const nextTitle = title ?? current.title;
     const fingerprint = graphFingerprint(nextGraph, nextTitle);
     if (fingerprint === lastSavedFingerprintRef.current) {
@@ -386,6 +410,10 @@ export function WorkflowCanvasPage() {
         }),
       });
       lastSavedFingerprintRef.current = fingerprint;
+      // Keep wf.graph consistent with what we just persisted so downstream
+      // readers (ContextInspector upstream list, the drop handler's prev.graph)
+      // see the latest positions and edges.
+      setWf((prev) => (prev ? { ...prev, graph: nextGraph, title: nextTitle } : prev));
       setSaveState('saved');
     } catch (e) {
       setSaveState('error');
@@ -401,52 +429,15 @@ export function WorkflowCanvasPage() {
     saveTimerRef.current = window.setTimeout(() => { void saveNow(); }, 1200);
   }, [saveNow]);
 
-  // Sync flow state → wf.graph and persist. Called after each meaningful
-  // mutation (drag-end, delete, connect, etc.).
-  const syncAndSave = useCallback(() => {
-    setWf((prev) => {
-      if (!prev) return prev;
-      const byId = new Map(prev.graph.nodes.map((n) => [n.id, n] as const));
-      const nextNodes: WorkflowDetail['graph']['nodes'] = flowNodes.map((fn) => {
-        const orig = byId.get(fn.id);
-        if (orig) {
-          return { ...orig, position: fn.position };
-        }
-        // New node added by drop — it should already exist in prev.graph from
-        // the drop handler, but as a safety net synthesize a minimal node.
-        const data = (fn.data ?? {}) as { type?: string; kind?: string };
-        return {
-          id: fn.id,
-          type: data.type ?? 'task',
-          title: (data as { label?: string }).label ?? fn.id,
-          position: fn.position,
-          config: { kind: data.kind ?? data.type ?? 'task' },
-        };
-      });
-      const nextEdges = flowEdges.map((fe) => {
-        const data = (fe.data ?? {}) as { type?: 'default' | 'error' | 'condition'; label?: string; condition?: string };
-        const e: { id: string; source: string; target: string; type?: 'default' | 'error' | 'condition'; label?: string; condition?: string } = {
-          id: fe.id,
-          source: fe.source,
-          target: fe.target,
-        };
-        if (data.type && data.type !== 'default') e.type = data.type;
-        if (data.label) e.label = data.label;
-        if (data.condition) e.condition = data.condition;
-        return e;
-      });
-      return { ...prev, graph: { ...prev.graph, nodes: nextNodes, edges: nextEdges } };
-    });
-    queueSave();
-  }, [flowNodes, flowEdges, queueSave]);
-
-  const queueSyncAndSave = useCallback(() => {
-    if (syncFrameRef.current !== null) window.cancelAnimationFrame(syncFrameRef.current);
-    syncFrameRef.current = window.requestAnimationFrame(() => {
-      syncFrameRef.current = null;
-      syncAndSave();
-    });
-  }, [syncAndSave]);
+  // Install the concrete edge-delete implementation behind the stable ref the
+  // edges were threaded with at hydration. Uses the controlled setter so the
+  // removal flows through React Flow's edge state, then persists.
+  useEffect(() => {
+    deleteEdgeRef.current = (edgeId: string) => {
+      setFlowEdges((eds) => eds.filter((e) => e.id !== edgeId));
+      queueSave();
+    };
+  }, [setFlowEdges, queueSave]);
 
   const handleConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
@@ -470,21 +461,22 @@ export function WorkflowCanvasPage() {
           id,
           source: conn.source!,
           target: conn.target!,
+          type: 'agentis',
           animated: false,
-          data: { type: edgeType },
+          data: { type: edgeType, onDelete: handleEdgeDelete },
         },
       ];
     });
-    queueSyncAndSave();
-  }, [setFlowEdges, queueSyncAndSave]);
+    queueSave();
+  }, [setFlowEdges, queueSave, handleEdgeDelete]);
 
   const deleteNodeById = useCallback((nodeId: string) => {
     setFlowNodes((nds) => nds.filter((n) => n.id !== nodeId));
     setFlowEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
     setSelection({ kind: null });
     setContextMenu(null);
-    queueSyncAndSave();
-  }, [setFlowNodes, setFlowEdges, queueSyncAndSave]);
+    queueSave();
+  }, [setFlowNodes, setFlowEdges, queueSave]);
 
   const duplicateNode = useCallback((nodeId: string) => {
     setFlowNodes((nds) => {
@@ -503,8 +495,8 @@ export function WorkflowCanvasPage() {
       return [...nds, copy];
     });
     setContextMenu(null);
-    queueSyncAndSave();
-  }, [setFlowNodes, queueSyncAndSave]);
+    queueSave();
+  }, [setFlowNodes, queueSave]);
 
   // Close context menu on global click/escape
   useEffect(() => {
@@ -534,7 +526,6 @@ export function WorkflowCanvasPage() {
 
   // Save on unmount if dirty
   useEffect(() => () => {
-    if (syncFrameRef.current !== null) window.cancelAnimationFrame(syncFrameRef.current);
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     if (saveState === 'dirty' && wf) {
       void saveNow();
@@ -610,7 +601,7 @@ export function WorkflowCanvasPage() {
         body: JSON.stringify({ target }),
       });
       toast.success(target === 'schedule' ? 'Deployed to schedule' : target === 'webhook' ? 'Deployed as webhook' : target === 'library' ? 'Saved to library' : 'Marked as reusable');
-    } catch (e) { toast.error('Publish failed', String(e)); }
+    } catch (e) { toast.error('Publish failed', apiErrorMessage(e)); }
   }
 
   if (!wf) return <div className="p-6 text-[13px] text-text-muted">Loading workflow…</div>;
@@ -720,6 +711,7 @@ export function WorkflowCanvasPage() {
             edges={flowEdges}
             fitView
             nodeTypes={{ agentis: AgentisNode }}
+            edgeTypes={edgeTypes}
             dropEffect="copy"
             onDropCanvas={(e, pos) => {
               const raw = e.dataTransfer.getData('application/x-agentis-node');
@@ -780,9 +772,9 @@ export function WorkflowCanvasPage() {
               e.stopPropagation();
               setContextMenu({ x: e.clientX, y: e.clientY, nodeId: n.id });
             }}
-            onNodeDragStop={() => syncAndSave()}
-            onNodesDelete={queueSyncAndSave}
-            onEdgesDelete={queueSyncAndSave}
+            onNodeDragStop={() => queueSave()}
+            onNodesDelete={queueSave}
+            onEdgesDelete={queueSave}
             onPaneClick={() => { setSelection({ kind: null }); setContextMenu(null); }}
             onNodesChange={onFlowNodesChange}
             onEdgesChange={onFlowEdgesChange}
@@ -1037,6 +1029,50 @@ function SaveIndicator({ state }: { state: SaveState }) {
 
 function graphFingerprint(graph: WorkflowDetail['graph'], title: string): string {
   return JSON.stringify({ title, graph });
+}
+
+/**
+ * Project the live React Flow node/edge state back into a persistable workflow
+ * graph. Node *config* (kind, skillId, …) lives only in `prevGraph`, so we
+ * merge each flow node onto its original config and take position/existence
+ * from the flow state. Transient edge `data` such as the `onDelete` handle is
+ * intentionally dropped so it never ends up in the persisted payload.
+ */
+function buildGraphFromFlow(
+  prevGraph: WorkflowDetail['graph'],
+  nodes: Node[],
+  edges: Edge[],
+): WorkflowDetail['graph'] {
+  const byId = new Map(prevGraph.nodes.map((n) => [n.id, n] as const));
+  const nextNodes: WorkflowDetail['graph']['nodes'] = nodes.map((fn) => {
+    const orig = byId.get(fn.id);
+    if (orig) {
+      return { ...orig, position: fn.position };
+    }
+    // New node that hasn't been mirrored into prev.graph yet — synthesize a
+    // minimal node from the flow data as a safety net.
+    const data = (fn.data ?? {}) as { type?: string; kind?: string; label?: string };
+    return {
+      id: fn.id,
+      type: data.type ?? 'task',
+      title: data.label ?? fn.id,
+      position: fn.position,
+      config: { kind: data.kind ?? data.type ?? 'task' },
+    };
+  });
+  const nextEdges = edges.map((fe) => {
+    const data = (fe.data ?? {}) as { type?: 'default' | 'error' | 'condition'; label?: string; condition?: string };
+    const e: { id: string; source: string; target: string; type?: 'default' | 'error' | 'condition'; label?: string; condition?: string } = {
+      id: fe.id,
+      source: fe.source,
+      target: fe.target,
+    };
+    if (data.type && data.type !== 'default') e.type = data.type;
+    if (data.label) e.label = data.label;
+    if (data.condition) e.condition = data.condition;
+    return e;
+  });
+  return { ...prevGraph, nodes: nextNodes, edges: nextEdges };
 }
 
 function PublishOption({ icon, title, desc, onClick }: { icon: React.ReactNode; title: string; desc: string; onClick: () => void }) {

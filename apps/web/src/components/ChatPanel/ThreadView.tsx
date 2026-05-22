@@ -24,7 +24,10 @@ import { ProactiveCard, type ProactiveCardData } from './ProactiveCard';
 import { CanvasEmbed } from './CanvasEmbed';
 import { ArtifactPanel } from '../ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../ArtifactPanel/types';
-import { ToolCallPill, type ToolCallPillData } from './ToolCallPill';
+import type { ToolCallPillData } from './ToolCallPill';
+import { ThinkingBubble } from '../chat/ThinkingBubble';
+import { ExecutionFeed } from '../chat/ExecutionFeed';
+import { PlanList, derivePlanItems, extractPlan } from '../chat/PlanList';
 import { ThreadSkeleton, SkeletonGate } from '../shared/Skeleton';
 
 type ContentType =
@@ -259,6 +262,7 @@ export function ThreadView({ agentId, agentColor, agentName }: { agentId: string
                 id: delta.id,
                 name: delta.name,
                 status: 'running',
+                args: delta.args,
               };
               setMessages((m) => m.map((x) => {
                 if (x.id !== streamId) return x;
@@ -275,11 +279,13 @@ export function ThreadView({ agentId, agentColor, agentName }: { agentId: string
               setMessages((m) => m.map((x) => {
                 if (x.id !== streamId) return x;
                 const existing = x.metadata?.toolCalls ?? [];
+                const previous = existing.find((p) => p.id === delta.id);
                 const next = existing.map((p) =>
                   p.id === delta.id
                     ? {
                         ...p,
                         status: (delta.error ? 'error' : 'success') as ToolCallPillData['status'],
+                        args: previous?.args,
                         result: delta.result,
                         error: delta.error,
                         durationMs,
@@ -293,6 +299,7 @@ export function ThreadView({ agentId, agentColor, agentName }: { agentId: string
                       id: delta.id,
                       name: delta.name,
                       status: (delta.error ? 'error' : 'success') as ToolCallPillData['status'],
+                      args: previous?.args,
                       result: delta.result,
                       error: delta.error,
                       durationMs,
@@ -431,6 +438,11 @@ function MessageBubble({ m }: { m: Message }) {
   const mine = m.role === 'operator';
   const [openArtifact, setOpenArtifact] = useState<Artifact | null>(null);
   const ct = m.metadata?.contentType ?? 'text';
+  const parsedPlan = !mine ? extractPlan(m.body) : null;
+  const bodyBeforePlan = parsedPlan ? parsedPlan.before : m.body;
+  const bodyAfterPlan = parsedPlan?.after ?? '';
+  const toolCalls = m.metadata?.toolCalls ?? [];
+  const streaming = m.deliveryStatus === 'sending';
   return (
     <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
       <div
@@ -447,19 +459,17 @@ function MessageBubble({ m }: { m: Message }) {
         )}
         {/* §5.4 streaming thinking — italic muted indented */}
         {m.metadata?.thinking && (
-          <div className="mb-1 border-l-2 border-line/60 pl-2 text-[11px] italic text-text-muted">
-            {m.metadata.thinking}
-          </div>
+          <ThinkingBubble text={m.metadata.thinking} streaming={streaming && !m.body.trim()} />
         )}
         {/* §5.4 tool calls — vertical stack of pills, parallel-friendly */}
-        {m.metadata?.toolCalls && m.metadata.toolCalls.length > 0 && (
-          <div className="mb-1 space-y-1">
-            {m.metadata.toolCalls.map((pill) => (
-              <ToolCallPill key={pill.id} data={pill} />
-            ))}
-          </div>
+        {bodyBeforePlan && <div className="mb-2 whitespace-pre-wrap break-words">{bodyBeforePlan}</div>}
+        {parsedPlan && (
+          <PlanList items={derivePlanItems(parsedPlan.items, toolCalls, streaming)} />
         )}
-        {m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
+        {toolCalls.length > 0 && (
+          <ExecutionFeed toolCalls={toolCalls} streaming={streaming} />
+        )}
+        {bodyAfterPlan && <div className="whitespace-pre-wrap break-words">{bodyAfterPlan}</div>}
         {ct === 'canvas_embed' && m.metadata?.canvasRunId && (
           <CanvasEmbed runId={m.metadata.canvasRunId} workflowId={m.metadata.canvasWorkflowId} />
         )}

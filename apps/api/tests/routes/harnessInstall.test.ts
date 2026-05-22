@@ -36,6 +36,19 @@ describe('/v1/harness install routes', () => {
     expect(http?.canAutoInstall).toBe(false);
   });
 
+  it('lists selectable LLM models for a runtime', async () => {
+    const response = await app().request('/v1/harness/models/codex', {
+      headers: ctx.authHeaders,
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      defaultModel: string | null;
+      models: Array<{ id: string; label: string; provider: string }>;
+    };
+    expect(body.defaultModel).toBe('gpt-5.3-codex');
+    expect(body.models.some((model) => model.id === 'gpt-5.3-codex' && model.provider === 'OpenAI')).toBe(true);
+  });
+
   it('rejects an install for a non-auto-installable harness', async () => {
     const response = await app().request('/v1/harness/install', {
       method: 'POST',

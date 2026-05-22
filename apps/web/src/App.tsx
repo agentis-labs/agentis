@@ -251,6 +251,16 @@ function Shell({
   const onChatPage = location.pathname.startsWith('/chat');
   const embedded = new URLSearchParams(location.search).get('embed') === '1';
 
+  useEffect(() => {
+    function onOpenCanvas(event: Event) {
+      const detail = (event as CustomEvent<{ workflowId?: string }>).detail;
+      if (!detail?.workflowId) return;
+      nav(`/workflows/${detail.workflowId}`);
+    }
+    window.addEventListener('agentis:open-canvas', onOpenCanvas);
+    return () => window.removeEventListener('agentis:open-canvas', onOpenCanvas);
+  }, [nav]);
+
   if (embedded) {
     return <main className="h-full min-h-0 bg-canvas">{children}</main>;
   }

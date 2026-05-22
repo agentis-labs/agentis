@@ -67,6 +67,17 @@ const envSchema = z.object({
   AGENTIS_EVALUATOR_BASE_URL: z.string().url().optional(),
   AGENTIS_EVALUATOR_API_KEY: z.string().optional(),
   AGENTIS_EVALUATOR_MODEL: z.string().optional(),
+
+  // Orchestrator chat runtime — opt-in fast path for the operator-facing chat.
+  // When set, interactive chat turns for agents whose runtime is a slow
+  // marker-protocol CLI (Codex / Claude Code) are answered by this native
+  // function-calling endpoint instead — token-streamed tool calls, no per-turn
+  // process re-spawn — while still attributed to the selected agent. Falls back
+  // to the evaluator endpoint when these are unset; when neither is configured,
+  // chat uses the agent's own adapter exactly as before.
+  AGENTIS_ORCHESTRATOR_BASE_URL: z.string().url().optional(),
+  AGENTIS_ORCHESTRATOR_API_KEY: z.string().optional(),
+  AGENTIS_ORCHESTRATOR_MODEL: z.string().optional(),
 });
 
 export type AgentisEnv = z.infer<typeof envSchema>;

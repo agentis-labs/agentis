@@ -16,7 +16,18 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     description:
       'Start a workflow by its ID with optional input data. Use this when the user asks to ' +
       'run, trigger, or execute a workflow. Returns the runId and initial status so you ' +
-      'can follow up with agentis.workflow.status.',
+      'can follow up with agentis.workflow.status. Always pass a real workflowId, never a workflow title; use agentis.workflow.list or agentis.canvas.context first if needed. Example input: {"workflowId":"8f4c5c7b-1b6e-4f8e-9c9a-5b3b4e7f9a12","inputs":{"text":"hello"}}.',
+    examples: [
+      {
+        description: 'Run a workflow by UUID with structured trigger input.',
+        input: { workflowId: '8f4c5c7b-1b6e-4f8e-9c9a-5b3b4e7f9a12', inputs: { text: 'hello' } },
+        expectedOutput: { runId: 'run_...', workflowId: '8f4c5c7b-1b6e-4f8e-9c9a-5b3b4e7f9a12', status: 'started' },
+      },
+      {
+        description: 'Run a workflow with no inputs after resolving its ID from context.',
+        input: { workflowId: '0b2b16f4-8c70-4e2d-9b4f-4dd6ebf7ec32' },
+      },
+    ],
     parameters: {
       type: 'object',
       properties: {
@@ -191,7 +202,17 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.agent.dispatch',
     description:
-      'Send a concrete task to an existing agent. Use after selecting a real agentId from agentis.agents.list. Returns either a chat response or a dispatched task id.',
+      'Send a concrete task to an existing agent. Use after selecting a real agentId from agentis.agents.list. Never pass an agent name as agentId. Returns either a chat response or a dispatched task id. Example input: {"agentId":"agent_9d2...","task":"Inspect the failing onboarding workflow and summarize the blocker."}.',
+    examples: [
+      {
+        description: 'Dispatch a bounded analysis task to a real agent ID.',
+        input: { agentId: 'agent_9d25f3', task: 'Inspect the failing onboarding workflow and summarize the blocker.', input: { workflowId: 'wf_123' } },
+      },
+      {
+        description: 'Ask an existing worker to produce a draft artifact.',
+        input: { agentId: 'agent_researcher_1', task: 'Draft a concise competitor brief from the indexed market research documents.' },
+      },
+    ],
     parameters: {
       type: 'object',
       properties: {
@@ -279,7 +300,17 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     description:
       'Full-text search across workspace documents, indexed URLs, and knowledge base entries. ' +
       'Use this when the user asks factual questions, wants to look up a document, or ' +
-      'references a previously indexed resource. Returns matching excerpts with source metadata.',
+      'references a previously indexed resource. Returns matching excerpts with source metadata. Prefer short keyword-first queries over verbose paragraphs. Example input: {"query":"Agentis workflow node types","limit":"5"}.',
+    examples: [
+      {
+        description: 'Search for architecture notes with a compact keyword query.',
+        input: { query: 'Agentis workflow node types', limit: '5' },
+      },
+      {
+        description: 'Find a decision record by a few distinctive terms.',
+        input: { query: 'chat orchestrator confirmation policy', limit: '3' },
+      },
+    ],
     parameters: {
       type: 'object',
       properties: {
@@ -327,6 +358,59 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
 
   // ─── Decisions & Approvals ───────────────────────────────────────────────
   {
+    name: 'agentis.skills.list',
+    description:
+      'List available workspace skills with real skillIds, runtime, entrypoint, capability tags, and input/output schemas. Use this before building a workflow with skill_task nodes or when the user asks what built-in/custom skills are available. Never invent a skillId; call this tool first. Example input: {"query":"http","limit":10}.',
+    examples: [
+      {
+        description: 'Find built-in or installed skills that can fetch HTTP data.',
+        input: { query: 'http', limit: 10 },
+        expectedOutput: { skills: [{ id: '...', slug: 'http_fetch', runtime: 'builtin', entrypoint: 'http_fetch' }] },
+      },
+      {
+        description: 'List deterministic in-process skills for cheap workflow steps.',
+        input: { runtime: 'builtin', limit: 20 },
+      },
+    ],
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Optional keyword filter across name, slug, entrypoint, runtime, and tags.' },
+        runtime: {
+          type: 'string',
+          description: 'Filter by skill runtime.',
+          enum: ['builtin', 'node_worker', 'docker_sandbox'],
+        },
+        capabilityTag: { type: 'string', description: 'Filter by a capability tag such as builtin, extraction, scoring, or formatting.' },
+        limit: { type: 'number', description: 'Maximum skills to return. Default 50, max 200.' },
+      },
+    },
+  },
+  {
+    name: 'agentis.skill.inspect',
+    description:
+      'Inspect a single skill by skillId, slug, or builtin entrypoint. Returns the manifest and whether it is usable in workflow skill_task nodes. Use this when you need exact schemas before wiring inputMapping/outputMapping. Example input: {"slug":"http_fetch"}.',
+    examples: [
+      {
+        description: 'Inspect a skill by slug before wiring a skill_task node.',
+        input: { slug: 'http_fetch' },
+        expectedOutput: { found: true, usableInWorkflows: true, skill: { id: '...', inputSchema: { type: 'object' } } },
+      },
+      {
+        description: 'Inspect by real skill ID returned from agentis.skills.list.',
+        input: { skillId: 'skill_123' },
+      },
+    ],
+    parameters: {
+      type: 'object',
+      properties: {
+        skillId: { type: 'string', description: 'Workspace skill ID. Preferred when known.' },
+        slug: { type: 'string', description: 'Workspace skill slug, for example http_fetch.' },
+        entrypoint: { type: 'string', description: 'Builtin or package entrypoint, for example echo.' },
+      },
+    },
+  },
+  {
     name: 'agentis.approval.list',
     description:
       'List pending approvals waiting for operator decision in the workspace. Use this when ' +
@@ -348,7 +432,17 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
       'Approve or reject a pending approval by ID. Use this when the user says "approve" or ' +
       '"reject" in response to an approval request, or explicitly instructs you to resolve one. ' +
       'Always confirm the approval title and action with the user before calling this tool ' +
-      'unless they have already provided explicit direction.',
+      'unless they have already provided explicit direction. Use agentis.approval.list first if the approvalId is not already known. Example input: {"approvalId":"apr_2f4...","decision":"approve","reason":"Operator approved in chat."}.',
+    examples: [
+      {
+        description: 'Approve a known pending approval after explicit user direction.',
+        input: { approvalId: 'apr_2f45c1', decision: 'approve', reason: 'Operator approved in chat.' },
+      },
+      {
+        description: 'Reject a known approval with a short reason.',
+        input: { approvalId: 'apr_7ab103', decision: 'reject', reason: 'Incorrect recipient list.' },
+      },
+    ],
     parameters: {
       type: 'object',
       properties: {
@@ -441,9 +535,25 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     name: 'agentis.build_workflow',
     description:
       'Generate or update a workflow graph from a natural-language description. Use this when ' +
-      'the user asks to create, design, or modify a workflow. Returns a structured workflow ' +
-      'graph that can be imported into the canvas editor. The graph includes nodes, edges, ' +
-      'and a summary of the proposed design.',
+      'the user asks to create, design, build, add, or modify a workflow. Call this tool immediately for clear build requests; do not show JSON for the operator to paste. The tool saves the workflow, emits live canvas build events, and returns workflowId/runId. Example input: {"title":"Hello World","description":"Create a manual workflow that returns { text: \\"Workflow is working\\" }."}.',
+    examples: [
+      {
+        description: 'Build the minimal Hello World workflow directly.',
+        input: {
+          title: 'Hello World',
+          description: 'Create a manual workflow that returns the fixed object { text: "Workflow is working" }.',
+        },
+        expectedOutput: { workflowId: '...', runId: 'build_...', nodeCount: 2, edgeCount: 1 },
+      },
+      {
+        description: 'Update an existing workflow by ID from a natural-language change request.',
+        input: {
+          workflowId: '8f4c5c7b-1b6e-4f8e-9c9a-5b3b4e7f9a12',
+          title: 'Weekly Research Digest',
+          description: 'Add a human review checkpoint before the Slack notification step.',
+        },
+      },
+    ],
     parameters: {
       type: 'object',
       properties: {

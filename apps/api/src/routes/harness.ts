@@ -26,6 +26,7 @@ import {
   isAutoInstallableAdapter,
   listHarnessInstallOptions,
 } from '../services/harnessInstall.js';
+import { listRuntimeModels } from '../services/runtimeModels.js';
 
 export interface HarnessRoutesDeps {
   db: AgentisSqliteDb;
@@ -75,6 +76,14 @@ export function buildHarnessRoutes(deps: HarnessRoutesDeps) {
         installCommand: harness.installCommand,
       })),
     });
+  });
+
+  app.get('/models/:adapterType', (c) => {
+    const adapterType = c.req.param('adapterType');
+    if (!HARNESS_ADAPTER_TYPES.has(adapterType)) {
+      throw new AgentisError('VALIDATION_FAILED', `'${adapterType}' is not a supported runtime.`);
+    }
+    return c.json(listRuntimeModels(adapterType as V1HarnessAdapterType));
   });
 
   /**

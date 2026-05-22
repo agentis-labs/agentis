@@ -966,13 +966,15 @@ function CanvasNodeCard({
         'home-node-enter absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border px-3 text-left shadow-card transition duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-muted focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
         node.kind === 'orchestrator' && node.status !== 'offline' && node.status !== 'error' && 'home-orchestrator-aura',
         node.ghost && 'home-ghost-breathe',
-        node.warn
-          ? 'border-warn/40 bg-warn-soft'
-          : node.active
-            ? 'border-accent/35 bg-accent-soft'
-            : node.ghost
-              ? 'border-dashed border-line bg-surface/45 text-text-muted'
-              : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
+        node.outOfCredits
+          ? 'border-warn bg-warn/5 shadow-[0_0_12px_rgba(245,158,11,0.25)]'
+          : node.warn
+            ? 'border-warn/40 bg-warn-soft'
+            : node.active
+              ? 'border-accent/35 bg-accent-soft'
+              : node.ghost
+                ? 'border-dashed border-line bg-surface/45 text-text-muted'
+                : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
         selected && 'ring-2 ring-violet-300/55',
         dimmed && 'opacity-25',
       )}
@@ -982,13 +984,15 @@ function CanvasNodeCard({
         <span
           className={clsx(
             'relative flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-card border',
-            node.warn
-              ? 'border-warn/35 bg-warn-soft text-warn'
-              : node.active
-                ? 'border-accent/35 bg-accent-soft text-accent'
-                : node.ghost
-                  ? 'border-line bg-canvas/50 text-text-muted'
-                  : 'border-line bg-surface-2 text-text-secondary',
+            node.outOfCredits
+              ? 'border-warn/50 bg-warn/10 text-warn shadow-[0_0_8px_rgba(245,158,11,0.2)]'
+              : node.warn
+                ? 'border-warn/35 bg-warn-soft text-warn'
+                : node.active
+                  ? 'border-accent/35 bg-accent-soft text-accent'
+                  : node.ghost
+                    ? 'border-line bg-canvas/50 text-text-muted'
+                    : 'border-line bg-surface-2 text-text-secondary',
           )}
           style={{ color: node.accent ?? undefined }}
         >
@@ -1147,6 +1151,9 @@ function agentNode(
   const approval = approvals.find((item) => item.agentName === agent.name);
   const size = role === 'orchestrator' ? NODE.orchestrator : role === 'manager' ? NODE.manager : NODE.worker;
   const status = statusLabel(agent.status, active ? 'working' : isAvailableAgent(agent.status) ? 'online' : 'idle');
+  const monthlyBudgetCents = agent.monthlyBudgetCents;
+  const currentMonthSpendCents = agent.currentMonthSpendCents;
+  const outOfCredits = monthlyBudgetCents !== undefined && monthlyBudgetCents !== null && currentMonthSpendCents !== undefined && currentMonthSpendCents >= monthlyBudgetCents;
   return {
     id: `agent-${agent.id}`,
     kind: role,
@@ -1159,7 +1166,8 @@ function agentNode(
     height: size.height,
     role,
     active,
-    warn: Boolean(approval) || agent.status === 'error' || agent.status === 'offline',
+    warn: Boolean(approval) || agent.status === 'error' || agent.status === 'offline' || outOfCredits,
+    outOfCredits,
     status: agent.status,
     route: `/agents/${agent.id}`,
     accent: stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? '#a78bfa' : undefined),
@@ -1176,6 +1184,7 @@ function agentNode(
       stringField(record, ['runtimeModel']) ? `Model: ${stringField(record, ['runtimeModel'])}` : undefined,
       stringField(record, ['adapterType']) ? `Adapter: ${stringField(record, ['adapterType'])}` : undefined,
       approval ? 'Approval pending' : undefined,
+      outOfCredits ? 'Out of credits' : undefined,
     ]),
     agent,
   };
@@ -1237,6 +1246,13 @@ function buildResourceNodes(
     const wfLabel = workflowLabel(workflow);
     const pos = positions(index++);
     const failed = failedRuns.find((item) => item.workflowName === wfLabel);
+    let connectedAgentIds = run?.agents?.map((agent) => `agent-${agent.id}`);
+    if ((!connectedAgentIds || connectedAgentIds.length === 0) && run && workflow?.graph?.nodes) {
+      const workflowAgentIds = workflow.graph.nodes
+        .filter((node: any) => node.config?.kind === 'agent_task' && node.config?.agentId)
+        .map((node: any) => `agent-${node.config.agentId}`);
+      connectedAgentIds = workflowAgentIds;
+    }
     resources.push({
       id: `workflow-${workflow.id}`,
       kind: 'workflow',
@@ -1260,7 +1276,7 @@ function buildResourceNodes(
         failed?.failedNode ? `Failed at: ${failed.failedNode}` : undefined,
       ]),
       workflow,
-      connectedAgentIds: run?.agents?.map((agent) => `agent-${agent.id}`),
+      connectedAgentIds,
     });
   }
 

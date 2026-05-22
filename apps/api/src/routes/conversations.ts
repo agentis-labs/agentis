@@ -4,6 +4,12 @@
  *   GET  /                                 list of threads
  *   GET  /:agentId                         messages for a thread (creates thread on demand)
  *   POST /:agentId/send                    operator → agent
+/**
+ * /v1/conversations — operator-agent threads.
+ *
+ *   GET  /                                 list of threads
+ *   GET  /:agentId                         messages for a thread (creates thread on demand)
+ *   POST /:agentId/send                    operator → agent
  *   POST /:agentId/continue/:sessionId     bind thread to a mirrored session id
  *   POST /:agentId/read                    clear unread badge
  */
@@ -11,9 +17,9 @@
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, CONSTANTS, type ChatDelta, type ChatTurnContext, type ViewportContext } from '@agentis/core';
+import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS, type ChatDelta, type ChatTurnContext, type ViewportContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -25,6 +31,7 @@ import type { ViewportStore } from '../services/viewportStore.js';
 import type { Logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
+import type { EventBus } from '../event-bus.js';
 
 const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
@@ -61,10 +68,28 @@ type ConversationRouteDeps = {
   adapters: AdapterManager;
   logger: Logger;
   viewportStore?: ViewportStore;
+  bus: EventBus;
 };
 
 type AgentRow = typeof schema.agents.$inferSelect;
 type ConversationMessageRow = typeof schema.conversationMessages.$inferSelect;
+
+interface PersistedToolCallData {
+  id: string;
+  name: string;
+  status: 'running' | 'success' | 'error';
+  args?: unknown;
+  result?: unknown;
+  error?: string | null;
+  durationMs?: number | null;
+}
+
+interface StreamedChatMetadata {
+  thinking: string;
+  toolCalls: PersistedToolCallData[];
+  toolStartedAt: Map<string, number>;
+  confirmation: (Omit<Extract<ChatDelta, { type: 'confirmation_required' }>, 'type'> & { status: 'pending' }) | null;
+}
 
 function serializeConversationMessage(message: ConversationMessageRow) {
   return {
@@ -144,7 +169,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
 
   app.get('/', (c) => {
     const ws = getWorkspace(c);
-    const rows = deps.conversations.list(ws.workspaceId);
+    const rows = deps.conversations.list(ws.workspaceId, { includeArchived: true });
     const agentRows = deps.db
       .select()
       .from(schema.agents)
@@ -160,6 +185,8 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
         agentName: a?.name ?? r.agentId.slice(0, 8),
         agentColor: a?.colorHex ?? '#7a8390',
         unread: r.unreadCount,
+        title: r.title,
+        archivedAt: r.archivedAt,
         lastMessageAt: r.lastMessageAt,
         lastMessagePreview: last ? last.body.slice(0, 80) : null,
         mirroredSessionId: r.mirroredSessionId,
@@ -171,14 +198,18 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
   app.get('/:agentId', (c) => {
     const ws = getWorkspace(c);
     const agentId = c.req.param('agentId');
+    const conversationId = c.req.query('conversationId') ?? null;
     const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
     if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
-    const conversation = deps.conversations.getOrCreateByAgent({
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      userId: ws.user.id,
-      agentId,
-    });
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? CONSTANTS.CONVERSATION_HISTORY_PAGE_SIZE), 1), 200);
     const before = c.req.query('before') ?? null;
     const beforeId = c.req.query('beforeId') ?? null;
@@ -235,6 +266,20 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     });
     deps.conversations.markRead(ws.workspaceId, conversation.id);
     return c.json({ ok: true });
+  });
+
+  app.post('/:agentId/new', (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+    if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const conversation = deps.conversations.startNewConversation({
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      userId: ws.user.id,
+      agentId,
+    });
+    return c.json({ ok: true, conversationId: conversation.id });
   });
 
   app.patch('/:agentId/:messageId', async (c) => {
@@ -343,6 +388,7 @@ async function sendConversationMessage(
       let wroteDoneDelta = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
       let adapterError: string | null = null;
+      const streamedMetadata = createStreamedChatMetadata();
       if (reg?.adapter?.chat) {
         const viewportOverride = body.viewportOverride as ViewportContext | null | undefined;
         const history = deps.conversations
@@ -368,6 +414,7 @@ async function sendConversationMessage(
             adapterError = delta.error;
             continue;
           }
+          captureChatDeltaMetadata(streamedMetadata, delta);
           await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
           if (delta.type === 'text') finalText += delta.delta;
           if (delta.type === 'done') {
@@ -399,14 +446,14 @@ async function sendConversationMessage(
         });
       }
 
-      if (finishReason !== 'error' && finalText.trim()) {
+      if (finishReason !== 'error' && (finalText.trim() || streamedMetadata.confirmation)) {
         const persisted = deps.conversations.appendMirrored({
           workspaceId: ws.workspaceId,
           conversationId: conversation.id,
           sessionMessageId: `chat_${randomUUID()}`,
           authorType: 'agent',
-          body: finalText,
-          metadata: { source: 'chat_loop' },
+          body: finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required',
+          metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata),
         });
         await stream.writeSSE({
           event: 'message',
@@ -444,8 +491,47 @@ async function confirmConversationAction(
     agentId,
   });
   const reg = deps.adapters.get(agentId);
-  if (!reg?.adapter?.chat) {
+  if (!reg?.adapter?.chat || reg.adapter.capabilities?.().interactiveChat === false) {
     throw new AgentisError('ADAPTER_UNAVAILABLE', 'agent does not support interactive chat confirmations');
+  }
+
+  const targetMsg = deps.db
+    .select()
+    .from(schema.conversationMessages)
+    .where(and(
+      eq(schema.conversationMessages.conversationId, conversation.id),
+      sql`json_extract(${schema.conversationMessages.metadata}, '$.confirmation.turnId') = ${body.turnId}`
+    ))
+    .get();
+
+  if (targetMsg) {
+    const metadata = (typeof targetMsg.metadata === 'string' ? JSON.parse(targetMsg.metadata) : targetMsg.metadata) as Record<string, any>;
+    if (metadata && metadata.confirmation) {
+      metadata.confirmation.status = body.confirmed ? 'approved' : 'cancelled';
+      deps.db
+        .update(schema.conversationMessages)
+        .set({ metadata })
+        .where(eq(schema.conversationMessages.id, targetMsg.id))
+        .run();
+
+      const updatedMsg = deps.db
+        .select()
+        .from(schema.conversationMessages)
+        .where(eq(schema.conversationMessages.id, targetMsg.id))
+        .get();
+
+      if (updatedMsg) {
+        deps.bus.publish(
+          REALTIME_ROOMS.conversation(conversation.agentId),
+          REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+          {
+            message: serializeConversationMessage(updatedMsg),
+            conversationId: conversation.id,
+            agentId: conversation.agentId,
+          }
+        );
+      }
+    }
   }
 
   const acceptsSSE = c.req.header('accept')?.includes('text/event-stream');
@@ -455,6 +541,7 @@ async function confirmConversationAction(
       let wroteDoneDelta = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
       let adapterError: string | null = null;
+      const streamedMetadata = createStreamedChatMetadata();
       for await (const delta of ChatSessionExecutor.confirm(reg.adapter, body.turnId, body.confirmed, {
         workspaceId: ws.workspaceId,
         userId: ws.user.id,
@@ -464,6 +551,7 @@ async function confirmConversationAction(
           adapterError = delta.error;
           continue;
         }
+        captureChatDeltaMetadata(streamedMetadata, delta);
         await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
         if (delta.type === 'text') finalText += delta.delta;
         if (delta.type === 'done') {
@@ -484,14 +572,14 @@ async function confirmConversationAction(
           }),
         });
       }
-      if (finishReason !== 'error' && finalText.trim()) {
+      if (finishReason !== 'error' && (finalText.trim() || streamedMetadata.confirmation)) {
         const persisted = deps.conversations.appendMirrored({
           workspaceId: ws.workspaceId,
           conversationId: conversation.id,
           sessionMessageId: `chat_${randomUUID()}`,
           authorType: 'agent',
-          body: finalText,
-          metadata: { source: 'chat_confirmation' },
+          body: finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required',
+          metadata: buildPersistedChatMetadata('chat_confirmation', streamedMetadata),
         });
         await stream.writeSSE({
           event: 'message',
@@ -539,4 +627,76 @@ function isAdapterErrorDelta(delta: ChatDelta): delta is Extract<ChatDelta, { ty
     && delta.name === 'adapter.chat'
     && typeof delta.error === 'string'
     && delta.error.trim().length > 0;
+}
+
+function createStreamedChatMetadata(): StreamedChatMetadata {
+  return {
+    thinking: '',
+    toolCalls: [],
+    toolStartedAt: new Map(),
+    confirmation: null,
+  };
+}
+
+function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta): void {
+  if (delta.type === 'thinking') {
+    state.thinking += delta.delta;
+    return;
+  }
+  if (delta.type === 'tool_call') {
+    state.toolStartedAt.set(delta.id, Date.now());
+    state.toolCalls = [
+      ...state.toolCalls.filter((entry) => entry.id !== delta.id),
+      {
+        id: delta.id,
+        name: delta.name,
+        status: 'running',
+        args: delta.args,
+      },
+    ];
+    return;
+  }
+  if (delta.type === 'tool_result') {
+    const startedAt = state.toolStartedAt.get(delta.id);
+    const durationMs = startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : null;
+    const previous = state.toolCalls.find((entry) => entry.id === delta.id);
+    state.toolCalls = [
+      ...state.toolCalls.filter((entry) => entry.id !== delta.id),
+      {
+        id: delta.id,
+        name: delta.name,
+        status: delta.error ? 'error' : 'success',
+        args: previous?.args,
+        result: delta.result,
+        error: delta.error ?? null,
+        durationMs,
+      },
+    ];
+    return;
+  }
+  if (delta.type === 'confirmation_required') {
+    state.confirmation = {
+      turnId: delta.turnId,
+      toolCall: delta.toolCall,
+      title: delta.title,
+      body: delta.body,
+      impact: delta.impact,
+      confirmLabel: delta.confirmLabel,
+      cancelLabel: delta.cancelLabel,
+      expiresAt: delta.expiresAt,
+      status: 'pending',
+    };
+  }
+}
+
+function buildPersistedChatMetadata(
+  source: 'chat_loop' | 'chat_confirmation',
+  state: StreamedChatMetadata,
+): Record<string, unknown> {
+  return {
+    source,
+    ...(state.thinking.trim() ? { thinking: state.thinking } : {}),
+    ...(state.toolCalls.length > 0 ? { toolCalls: state.toolCalls } : {}),
+    ...(state.confirmation ? { confirmation: state.confirmation } : {}),
+  };
 }
