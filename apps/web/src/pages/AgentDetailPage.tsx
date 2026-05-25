@@ -19,8 +19,9 @@ import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
 import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
 import { AgentChannelsTab } from '../components/agents/AgentChannelsTab';
+import { useAgentInstallSession } from '../hooks/useBackgroundInstall';
 
-type TabKey = 'identity' | 'instructions' | 'runtime' | 'channels' | 'history';
+type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'history';
 
 /** Map legacy tab values (overview / connections) onto the redesigned set. */
 function normalizeTab(raw: string | null): TabKey {
@@ -32,6 +33,7 @@ function normalizeTab(raw: string | null): TabKey {
     case 'runtime':
       return 'runtime';
     case 'instructions':
+    case 'memory':
     case 'channels':
     case 'history':
       return raw;
@@ -119,6 +121,7 @@ export function AgentDetailPage() {
   const [allAgents, setAllAgents] = useState<AgentSummary[]>([]);
   const [allSpaces, setAllSpaces] = useState<Array<{ id: string; name: string }>>([]);
   const [loading, setLoading] = useState(true);
+  const installSession = useAgentInstallSession(agent?.id);
 
   async function refresh() {
     if (!id) return;
@@ -186,6 +189,10 @@ export function AgentDetailPage() {
     );
   }
 
+  const installActive = installSession?.phase === 'installing' || installSession?.phase === 'verifying';
+  const displayStatus = agent.status === 'setting_up' && !installActive ? 'error' : agent.status ?? 'offline';
+  const displayStatusLabel = agent.status === 'setting_up' && !installActive ? 'runtime missing' : undefined;
+
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
@@ -209,7 +216,7 @@ export function AgentDetailPage() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h1 className="truncate text-display text-text-primary">{agent.name}</h1>
-              <StatusBadge status={agent.status ?? 'offline'} size="sm" />
+              <StatusBadge status={displayStatus} label={displayStatusLabel} pulse={installActive ? undefined : false} size="sm" />
             </div>
             {agent.description && (
               <p className="mt-1 text-[13px] text-text-secondary">{agent.description}</p>
@@ -235,6 +242,7 @@ export function AgentDetailPage() {
           { value: 'identity',     label: 'Identity' },
           { value: 'instructions', label: 'Instructions' },
           { value: 'runtime',      label: 'Runtime' },
+          { value: 'memory',       label: 'Memory' },
           { value: 'channels',     label: 'Channels' },
           { value: 'history',      label: 'History' },
         ]}
@@ -245,6 +253,7 @@ export function AgentDetailPage() {
         {tab === 'identity' && <IdentityTab agent={agent} allAgents={allAgents} allSpaces={allSpaces} onChange={refresh} />}
         {tab === 'instructions' && <InstructionsTab agent={agent} />}
         {tab === 'runtime' && <RuntimeTab agent={agent} allAgents={allAgents} onChange={refresh} />}
+        {tab === 'memory' && <MemoryTab agent={agent} />}
         {tab === 'channels' && <AgentChannelsTab agentId={agent.id} agentName={agent.name} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
       </div>
@@ -755,6 +764,118 @@ function HistoryTab({ agent }: { agent: AgentDetail }) {
           <span className="flex-1 truncate text-[13px] text-text-primary">{r.workflowName ?? 'Workflow run'}</span>
           <span className="text-[11px] text-text-muted">{relativeTime(r.startedAt)}</span>
         </button>
+      ))}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Memory tab — the agent's personal Brain (§G11)
+// ────────────────────────────────────────────────────────────
+
+interface AgentMemoryRow {
+  id: string;
+  section: string;
+  content: string;
+  tags: string[];
+  createdAt: string;
+}
+
+/**
+ * The agent's own memory: findings and decisions it has accumulated across every
+ * workflow and chat it has run — separate from the shared workspace memory log.
+ */
+function MemoryTab({ agent }: { agent: AgentDetail }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [entries, setEntries] = useState<AgentMemoryRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await api<{ entries: AgentMemoryRow[] }>(`/v1/brain/agents/${agent.id}/memory`);
+        if (!cancelled) setEntries(data.entries ?? []);
+      } catch { if (!cancelled) setEntries([]); }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [agent.id]);
+
+  async function clearAll() {
+    const ok = await confirm({
+      title: 'Clear agent memory',
+      body: `Permanently delete everything ${agent.name} has remembered? This cannot be undone.`,
+      confirmLabel: 'Clear memory',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await api(`/v1/brain/agents/${agent.id}/memory`, { method: 'DELETE' });
+      toast.success('Agent memory cleared');
+      setEntries([]);
+    } catch (err) {
+      toast.error('Failed to clear memory', err instanceof Error ? err.message : undefined);
+    }
+  }
+
+  async function removeOne(id: string) {
+    try {
+      await api(`/v1/brain/agents/${agent.id}/memory/${id}`, { method: 'DELETE' });
+      setEntries((prev) => prev.filter((e) => e.id !== id));
+    } catch (err) {
+      toast.error('Failed to delete entry', err instanceof Error ? err.message : undefined);
+    }
+  }
+
+  if (loading) return <Skeleton height={300} />;
+
+  if (entries.length === 0) {
+    return (
+      <EmptyState
+        icon={<FileText size={48} />}
+        title="No memories yet"
+        body={`As ${agent.name} runs tasks, the findings and decisions it chooses to remember will accumulate here — its personal expertise, separate from the shared workspace memory.`}
+      />
+    );
+  }
+
+  const bySection = new Map<string, AgentMemoryRow[]>();
+  for (const e of entries) {
+    const list = bySection.get(e.section) ?? [];
+    list.push(e);
+    bySection.set(e.section, list);
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <p className="text-[12px] text-text-muted">
+          {entries.length} {entries.length === 1 ? 'memory' : 'memories'} this agent carries across every workflow it runs.
+        </p>
+        <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={clearAll}>Clear all</Button>
+      </div>
+      {[...bySection.entries()].map(([section, rows]) => (
+        <section key={section}>
+          <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wide text-text-muted">{section}</h3>
+          <div className="space-y-1.5">
+            {rows.map((e) => (
+              <div key={e.id} className="group flex items-start gap-3 rounded-md border border-line bg-surface px-4 py-2.5">
+                <span className="flex-1 text-[13px] leading-snug text-text-primary">{e.content}</span>
+                <span className="shrink-0 text-[11px] text-text-muted">{relativeTime(e.createdAt)}</span>
+                <button
+                  type="button"
+                  onClick={() => removeOne(e.id)}
+                  className="shrink-0 text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+                  aria-label="Delete memory"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
       ))}
     </div>
   );

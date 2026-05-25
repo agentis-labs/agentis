@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Invoice Processor",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["invoice", "finance-ops", "approval"],
         "config": {},
         "instructions": "Extract invoice facts exactly, flag mismatches, and route approvals instead of guessing.",

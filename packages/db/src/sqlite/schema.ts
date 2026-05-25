@@ -52,6 +52,8 @@ export const workspaces = sqliteTable('workspaces', {
   slug: text('slug').notNull(),
   defaultAmbientId: text('default_ambient_id'),
   issuePrefix: text('issue_prefix').notNull().default('AGT'),
+  /** Layer 5 §5.3 — workspace/day cost ceiling (cents). null = uncapped. */
+  dailyBudgetCents: integer('daily_budget_cents'),
   ...baseTimestamps(),
 });
 
@@ -255,6 +257,8 @@ export const workflows = sqliteTable('workflows', {
   settings: text('settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   isFromRegistry: integer('is_from_registry', { mode: 'boolean' }).notNull().default(false),
   maxConcurrentRuns: integer('max_concurrent_runs'),
+  /** §5.3 — per-run cost ceiling (cents). null = uncapped. */
+  budgetCents: integer('budget_cents'),
   /** queue | reject | replace_oldest. NOT NULL DEFAULT 'queue' so an omitted value can never trip the constraint. */
   concurrencyOverflow: text('concurrency_overflow').notNull().default('queue'),
   tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
@@ -307,6 +311,38 @@ export const workflowKvEntries = sqliteTable('workflow_kv_entries', {
   version: integer('version').notNull().default(1),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Tier-3 state: workspace-scoped KV shared across all workflows (§4.1). */
+export const workspaceKv = sqliteTable('workspace_kv', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  key: text('key').notNull(),
+  value: text('value', { mode: 'json' }).notNull(),
+  version: integer('version').notNull().default(1),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/** Full per-run audit trail — every node/run action attributed (§5.4). */
+export const auditEntries = sqliteTable('audit_entries', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id').notNull(),
+  phaseId: text('phase_id'),
+  nodeId: text('node_id'),
+  agentId: text('agent_id'),
+  action: text('action').notNull(),
+  actorType: text('actor_type').notNull(),
+  actorId: text('actor_id').notNull(),
+  inputSummary: text('input_summary'),
+  outputSummary: text('output_summary'),
+  costCents: integer('cost_cents'),
+  at: text('at').notNull().default(isoNow() as unknown as string),
 });
 
 export const workflowRuns = sqliteTable('workflow_runs', {
@@ -454,6 +490,8 @@ export const artifacts = sqliteTable('artifacts', {
   content: text('content').notNull().default(''),
   thumbnailUrl: text('thumbnail_url'),
   metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** §6.4 — pinned to the workspace output gallery (survives run cleanup). */
+  pinned: integer('pinned', { mode: 'boolean' }).notNull().default(false),
   ...baseTimestamps(),
 });
 
@@ -900,6 +938,26 @@ export const kbChunks = sqliteTable('kb_chunks', {
   content: text('content').notNull(),
   metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
   tokenCount: integer('token_count').notNull().default(0),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Agent-scoped memory — the personal Brain of a single agent. Distinct from the
+ * workspace MEMORY.md (shared by all agents) and workflow_kv_entries (scoped to
+ * one workflow): these entries belong to one agent and follow it across every
+ * workflow and chat it ever participates in, so its expertise compounds over time.
+ */
+export const agentMemories = sqliteTable('agent_memories', {
+  id: text('id').primaryKey(),
+  agentId: text('agent_id')
+    .notNull()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  section: text('section').notNull().default('Notes'),
+  content: text('content').notNull(),
+  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 

@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Lead Enricher",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["research", "crm", "data-quality"],
         "config": {},
         "instructions": "Enrich records with sourced context and avoid overwriting known CRM values without evidence.",

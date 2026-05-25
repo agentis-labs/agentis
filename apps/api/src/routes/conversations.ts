@@ -115,12 +115,15 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       throw new AgentisError('RESOURCE_NOT_FOUND', 'workspace orchestrator not found');
     }
 
-    const conversation = deps.conversations.getOrCreateByAgent({
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      userId: ws.user.id,
-      agentId: orchestrator.id,
-    });
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId: orchestrator.id,
+        });
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? CONSTANTS.CONVERSATION_HISTORY_PAGE_SIZE), 1), 200);
     const before = c.req.query('before') ?? null;
     const beforeId = c.req.query('beforeId') ?? null;
@@ -157,12 +160,15 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     if (!orchestrator) {
       throw new AgentisError('RESOURCE_NOT_FOUND', 'workspace orchestrator not found');
     }
-    const conversation = deps.conversations.getOrCreateByAgent({
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      userId: ws.user.id,
-      agentId: orchestrator.id,
-    });
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId: orchestrator.id,
+        });
     deps.conversations.markRead(ws.workspaceId, conversation.id);
     return c.json({ ok: true, agent: serializeScopeAgent(orchestrator) });
   });
@@ -184,12 +190,14 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
         agentId: r.agentId,
         agentName: a?.name ?? r.agentId.slice(0, 8),
         agentColor: a?.colorHex ?? '#7a8390',
+        agentStatus: a?.status ?? 'offline',
         unread: r.unreadCount,
         title: r.title,
         archivedAt: r.archivedAt,
         lastMessageAt: r.lastMessageAt,
         lastMessagePreview: last ? last.body.slice(0, 80) : null,
         mirroredSessionId: r.mirroredSessionId,
+        createdAt: r.createdAt,
       };
     });
     return c.json({ conversations: enriched });
@@ -256,14 +264,17 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
   app.post('/:agentId/read', (c) => {
     const ws = getWorkspace(c);
     const agentId = c.req.param('agentId');
+    const conversationId = c.req.query('conversationId') || null;
     const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
     if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
-    const conversation = deps.conversations.getOrCreateByAgent({
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      userId: ws.user.id,
-      agentId,
-    });
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
     deps.conversations.markRead(ws.workspaceId, conversation.id);
     return c.json({ ok: true });
   });
@@ -280,6 +291,26 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       agentId,
     });
     return c.json({ ok: true, conversationId: conversation.id });
+  });
+
+  app.patch('/session/:conversationId', async (c) => {
+    const ws = getWorkspace(c);
+    const conversationId = c.req.param('conversationId');
+    const body = await c.req.json();
+    const parsed = z.object({
+      title: z.string().nullable().optional(),
+      archived: z.boolean().optional(),
+    }).parse(body);
+
+    const conversation = deps.conversations.updateSession(ws.workspaceId, conversationId, parsed);
+    return c.json({ ok: true, conversation });
+  });
+
+  app.delete('/session/:conversationId', (c) => {
+    const ws = getWorkspace(c);
+    const conversationId = c.req.param('conversationId');
+    deps.conversations.deleteConversation(ws.workspaceId, conversationId);
+    return c.json({ ok: true });
   });
 
   app.patch('/:agentId/:messageId', async (c) => {
@@ -367,12 +398,15 @@ async function sendConversationMessage(
   agentId: string,
 ) {
   const body = sendSchema.parse(await c.req.json());
-  const conversation = deps.conversations.getOrCreateByAgent({
-    workspaceId: ws.workspaceId,
-    ambientId: ws.ambientId,
-    userId: ws.user.id,
-    agentId,
-  });
+  const conversationId = c.req.query('conversationId') || null;
+  const conversation = conversationId
+    ? deps.conversations.getById(ws.workspaceId, conversationId)
+    : deps.conversations.getOrCreateByAgent({
+        workspaceId: ws.workspaceId,
+        ambientId: ws.ambientId,
+        userId: ws.user.id,
+        agentId,
+      });
   const message = deps.conversations.appendOutbound({
     workspaceId: ws.workspaceId,
     conversationId: conversation.id,
@@ -484,12 +518,15 @@ async function confirmConversationAction(
   agentId: string,
 ) {
   const body = confirmSchema.parse(await c.req.json());
-  const conversation = deps.conversations.getOrCreateByAgent({
-    workspaceId: ws.workspaceId,
-    ambientId: ws.ambientId,
-    userId: ws.user.id,
-    agentId,
-  });
+  const conversationId = c.req.query('conversationId') || null;
+  const conversation = conversationId
+    ? deps.conversations.getById(ws.workspaceId, conversationId)
+    : deps.conversations.getOrCreateByAgent({
+        workspaceId: ws.workspaceId,
+        ambientId: ws.ambientId,
+        userId: ws.user.id,
+        agentId,
+      });
   const reg = deps.adapters.get(agentId);
   if (!reg?.adapter?.chat || reg.adapter.capabilities?.().interactiveChat === false) {
     throw new AgentisError('ADAPTER_UNAVAILABLE', 'agent does not support interactive chat confirmations');

@@ -7,6 +7,40 @@ export interface PlaybookLibraryEntry {
   markdown: string;
 }
 
+/** Substitute the agent name into a playbook template. */
+export function renderPlaybook(markdown: string, name: string): string {
+  return markdown.replace(/\{\{\s*name\s*\}\}/g, name);
+}
+
+/** The base playbook that defines each hierarchy role's default instructions. */
+const ROLE_DEFAULT_PLAYBOOK: Record<'orchestrator' | 'manager' | 'worker', string> = {
+  orchestrator: 'workspace-orchestrator',
+  manager: 'department-manager',
+  worker: 'specialist-worker',
+};
+
+/**
+ * The auto-generated `agentis.md` (platform) instructions for a hierarchy role,
+ * rendered with the agent's name. Returns null for non-hierarchy / custom roles.
+ */
+export function defaultInstructionsForRole(role: string | null | undefined, name: string): string | null {
+  const r = role === 'orchestrator' || role === 'manager' || role === 'worker' ? role : null;
+  if (!r) return null;
+  const entry = PLAYBOOK_LIBRARY.find((e) => e.id === ROLE_DEFAULT_PLAYBOOK[r]);
+  return entry ? renderPlaybook(entry.markdown, name) : null;
+}
+
+/**
+ * True when `text` is an unedited playbook default (rendered with `name`) — i.e.
+ * the operator hasn't customized it, so a role change may safely regenerate it.
+ * Empty instructions also count as "default" (safe to generate).
+ */
+export function isDefaultRoleInstructions(text: string | null | undefined, name: string): boolean {
+  const t = (text ?? '').trim();
+  if (!t) return true;
+  return PLAYBOOK_LIBRARY.some((e) => renderPlaybook(e.markdown, name).trim() === t);
+}
+
 export const PLAYBOOK_LIBRARY: PlaybookLibraryEntry[] = [
   {
     id: 'workspace-orchestrator',

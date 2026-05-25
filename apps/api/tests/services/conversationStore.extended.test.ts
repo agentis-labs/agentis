@@ -105,4 +105,24 @@ describe('ConversationStore — extended', () => {
     });
     expect(msg.deliveryStatus).toBe('failed');
   });
+
+  it('updateSession updates the title and archives/unarchives the session', () => {
+    const c = store.getOrCreateByAgent({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
+    expect(c.archivedAt).toBeNull();
+
+    // archive the session
+    const archived = store.updateSession(wsA, c.id, { archived: true });
+    expect(archived.archivedAt).not.toBeNull();
+
+    // fetch from list (should not be in list without includeArchived)
+    const listActive = store.list(wsA, { includeArchived: false });
+    expect(listActive.find((x) => x.id === c.id)).toBeUndefined();
+
+    // unarchive the session
+    const unarchived = store.updateSession(wsA, c.id, { archived: false });
+    expect(unarchived.archivedAt).toBeNull();
+
+    const listActive2 = store.list(wsA, { includeArchived: false });
+    expect(listActive2.find((x) => x.id === c.id)).toBeDefined();
+  });
 });

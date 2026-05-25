@@ -31,6 +31,9 @@ interface PWPage {
   title(): Promise<string>;
   innerText(selector: string): Promise<string>;
   content(): Promise<string>;
+  fill(selector: string, value: string): Promise<void>;
+  click(selector: string): Promise<void>;
+  evaluate<T = unknown>(expression: string): Promise<T>;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   emulateMedia(opts: { media?: 'screen' | 'print' }): Promise<void>;
   close(): Promise<void>;
@@ -54,6 +57,10 @@ export interface BrowserRenderOptions {
   headless?: boolean;
   viewport?: { width: number; height: number };
   timeout?: number;
+  /** For fill_form: selector → value. */
+  formData?: Record<string, string>;
+  /** For fill_form: optional element to click after filling (submit). */
+  submitSelector?: string;
 }
 
 export class BrowserPool {
@@ -115,6 +122,54 @@ export class BrowserPool {
     return this.#withPage(opts.headless, async (page) => {
       await this.#load_(page, opts);
       return page.innerText(opts.selector ?? 'body').catch(() => '');
+    });
+  }
+
+  /** Fill form fields by selector, optionally submit; returns read-back values + final HTML. */
+  async fillForm(opts: BrowserRenderOptions): Promise<{ title: string; html: string; values: Record<string, string> }> {
+    return this.#withPage(opts.headless, async (page) => {
+      await this.#load_(page, opts);
+      const selectors = Object.keys(opts.formData ?? {});
+      for (const selector of selectors) {
+        await page.fill(selector, (opts.formData ?? {})[selector]!);
+      }
+      if (opts.submitSelector) await page.click(opts.submitSelector);
+      // Read back live `.value` (the value attribute in serialized HTML does not
+      // reflect typed input, so we evaluate the live property).
+      const values: Record<string, string> = {};
+      for (const selector of selectors) {
+        const v = await page.evaluate<string>(
+          `(() => { const el = document.querySelector(${JSON.stringify(selector)}); return el ? String((el).value ?? '') : ''; })()`,
+        );
+        values[selector] = typeof v === 'string' ? v : '';
+      }
+      const [title, html] = await Promise.all([page.title(), page.content()]);
+      return { title, html, values };
+    });
+  }
+
+  /** Extract a `<table>` (by selector, default first) into an array of row objects. */
+  async extractTable(opts: BrowserRenderOptions): Promise<Array<Record<string, string | null>>> {
+    return this.#withPage(opts.headless, async (page) => {
+      await this.#load_(page, opts);
+      const sel = JSON.stringify(opts.selector ?? 'table');
+      const expr = `(() => {
+        const table = document.querySelector(${sel});
+        if (!table) return [];
+        const rows = Array.from(table.querySelectorAll('tr'));
+        if (!rows.length) return [];
+        const headers = Array.from(rows[0].querySelectorAll('th,td')).map(c => (c.textContent || '').trim());
+        const out = [];
+        for (let i = 1; i < rows.length; i++) {
+          const cells = Array.from(rows[i].querySelectorAll('td,th')).map(c => (c.textContent || '').trim());
+          const obj = {};
+          headers.forEach((h, idx) => { obj[h || ('col' + idx)] = cells[idx] ?? null; });
+          out.push(obj);
+        }
+        return out;
+      })()`;
+      const rows = await page.evaluate<Array<Record<string, string | null>>>(expr);
+      return Array.isArray(rows) ? rows : [];
     });
   }
 

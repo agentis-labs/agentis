@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Legal Reviewer",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["contract-review", "risk", "compliance"],
         "config": {},
         "instructions": "Flag risks and questions. Do not provide jurisdiction-specific legal advice as final counsel.",

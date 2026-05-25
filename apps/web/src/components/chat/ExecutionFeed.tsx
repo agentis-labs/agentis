@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, Circle, ExternalLink, Loader2, XCircle } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Circle, Clock3, ExternalLink, Loader2, XCircle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 import type { ToolCallPillData } from '../ChatPanel/ToolCallPill';
@@ -101,7 +101,7 @@ function ExecutionFeedRow({ data }: { data: ToolCallPillData }) {
         <StatusIcon status={data.status} />
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-primary">{data.name}</span>
         <span className="font-mono text-[10px] text-text-muted">
-          {data.status === 'running' ? 'running' : data.durationMs != null ? formatDuration(data.durationMs) : data.status}
+          {data.status === 'running' ? 'running' : data.status === 'paused' ? 'paused' : data.durationMs != null ? formatDuration(data.durationMs) : data.status}
         </span>
         {hasDetails ? (
           open ? <ChevronDown size={12} className="text-text-muted" /> : <ChevronRight size={12} className="text-text-muted" />
@@ -125,6 +125,7 @@ function ExecutionFeedRow({ data }: { data: ToolCallPillData }) {
 
 function StatusIcon({ status }: { status: ToolCallPillData['status'] }) {
   if (status === 'running') return <Loader2 size={13} className="shrink-0 animate-spin text-accent" />;
+  if (status === 'paused') return <Clock3 size={13} className="shrink-0 text-warn animate-pulse" />;
   if (status === 'success') return <CheckCircle2 size={13} className="shrink-0 text-accent" />;
   if (status === 'error') return <XCircle size={13} className="shrink-0 text-danger" />;
   return <Circle size={13} className="shrink-0 text-text-muted" />;

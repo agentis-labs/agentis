@@ -12,6 +12,7 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
@@ -60,23 +61,18 @@ export interface AgentHierarchyAgent {
 interface AgentNodeData extends Record<string, unknown> {
   agent: AgentHierarchyAgent;
   onGhostCreate?: (preset?: AgentHierarchyCreatePreset) => void;
+  tierCount?: number;
 }
 
 const TIER_Y: Record<'orchestrator' | 'manager' | 'worker' | 'unassigned', number> = {
-  orchestrator: 40,
-  manager: 250,
-  worker: 460,
-  unassigned: 690,
+  orchestrator: 120,
+  manager: 300,
+  worker: 480,
+  unassigned: 650,
 };
 
-const TIER_LABELS = [
-  { label: 'Orchestrator', y: TIER_Y.orchestrator },
-  { label: 'Managers', y: TIER_Y.manager },
-  { label: 'Workers', y: TIER_Y.worker },
-  { label: 'Unassigned', y: TIER_Y.unassigned },
-];
-
 const nodeTypes = { agentHierarchy: AgentHierarchyNode };
+type AgentFleetFilterValue = 'all' | 'active' | 'idle' | 'setup_needed';
 
 export function AgentHierarchyCanvas({
   agents,
@@ -84,16 +80,20 @@ export function AgentHierarchyCanvas({
   onSelect,
   selectedAgent,
   onCloseSelection,
-  onCreate,
   onGhostCreate,
+  filter,
+  search,
+  onClearFilters,
 }: {
   agents: AgentHierarchyAgent[];
   onChanged: () => void;
   onSelect: (agent: AgentHierarchyAgent) => void;
   selectedAgent: AgentHierarchyAgent | null;
   onCloseSelection: () => void;
-  onCreate: () => void;
   onGhostCreate?: (preset?: AgentHierarchyCreatePreset) => void;
+  filter: AgentFleetFilterValue;
+  search: string;
+  onClearFilters: () => void;
 }) {
   const onGhostCreateRef = useRef(onGhostCreate);
   onGhostCreateRef.current = onGhostCreate;
@@ -101,15 +101,34 @@ export function AgentHierarchyCanvas({
     () => (preset?: AgentHierarchyCreatePreset) => onGhostCreateRef.current?.(preset),
     [],
   );
-  const graph = useMemo(() => buildGraph(agents, {}, stableOnGhostCreate), [agents, stableOnGhostCreate]);
+  const visibleAgents = useMemo(
+    () => agents.filter((agent) => matchesFleetFilter(agent, filter) && matchesFleetSearch(agent, search)),
+    [agents, filter, search],
+  );
+  const graph = useMemo(
+    () => buildGraph(visibleAgents, {
+      showGhostOrchestrator: !hasRole(agents, 'orchestrator') && filter === 'all' && search.trim().length === 0,
+    }, stableOnGhostCreate),
+    [agents, filter, search, stableOnGhostCreate, visibleAgents],
+  );
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<AgentNodeData>>(graph.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
   const [resettingLayout, setResettingLayout] = useState(false);
   const persistTimers = useRef(new Map<string, number>());
+  const reconcileSignatureRef = useRef<string>('');
+  const fitSignatureRef = useRef<string>('');
+  const flowRef = useRef<ReactFlowInstance<Node<AgentNodeData>, Edge> | null>(null);
 
   useEffect(() => {
     setNodes(graph.nodes);
     setEdges(graph.edges);
+    const signature = graph.nodes
+      .map((node) => `${node.id}:${normalizeRole(node.data.agent)}:${node.data.agent.reportsTo ?? 'root'}`)
+      .join('|');
+    if (signature !== fitSignatureRef.current) {
+      fitSignatureRef.current = signature;
+      requestFleetFit(flowRef.current);
+    }
   }, [graph, setEdges, setNodes]);
 
   useEffect(() => {
@@ -118,6 +137,21 @@ export function AgentHierarchyCanvas({
       persistTimers.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    const patches = hierarchyPatches(agents);
+    const signature = patches.map((patch) => `${patch.id}:${patch.reportsTo ?? 'none'}`).join('|');
+    if (!signature || signature === reconcileSignatureRef.current) return;
+    reconcileSignatureRef.current = signature;
+    let cancelled = false;
+    void Promise.all(patches.map((patch) => api(`/v1/agents/${patch.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ reportsTo: patch.reportsTo }),
+    }))).then(() => {
+      if (!cancelled) onChanged();
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [agents, onChanged]);
 
   async function connectAgents(connection: Connection) {
     if (!connection.source || !connection.target || connection.source === connection.target) return;
@@ -145,10 +179,14 @@ export function AgentHierarchyCanvas({
   async function resetLayout() {
     setResettingLayout(true);
     try {
-      const nextGraph = buildGraph(agents, { forceAutoLayout: true }, stableOnGhostCreate);
+      const nextGraph = buildGraph(visibleAgents, {
+        forceAutoLayout: true,
+        showGhostOrchestrator: !hasRole(agents, 'orchestrator') && filter === 'all' && search.trim().length === 0,
+      }, stableOnGhostCreate);
       setNodes(nextGraph.nodes);
       setEdges(nextGraph.edges);
-      await Promise.all(nextGraph.nodes.map((node) => api(`/v1/agents/${node.id}`, {
+      requestFleetFit(flowRef.current);
+      await Promise.all(nextGraph.nodes.filter((node) => !node.data.agent.isGhost).map((node) => api(`/v1/agents/${node.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ canvasPosition: node.position }),
       })));
@@ -159,17 +197,22 @@ export function AgentHierarchyCanvas({
   }
 
   return (
-    <div className="relative h-full min-h-[34rem] overflow-hidden rounded-lg border border-line bg-canvas">
+    <div className="relative h-full min-h-0 overflow-hidden bg-canvas">
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        onInit={(instance) => {
+          flowRef.current = instance as ReactFlowInstance<Node<AgentNodeData>, Edge>;
+          requestFleetFit(flowRef.current);
+        }}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={(connection) => void connectAgents(connection)}
         onNodeClick={(_event, node) => onSelect(node.data.agent)}
         onNodeDragStop={(_event, node) => void persistPosition(node)}
         fitView
+        fitViewOptions={{ padding: 0.1, minZoom: 0.62, maxZoom: 1 }}
         nodesDraggable
         nodesConnectable
         elementsSelectable
@@ -178,18 +221,27 @@ export function AgentHierarchyCanvas({
       >
         <Background color="#23252d" gap={28} />
         <Controls position="bottom-right" className="!border-line !bg-surface-2" />
-        <Panel position="top-left" className="pointer-events-none space-y-[168px] pt-6 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-          {TIER_LABELS.map((tier) => <div key={tier.label}>{tier.label}</div>)}
-        </Panel>
-        <Panel position="top-right" className="pointer-events-auto flex items-center gap-2">
-          <button type="button" onClick={() => void resetLayout()} disabled={resettingLayout} aria-label="Reset layout" className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface-2 px-3 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50">
+        <Panel position="top-right" className="pointer-events-auto m-3">
+          <button type="button" onClick={() => void resetLayout()} disabled={resettingLayout} aria-label="Reset layout" className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface-2/95 px-3 text-xs font-medium text-text-secondary shadow-card backdrop-blur-xl hover:bg-surface-3 hover:text-text-primary disabled:opacity-50">
             <RotateCcw size={13} /> {resettingLayout ? 'Resetting...' : 'Reset layout'}
-          </button>
-          <button type="button" onClick={onCreate} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface-2 px-3 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary">
-            <Plus size={13} /> Agent
           </button>
         </Panel>
       </ReactFlow>
+      {visibleAgents.length === 0 && (
+        <div className="pointer-events-none absolute inset-x-0 top-12 z-10 flex justify-center px-4">
+          <div className="pointer-events-auto rounded-2xl border border-line bg-surface/95 px-5 py-4 text-center shadow-2xl backdrop-blur-xl">
+            <div className="text-subheading text-text-primary">No agents match this view</div>
+            <p className="mt-1 text-[12px] text-text-muted">Clear the canvas filters to bring the fleet back into view.</p>
+            <button
+              type="button"
+              onClick={onClearFilters}
+              className="mt-3 inline-flex h-8 items-center rounded-btn border border-line bg-surface-2 px-3 text-[12px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+            >
+              Clear filters
+            </button>
+          </div>
+        </div>
+      )}
       <AgentQuickDetailPanel
         open={Boolean(selectedAgent)}
         agent={selectedAgent}
@@ -201,11 +253,10 @@ export function AgentHierarchyCanvas({
 
 function buildGraph(
   agents: AgentHierarchyAgent[],
-  options: { forceAutoLayout?: boolean } = {},
+  options: { forceAutoLayout?: boolean; showGhostOrchestrator?: boolean } = {},
   onGhostCreate?: (preset?: AgentHierarchyCreatePreset) => void,
 ): { nodes: Node<AgentNodeData>[]; edges: Edge[] } {
   const forceAutoLayout = options.forceAutoLayout ?? false;
-  const byId = new Set(agents.map((agent) => agent.id));
   const groups = {
     orchestrator: agents.filter((agent) => normalizeRole(agent) === 'orchestrator'),
     manager: agents.filter((agent) => normalizeRole(agent) === 'manager'),
@@ -220,14 +271,14 @@ function buildGraph(
       nodes.push({
         id: agent.id,
         type: 'agentHierarchy',
-        position: !forceAutoLayout && isPosition(agent.canvasPosition) ? agent.canvasPosition : fallback,
-        data: { agent, onGhostCreate },
+        position: forceAutoLayout ? fallback : safeCanvasPosition(tier, agent.canvasPosition, fallback),
+        data: { agent, onGhostCreate, tierCount: list.length },
       });
     });
   }
 
   // Ghost orchestrator — shown when no orchestrator exists
-  if (groups.orchestrator.length === 0) {
+  if (options.showGhostOrchestrator) {
     nodes.push({
       id: '__ghost_orchestrator__',
       type: 'agentHierarchy',
@@ -246,22 +297,102 @@ function buildGraph(
           reportsTo: null,
         },
         onGhostCreate,
+        tierCount: 1,
       },
     });
   }
 
-  const edges = agents
-    .filter((agent) => agent.reportsTo && byId.has(agent.reportsTo))
-    .map((agent) => ({
-      id: `${agent.reportsTo}-${agent.id}`,
-      source: agent.reportsTo!,
-      target: agent.id,
-      type: 'smoothstep',
-      animated: agent.status === 'busy' || Boolean(agent.currentTaskId),
-      style: { stroke: agent.colorHex ?? '#6366f1', strokeWidth: 1.5 },
-    } satisfies Edge));
+  const relationships = derivedRelationships(agents);
+  const visibleIds = new Set(nodes.map((node) => node.id));
+  const edges = relationships
+    .filter((relationship) => visibleIds.has(relationship.source) && visibleIds.has(relationship.target))
+    .map((relationship) => {
+      const agent = agents.find((item) => item.id === relationship.target);
+      return {
+        id: `${relationship.source}-${relationship.target}`,
+        source: relationship.source,
+        target: relationship.target,
+        type: 'smoothstep',
+        animated: agent?.status === 'busy' || Boolean(agent?.currentTaskId),
+        style: { stroke: agent?.colorHex ?? '#6366f1', strokeWidth: 1.5 },
+      } satisfies Edge;
+    });
 
   return { nodes, edges };
+}
+
+function derivedRelationships(agents: AgentHierarchyAgent[]): Array<{ source: string; target: string }> {
+  const orchestrator = primaryOrchestrator(agents);
+  const managers = agents.filter((agent) => normalizeRole(agent) === 'manager');
+  const managerIds = new Set(managers.map((agent) => agent.id));
+  const relationships: Array<{ source: string; target: string }> = [];
+
+  if (orchestrator) {
+    for (const manager of managers) {
+      relationships.push({ source: orchestrator.id, target: manager.id });
+    }
+  }
+
+  for (const worker of agents.filter((agent) => normalizeRole(agent) === 'worker')) {
+    if (worker.reportsTo && managerIds.has(worker.reportsTo)) {
+      relationships.push({ source: worker.reportsTo, target: worker.id });
+    }
+  }
+
+  return relationships;
+}
+
+function hierarchyPatches(agents: AgentHierarchyAgent[]): Array<{ id: string; reportsTo: string | null }> {
+  const orchestrator = primaryOrchestrator(agents);
+  const patches: Array<{ id: string; reportsTo: string | null }> = [];
+  for (const manager of agents.filter((agent) => normalizeRole(agent) === 'manager')) {
+    const expected = orchestrator?.id ?? null;
+    if ((manager.reportsTo ?? null) !== expected) {
+      patches.push({ id: manager.id, reportsTo: expected });
+    }
+  }
+  return patches;
+}
+
+function primaryOrchestrator(agents: AgentHierarchyAgent[]): AgentHierarchyAgent | null {
+  return [...agents]
+    .filter((agent) => normalizeRole(agent) === 'orchestrator')
+    .sort((a, b) => readinessRank(b) - readinessRank(a) || a.name.localeCompare(b.name))[0] ?? null;
+}
+
+function hasRole(agents: AgentHierarchyAgent[], role: 'orchestrator' | 'manager' | 'worker' | 'unassigned'): boolean {
+  return agents.some((agent) => normalizeRole(agent) === role);
+}
+
+function matchesFleetFilter(agent: AgentHierarchyAgent, filter: AgentFleetFilterValue): boolean {
+  if (filter === 'all') return true;
+  const status = readinessOf(agent);
+  if (filter === 'active') return status === 'live' || status === 'running';
+  if (filter === 'idle') return status === 'offline' || status === 'standby';
+  if (filter === 'setup_needed') return !agent.adapterType || status === 'failed' || agent.status === 'setup_needed';
+  return true;
+}
+
+function matchesFleetSearch(agent: AgentHierarchyAgent, search: string): boolean {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  return [
+    agent.name,
+    agent.description,
+    agent.runtimeModel,
+    harnessLabel(agent.adapterType),
+    normalizeRole(agent),
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .some((value) => value.toLowerCase().includes(query));
+}
+
+function readinessRank(agent: AgentHierarchyAgent): number {
+  const readiness = readinessOf(agent);
+  if (readiness === 'running') return 4;
+  if (readiness === 'live') return 3;
+  if (readiness === 'standby') return 1;
+  return 0;
 }
 
 function OrchestratorGlyph({ size = 15 }: { size?: number }) {
@@ -281,6 +412,130 @@ const TIER_BORDER: Record<'orchestrator' | 'manager' | 'worker' | 'unassigned', 
   worker: '#2a2c34',
   unassigned: '#2a2c34',
 };
+
+interface NodeVisualSpec {
+  width: number;
+  padding: number;
+  glyph: number;
+  icon: number;
+  handle: number;
+  gap: number;
+  titleSize: number;
+  subtitleSize: number;
+  activitySize: number;
+  showSubtitle: boolean;
+  showActivity: boolean;
+  showProgress: boolean;
+  compactProgress: boolean;
+}
+
+function nodeVisualSpec(role: 'orchestrator' | 'manager' | 'worker' | 'unassigned', tierCount: number): NodeVisualSpec {
+  if (role === 'orchestrator') {
+    return {
+      width: 304,
+      padding: 16,
+      glyph: 44,
+      icon: 19,
+      handle: 11,
+      gap: 12,
+      titleSize: 15,
+      subtitleSize: 11,
+      activitySize: 12,
+      showSubtitle: true,
+      showActivity: true,
+      showProgress: true,
+      compactProgress: false,
+    };
+  }
+
+  if (role === 'manager') {
+    return {
+      width: 252,
+      padding: 14,
+      glyph: 36,
+      icon: 16,
+      handle: 10,
+      gap: 10,
+      titleSize: 13,
+      subtitleSize: 10.5,
+      activitySize: 11,
+      showSubtitle: true,
+      showActivity: true,
+      showProgress: true,
+      compactProgress: false,
+    };
+  }
+
+  if (tierCount > 32) {
+    return {
+      width: 118,
+      padding: 8,
+      glyph: 22,
+      icon: 12,
+      handle: 6,
+      gap: 7,
+      titleSize: 10.5,
+      subtitleSize: 9,
+      activitySize: 9,
+      showSubtitle: false,
+      showActivity: false,
+      showProgress: false,
+      compactProgress: true,
+    };
+  }
+
+  if (tierCount > 16) {
+    return {
+      width: 142,
+      padding: 9,
+      glyph: 24,
+      icon: 12,
+      handle: 7,
+      gap: 8,
+      titleSize: 11,
+      subtitleSize: 9.5,
+      activitySize: 10,
+      showSubtitle: true,
+      showActivity: false,
+      showProgress: false,
+      compactProgress: true,
+    };
+  }
+
+  if (tierCount > 8) {
+    return {
+      width: 164,
+      padding: 10,
+      glyph: 26,
+      icon: 13,
+      handle: 8,
+      gap: 8,
+      titleSize: 11.5,
+      subtitleSize: 10,
+      activitySize: 10,
+      showSubtitle: true,
+      showActivity: false,
+      showProgress: true,
+      compactProgress: true,
+    };
+  }
+
+  return {
+    width: role === 'unassigned' ? 170 : 184,
+    padding: 10,
+    glyph: 28,
+    icon: 14,
+    handle: 8,
+    gap: 9,
+    titleSize: 12,
+    subtitleSize: 10,
+    activitySize: 10.5,
+    showSubtitle: true,
+    showActivity: true,
+    showProgress: true,
+    compactProgress: true,
+  };
+}
 
 function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   const agent = data.agent;
@@ -313,62 +568,72 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   const role = normalizeRole(agent);
   const installComplete = installSession?.phase === 'complete';
   const installFailed = installSession?.phase === 'error';
-  const isSettingUp = installSession ? !installComplete && !installFailed : agent.status === 'setting_up';
-  const readiness = installComplete ? 'live' : installFailed ? 'failed' : isSettingUp ? 'setting_up' : readinessOf(agent);
+  const installActive = installSession?.phase === 'installing' || installSession?.phase === 'verifying';
+  const staleSetup = agent.status === 'setting_up' && !installSession;
+  const isSettingUp = installActive;
+  const readiness = installComplete ? 'live' : installFailed || staleSetup ? 'failed' : isSettingUp ? 'setting_up' : readinessOf(agent);
   const GlyphIcon = role === 'orchestrator' ? OrchestratorGlyph : role === 'manager' ? ManagerGlyph : WorkerGlyph;
+  const visual = nodeVisualSpec(role, data.tierCount ?? 1);
   const activity = isSettingUp ? installActivity(installSession) : liveActivity(agent, readiness);
   const running = readiness === 'running';
   const settingUp = readiness === 'setting_up';
+  const subtitle = settingUp ? 'setting up runtime' : role === 'worker' ? harnessLabel(agent.adapterType) : `${role} - ${harnessLabel(agent.adapterType)}`;
 
   return (
     <div
       role="article"
       aria-label={`${agent.name} — ${readiness}`}
       className={clsx(
-        'relative w-64 rounded-lg border-2 bg-surface p-3.5 shadow-card transition-colors',
+        'relative rounded-lg border-2 bg-surface shadow-card transition-colors',
         running && 'ring-1 ring-warn/20',
         settingUp && 'ring-1 ring-cyan-500/20',
       )}
       style={{
+        width: visual.width,
+        padding: visual.padding,
         borderColor: settingUp ? '#06b6d4' : TIER_BORDER[role],
         boxShadow: settingUp ? '0 0 16px rgba(6, 182, 212, 0.08)' : running ? `0 0 12px ${TIER_BORDER[role]}22` : undefined,
       }}
     >
-      <Handle type="target" position={Position.Top} className="!h-2.5 !w-2.5 !border-line !bg-surface" />
-      <div className="flex items-center gap-2.5">
+      <Handle type="target" position={Position.Top} className="!border-line !bg-surface" style={{ width: visual.handle, height: visual.handle }} />
+      <div className="flex items-center" style={{ gap: visual.gap }}>
         <span
           className={clsx(
-            'flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-canvas',
+            'flex shrink-0 items-center justify-center rounded-md bg-canvas',
             settingUp && 'animate-pulse',
           )}
-          style={{ color: settingUp ? '#06b6d4' : TIER_BORDER[role] }}
+          style={{ width: visual.glyph, height: visual.glyph, color: settingUp ? '#06b6d4' : TIER_BORDER[role] }}
         >
-          {settingUp ? <Loader2 size={16} className="animate-spin" /> : (agent.avatarGlyph || <GlyphIcon size={16} />)}
+          {settingUp ? <Loader2 size={visual.icon} className="animate-spin" /> : (agent.avatarGlyph || <GlyphIcon size={visual.icon} />)}
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-text-primary">{agent.name}</div>
-          <div className="mt-0.5 truncate text-[11px] capitalize text-text-muted">
-            {settingUp ? 'setting up runtime' : `${role} · ${harnessLabel(agent.adapterType)}`}
-          </div>
+          <div className="truncate font-medium text-text-primary" style={{ fontSize: visual.titleSize }}>{agent.name}</div>
+          {visual.showSubtitle && (
+            <div className="mt-0.5 truncate capitalize text-text-muted" style={{ fontSize: visual.subtitleSize }}>
+              {subtitle}
+            </div>
+          )}
         </div>
         <StatusDot readiness={readiness} />
       </div>
-      {settingUp && installSession ? (
-        <SetupProgressBar session={installSession} />
-      ) : (
+      {settingUp && installSession && visual.showProgress ? (
+        <SetupProgressBar session={installSession} compact={visual.compactProgress} />
+      ) : visual.showActivity ? (
         <div className="mt-3 border-t border-line pt-2.5">
-          <div className={clsx('truncate text-[12px]', activity.tone)} aria-live="polite">
+          <div className={clsx('truncate', activity.tone)} style={{ fontSize: visual.activitySize }} aria-live="polite">
             {activity.text}
           </div>
         </div>
+      ) : (
+        null
       )}
-      <Handle type="source" position={Position.Bottom} className="!h-2.5 !w-2.5 !border-line !bg-surface" />
+      <Handle type="source" position={Position.Bottom} className="!border-line !bg-surface" style={{ width: visual.handle, height: visual.handle }} />
     </div>
   );
 }
 
 /** Inline install progress bar shown on the fleet card during setup. */
-function SetupProgressBar({ session }: { session: InstallSession }) {
+function SetupProgressBar({ session, compact = false }: { session: InstallSession; compact?: boolean }) {
   const totalSteps = 4;
   const completedSteps = session.steps.filter((s) => s.status === 'done').length;
   const currentStep = session.steps.find((s) => s.status === 'running');
@@ -376,7 +641,7 @@ function SetupProgressBar({ session }: { session: InstallSession }) {
   const hasError = session.phase === 'error';
 
   return (
-    <div className="mt-3 border-t border-line pt-2.5 space-y-1.5">
+    <div className={clsx('border-t border-line space-y-1.5', compact ? 'mt-2 pt-2' : 'mt-3 pt-2.5')}>
       <div className="flex items-center gap-2">
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-2">
           <div
@@ -389,7 +654,7 @@ function SetupProgressBar({ session }: { session: InstallSession }) {
         </div>
         <span className="text-[10px] tabular-nums text-text-muted">{progress}%</span>
       </div>
-      <div className={clsx('truncate text-[11px]', hasError ? 'text-danger' : 'text-cyan-400')}>
+      <div className={clsx('truncate', compact ? 'text-[10px]' : 'text-[11px]', hasError ? 'text-danger' : 'text-cyan-400')}>
         {hasError
           ? (session.error ?? 'Install failed')
           : currentStep
@@ -443,6 +708,9 @@ function liveActivity(
     return { text: 'setup needed · connect harness', tone: 'text-warn' };
   }
   if (readiness === 'failed') {
+    if (agent.status === 'setting_up') {
+      return { text: 'setup needed - runtime missing', tone: 'text-danger' };
+    }
     return { text: 'failed — needs review', tone: 'text-danger' };
   }
   if (readiness === 'running') {
@@ -472,8 +740,49 @@ function relativeTime(iso: string): string {
 }
 
 function fallbackPosition(tier: 'orchestrator' | 'manager' | 'worker' | 'unassigned', index: number, count: number) {
-  const spacing = 300;
-  return { x: (index - (count - 1) / 2) * spacing, y: TIER_Y[tier] };
+  if (tier === 'orchestrator') return { x: 0, y: TIER_Y.orchestrator };
+
+  if (tier === 'manager') {
+    const columns = count > 6 ? 6 : count;
+    const row = Math.floor(index / columns);
+    const col = index % columns;
+    const columnsInRow = Math.min(columns, count - row * columns);
+    return { x: (col - (columnsInRow - 1) / 2) * 300, y: TIER_Y.manager + row * 150 };
+  }
+
+  const layout = compactTierLayout(count);
+  const row = Math.floor(index / layout.columns);
+  const col = index % layout.columns;
+  const columnsInRow = Math.min(layout.columns, count - row * layout.columns);
+  return {
+    x: (col - (columnsInRow - 1) / 2) * layout.spacingX,
+    y: TIER_Y[tier] + row * layout.spacingY,
+  };
+}
+
+function compactTierLayout(count: number) {
+  if (count > 32) return { columns: 12, spacingX: 128, spacingY: 84 };
+  if (count > 16) return { columns: 10, spacingX: 154, spacingY: 96 };
+  if (count > 8) return { columns: 8, spacingX: 184, spacingY: 108 };
+  return { columns: Math.max(1, count), spacingX: 220, spacingY: 132 };
+}
+
+function safeCanvasPosition(
+  tier: 'orchestrator' | 'manager' | 'worker' | 'unassigned',
+  value: unknown,
+  fallback: { x: number; y: number },
+) {
+  if (!isPosition(value)) return fallback;
+  if (tier === 'orchestrator' && value.y < 96) return fallback;
+  if (value.y < -120 || value.y > 1800 || Math.abs(value.x) > 3000) return fallback;
+  return value;
+}
+
+function requestFleetFit(instance: ReactFlowInstance<Node<AgentNodeData>, Edge> | null) {
+  if (!instance) return;
+  window.requestAnimationFrame(() => {
+    instance.fitView({ padding: 0.1, minZoom: 0.62, maxZoom: 1, duration: 180 });
+  });
 }
 
 function isPosition(value: unknown): value is { x: number; y: number } {
@@ -486,7 +795,7 @@ function normalizeRole(agent: AgentHierarchyAgent): 'orchestrator' | 'manager' |
 }
 
 function readinessOf(agent: AgentHierarchyAgent) {
-  if (agent.status === 'setting_up') return 'setting_up';
+  if (agent.status === 'setting_up') return 'failed';
   if (agent.isPaused || agent.status === 'paused') return 'standby';
   if (agent.status === 'error') return 'failed';
   if (agent.status === 'busy' || agent.currentTaskId) return 'running';

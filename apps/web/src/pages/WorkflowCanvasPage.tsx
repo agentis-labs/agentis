@@ -24,7 +24,7 @@ import {
 import {
   ArrowLeft, Undo2, Redo2, Play, Upload, Map as MapIcon, MapPinOff,
   ChevronDown, X, Variable, Trash2, Webhook, Clock as ClockIcon, Copy,
-  BookOpen, ExternalLink, FileSignature, GitBranch,
+  BookOpen, ExternalLink, FileSignature, GitBranch, Sparkles, BarChart3,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage, workspace as workspaceStore } from '../lib/api';
@@ -46,6 +46,8 @@ import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 import { WorkflowRunsTab } from '../components/workflows/WorkflowRunsTab';
 import { WorkflowOutputTab } from '../components/workflows/WorkflowOutputTab';
+import { PhaseCards, type WorkflowPlanView } from '../components/workflows/PhaseCards';
+import { DashboardViewer } from '../components/workflows/OutputViewers';
 
 interface WorkflowDetail {
   id: string;
@@ -130,6 +132,7 @@ export function WorkflowCanvasPage() {
   const [savingIntent, setSavingIntent] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>('saved');
   const [knowledgeBaseCount, setKnowledgeBaseCount] = useState<number | null>(null);
+  const [knowledgeChunkCount, setKnowledgeChunkCount] = useState<number | null>(null);
   const [showMinimap, setShowMinimap] = useState<boolean>(() => {
     try { return localStorage.getItem(MINIMAP_KEY) === '1'; } catch { return false; }
   });
@@ -138,6 +141,15 @@ export function WorkflowCanvasPage() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [contractsOpen, setContractsOpen] = useState(false);
   const [chainsOpen, setChainsOpen] = useState(false);
+  // Builder Session §9 — Phase Card plan preview.
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planDesc, setPlanDesc] = useState('');
+  const [plan, setPlan] = useState<WorkflowPlanView | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  // §7.1 analytics dashboard.
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const [analytics, setAnalytics] = useState<WorkflowAnalytics | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [integrations, setIntegrations] = useState<Array<{ service: string; name: string; operations: readonly string[]; icon?: string }>>([]);
   const [reusableWorkflows, setReusableWorkflows] = useState<Array<{ id: string; title: string }>>([]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
@@ -163,7 +175,11 @@ export function WorkflowCanvasPage() {
       lastSavedFingerprintRef.current = graphFingerprint(d.workflow.graph, d.workflow.title);
     });
     void api<{ skills: SkillRow[] }>('/v1/skills').then((d) => setSkills(d.skills));
-    void api<{ knowledgeBases: Array<{ id: string }> }>('/v1/knowledge-bases').then((d) => setKnowledgeBaseCount(d.knowledgeBases?.length ?? 0)).catch(() => setKnowledgeBaseCount(0));
+    // The Brain overview reports both base count and total indexed chunks, so the
+    // canvas callout can fire when a Brain node has no content to retrieve (§G5).
+    void api<{ stats: { knowledgeBases: number; chunks: number } }>('/v1/brain')
+      .then((d) => { setKnowledgeBaseCount(d.stats.knowledgeBases); setKnowledgeChunkCount(d.stats.chunks); })
+      .catch(() => { setKnowledgeBaseCount(0); setKnowledgeChunkCount(0); });
   }, [id]);
 
   const hasKnowledgeNode = useMemo(() => wf?.graph.nodes.some((n) => n.config.kind === 'knowledge' || n.type === 'knowledge') ?? false, [wf]);
@@ -202,10 +218,15 @@ export function WorkflowCanvasPage() {
         e.preventDefault();
         setCommandPaletteOpen((open) => !open);
       }
+      // ORCHESTRATOR-CREATION §9 — Cmd/Ctrl+B opens the Builder Session.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        nav('/workflows/build');
+      }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [nav]);
 
   // Load data the command palette needs: integration connectors + reusable
   // workflows. Both are best-effort — failures collapse to empty lists so
@@ -348,7 +369,7 @@ export function WorkflowCanvasPage() {
         id: n.id,
         type: 'agentis',
         position: n.position,
-        data: { label: n.title, kind: (n.config as { kind?: string }).kind ?? n.type, type: n.type },
+        data: { label: n.title, kind: (n.config as { kind?: string }).kind ?? n.type, type: n.type, pendingConfig: isPendingConfig(n.config) },
       })),
     );
     setFlowEdges(
@@ -671,6 +692,27 @@ export function WorkflowCanvasPage() {
           <Button variant="secondary" size="sm" iconLeft={<BookOpen size={12} />} onClick={() => { setIntentDraft(wf.intendedBehavior ?? ''); setIntentOpen(true); }}>
             Intent
           </Button>
+          <Button variant="secondary" size="sm" iconLeft={<Sparkles size={12} />} onClick={() => { setPlanDesc(wf.summary ?? wf.title ?? ''); setPlan(null); setPlanOpen(true); }}>
+            Plan
+          </Button>
+          <Button variant="secondary" size="sm" iconLeft={<BarChart3 size={12} />} onClick={async () => {
+            setAnalyticsOpen(true); setAnalyticsLoading(true);
+            try { setAnalytics(await api<WorkflowAnalytics>(`/v1/workflows/${wf.id}/analytics`)); }
+            catch (err) { toast.error('Analytics failed', apiErrorMessage(err)); }
+            finally { setAnalyticsLoading(false); }
+          }}>
+            Analytics
+          </Button>
+          {(() => {
+            const pending = flowNodes.filter((n) => (n.data as { pendingConfig?: boolean } | undefined)?.pendingConfig).length;
+            if (pending === 0) return null;
+            return (
+              <span className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-warn/50 bg-warn/10 px-2.5 text-[12px] font-medium text-warn" title="Click each amber node to connect its credential">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warn" />
+                {pending} integration{pending === 1 ? '' : 's'} need{pending === 1 ? 's' : ''} setup
+              </span>
+            );
+          })()}
           <Button variant="secondary" size="sm" iconLeft={<FileSignature size={12} />} onClick={() => setContractsOpen(true)}>
             Contracts
           </Button>
@@ -796,7 +838,7 @@ export function WorkflowCanvasPage() {
               />
             )}
           </CanvasEngine>
-          {hasKnowledgeNode && knowledgeBaseCount === 0 && <KnowledgeCanvasCallout onOpen={() => nav('/knowledge')} />}
+          {hasKnowledgeNode && (knowledgeBaseCount === 0 || knowledgeChunkCount === 0) && <KnowledgeCanvasCallout onOpen={() => nav('/brain')} />}
           <RunDrawer runId={activeRunId} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
           {contextMenu && (
             <div
@@ -852,10 +894,101 @@ export function WorkflowCanvasPage() {
             const nextGraph = { ...wf.graph, nodes: nextNodes };
             setWf({ ...wf, graph: nextGraph });
             setSelection((s) => ({ ...s, data }));
+            // Keep the canvas node's pending-config state (amber ring) in sync
+            // with the edited config without a full re-hydration.
+            const savedNode = nextNodes.find((n) => n.id === selection.nodeId);
+            if (savedNode) {
+              setFlowNodes((nds) => nds.map((n) =>
+                n.id === selection.nodeId ? { ...n, data: { ...(n.data ?? {}), pendingConfig: isPendingConfig(savedNode.config) } } : n,
+              ));
+            }
             void saveNow(nextGraph);
           }}
         />
       </div>
+
+      {planOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/60 backdrop-blur-sm"
+          onClick={() => setPlanOpen(false)}
+        >
+          <div
+            className="flex max-h-[80vh] w-[520px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between border-b border-line px-3 py-2.5">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-muted">Builder Session</div>
+                <div className="text-subheading text-text-primary">Phase plan</div>
+              </div>
+              <button type="button" onClick={() => setPlanOpen(false)} className="rounded p-1 text-text-muted hover:text-accent" aria-label="Close">×</button>
+            </header>
+            <div className="flex flex-col gap-2 overflow-y-auto p-3">
+              <textarea
+                rows={3}
+                className="w-full rounded-input border border-line bg-surface-2 px-2 py-1.5 text-[12px] text-text-primary"
+                placeholder="Describe the workflow in plain English…"
+                value={planDesc}
+                onChange={(e) => setPlanDesc(e.target.value)}
+              />
+              <button
+                type="button"
+                disabled={planLoading || !planDesc.trim()}
+                onClick={async () => {
+                  setPlanLoading(true);
+                  try {
+                    const res = await api<{ plan: WorkflowPlanView }>('/v1/workflows/plan', { method: 'POST', body: JSON.stringify({ description: planDesc.trim() }) });
+                    setPlan(res.plan);
+                  } catch (err) {
+                    toast.error('Planning failed', apiErrorMessage(err));
+                  } finally {
+                    setPlanLoading(false);
+                  }
+                }}
+                className="inline-flex h-8 items-center justify-center gap-1 rounded-btn bg-accent px-3 text-[12px] font-medium text-canvas hover:opacity-90 disabled:opacity-50"
+              >
+                <Sparkles size={12} /> {planLoading ? 'Planning…' : 'Plan phases'}
+              </button>
+              {plan && <PhaseCards plan={plan} />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {analyticsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/60 backdrop-blur-sm" onClick={() => setAnalyticsOpen(false)}>
+          <div className="flex max-h-[80vh] w-[560px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <header className="flex items-center justify-between border-b border-line px-3 py-2.5">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-muted">Workflow</div>
+                <div className="text-subheading text-text-primary">Analytics</div>
+              </div>
+              <button type="button" onClick={() => setAnalyticsOpen(false)} className="rounded p-1 text-text-muted hover:text-accent" aria-label="Close">×</button>
+            </header>
+            <div className="overflow-y-auto p-3">
+              {analyticsLoading || !analytics ? (
+                <div className="py-8 text-center text-[12px] text-text-muted">{analyticsLoading ? 'Loading…' : 'No data'}</div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <div className="grid grid-cols-3 gap-2">
+                    <Stat label="Runs" value={String(analytics.runs)} />
+                    <Stat label="Success" value={analytics.successRate == null ? '—' : `${Math.round(analytics.successRate * 100)}%`} />
+                    <Stat label="Avg cost" value={`$${(analytics.avgCostCents / 100).toFixed(3)}`} />
+                    <Stat label="Total cost" value={`$${(analytics.totalCostCents / 100).toFixed(2)}`} />
+                    <Stat label="Avg duration" value={analytics.avgDurationMs == null ? '—' : `${(analytics.avgDurationMs / 1000).toFixed(1)}s`} />
+                  </div>
+                  {Object.keys(analytics.byStatus).length > 0 && (
+                    <DashboardViewer spec={{ title: 'Runs by status', series: Object.entries(analytics.byStatus).map(([label, value]) => ({ label, value })) }} />
+                  )}
+                  {analytics.nodeFailures.length > 0 && (
+                    <DashboardViewer spec={{ title: 'Failures by node', series: analytics.nodeFailures.map((n) => ({ label: n.title, value: n.failures })) }} />
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {chainsOpen && wf && (
         <div
@@ -1073,6 +1206,15 @@ function buildGraphFromFlow(
     return e;
   });
   return { ...prevGraph, nodes: nextNodes, edges: nextEdges };
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-line bg-surface-2 px-2.5 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-text-muted">{label}</div>
+      <div className="mt-0.5 text-[15px] font-semibold text-text-primary">{value}</div>
+    </div>
+  );
 }
 
 function PublishOption({ icon, title, desc, onClick }: { icon: React.ReactNode; title: string; desc: string; onClick: () => void }) {
@@ -1339,6 +1481,22 @@ function VariablesDialog({
 type LiveStatus = 'running' | 'completed' | 'failed' | 'retry' | 'waiting';
 type LiveExtra = { progress?: { completed?: number; total?: number } };
 
+interface WorkflowAnalytics {
+  runs: number;
+  byStatus: Record<string, number>;
+  successRate: number | null;
+  avgDurationMs: number | null;
+  avgCostCents: number;
+  totalCostCents: number;
+  nodeFailures: Array<{ nodeId: string; title: string; failures: number; sampleError: string }>;
+}
+
+/** ORCHESTRATOR-CREATION §7 — an integration node with no credential is "pending-config". */
+function isPendingConfig(config: unknown): boolean {
+  const c = config as { kind?: string; credentialId?: unknown } | null;
+  return !!c && c.kind === 'integration' && !c.credentialId;
+}
+
 function AgentisNode({ data }: {
   data: {
     label: string;
@@ -1347,6 +1505,7 @@ function AgentisNode({ data }: {
     toolPreview?: string;
     liveStatus?: LiveStatus;
     liveExtra?: LiveExtra;
+    pendingConfig?: boolean;
   };
 }) {
   const glyph = NODE_GLYPH[data.kind] ?? '•';
@@ -1354,13 +1513,15 @@ function AgentisNode({ data }: {
   const status = data.liveStatus;
   const progress = data.liveExtra?.progress;
   // Border + glow per live state. Idle nodes keep the original look so the
-  // canvas doesn't twitch when no run is active.
+  // canvas doesn't twitch when no run is active. ORCHESTRATOR-CREATION §7:
+  // an integration node missing its credential pulses amber (pending-config).
   const stateBorder =
     status === 'running'  ? 'border-accent shadow-glow animate-pulse'
     : status === 'completed' ? 'border-success/60'
     : status === 'failed'    ? 'border-danger shadow-[0_0_0_1px_var(--color-danger,#ef4444)]'
     : status === 'retry'     ? 'border-warn border-dashed'
     : status === 'waiting'   ? 'border-warn'
+    : data.pendingConfig ? 'border-2 border-warn animate-pulse shadow-[0_0_12px_rgba(245,158,11,0.4)]'
     : isTrigger ? 'border-accent/60 shadow-glow' : 'border-line';
   return (
     <div
@@ -1407,6 +1568,11 @@ function AgentisNode({ data }: {
           <div className="text-[10px] uppercase tracking-wide text-text-muted">{data.type}</div>
         </div>
       </div>
+      {data.pendingConfig && !status && (
+        <div className="flex items-center gap-1 text-[10px] font-medium text-warn">
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warn" /> Connect to activate
+        </div>
+      )}
       {data.toolPreview && (
         <Typewriter text={data.toolPreview} className="text-[10px] text-text-muted" />
       )}
@@ -1433,9 +1599,9 @@ function KnowledgeCanvasCallout({ onOpen }: { onOpen: () => void }) {
       <div className="flex items-start gap-2">
         <BookOpen size={15} className="mt-0.5 shrink-0 text-accent" />
         <div className="min-w-0">
-          <div className="text-[12px] font-medium text-text-primary">Knowledge node needs sources</div>
-          <p className="mt-1 text-[11px] leading-relaxed text-text-muted">Create a knowledge base or upload documents before this workflow retrieves context.</p>
-          <button type="button" onClick={onOpen} className="mt-2 text-[11px] font-medium text-accent hover:text-accent-hover">Open Knowledge</button>
+          <div className="text-[12px] font-medium text-text-primary">Brain node needs content</div>
+          <p className="mt-1 text-[11px] leading-relaxed text-text-muted">This workflow retrieves from the Brain, but it has no indexed content yet. Add documents so the node has something to return.</p>
+          <button type="button" onClick={onOpen} className="mt-2 text-[11px] font-medium text-accent hover:text-accent-hover">Open Brain</button>
         </div>
       </div>
     </div>

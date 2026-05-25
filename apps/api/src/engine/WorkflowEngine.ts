@@ -47,6 +47,7 @@ import {
   type IntegrationNodeConfig,
   type HttpRequestNodeConfig,
   type WorkflowStoreNodeConfig,
+  type WorkspaceStoreNodeConfig,
   type EvaluatorNodeConfig,
   type GuardrailsNodeConfig,
   type LoopNodeConfig,
@@ -57,6 +58,7 @@ import {
   type WorkflowEdge,
   type WorkflowGraphPatch,
   specialistForRole,
+  isAgentRole,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -73,11 +75,18 @@ import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
 import type { ConversationStore } from '../services/conversationStore.js';
 import type { ConnectorRegistry } from '@agentis/integrations';
 import type { WorkflowStoreService } from '../services/workflowStore.js';
+import type { WorkspaceStoreService } from '../services/workspaceStore.js';
 import type { EvaluatorRuntime } from '../services/evaluatorRuntime.js';
 import type { CredentialVault } from '../services/credentialVault.js';
 import type { WorkspaceIntelligenceService } from '../services/workspaceIntelligence.js';
 import type { BrowserPool } from '../services/browserPool.js';
 import type { SpecialistAgentService } from '../services/specialistAgents.js';
+import type { AuditTrailService } from '../services/auditTrail.js';
+import type { InstinctEngine } from '../services/instinctEngine.js';
+import type { SkillLibraryService } from '../services/skillLibrary.js';
+import type { AgentToolRuntime } from '../services/agentToolRuntime.js';
+import { AgentToolLoop } from '../services/agentToolLoop.js';
+import type { AgentMemoryService } from '../services/agentMemory.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
@@ -102,6 +111,8 @@ export interface EngineDeps {
   connectors?: ConnectorRegistry;
   /** Workflow-scoped KV — required for `workflow_store` nodes. */
   workflowStore?: WorkflowStoreService;
+  /** Workspace-scoped KV (Tier 3) — required for `workspace_store` nodes + `{{workspace.kv.*}}`. */
+  workspaceStore?: WorkspaceStoreService;
   /** LLM-as-judge runtime — required for `evaluator` nodes and the `router` llm_route mode. */
   evaluatorRuntime?: EvaluatorRuntime;
   /** Credential vault — required for `integration` nodes that need decrypted credentials. */
@@ -112,6 +123,16 @@ export interface EngineDeps {
   browserPool?: BrowserPool;
   /** Specialist agent library — resolves `agent_task.agentRole` → agentId (Layer 2). */
   specialists?: SpecialistAgentService;
+  /** Full per-run audit trail (§5.4). Best-effort; never blocks a run. */
+  audit?: AuditTrailService;
+  /** Self-improvement: analyzes failed runs for repeat patterns (§7.2). */
+  instincts?: InstinctEngine;
+  /** Behavioral skill protocols injected into agent prompts (§2.5). */
+  skillLibrary?: SkillLibraryService;
+  /** Role-scoped tool execution (§2.2.1) — consumed by the agentic tool-use loop. */
+  agentTools?: AgentToolRuntime;
+  /** Agent-scoped personal memory (§G11) — injected into each dispatched agent's preamble. */
+  agentMemory?: AgentMemoryService;
   /** Optional tracer; defaults to a no-op so tests stay free of OTel deps. */
   telemetry?: Telemetry;
 }
@@ -176,6 +197,12 @@ export class WorkflowEngine {
       entityId: ctx.runId,
       summary: `Workflow run started`,
       metadata: { workflowId: ctx.workflowId, triggerId: args.triggerId },
+    });
+    this.#audit(ctx, {
+      action: 'run.started',
+      actorType: args.triggerId ? 'scheduler' : 'user',
+      actorId: ctx.userId,
+      inputSummary: summarizeForAudit(args.inputs),
     });
 
     // Kick the dispatch loop. Don't await — runs are async.
@@ -438,6 +465,9 @@ export class WorkflowEngine {
           break;
         case 'workflow_store':
           output = await this.#executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
+          break;
+        case 'workspace_store':
+          output = await this.#executeWorkspaceStore(ctx, node.config as WorkspaceStoreNodeConfig, tctx);
           break;
         case 'evaluator':
           output = await this.#executeEvaluator(ctx, node, node.config as EvaluatorNodeConfig, args.inputs, tctx);
@@ -753,7 +783,11 @@ export class WorkflowEngine {
       Object.keys(ctx.state.activeExecutions).length === 0 &&
       ctx.inflightDispatches === 0
     ) {
-      if (ctx.state.failedNodeIds.length > 0) {
+      if (ctx.budgetHalt) {
+        this.#skipBlockedNodes(ctx, 'Skipped: phase budget exceeded');
+        await this.#transitionRunStatus(ctx, 'FAILED');
+        this.#runs.delete(ctx.runId);
+      } else if (ctx.state.failedNodeIds.length > 0) {
         this.#skipBlockedNodes(ctx, 'Skipped because an upstream node failed');
         await this.#transitionRunStatus(ctx, 'FAILED');
         this.#runs.delete(ctx.runId);
@@ -780,6 +814,11 @@ export class WorkflowEngine {
     node: WorkflowNode,
     item: ReadyQueueItem,
   ): Promise<void> {
+    // Layer 5 human gate: hold the node before it starts if its phase requires
+    // approval and the gate hasn't been granted yet. The downstream nodes stay in
+    // waitingInputs, so the run settles to WAITING (not COMPLETED) until approved.
+    if (await this.#maybeHoldForPhaseGate(ctx, node, item)) return;
+
     await this.#startNode(ctx, node, item.inputData);
 
     // Build template context once per dispatch and resolve every templated
@@ -832,7 +871,12 @@ export class WorkflowEngine {
         return;
       }
       case 'agent_task': {
-        await this.#dispatchAgentTask(ctx, node, resolvedConfig as AgentTaskNodeConfig, item.inputData);
+        const agentCfg = resolvedConfig as AgentTaskNodeConfig;
+        // §2.2 agentic tool-use loop: when opted in, run in-process against the
+        // role-scoped tool runtime and complete synchronously. Otherwise fall
+        // through to the external-adapter dispatch (async completion).
+        if (await this.#maybeRunAgentToolLoop(ctx, node, agentCfg, item.inputData)) return;
+        await this.#dispatchAgentTask(ctx, node, agentCfg, item.inputData);
         return; // adapter event will call notifyTaskCompleted
       }
       case 'agent_swarm': {
@@ -885,6 +929,11 @@ export class WorkflowEngine {
       }
       case 'workflow_store': {
         const result = await this.#executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'workspace_store': {
+        const result = await this.#executeWorkspaceStore(ctx, node.config as WorkspaceStoreNodeConfig, tctx);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -1038,16 +1087,93 @@ export class WorkflowEngine {
     };
   }
 
+  /**
+   * §2.2 agentic tool-use loop. When `agent_task.useRoleTools` is set and the
+   * runtime + an LLM are available, run the role's bounded ReAct loop in-process
+   * (against the role-scoped, manifest-enforced tool runtime) and complete the
+   * node synchronously. Returns false when the loop isn't applicable, so the
+   * caller falls back to the external-adapter dispatch.
+   */
+  async #maybeRunAgentToolLoop(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: AgentTaskNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!config.useRoleTools || !config.agentRole || !isAgentRole(config.agentRole)) return false;
+    if (!this.deps.agentTools || !this.deps.evaluatorRuntime) return false;
+
+    let skillBlock = '';
+    if (config.skills?.length && this.deps.skillLibrary) {
+      try {
+        skillBlock = await this.deps.skillLibrary.buildSkillBlock(ctx.workspaceId, config.skills);
+      } catch (err) {
+        this.deps.logger.warn('engine.skill_inject.failed', { runId: ctx.runId, err: (err as Error).message });
+      }
+    }
+    // Resolve the concrete agent so its personal memory (§G11) is scoped
+    // correctly for both context injection and the agent-memory tools.
+    const agentId = config.agentId
+      ?? this.deps.specialists?.ensureRole(ctx.workspaceId, ctx.userId, config.agentRole)
+      ?? undefined;
+
+    const rolePrompt = specialistForRole(config.agentRole).systemPrompt;
+    const preamble = await this.#withWorkspaceContext(ctx, '', rolePrompt, skillBlock, agentId);
+    const inputBlock = Object.keys(inputData).length > 0 ? `\n\nINPUT:\n${safeJson(inputData)}` : '';
+
+    const loop = new AgentToolLoop({
+      runtime: this.deps.agentTools,
+      llm: this.deps.evaluatorRuntime,
+      logger: this.deps.logger,
+    });
+    const result = await loop.run({
+      workspaceId: ctx.workspaceId,
+      role: config.agentRole,
+      task: `${config.prompt}${inputBlock}`,
+      systemPreamble: preamble,
+      maxSteps: config.maxToolSteps,
+      workflowId: ctx.workflowId,
+      agentId,
+    });
+
+    this.#audit(ctx, {
+      nodeId: node.id,
+      action: 'agent.tool_loop',
+      actorType: 'agent',
+      actorId: config.agentRole,
+      outputSummary: `${result.stoppedReason}: ${result.toolCalls} tool call(s)`,
+    });
+    await this.#completeNode(ctx, node.id, {
+      output: result.output,
+      toolCalls: result.toolCalls,
+      steps: result.steps.length,
+      stoppedReason: result.stoppedReason,
+    });
+    return true;
+  }
+
   async #dispatchAgentTask(
     ctx: RunningContext,
     node: WorkflowNode,
     config: AgentTaskNodeConfig,
     inputData: Record<string, unknown>,
   ): Promise<void> {
-    if (!config.agentId) {
+    // Layer 2: resolve a specialist `agentRole` to a concrete workspace agent
+    // when no explicit agentId is bound. `agentId` always wins.
+    let agentId = config.agentId;
+    let rolePrompt: string | undefined;
+    if (config.agentRole) {
+      rolePrompt = specialistForRole(config.agentRole).systemPrompt;
+      if (!agentId && this.deps.specialists) {
+        agentId = this.deps.specialists.ensureRole(ctx.workspaceId, ctx.userId, config.agentRole) ?? undefined;
+      }
+    }
+    if (!agentId) {
       throw new AgentisError(
         'WORKFLOW_GRAPH_INVALID',
-        `agent_task node ${node.id} has no agentId bound`,
+        config.agentRole
+          ? `agent_task node ${node.id}: role '${config.agentRole}' could not be resolved (specialist library not wired)`
+          : `agent_task node ${node.id} has no agentId or agentRole bound`,
       );
     }
     const taskId = randomUUID();
@@ -1055,13 +1181,24 @@ export class WorkflowEngine {
       taskId,
       nodeId: node.id,
       executorType: 'agent',
-      executorRef: config.agentId,
+      executorRef: agentId,
       startedAt: new Date().toISOString(),
     };
 
-    // Layer 1: prepend the workspace context block (WORKSPACE.md + relevant
-    // MEMORY.md patterns) so no agent call starts from zero (Principle #2).
-    const prompt = await this.#withWorkspaceContext(ctx, config.prompt);
+    // Resolve behavioral skills (§2.5) into an injected block.
+    let skillBlock = '';
+    if (config.skills?.length && this.deps.skillLibrary) {
+      try {
+        skillBlock = await this.deps.skillLibrary.buildSkillBlock(ctx.workspaceId, config.skills);
+      } catch (err) {
+        this.deps.logger.warn('engine.skill_inject.failed', { runId: ctx.runId, err: (err as Error).message });
+      }
+    }
+
+    // Compose the system preamble: role identity (Layer 2) → workspace context
+    // (Layer 1) → agent memory (§G11) → behavioral skills (§2.5) → the task
+    // prompt. No agent call starts from zero (Principle #2).
+    const prompt = await this.#withWorkspaceContext(ctx, config.prompt, rolePrompt, skillBlock, agentId);
 
     await this.deps.adapters.dispatchTask({
       taskId,
@@ -1074,29 +1211,46 @@ export class WorkflowEngine {
       scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
       capabilityTags: config.capabilityTags,
       timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
-    }, config.agentId);
+    }, agentId);
   }
 
   /**
-   * Prepend the workspace context block to an agent prompt (Layer 1). Best
-   * effort: a context-read failure must never block a dispatch, so we log and
-   * fall back to the raw prompt.
+   * Compose an agent prompt's system preamble: optional role identity, then the
+   * workspace context block (Layer 1), the agent's personal memory (§G11), then
+   * the task prompt. Best effort: a context-read failure must never block a
+   * dispatch.
    */
-  async #withWorkspaceContext(ctx: RunningContext, prompt: string): Promise<string> {
-    if (!this.deps.workspaceIntelligence) return prompt;
-    try {
-      const block = await this.deps.workspaceIntelligence.buildContextBlock(ctx.workspaceId, {
-        workflowId: ctx.workflowId,
-      });
-      return block ? `${block}\n\n${prompt}` : prompt;
-    } catch (err) {
-      this.deps.logger.warn('engine.workspace_context.failed', {
-        runId: ctx.runId,
-        workspaceId: ctx.workspaceId,
-        err: (err as Error).message,
-      });
-      return prompt;
+  async #withWorkspaceContext(ctx: RunningContext, prompt: string, rolePrompt?: string, skillBlock?: string, agentId?: string): Promise<string> {
+    let block = '';
+    if (this.deps.workspaceIntelligence) {
+      try {
+        block = await this.deps.workspaceIntelligence.buildContextBlock(ctx.workspaceId, {
+          workflowId: ctx.workflowId,
+          // §G1 — fold the most relevant Brain passages into the preamble using
+          // the task prompt as the retrieval query. No-op when no KBs match.
+          knowledgeQuery: prompt || undefined,
+          knowledgeBases: this.deps.knowledgeBases,
+        });
+      } catch (err) {
+        this.#logContextFailure(ctx, err);
+      }
     }
+    // §G11 — the dispatched agent's personal memory, accumulated across every
+    // prior task it has run. Wrapped so the agent sees it as part of its context.
+    let agentMemory = '';
+    if (agentId && this.deps.agentMemory) {
+      const section = this.deps.agentMemory.contextSection(agentId, ctx.workspaceId);
+      if (section) agentMemory = `<agent_memory>\n${section}\n</agent_memory>`;
+    }
+    return [rolePrompt, block, agentMemory, skillBlock, prompt].filter(Boolean).join('\n\n');
+  }
+
+  #logContextFailure(ctx: RunningContext, err: unknown): void {
+    this.deps.logger.warn('engine.workspace_context.failed', {
+      runId: ctx.runId,
+      workspaceId: ctx.workspaceId,
+      err: (err as Error).message,
+    });
   }
 
   // ────────────────────────────────────────────────────────────
@@ -1639,6 +1793,8 @@ export class WorkflowEngine {
       url: config.url,
       html: html || undefined,
       selector: config.selector,
+      formData: config.formData,
+      submitSelector: config.submitSelector,
       fullPage: config.fullPage,
       headless: config.headless,
       viewport: config.viewport,
@@ -1680,6 +1836,14 @@ export class WorkflowEngine {
         case 'extract_text': {
           const text = await this.deps.browserPool.extractText(opts);
           return { text };
+        }
+        case 'fill_form': {
+          const r = await this.deps.browserPool.fillForm(opts);
+          return { title: r.title, values: r.values, html: r.html };
+        }
+        case 'extract_table': {
+          const rows = await this.deps.browserPool.extractTable(opts);
+          return { rows, count: rows.length };
         }
         default:
           throw new AgentisError('VALIDATION_FAILED', `browser: unknown operation ${(config as { operation: string }).operation}`);
@@ -1902,6 +2066,54 @@ export class WorkflowEngine {
         }
         default:
           throw new AgentisError('VALIDATION_FAILED', `workflow_store: unknown op ${(op as { op: string }).op}`);
+      }
+    }
+    return out;
+  }
+
+  async #executeWorkspaceStore(
+    ctx: RunningContext,
+    config: WorkspaceStoreNodeConfig,
+    tctx: TemplateContext,
+  ): Promise<Record<string, unknown>> {
+    if (!this.deps.workspaceStore) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'workspace_store node present but WorkspaceStoreService not wired');
+    }
+    const ws = ctx.workspaceId;
+    const out: Record<string, unknown> = {};
+    for (const op of config.operations ?? []) {
+      const key = op.key ? resolveTemplate(op.key, tctx) : undefined;
+      const outKey = op.outputKey ?? key ?? op.op;
+      switch (op.op) {
+        case 'get':
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.get requires a key');
+          out[outKey] = this.deps.workspaceStore.get(ws, key);
+          break;
+        case 'set': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.set requires a key');
+          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
+          out[outKey] = this.deps.workspaceStore.set(ws, key, value);
+          break;
+        }
+        case 'delete':
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.delete requires a key');
+          out[outKey] = this.deps.workspaceStore.delete(ws, key);
+          break;
+        case 'increment':
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.increment requires a key');
+          out[outKey] = this.deps.workspaceStore.increment(ws, key, op.incrementBy ?? 1);
+          break;
+        case 'append': {
+          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.append requires a key');
+          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
+          out[outKey] = this.deps.workspaceStore.append(ws, key, value);
+          break;
+        }
+        case 'get_all':
+          out[outKey] = this.deps.workspaceStore.snapshot(ws);
+          break;
+        default:
+          throw new AgentisError('VALIDATION_FAILED', `workspace_store: unknown op ${(op as { op: string }).op}`);
       }
     }
     return out;
@@ -2169,7 +2381,9 @@ export class WorkflowEngine {
     config: CheckpointNodeConfig,
     inputData: Record<string, unknown>,
   ): Promise<void> {
-    await this.deps.approvals.create({
+    // `task_id` has an FK to `tasks` — we can't stash the node id there, so the
+    // resume target is tracked in-memory keyed by the approval id.
+    const approval = await this.deps.approvals.create({
       workspaceId: ctx.workspaceId,
       ambientId: ctx.ambientId,
       userId: ctx.userId,
@@ -2181,6 +2395,7 @@ export class WorkflowEngine {
       summary: `Checkpoint pending in workflow run ${ctx.runId}`,
       confidence: null,
     });
+    this.#pendingApprovals(ctx).set(approval.id, { kind: 'checkpoint', targetId: node.id });
     // Mark node WAITING; an explicit operator approval will resume the run
     // through ApprovalInboxService.resolve() → engine.notifyTaskCompleted().
     const ns = ctx.state.nodeStates[node.id]!;
@@ -2215,7 +2430,281 @@ export class WorkflowEngine {
       nodeId: node.id,
     });
     this.#emitWorkStep(ctx, node, 'start');
+    this.#onPhaseNodeStart(ctx, node);
+    this.#audit(ctx, {
+      nodeId: node.id,
+      action: 'node.started',
+      actorType: node.config.kind === 'agent_task' || node.config.kind === 'agent_swarm' ? 'agent' : 'system',
+      actorId: nodeActorId(node),
+      inputSummary: summarizeForAudit(inputData),
+    });
     ctx.eventsSinceSnapshot += 1;
+  }
+
+  /** Record an audit entry, enriching it with the node's phase. Best-effort. */
+  #audit(ctx: RunningContext, entry: {
+    nodeId?: string;
+    action: string;
+    actorType: 'agent' | 'user' | 'system' | 'scheduler';
+    actorId: string;
+    inputSummary?: string | null;
+    outputSummary?: string | null;
+    costCents?: number | null;
+  }): void {
+    if (!this.deps.audit) return;
+    this.deps.audit.record({
+      workspaceId: ctx.workspaceId,
+      runId: ctx.runId,
+      phaseId: entry.nodeId ? phaseIdForNode(ctx.graph, entry.nodeId) : null,
+      nodeId: entry.nodeId ?? null,
+      agentId: entry.actorType === 'agent' ? entry.actorId : null,
+      action: entry.action,
+      actorType: entry.actorType,
+      actorId: entry.actorId,
+      inputSummary: entry.inputSummary ?? null,
+      outputSummary: entry.outputSummary ?? null,
+      costCents: entry.costCents ?? null,
+    });
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Phase execution model (Layer 5): SLA tracking + budget governance
+  // ────────────────────────────────────────────────────────────
+
+  #phaseRuntime(ctx: RunningContext): Map<string, PhaseRuntimeState> {
+    if (!ctx.phaseRuntime) ctx.phaseRuntime = new Map();
+    return ctx.phaseRuntime;
+  }
+
+  #pendingApprovals(ctx: RunningContext): Map<string, { kind: 'checkpoint' | 'phase_gate'; targetId: string }> {
+    if (!ctx.pendingApprovals) ctx.pendingApprovals = new Map();
+    return ctx.pendingApprovals;
+  }
+
+  /**
+   * Route an approval resolution to the right resume path (checkpoint node or
+   * phase gate). The resume target is looked up from the in-memory map keyed by
+   * the approval id. Public — called from the approval-resolution wiring.
+   */
+  async resolveApproval(args: { runId: string; approvalId: string; decision: 'approve' | 'reject' }): Promise<void> {
+    const ctx = this.#runs.get(args.runId);
+    if (!ctx) return;
+    const pending = ctx.pendingApprovals?.get(args.approvalId);
+    if (!pending) return;
+    ctx.pendingApprovals!.delete(args.approvalId);
+    if (pending.kind === 'phase_gate') {
+      if (args.decision === 'approve') await this.resumePhaseGate({ runId: args.runId, phaseId: pending.targetId });
+      else await this.failRunForGate({ runId: args.runId, phaseId: pending.targetId, reason: 'Phase gate rejected' });
+      return;
+    }
+    // checkpoint: approve completes the node; reject leaves it waiting (V1).
+    if (args.decision === 'approve') {
+      await this.notifyTaskCompleted({ runId: args.runId, nodeId: pending.targetId, output: { approved: true } });
+    }
+  }
+
+  /** Start the phase clock + SLA timer the first time any of its nodes runs. */
+  #onPhaseNodeStart(ctx: RunningContext, node: WorkflowNode): void {
+    const phaseId = phaseIdForNode(ctx.graph, node.id);
+    if (!phaseId) return;
+    const phase = ctx.graph.phases?.find((p) => p.id === phaseId);
+    if (!phase) return;
+    const rt = this.#phaseRuntime(ctx);
+    let st = rt.get(phaseId);
+    if (!st) { st = { started: false, startedAt: 0, cost: 0, slaBreached: false }; rt.set(phaseId, st); }
+    if (st.started) return;
+    st.started = true;
+    st.startedAt = Date.now();
+    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.PHASE_STARTED, {
+      runId: ctx.runId, phaseId, name: phase.name,
+    });
+    if (typeof phase.slaDurationMs === 'number' && phase.slaDurationMs > 0) {
+      const timer = setTimeout(() => {
+        st!.slaBreached = true;
+        const payload = { runId: ctx.runId, phaseId, name: phase.name, slaDurationMs: phase.slaDurationMs };
+        this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.PHASE_SLA_BREACHED, payload);
+        this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.PHASE_SLA_BREACHED, payload);
+        this.#audit(ctx, { action: 'phase.sla_breached', actorType: 'system', actorId: 'engine', outputSummary: `phase ${phase.name} exceeded ${phase.slaDurationMs}ms` });
+      }, phase.slaDurationMs);
+      timer.unref?.();
+      st.slaTimer = timer;
+    }
+  }
+
+  /**
+   * Accrue a completed node's cost into its phase. Returns true when the phase
+   * budget is exceeded (the caller halts the run). Also emits PHASE_COMPLETED
+   * and clears the SLA timer when the phase finishes.
+   */
+  #onPhaseNodeComplete(ctx: RunningContext, node: WorkflowNode): boolean {
+    const phaseId = phaseIdForNode(ctx.graph, node.id);
+    if (!phaseId) return false;
+    const phase = ctx.graph.phases?.find((p) => p.id === phaseId);
+    if (!phase) return false;
+    const rt = this.#phaseRuntime(ctx);
+    const st = rt.get(phaseId) ?? { started: true, startedAt: Date.now(), cost: 0, slaBreached: false };
+    rt.set(phaseId, st);
+    st.cost += nodeCostCents(node) ?? 0;
+
+    if (typeof phase.budgetCents === 'number' && st.cost > phase.budgetCents) {
+      const payload = { runId: ctx.runId, phaseId, name: phase.name, spentCents: st.cost, budgetCents: phase.budgetCents };
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.BUDGET_PHASE_EXCEEDED, payload);
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.BUDGET_PHASE_EXCEEDED, payload);
+      this.#audit(ctx, { action: 'budget.phase_exceeded', actorType: 'system', actorId: 'engine', outputSummary: `phase ${phase.name} spent ${st.cost}c > ${phase.budgetCents}c` });
+      if (st.slaTimer) clearTimeout(st.slaTimer);
+      return true;
+    }
+
+    const allDone = phase.nodeIds.every((id) =>
+      ctx.state.completedNodeIds.includes(id) || ctx.state.skippedNodeIds.includes(id));
+    if (allDone) {
+      if (st.slaTimer) clearTimeout(st.slaTimer);
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.PHASE_COMPLETED, {
+        runId: ctx.runId, phaseId, name: phase.name, spentCents: st.cost,
+        durationMs: st.startedAt ? Date.now() - st.startedAt : null, slaBreached: st.slaBreached,
+      });
+      this.#audit(ctx, { action: 'phase.completed', actorType: 'system', actorId: 'engine', outputSummary: `${phase.name}: ${st.cost}c` });
+    }
+    return false;
+  }
+
+  /**
+   * Per-run workflow cost ceiling (§5.3): the middle budget tier between
+   * per-phase and workspace/day. Accrues the completed node's cost into the run
+   * total and returns true when it exceeds `workflows.budget_cents`.
+   */
+  #workflowRunBudgetExceeded(ctx: RunningContext, node: WorkflowNode): boolean {
+    ctx.runCostCents = (ctx.runCostCents ?? 0) + (nodeCostCents(node) ?? 0);
+    if (ctx.workflowBudgetCents === undefined) {
+      const wf = this.deps.db
+        .select({ budget: schema.workflows.budgetCents })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.id, ctx.workflowId))
+        .get();
+      ctx.workflowBudgetCents = wf?.budget ?? null;
+    }
+    const cap = ctx.workflowBudgetCents;
+    if (cap == null || cap <= 0 || ctx.runCostCents <= cap) return false;
+    const payload = { runId: ctx.runId, workflowId: ctx.workflowId, spentCents: ctx.runCostCents, budgetCents: cap };
+    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.BUDGET_RUN_EXCEEDED, payload);
+    this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.BUDGET_RUN_EXCEEDED, payload);
+    this.#audit(ctx, { action: 'budget.run_exceeded', actorType: 'system', actorId: 'engine', outputSummary: `run spent ${ctx.runCostCents}c > ${cap}c` });
+    return true;
+  }
+
+  /**
+   * Workspace/day cost ceiling (§5.3): the outermost budget cage above per-phase.
+   * Sums the workspace's audited spend since UTC midnight (the just-completed
+   * node's cost is already recorded synchronously) and returns true when it
+   * exceeds `workspaces.daily_budget_cents`. Uncapped workspaces never trip.
+   */
+  #workspaceDailyBudgetExceeded(ctx: RunningContext): boolean {
+    if (!this.deps.audit) return false;
+    const ws = this.deps.db
+      .select({ cap: schema.workspaces.dailyBudgetCents })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, ctx.workspaceId))
+      .get();
+    const cap = ws?.cap;
+    if (cap == null || cap <= 0) return false;
+    const startOfDay = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
+    const spent = this.deps.audit.workspaceSpendSince(ctx.workspaceId, startOfDay);
+    if (spent <= cap) return false;
+    const payload = { runId: ctx.runId, workspaceId: ctx.workspaceId, spentCents: spent, budgetCents: cap };
+    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.BUDGET_WORKSPACE_EXCEEDED, payload);
+    this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.BUDGET_WORKSPACE_EXCEEDED, payload);
+    this.#audit(ctx, { action: 'budget.workspace_exceeded', actorType: 'system', actorId: 'engine', outputSummary: `workspace spent ${spent}c > ${cap}c/day` });
+    return true;
+  }
+
+  /**
+   * Hold a node before dispatch when its phase has a human gate that hasn't been
+   * granted. Creates a `phase_gate` approval the first time, marks the node
+   * WAITING, and stashes the ready item for re-enqueue on approval. Returns true
+   * when the node was held (caller must not dispatch it).
+   */
+  async #maybeHoldForPhaseGate(ctx: RunningContext, node: WorkflowNode, item: ReadyQueueItem): Promise<boolean> {
+    const phaseId = phaseIdForNode(ctx.graph, node.id);
+    if (!phaseId) return false;
+    const phase = ctx.graph.phases?.find((p) => p.id === phaseId);
+    if (!phase?.humanGate) return false;
+    const rt = this.#phaseRuntime(ctx);
+    let st = rt.get(phaseId);
+    if (!st) { st = { started: false, startedAt: 0, cost: 0, slaBreached: false }; rt.set(phaseId, st); }
+    if (st.gateState === 'approved') return false;
+
+    st.held = st.held ?? [];
+    st.held.push(item);
+    const ns = ctx.state.nodeStates[node.id];
+    if (ns) ns.status = 'WAITING';
+
+    if (st.gateState !== 'pending') {
+      st.gateState = 'pending';
+      const approval = await this.deps.approvals.create({
+        workspaceId: ctx.workspaceId,
+        ambientId: ctx.ambientId,
+        userId: ctx.userId,
+        runId: ctx.runId,
+        taskId: null,
+        gatewayId: null,
+        source: 'phase_gate',
+        title: `Approve phase: ${phase.name}`,
+        summary: phase.humanGate.message ?? `Phase "${phase.name}" requires approval before it runs.`,
+        confidence: null,
+      });
+      this.#pendingApprovals(ctx).set(approval.id, { kind: 'phase_gate', targetId: phaseId });
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_WAITING_FOR_INPUT, {
+        runId: ctx.runId, nodeId: node.id, reason: 'phase_gate', phaseId,
+      });
+      this.#audit(ctx, { nodeId: node.id, action: 'human_gate.requested', actorType: 'system', actorId: 'engine', outputSummary: `phase ${phase.name}` });
+    }
+    await this.#persistRun(ctx);
+    return true;
+  }
+
+  /**
+   * Release a phase gate (operator approved). Re-enqueues every node held behind
+   * the gate and re-enters the dispatch loop. Public — called from the approval
+   * resolution handler.
+   */
+  async resumePhaseGate(args: { runId: string; phaseId: string }): Promise<void> {
+    const ctx = this.#runs.get(args.runId);
+    if (!ctx) return;
+    const st = ctx.phaseRuntime?.get(args.phaseId);
+    if (!st || st.gateState === 'approved') return;
+    st.gateState = 'approved';
+    const held = st.held ?? [];
+    st.held = [];
+    this.#audit(ctx, { action: 'human_gate.approved', actorType: 'user', actorId: 'operator', outputSummary: `phase ${args.phaseId}` });
+    for (const item of held) {
+      const ns = ctx.state.nodeStates[item.nodeId];
+      if (ns) ns.status = 'PENDING';
+      ctx.state.readyQueue.push(item);
+    }
+    if (ctx.state.status === 'WAITING') ctx.state.status = 'RUNNING';
+    await this.#persistRun(ctx);
+    void this.#tick(ctx);
+  }
+
+  /** Fail a run because a phase gate was rejected. Public — called from approval resolution. */
+  async failRunForGate(args: { runId: string; phaseId: string; reason: string }): Promise<void> {
+    const ctx = this.#runs.get(args.runId);
+    if (!ctx) {
+      await this.#cancelPersistedRun(args.runId);
+      return;
+    }
+    this.#audit(ctx, { action: 'human_gate.rejected', actorType: 'user', actorId: 'operator', outputSummary: `phase ${args.phaseId}: ${args.reason}` });
+    markOpenNodesSkipped(ctx.state, args.reason);
+    await this.#transitionRunStatus(ctx, 'FAILED');
+    this.#runs.delete(args.runId);
+  }
+
+  /** Clear any pending phase SLA timers (called on run terminal). */
+  #clearPhaseTimers(ctx: RunningContext): void {
+    if (!ctx.phaseRuntime) return;
+    for (const st of ctx.phaseRuntime.values()) {
+      if (st.slaTimer) clearTimeout(st.slaTimer);
+    }
   }
 
   async #completeNode(
@@ -2246,7 +2735,42 @@ export class WorkflowEngine {
     });
     const completedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
     if (completedNode) this.#emitWorkStep(ctx, completedNode, 'complete');
+    this.#audit(ctx, {
+      nodeId,
+      action: 'node.completed',
+      actorType: completedNode && (completedNode.config.kind === 'agent_task' || completedNode.config.kind === 'agent_swarm') ? 'agent' : 'system',
+      actorId: completedNode ? nodeActorId(completedNode) : 'engine',
+      outputSummary: summarizeForAudit(output),
+      costCents: completedNode ? nodeCostCents(completedNode) : null,
+    });
     ctx.eventsSinceSnapshot += 1;
+
+    // Phase governance (Layer 5): accrue cost; on budget overrun, halt the run
+    // before fanning out so no further spend occurs. The settle loop in #tick
+    // transitions the run to FAILED when `budgetHalt` is set.
+    if (completedNode && this.#onPhaseNodeComplete(ctx, completedNode)) {
+      ctx.budgetHalt = true;
+      markOpenNodesSkipped(ctx.state, 'Halted: phase budget exceeded');
+      await this.#persistRun(ctx);
+      return;
+    }
+
+    // Per-run workflow ceiling (§5.3) — the middle budget tier.
+    if (completedNode && this.#workflowRunBudgetExceeded(ctx, completedNode)) {
+      ctx.budgetHalt = true;
+      markOpenNodesSkipped(ctx.state, 'Halted: workflow run budget exceeded');
+      await this.#persistRun(ctx);
+      return;
+    }
+
+    // Workspace/day ceiling (§5.3) — the outermost budget cage. Checked after
+    // every node so a single run can't blow the workspace's daily allowance.
+    if (this.#workspaceDailyBudgetExceeded(ctx)) {
+      ctx.budgetHalt = true;
+      markOpenNodesSkipped(ctx.state, 'Halted: workspace daily budget exceeded');
+      await this.#persistRun(ctx);
+      return;
+    }
 
     // Fan out to downstream nodes. Error edges are reserved for `#failNode`
     // and must NOT be traversed on a successful completion — but their
@@ -2365,6 +2889,7 @@ export class WorkflowEngine {
       });
       const failedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
       if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
+      this.#audit(ctx, { nodeId, action: 'node.failed', actorType: 'system', actorId: 'engine', outputSummary: `handled by error edge: ${error}` });
       await this.#persistRun(ctx);
       return;
     }
@@ -2390,6 +2915,7 @@ export class WorkflowEngine {
     });
     const failedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
     if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
+    this.#audit(ctx, { nodeId, action: 'node.failed', actorType: 'system', actorId: 'engine', outputSummary: error });
     await this.#persistRun(ctx);
   }
 
@@ -2417,11 +2943,17 @@ export class WorkflowEngine {
     const storeSnap = this.deps.workflowStore && ctx.workflowId
       ? this.deps.workflowStore.snapshot(ctx.workspaceId, ctx.workflowId)
       : {};
+    // Workspace-store (Tier 3) snapshot — powers `{{workspace.kv.*}}`.
+    const workspaceKvSnap = this.deps.workspaceStore
+      ? this.deps.workspaceStore.snapshot(ctx.workspaceId)
+      : {};
     return buildTemplateContext({
       triggerInputs: triggerInputs ?? item.inputData ?? {},
       nodeOutputs,
       scratchpad: scratchpadSnap,
       store: storeSnap,
+      workspace: { id: ctx.workspaceId, kv: workspaceKvSnap },
+      run: { id: ctx.runId, startedAt: ctx.startedAt },
       loop,
     });
   }
@@ -2554,7 +3086,23 @@ export class WorkflowEngine {
     // RUN_COMPLETED / RUN_FAILED / RUN_CANCELLED as the "everything is done"
     // signal — so any further work performed after the publish would race.
     if (finishing && previous !== status) {
+      this.#clearPhaseTimers(ctx);
       await this.#appendTerminalConversationMessage(ctx, status);
+      this.#audit(ctx, {
+        action: `run.${status.toLowerCase()}`,
+        actorType: 'system',
+        actorId: 'engine',
+        outputSummary: `${ctx.state.completedNodeIds.length} completed, ${ctx.state.failedNodeIds.length} failed`,
+      });
+      // Self-improvement: after a failure, look for a repeat pattern (§7.2).
+      if (status === 'FAILED' && this.deps.instincts) {
+        void this.deps.instincts.onRunFailed({
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
+          runId: ctx.runId,
+          state: ctx.state,
+        });
+      }
     }
 
     // If this is a child subflow run reaching a terminal state, notify the executor.
@@ -2722,6 +3270,28 @@ interface RunningContext {
   swarms: Map<string, SwarmState>;
   /** Self-heal attempt counters keyed by agent_task node id. */
   selfHealAttempts: Map<string, number>;
+  /** Per-phase execution runtime (cost accrual + SLA timer). Lazily created. */
+  phaseRuntime?: Map<string, PhaseRuntimeState>;
+  /** Set when a phase / run / workspace budget is exceeded — settles the run as FAILED. */
+  budgetHalt?: boolean;
+  /** Accrued cost for this run (cents) — drives the per-run workflow ceiling (§5.3). */
+  runCostCents?: number;
+  /** Cached workflow per-run budget: undefined = not yet loaded, null = uncapped. */
+  workflowBudgetCents?: number | null;
+  /** In-memory map of pending approval id → resume target (checkpoint node / phase). */
+  pendingApprovals?: Map<string, { kind: 'checkpoint' | 'phase_gate'; targetId: string }>;
+}
+
+interface PhaseRuntimeState {
+  started: boolean;
+  startedAt: number;
+  cost: number;
+  slaTimer?: ReturnType<typeof setTimeout>;
+  slaBreached: boolean;
+  /** Human-gate state (§5.1). `none` until the phase's first node is reached. */
+  gateState?: 'none' | 'pending' | 'approved';
+  /** Ready-queue items held while the gate is pending — re-enqueued on approval. */
+  held?: ReadyQueueItem[];
 }
 
 interface SwarmState {
@@ -2986,6 +3556,50 @@ function asString(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'string') return value;
   try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+/** The phase id (if any) a node belongs to — for audit + SLA/budget attribution. */
+function phaseIdForNode(graph: WorkflowGraph, nodeId: string): string | null {
+  for (const phase of graph.phases ?? []) {
+    if (phase.nodeIds?.includes(nodeId)) return phase.id;
+  }
+  return null;
+}
+
+/** Best identifier for the actor behind a node — agent id/role for agent nodes, else 'engine'. */
+function nodeActorId(node: WorkflowNode): string {
+  const cfg = node.config as { kind?: string; agentId?: string; agentRole?: string };
+  if (cfg.kind === 'agent_task' || cfg.kind === 'agent_swarm') {
+    return cfg.agentId ?? cfg.agentRole ?? 'agent';
+  }
+  return 'engine';
+}
+
+/** Declared per-node cost estimate (cents), if the node carries one. */
+function nodeCostCents(node: WorkflowNode): number | null {
+  const c = (node.config as { estimatedCostCents?: unknown }).estimatedCostCents;
+  return typeof c === 'number' ? c : null;
+}
+
+/** Short, log-safe preview of a node payload for the audit trail. */
+function summarizeForAudit(value: unknown): string | null {
+  if (value == null) return null;
+  try {
+    const s = typeof value === 'string' ? value : JSON.stringify(value);
+    return s.length > 280 ? `${s.slice(0, 279)}…` : s;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort JSON for embedding input data in a tool-loop task prompt. */
+function safeJson(value: unknown): string {
+  try {
+    const s = JSON.stringify(value);
+    return s.length > 4_000 ? `${s.slice(0, 3_999)}…` : s;
+  } catch {
+    return String(value);
+  }
 }
 
 /** Pull an HTML string out of a node input: a string, or `{content|html|body}`. */

@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Email Marketer",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["email", "segmentation", "copywriting"],
         "config": {},
         "instructions": "Write clear compliant email copy and segment audiences before recommending a launch.",

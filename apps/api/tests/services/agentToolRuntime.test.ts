@@ -1,0 +1,79 @@
+/**
+ * Layer 2 §2.2.1 — AgentToolRuntime (role-scoped tool execution + security).
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
+import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
+
+let dataDir: string;
+let volume: WorkspaceVolumeService;
+let tools: AgentToolRuntime;
+const WS = 'ws-tools-1';
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-tools-'));
+  volume = new WorkspaceVolumeService(dataDir);
+  tools = new AgentToolRuntime({ volume });
+});
+
+afterEach(async () => {
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+describe('AgentToolRuntime', () => {
+  it('write_file then read_file round-trips within the Volume', async () => {
+    const w = await tools.execute(WS, 'write_file', { path: 'projects/app/index.ts', content: 'export const x = 1;' });
+    expect(w.ok).toBe(true);
+    const r = await tools.execute(WS, 'read_file', { path: 'projects/app/index.ts' });
+    expect(r.ok).toBe(true);
+    expect((r.result as { content: string }).content).toMatch(/export const x/);
+  });
+
+  it('blocks .env and path-escape', async () => {
+    const env = await tools.execute(WS, 'read_file', { path: 'projects/.env' });
+    expect(env.ok).toBe(false);
+    expect(env.error).toMatch(/blocked/i);
+    const escape = await tools.execute(WS, 'read_file', { path: '../../secret.txt' });
+    expect(escape.ok).toBe(false);
+    expect(escape.error).toMatch(/escape/i);
+  });
+
+  it('run_code evaluates in the sandbox (no process/require)', async () => {
+    const ok = await tools.execute(WS, 'run_code', { expression: '({ doubled: input.n * 2 })', input: { n: 21 } });
+    expect(ok.ok).toBe(true);
+    expect((ok.result as { value: { doubled: number } }).value.doubled).toBe(42);
+
+    const blocked = await tools.execute(WS, 'run_code', { expression: 'process.env' });
+    expect(blocked.ok).toBe(false); // process is shadowed → throws
+  });
+
+  it('search_code finds matches across Volume files', async () => {
+    await tools.execute(WS, 'write_file', { path: 'projects/a.ts', content: 'const TODO = 1;\nconst y = 2;' });
+    await tools.execute(WS, 'write_file', { path: 'projects/b.ts', content: 'const z = 3; // TODO later' });
+    const res = await tools.execute(WS, 'search_code', { query: 'TODO' });
+    expect(res.ok).toBe(true);
+    const matches = (res.result as { matches: Array<{ path: string }> }).matches;
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('enforces the role tool manifest', async () => {
+    // researcher is NOT granted write_file.
+    const denied = await tools.execute(WS, 'write_file', { path: 'x.txt', content: 'y' }, 'researcher');
+    expect(denied.ok).toBe(false);
+    expect(denied.error).toMatch(/not granted/);
+    // coder IS granted write_file.
+    const allowed = await tools.execute(WS, 'write_file', { path: 'x.txt', content: 'y' }, 'coder');
+    expect(allowed.ok).toBe(true);
+  });
+
+  it('reports unavailable tools clearly', async () => {
+    const ws = await tools.execute(WS, 'web_search', { query: 'anything' });
+    expect(ws.ok).toBe(false);
+    expect(ws.error).toMatch(/not configured/);
+    const git = await tools.execute(WS, 'git_status', {});
+    expect(git.ok).toBe(false);
+  });
+});

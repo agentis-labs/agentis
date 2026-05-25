@@ -23,6 +23,7 @@ interface RuntimeModelCatalog {
 
 export function ModelChooser({
   adapterType,
+  agentId,
   value,
   onChange,
   disabled = false,
@@ -32,6 +33,7 @@ export function ModelChooser({
   className,
 }: {
   adapterType: AdapterType;
+  agentId?: string | null;
   value: string;
   onChange: (value: string) => void;
   disabled?: boolean;
@@ -47,7 +49,8 @@ export function ModelChooser({
 
   useEffect(() => {
     let cancelled = false;
-    void api<RuntimeModelCatalog>(`/v1/harness/models/${adapterType}`)
+    const queryStr = agentId ? `?agentId=${agentId}` : '';
+    void api<RuntimeModelCatalog>(`/v1/harness/models/${adapterType}${queryStr}`)
       .then((data) => {
         if (!cancelled) setCatalog(data);
       })
@@ -63,7 +66,7 @@ export function ModelChooser({
         }
       });
     return () => { cancelled = true; };
-  }, [adapterType]);
+  }, [adapterType, agentId]);
 
   useEffect(() => {
     if (!open) return;
@@ -155,7 +158,8 @@ export function ModelChooser({
       {open && (
         <div
           className={clsx(
-            'absolute z-[80] w-[320px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-card border border-line bg-surface shadow-dropdown',
+            'absolute z-[80] max-w-[calc(100vw-2rem)] overflow-hidden rounded-card border border-line bg-surface shadow-dropdown',
+            variant === 'compact' ? 'w-[250px]' : 'w-[320px]',
             openDirection === 'up' ? 'bottom-full mb-2' : 'top-full mt-2',
             align === 'right' ? 'right-0' : 'left-0',
           )}

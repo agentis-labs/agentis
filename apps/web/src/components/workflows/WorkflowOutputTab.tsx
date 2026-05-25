@@ -152,8 +152,16 @@ export function WorkflowOutputTab({
               </span>
               <button
                 type="button"
+                onClick={onRun}
+                className="ml-auto text-[12px] font-medium text-text-secondary hover:text-text-primary"
+                title="Run this workflow again"
+              >
+                Re-run
+              </button>
+              <button
+                type="button"
                 onClick={() => nav(`/runs/${data.lastRun!.id}`)}
-                className="ml-auto text-[12px] font-medium text-accent hover:text-accent-hover"
+                className="text-[12px] font-medium text-accent hover:text-accent-hover"
               >
                 View run →
               </button>

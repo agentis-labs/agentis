@@ -163,8 +163,26 @@ function normalizeRoomMessage(message: RoomMsg): ChatMessage {
   };
 }
 
+function getMessageTier(msg: ChatMessage): number {
+  if (msg.id.startsWith('stream-')) return 2;
+  if (msg.id.startsWith('tmp-')) return 1;
+  return 0;
+}
+
 function sortMessages(messages: ChatMessage[]): ChatMessage[] {
-  return [...messages].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  return [...messages].sort((a, b) => {
+    const tierA = getMessageTier(a);
+    const tierB = getMessageTier(b);
+    if (tierA !== tierB) return tierA - tierB;
+
+    const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    if (diff !== 0) return diff;
+    if (a.authorKind === 'operator' && b.authorKind !== 'operator') return -1;
+    if (b.authorKind === 'operator' && a.authorKind !== 'operator') return 1;
+    if (a.authorKind === 'agent' && b.authorKind === 'system') return -1;
+    if (b.authorKind === 'agent' && a.authorKind === 'system') return 1;
+    return 0;
+  });
 }
 
 function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -297,9 +315,10 @@ export function ThreadView({
   const awareness = useViewportAwareness();
   const navigate = useNavigate();
 
+  const querySuffix = conversationId ? `?conversationId=${conversationId}` : '';
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
-  const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send` : `/v1/rooms/${id}/messages`;
-  const confirmEndpoint = kind === 'agent' ? `/v1/conversations/${id}/confirm` : null;
+  const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send${querySuffix}` : `/v1/rooms/${id}/messages`;
+  const confirmEndpoint = kind === 'agent' ? `/v1/conversations/${id}/confirm${querySuffix}` : null;
   const readOnly = kind === 'agent' && Boolean(archivedAt);
 
   useEffect(() => {
@@ -742,18 +761,25 @@ export function ThreadView({
       expiresAt: delta.expiresAt,
       status: 'pending',
     };
-    setMessages((current) => current.map((message) => (
-      message.id === streamId
-        ? {
-            ...message,
-            metadata: {
-              ...(message.metadata ?? {}),
-              source: message.metadata?.source ?? 'chat_loop',
-              confirmation: confirmationCard,
-            },
-          }
-        : message
-    )));
+    setMessages((current) => current.map((message) => {
+      if (message.id !== streamId) return message;
+      const existing = message.metadata?.toolCalls ?? [];
+      const updatedToolCalls = existing.map((tc) => {
+        if (tc.id === delta.toolCall.id) {
+          return { ...tc, status: 'paused' as any };
+        }
+        return tc;
+      });
+      return {
+        ...message,
+        metadata: {
+          ...(message.metadata ?? {}),
+          source: message.metadata?.source ?? 'chat_loop',
+          confirmation: confirmationCard,
+          toolCalls: updatedToolCalls,
+        },
+      };
+    }));
   }
 
   async function handleSend(text: string, options?: { useViewportContext?: boolean }) {
@@ -1009,10 +1035,10 @@ export function ThreadView({
     && awareness.context.surface !== 'chat'
     && awareness.context.surface !== 'unknown';
   const activeToolCalls = messages
-    .filter((message) => message.deliveryStatus === 'sending' || message.metadata?.toolCalls?.some((call) => call.status === 'running'))
+    .filter((message) => message.deliveryStatus === 'sending')
     .flatMap((message) => message.metadata?.toolCalls ?? []);
   const activeRunId = messages.find(
-    (m) => (m.deliveryStatus === 'sending' || m.metadata?.toolCalls?.some((tc) => tc.status === 'running')) && m.metadata?.runId
+    (m) => m.deliveryStatus === 'sending' && m.metadata?.runId
   )?.metadata?.runId;
   const runtimeWarning = kind === 'agent' && !agentNoAdapter
     ? runtimeCapabilityWarning(agentRuntime)
@@ -1111,12 +1137,12 @@ export function ThreadView({
         </div>
       ) : (
         <Composer
-          key={`${kind}:${id}:${composerInitialText}`}
+          key={`${kind}:${id}:${conversationId ?? 'active'}:${composerInitialText}`}
           onSend={handleSend}
           awareness={{ label: awareness.label, active: awarenessActive }}
           initialText={composerInitialText}
           placeholder={composerPlaceholder}
-          draftKey={`${kind}:${id}`}
+          draftKey={`${kind}:${id}:${conversationId ?? 'active'}`}
           footer={
             kind === 'agent' ? (
               <AgentModelSelector agentId={id} compact />
@@ -1367,14 +1393,14 @@ function ConfirmationCard({
         </div>
 
         {details.length > 0 && (
-          <div className="mt-3 grid gap-1.5">
+          <ul className="mt-2.5 space-y-1.5 rounded-lg border border-line/40 bg-surface/30 px-3 py-2 text-[11px] text-text-secondary">
             {details.slice(0, 4).map((detail) => (
-              <div key={detail} className="flex gap-2 rounded-xl border border-line/60 bg-surface/60 px-2.5 py-1.5 text-[11px] text-text-secondary">
-                <span className={clsx('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', risk.dot)} />
-                <span>{detail}</span>
-              </div>
+              <li key={detail} className="flex items-start gap-1.5 leading-normal">
+                <span className={clsx('mt-1.5 h-1 w-1 shrink-0 rounded-full', risk.dot)} />
+                <span className="break-all font-sans">{detail}</span>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
 
         <button

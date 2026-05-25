@@ -27,7 +27,7 @@ import type { Logger } from '../logger.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
 
-export type OpenAiCompatibleAdapterType = 'hermes' | 'local_llm';
+export type OpenAiCompatibleAdapterType = 'local_llm';
 
 export interface HermesAdapterOptions {
   agentId: string;
@@ -50,7 +50,7 @@ export class HermesAdapter implements AgentAdapter {
   readonly #fetch: typeof fetch;
 
   constructor(private readonly opts: HermesAdapterOptions) {
-    this.adapterType = opts.adapterType ?? 'hermes';
+    this.adapterType = opts.adapterType ?? 'local_llm';
     this.#fetch = opts.fetchImpl ?? fetch;
   }
 

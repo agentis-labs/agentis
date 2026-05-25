@@ -372,7 +372,7 @@ export function AgentCreateWizard({
 
     setCreating(true);
     try {
-      const needsRuntimeSetup = adapterType !== 'http' && activeDetection?.status !== 'found';
+      const runtimeUnavailable = adapterType !== 'http' && activeDetection?.status !== 'found';
       const adapterConfig = runtimeConfigToAdapterConfig(adapterType, runtimeConfig);
       const runtimeModel = runtimeModelFor(adapterType, runtimeConfig);
 
@@ -393,7 +393,6 @@ export function AgentCreateWizard({
           instructions: playbook,
           monthlyBudgetCents: budgetToCents(monthlyBudget),
           config: adapterConfig,
-          ...(needsRuntimeSetup ? { status: 'setting_up' } : {}),
         }),
       });
 
@@ -418,10 +417,10 @@ export function AgentCreateWizard({
         }
       }
 
-      if (needsRuntimeSetup) {
+      if (runtimeUnavailable) {
         toast.success(
-          'Agent commissioned — runtime setup pending',
-          `${name.trim()} is ready to connect once the runtime is available.`,
+          'Agent commissioned - runtime missing',
+          `${name.trim()} was created. Connect or install ${activeDetection?.harness ?? adapterType} from Runtime settings.`,
         );
       } else {
         toast.success('Agent commissioned', name.trim());

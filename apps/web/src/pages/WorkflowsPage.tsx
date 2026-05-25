@@ -257,6 +257,14 @@ export function WorkflowsPage() {
             variant="secondary"
             size="md"
             iconLeft={<SparklesIcon size={14} />}
+            onClick={() => nav('/workflows/build')}
+          >
+            Build with AI
+          </Button>
+          <Button
+            variant="secondary"
+            size="md"
+            iconLeft={<SparklesIcon size={14} />}
             onClick={() => setTemplatesOpen(true)}
           >
             Templates

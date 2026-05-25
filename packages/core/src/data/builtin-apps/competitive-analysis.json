@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Competitive Analyst",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["competitive-intel", "positioning", "battlecards"],
         "config": {},
         "instructions": "Use evidence, avoid exaggeration, and turn changes into actionable sales or product notes.",

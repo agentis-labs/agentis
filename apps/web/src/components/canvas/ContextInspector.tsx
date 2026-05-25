@@ -3,6 +3,7 @@ import { Code2, LayoutTemplate, Search } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { SkillCombobox } from './SkillCombobox';
+import { ModelChooser } from '../agents/ModelChooser';
 import type { InstalledSkillOption } from './SkillCombobox';
 import { describeCron, nextFires, CRON_PRESETS } from '../../lib/cronPreview';
 import { NodeTestRunner } from './NodeTestRunner';
@@ -16,10 +17,12 @@ export interface InspectorSelection {
   data?: Record<string, unknown>;
 }
 
-interface AgentRow { id: string; name: string; }
+interface AgentRow { id: string; name: string; adapterType?: string; status?: string; role?: string | null; }
 interface SkillRow { id: string; slug: string; name: string; runtime?: string; }
 interface WorkflowRow { id: string; title?: string; name?: string; isReusable?: boolean; }
 interface KnowledgeBaseRow { id: string; name: string; description?: string | null; }
+interface CredentialRow { id: string; name: string; credentialType: string; }
+interface OAuthProvider { id: string; label: string; slugs: string[]; }
 
 const KIND_LABEL: Record<string, string> = {
   trigger: 'Trigger',
@@ -32,7 +35,7 @@ const KIND_LABEL: Record<string, string> = {
   branch: 'Branch',
   merge: 'Merge',
   subflow: 'Subflow',
-  knowledge: 'Knowledge',
+  knowledge: 'Brain',
   webhook: 'Webhook',
   wait: 'Wait / Timer',
   variables: 'Variables',
@@ -40,6 +43,31 @@ const KIND_LABEL: Record<string, string> = {
   return_output: 'Return Output',
   artifact_save: 'Save Artifact',
   browser: 'Browser',
+};
+
+// "Why this node?" rationale per kind (mirrors the engine's nodeReason()).
+const NODE_REASON: Record<string, string> = {
+  trigger: 'Starts the workflow — manual, scheduled, or on an incoming event.',
+  agent_task: 'A specialist reasons over the input and produces the work product.',
+  agent_swarm: 'Fans the task out across parallel agents and merges the results.',
+  skill_task: 'Runs a typed, deterministic skill — no LLM tokens spent.',
+  router: 'Branches the flow based on the data or an LLM routing decision.',
+  branch: 'Branches the flow based on the data or an LLM routing decision.',
+  merge: 'Joins parallel branches back into one path.',
+  integration: 'Calls an external service (Slack, Gmail, …) with a bound credential.',
+  http_request: 'Fetches or posts to an HTTP endpoint with retry/backoff.',
+  transform: 'Shapes data deterministically — no LLM tokens spent.',
+  filter: 'Drops items that don’t match the condition.',
+  wait: 'Pauses the run (crash-recoverable) until a delay or time elapses.',
+  knowledge: 'Fetches the most relevant passages from the workspace Brain before the next node runs.',
+  checkpoint: 'Pauses for human approval before continuing.',
+  approval: 'Pauses for human approval before continuing.',
+  return_output: 'Declares the rendered result the operator sees.',
+  artifact_save: 'Persists a file artifact to the workspace.',
+  browser: 'Renders HTML or captures a screenshot in real Chromium.',
+  subflow: 'Runs a reusable sub-workflow as one step.',
+  workflow_store: 'Reads/writes shared state across runs of this workflow.',
+  scratchpad: 'Holds working variables for the run.',
 };
 
 export function ContextInspector({
@@ -72,12 +100,15 @@ export function ContextInspector({
   const [skills, setSkills] = useState<SkillRow[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRow[]>([]);
+  const [credentials, setCredentials] = useState<CredentialRow[]>([]);
+  const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
 
   const kind = ((editData.kind as string | undefined) ?? selection.nodeType ?? '').toLowerCase();
   const needsAgents = kind === 'agent_task' || kind === 'agenttask';
   const needsSkills = kind === 'skill_task' || kind === 'skill';
   const needsWorkflows = kind === 'subflow';
   const needsKnowledge = kind === 'knowledge';
+  const needsCredentials = kind === 'integration';
 
   useEffect(() => {
     const d = selection.data ?? {};
@@ -101,7 +132,18 @@ export function ContextInspector({
     if (needsKnowledge && knowledgeBases.length === 0) {
       void api<{ knowledgeBases: KnowledgeBaseRow[] }>('/v1/knowledge-bases').then((d) => setKnowledgeBases(d.knowledgeBases ?? [])).catch(() => {});
     }
-  }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, agents.length, skills.length, workflows.length, knowledgeBases.length]);
+    if (needsCredentials && credentials.length === 0) {
+      void api<{ credentials: CredentialRow[] }>('/v1/credentials').then((d) => setCredentials(d.credentials ?? [])).catch(() => {});
+    }
+    if (needsCredentials && oauthProviders.length === 0) {
+      void api<{ providers: OAuthProvider[] }>('/v1/oauth/providers').then((d) => setOauthProviders(d.providers ?? [])).catch(() => {});
+    }
+  }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length]);
+
+  // Refresh credentials after an inline OAuth connect so the new credential is selectable/bound.
+  function refreshCredentials() {
+    void api<{ credentials: CredentialRow[] }>('/v1/credentials').then((d) => setCredentials(d.credentials ?? [])).catch(() => {});
+  }
 
   if (!selection.kind) return null;
 
@@ -130,6 +172,8 @@ export function ContextInspector({
 
   const hasChanges = JSON.stringify(editData) !== JSON.stringify(selection.data ?? {});
   const headingLabel = KIND_LABEL[kind] ?? selection.nodeType ?? 'Node';
+  // ORCHESTRATOR-CREATION §9 — "why this node?" rationale shown under the heading.
+  const nodeReason = selection.kind === 'node' ? (NODE_REASON[kind] ?? null) : null;
 
   return (
     <aside className={clsx('flex w-80 shrink-0 flex-col border-l border-line bg-surface text-xs', className)}>
@@ -139,6 +183,7 @@ export function ContextInspector({
             {selection.kind === 'node' ? 'Node' : 'Edge'}
           </span>
           <div className="text-subheading text-text-primary">{headingLabel}</div>
+          {nodeReason && <div className="mt-0.5 text-[10px] italic text-text-muted" title="Why this node?">{nodeReason}</div>}
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -209,6 +254,9 @@ export function ContextInspector({
               skills={skills}
               workflows={workflows}
               knowledgeBases={knowledgeBases}
+              credentials={credentials}
+              oauthProviders={oauthProviders}
+              refreshCredentials={refreshCredentials}
               upstream={upstream}
               onSkillsChange={() => {
                 void api<{ skills: SkillRow[] }>('/v1/skills')
@@ -273,12 +321,15 @@ interface NodeFormProps {
   skills: SkillRow[];
   workflows: WorkflowRow[];
   knowledgeBases: KnowledgeBaseRow[];
+  credentials: CredentialRow[];
+  oauthProviders: OAuthProvider[];
+  refreshCredentials: () => void;
   /** Other nodes in the same workflow — populates the variable picker. */
   upstream?: UpstreamNode[];
   onSkillsChange?: () => void;
 }
 
-function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, upstream, onSkillsChange }: NodeFormProps) {
+function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, refreshCredentials, upstream, onSkillsChange }: NodeFormProps) {
   switch (kind) {
     case 'trigger':
       return <TriggerForm data={data} update={update} />;
@@ -311,7 +362,7 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
     case 'filter':
       return <FilterForm data={data} update={update} upstream={upstream} />;
     case 'integration':
-      return <IntegrationForm data={data} update={update} upstream={upstream} />;
+      return <IntegrationForm data={data} update={update} upstream={upstream} credentials={credentials} oauthProviders={oauthProviders} refreshCredentials={refreshCredentials} />;
     case 'http_request':
       return <HttpRequestForm data={data} update={update} upstream={upstream} />;
     case 'workflow_store':
@@ -446,21 +497,74 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
   );
 }
 
+const SPECIALIST_ROLES = ['planner', 'researcher', 'coder', 'reviewer', 'analyst', 'writer', 'monitor', 'architect', 'debugger', 'deployer'] as const;
+
 function AgentTaskForm({ data, update, agents, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[] }) {
+  const agentId = asStr(data.agentId);
+  const agentRole = asStr(data.agentRole);
+  const boundAgent = agents.find((a) => a.id === agentId);
+  const adapterType = boundAgent?.adapterType;
+  const castingReason = asStr((data as { castingReason?: unknown }).castingReason);
   return (
     <>
-      <Field label="Agent" hint="Which agent should handle this task?">
-        <select
-          className={selectCls}
-          value={asStr(data.agentId)}
-          onChange={(e) => update({ agentId: e.target.value })}
-        >
-          <option value="">— Pick an agent —</option>
+      {/* ORCHESTRATOR-CREATION §4: a node configured with a specialist role is valid —
+          show it as a badge so the inspector doesn't look empty/broken. */}
+      <Field label="Specialist role" hint={agentRole ? 'Resolved to a workspace specialist at run time. Bind a specific agent below to override.' : 'Optional. Pick a specialist role, or bind a specific agent below.'}>
+        <select className={selectCls} value={agentRole} onChange={(e) => update({ agentRole: e.target.value || undefined })}>
+          <option value="">— No role —</option>
+          {SPECIALIST_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        {agentRole && castingReason && (
+          <p className="mt-1 text-[10px] italic text-text-muted">{castingReason}</p>
+        )}
+      </Field>
+      {agentRole && (
+        <Field label="Tool-use loop" hint="Run this task in-process with the role's tools (file I/O, code, search) instead of an external agent.">
+          <label className="flex items-center gap-2 text-[11px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={Boolean((data as { useRoleTools?: unknown }).useRoleTools)}
+              onChange={(e) => update({ useRoleTools: e.target.checked || undefined })}
+            />
+            Run with role tools
+          </label>
+          {Boolean((data as { useRoleTools?: unknown }).useRoleTools) && (
+            <input
+              type="number"
+              min={1}
+              max={12}
+              className={`${selectCls} mt-2`}
+              placeholder="Max steps (default 6)"
+              value={asStr((data as { maxToolSteps?: unknown }).maxToolSteps)}
+              onChange={(e) => update({ maxToolSteps: e.target.value ? Number(e.target.value) : undefined })}
+            />
+          )}
+        </Field>
+      )}
+      <Field label="Agent" hint="Bind a specific agent (overrides the role).">
+        <select className={selectCls} value={agentId} onChange={(e) => update({ agentId: e.target.value || undefined })}>
+          <option value="">{agentRole ? `— Auto (${agentRole} specialist) —` : '— Pick an agent —'}</option>
           {agents.map((a) => (
-            <option key={a.id} value={a.id}>{a.name}</option>
+            <option key={a.id} value={a.id}>{a.name}{a.status && a.status !== 'online' ? ` (${a.status})` : ''}</option>
           ))}
         </select>
+        {boundAgent && boundAgent.status && boundAgent.status !== 'online' && (
+          <p className="mt-1 flex items-center gap-1 text-[10px] text-warn">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-warn" /> {boundAgent.status} — connect a runtime or this node fails on first run.
+          </p>
+        )}
       </Field>
+      {agentId && adapterType && (
+        <Field label="Model override" hint="Tune the model for this node without changing the agent globally.">
+          <ModelChooser
+            adapterType={adapterType as never}
+            agentId={agentId}
+            value={asStr(data.modelOverride)}
+            onChange={(m) => update({ modelOverride: m || undefined })}
+            variant="compact"
+          />
+        </Field>
+      )}
       <Field label="Prompt" hint="Type `{{` to insert a variable from the trigger or any upstream node.">
         <TemplatedTextField
           multiline
@@ -746,7 +850,46 @@ function FilterForm({ data, update, upstream }: { data: Record<string, unknown>;
 
 // ─── Integration & HTTP ─────────────────────────────────────────────────────
 
-function IntegrationForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
+function IntegrationForm({ data, update, upstream, credentials, oauthProviders, refreshCredentials }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[]; credentials: CredentialRow[]; oauthProviders: OAuthProvider[]; refreshCredentials: () => void }) {
+  const slug = asStr(data.integrationId);
+  const credentialId = asStr(data.credentialId);
+  // Match credentials to this integration by slug appearing in the type or name.
+  const matching = slug
+    ? credentials.filter((c) => `${c.credentialType} ${c.name}`.toLowerCase().includes(slug.toLowerCase()))
+    : credentials;
+  const bound = credentials.find((c) => c.id === credentialId);
+  // The OAuth provider that can authenticate this integration slug, if configured.
+  const provider = slug ? oauthProviders.find((p) => p.slugs.includes(slug.toLowerCase())) : undefined;
+  const [connecting, setConnecting] = useState(false);
+
+  // ORCH §7 — inline OAuth: pop the provider's consent flow, receive the minted
+  // credential id via postMessage, bind it to the node (amber → green). No nav away.
+  function connectOAuth() {
+    if (!provider) return;
+    setConnecting(true);
+    void api<{ url: string }>(`/v1/oauth/${provider.id}/authorize`, {
+      method: 'POST',
+      body: JSON.stringify({ integrationSlug: slug, origin: window.location.origin }),
+    }).then(({ url }) => {
+      const popup = window.open(url, 'agentis-oauth', 'popup,width=520,height=680');
+      const onMessage = (e: MessageEvent) => {
+        const d = e.data as { type?: string; ok?: boolean; credentialId?: string };
+        if (d?.type !== 'agentis-oauth') return;
+        window.removeEventListener('message', onMessage);
+        setConnecting(false);
+        if (d.ok && d.credentialId) {
+          update({ credentialId: d.credentialId });
+          refreshCredentials();
+        }
+      };
+      window.addEventListener('message', onMessage);
+      // Safety: stop the spinner if the popup is closed without finishing.
+      const poll = setInterval(() => {
+        if (popup?.closed) { clearInterval(poll); window.removeEventListener('message', onMessage); setConnecting(false); }
+      }, 800);
+    }).catch(() => setConnecting(false));
+  }
+
   return (
     <>
       <Field label="Integration" hint="Slug of a registered connector (slack, gmail, github, sheets, …).">
@@ -754,7 +897,7 @@ function IntegrationForm({ data, update, upstream }: { data: Record<string, unkn
           type="text"
           className={inputCls}
           placeholder="slack"
-          value={asStr(data.integrationId)}
+          value={slug}
           onChange={(e) => update({ integrationId: e.target.value })}
         />
       </Field>
@@ -767,15 +910,68 @@ function IntegrationForm({ data, update, upstream }: { data: Record<string, unkn
           onChange={(e) => update({ operationId: e.target.value })}
         />
       </Field>
-      <Field label="Credential ID (optional)">
-        <input
-          type="text"
-          className={inputCls}
-          placeholder="uuid of a saved credential"
-          value={asStr(data.credentialId)}
-          onChange={(e) => update({ credentialId: e.target.value || undefined })}
-        />
-      </Field>
+
+      {/* ORCHESTRATOR-CREATION §7 — the living integration node. No credential =
+          pending-config (amber); bound = configured (green). Wire in place. */}
+      {credentialId ? (
+        <div className="rounded-md border border-emerald-500/40 bg-emerald-500/5 p-2.5">
+          <div className="flex items-center gap-2 text-[11px] text-text-primary">
+            <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+            <span className="font-medium">Connected{slug ? ` — ${slug}` : ''}</span>
+          </div>
+          {bound && <p className="mt-1 text-[10px] text-text-muted">{bound.name}</p>}
+          <button
+            type="button"
+            className="mt-2 text-[10px] text-accent hover:underline"
+            onClick={() => update({ credentialId: undefined })}
+          >
+            Change credential
+          </button>
+        </div>
+      ) : (
+        <div className="rounded-md border-2 border-warn/60 bg-warn/5 p-2.5 shadow-[0_0_12px_rgba(245,158,11,0.25)]">
+          <div className="flex items-center gap-2 text-[11px] text-text-primary">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-warn" />
+            <span className="font-medium">Connect {slug || 'integration'}</span>
+          </div>
+          <p className="mt-1 text-[10px] text-text-muted">
+            This node is built but needs a credential before it can run.
+          </p>
+          {provider && (
+            <button
+              type="button"
+              onClick={connectOAuth}
+              disabled={connecting}
+              className="mt-2 inline-flex h-8 w-full items-center justify-center gap-2 rounded-btn bg-surface px-2 text-[11px] font-medium text-text-primary ring-1 ring-line hover:ring-accent disabled:opacity-50"
+            >
+              {connecting ? 'Connecting…' : `Sign in with ${provider.label}`}
+            </button>
+          )}
+          {matching.length > 0 ? (
+            <div className="mt-2 space-y-1">
+              {provider && <div className="text-[9px] uppercase tracking-wider text-text-muted">or use an existing credential</div>}
+              {matching.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className="flex w-full items-center justify-between rounded border border-line bg-surface px-2 py-1 text-left text-[10px] hover:border-accent"
+                  onClick={() => update({ credentialId: c.id })}
+                >
+                  <span className="truncate text-text-primary">{c.name}</span>
+                  <span className="ml-2 shrink-0 text-text-muted">{c.credentialType}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            !provider && (
+              <p className="mt-2 text-[10px] italic text-text-muted">
+                No matching credentials. Create one in Settings → Credentials, then return here.
+              </p>
+            )
+          )}
+        </div>
+      )}
+
       <Field
         label="Inputs (JSON)"
         hint="Object of input fields. Values support `{{variable}}` templates."
@@ -1239,7 +1435,7 @@ function ArtifactSaveForm({ data, update }: { data: Record<string, unknown>; upd
 function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   const op = asStr(data.operation) || 'serve_html';
   const usesHtml = op === 'serve_html' || op === 'screenshot' || op === 'pdf';
-  const usesUrl = op === 'screenshot' || op === 'pdf' || op === 'navigate' || op === 'extract_text';
+  const usesUrl = op === 'screenshot' || op === 'pdf' || op === 'navigate' || op === 'extract_text' || op === 'fill_form' || op === 'extract_table';
   return (
     <>
       <Field label="Operation" hint="Native Chromium runs headless; Chromium auto-installs on first use.">
@@ -1249,8 +1445,26 @@ function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>
           <option value="pdf">pdf — print a URL/HTML → PDF</option>
           <option value="navigate">navigate — load URL, return title/text</option>
           <option value="extract_text">extract_text — text under a selector</option>
+          <option value="fill_form">fill_form — fill fields + submit</option>
+          <option value="extract_table">extract_table — table → rows</option>
         </select>
       </Field>
+      {op === 'fill_form' && (
+        <>
+          <Field label="Form data (JSON)" hint='Map of CSS selector → value, e.g. {"#email": "a@b.com"}.'>
+            <textarea
+              rows={4}
+              spellCheck={false}
+              className={textareaCls + ' font-mono text-[11px]'}
+              value={JSON.stringify(typeof data.formData === 'object' && data.formData ? data.formData : {}, null, 2)}
+              onChange={(e) => { try { update({ formData: JSON.parse(e.target.value) as unknown }); } catch { /* keep */ } }}
+            />
+          </Field>
+          <Field label="Submit selector (optional)" hint="Element to click after filling.">
+            <input type="text" className={inputCls} value={asStr(data.submitSelector)} placeholder="button[type=submit]" onChange={(e) => update({ submitSelector: e.target.value || undefined })} />
+          </Field>
+        </>
+      )}
       {usesUrl && (
         <Field label="URL" hint="Type `{{` to insert a variable.">
           <TemplatedTextField placeholder="https://example.com" value={asStr(data.url)} onChange={(next) => update({ url: next })} upstream={upstream} />
@@ -1266,9 +1480,9 @@ function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>
           </Field>
         </>
       )}
-      {op === 'extract_text' && (
-        <Field label="Selector" hint="CSS selector to extract (defaults to body).">
-          <input type="text" className={inputCls} value={asStr(data.selector)} placeholder="main article" onChange={(e) => update({ selector: e.target.value || undefined })} />
+      {(op === 'extract_text' || op === 'extract_table') && (
+        <Field label="Selector" hint={op === 'extract_table' ? 'Table selector (defaults to first <table>).' : 'CSS selector to extract (defaults to body).'}>
+          <input type="text" className={inputCls} value={asStr(data.selector)} placeholder={op === 'extract_table' ? 'table.results' : 'main article'} onChange={(e) => update({ selector: e.target.value || undefined })} />
         </Field>
       )}
       <Field label="Open visible window">

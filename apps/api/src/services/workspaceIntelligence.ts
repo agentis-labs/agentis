@@ -18,15 +18,17 @@
  */
 
 import type { WorkspaceVolumeService } from './workspaceVolume.js';
+import type { KnowledgeBaseService } from './knowledgeBase.js';
 
 const CONTEXT_DIR = 'context';
 export const CONTEXT_FILES = {
   workspace: `${CONTEXT_DIR}/WORKSPACE.md`,
   memory: `${CONTEXT_DIR}/MEMORY.md`,
   decisions: `${CONTEXT_DIR}/DECISIONS.md`,
+  workflow: `${CONTEXT_DIR}/WORKFLOW.md`,
 } as const;
 
-export type ContextFileName = 'WORKSPACE.md' | 'MEMORY.md' | 'DECISIONS.md';
+export type ContextFileName = 'WORKSPACE.md' | 'MEMORY.md' | 'DECISIONS.md' | 'WORKFLOW.md';
 
 export interface MemoryEntry {
   raw: string;
@@ -44,6 +46,17 @@ export interface BuildContextOptions {
   tokenBudget?: number;
   /** Max MEMORY entries to inject. Default 10. */
   maxEntries?: number;
+  /**
+   * When set, search the workspace Brain (knowledge bases) with this text and
+   * append the top passages as a `Relevant Workspace Knowledge` section. This is
+   * the prompt of the task about to run, used as the retrieval query. No-op when
+   * `knowledgeBases` is not provided or no Brain content matches.
+   */
+  knowledgeQuery?: string;
+  /** Brain knowledge-base service. Required for `knowledgeQuery` to take effect. */
+  knowledgeBases?: KnowledgeBaseService;
+  /** Number of Brain passages to inject. Default 3. */
+  knowledgeTopK?: number;
 }
 
 const DEFAULT_WORKSPACE_MD = `# Workspace Context
@@ -71,6 +84,24 @@ const DEFAULT_MEMORY_MD = `# Session Memory Log
 `;
 
 const DEFAULT_DECISIONS_MD = `# Architectural Decision Record
+`;
+
+const DEFAULT_WORKFLOW_MD = `# Workflow Conventions
+
+## Delivery Rules
+_(Which credential/channel to use for email, Slack, GitHub, etc.)_
+
+## Review Policy
+_(When a checkpoint/human approval is required before a workflow acts.)_
+
+## Standard Patterns
+_(Reusable shapes, e.g. "morning reports: cron -> knowledge -> agent_task -> gmail".)_
+
+## Model Preferences
+_(Which model for summarization vs. code review vs. drafting.)_
+
+## Cost Guardrails
+_(Per-run cost ceilings, max parallel fan-out.)_
 `;
 
 export class WorkspaceIntelligenceService {
@@ -108,9 +139,10 @@ export class WorkspaceIntelligenceService {
    * context exists yet (so prompts aren't polluted with empty headers).
    */
   async buildContextBlock(workspaceId: string, opts: BuildContextOptions = {}): Promise<string> {
-    const [workspaceMd, memoryMd] = await Promise.all([
+    const [workspaceMd, memoryMd, workflowMd] = await Promise.all([
       this.getContextFile(workspaceId, 'WORKSPACE.md'),
       this.getContextFile(workspaceId, 'MEMORY.md'),
+      this.getContextFile(workspaceId, 'WORKFLOW.md'),
     ]);
 
     const entries = parseMemoryEntries(memoryMd);
@@ -124,6 +156,9 @@ export class WorkspaceIntelligenceService {
     const ws = stripPlaceholders(workspaceMd);
     if (ws.trim()) sections.push(`## Your Workspace Context\n${ws.trim()}`);
 
+    const conventions = stripPlaceholders(workflowMd);
+    if (conventions.trim()) sections.push(`## Workflow Conventions (follow these when building workflows)\n${conventions.trim()}`);
+
     const active = this.listActiveIntegrations?.(workspaceId) ?? [];
     if (active.length) sections.push(`## Active Integrations\n${active.join(', ')}`);
 
@@ -132,25 +167,61 @@ export class WorkspaceIntelligenceService {
       sections.push(`## Relevant Memory — apply effective patterns, avoid failed ones\n${lines.join('\n')}`);
     }
 
+    const knowledge = this.#retrieveKnowledge(workspaceId, opts);
+    if (knowledge) sections.push(knowledge);
+
     if (!sections.length) return '';
     return `<workspace_context>\n${sections.join('\n\n')}\n</workspace_context>`;
   }
+
+  /**
+   * Best-effort Brain retrieval (§G1). Runs one lexical search across every
+   * workspace knowledge base using the task prompt as the query and folds the
+   * top passages into the context block. Returns null when there is nothing to
+   * inject so the caller never emits an empty header. Never throws — a Brain
+   * read failure must not block an agent dispatch.
+   */
+  #retrieveKnowledge(workspaceId: string, opts: BuildContextOptions): string | null {
+    const query = opts.knowledgeQuery?.trim();
+    if (!query || !opts.knowledgeBases) return null;
+    const topK = Math.max(1, Math.min(opts.knowledgeTopK ?? 3, 8));
+    try {
+      const bases = opts.knowledgeBases.listKnowledgeBases(workspaceId);
+      if (!bases.length) return null;
+      const hits = bases
+        .flatMap((b) => opts.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK);
+      if (!hits.length) return null;
+      const lines = hits.map((h) => `- ${collapse(h.content).slice(0, 500)}`);
+      return `## Relevant Workspace Knowledge (retrieved from the Brain for this task)\n${lines.join('\n')}`;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Collapse whitespace so a multi-line chunk reads as one bullet. */
+function collapse(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function relFor(name: ContextFileName): string {
   if (name === 'WORKSPACE.md') return CONTEXT_FILES.workspace;
   if (name === 'MEMORY.md') return CONTEXT_FILES.memory;
+  if (name === 'WORKFLOW.md') return CONTEXT_FILES.workflow;
   return CONTEXT_FILES.decisions;
 }
 
 function defaultFor(name: ContextFileName): string {
   if (name === 'WORKSPACE.md') return DEFAULT_WORKSPACE_MD;
   if (name === 'MEMORY.md') return DEFAULT_MEMORY_MD;
+  if (name === 'WORKFLOW.md') return DEFAULT_WORKFLOW_MD;
   return DEFAULT_DECISIONS_MD;
 }
 
 /** Drop `_(placeholder)_` italic hint lines so a freshly-seeded file reads as empty. */
-function stripPlaceholders(md: string): string {
+export function stripPlaceholders(md: string): string {
   return md
     .split('\n')
     .filter((l) => !/^_\(.*\)_\s*$/.test(l.trim()))

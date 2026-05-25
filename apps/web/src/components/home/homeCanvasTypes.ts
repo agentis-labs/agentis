@@ -22,6 +22,7 @@ export type CanvasNodeKind =
   | 'ghost';
 
 export type CanvasEdgeType = 'command' | 'resource';
+export type CanvasOperationalState = 'active' | 'idle' | 'attention' | 'error' | 'offline';
 
 export interface HomeWorkflow {
   id: string;
@@ -76,11 +77,17 @@ export interface CanvasNode {
   ghost?: boolean;
   role?: 'orchestrator' | 'manager' | 'worker';
   status?: string;
+  online?: boolean;
+  operationalState?: CanvasOperationalState;
   route?: string;
   accent?: string;
+  artifactCount?: number;
   imageUrl?: string | null;
   icon?: ReactNode;
   currentTask?: string;
+  currentTool?: string | null;
+  outputLines?: string[];
+  runtimeError?: string | null;
   progress?: number;
   startedAt?: string;
   tooltipLines: string[];
@@ -129,11 +136,13 @@ export interface CanvasModel {
 
 export interface FleetCounts {
   activeAgents: number;
+  runningAgents?: number;
   idleAgents: number;
   attentionCount: number;
   approvalCount: number;
   failedRunCount: number;
   workflows: number;
+  artifactsToday?: number;
 }
 
 export interface ComposerRecentCompletion {

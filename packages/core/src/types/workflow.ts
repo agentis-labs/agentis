@@ -24,6 +24,7 @@ export type WorkflowNodeType =
   | 'integration'
   | 'http_request'
   | 'workflow_store'
+  | 'workspace_store'
   | 'scratchpad'
   // Intelligence — LLM-powered
   | 'agent_task'
@@ -101,7 +102,12 @@ export interface WorkflowContract {
   }>;
 }
 
-/** A named group of nodes used by the canvas for collapse/expand in large graphs. */
+/**
+ * A phase is both a canvas grouping AND an execution primitive (Layer 5).
+ * When `slaDurationMs` / `budgetCents` / `humanGate` are set, the engine
+ * enforces them: SLA breach emits an alert (does not kill), budget overrun
+ * halts the run, and human gates pause between phases.
+ */
 export interface WorkflowPhase {
   id: string;
   name: string;
@@ -109,11 +115,32 @@ export interface WorkflowPhase {
   color: string;
   nodeIds: string[];
   collapsed?: boolean;
+  /** SLA window for the whole phase. Breach alerts; it does not kill the run. */
+  slaDurationMs?: number;
+  /** Cost ceiling (cents) for the phase. Overrun halts the run with BUDGET_LIMIT_EXCEEDED. */
+  budgetCents?: number;
+  /** Human approval gate evaluated when the phase's first node becomes ready. */
+  humanGate?: {
+    type: 'approve' | 'provide_input' | 'review_output';
+    message?: string;
+    approvers?: string[];
+    timeoutMs?: number;
+    onTimeout?: 'escalate' | 'auto_approve' | 'fail';
+    escalateTo?: string;
+  };
+  /** JS expression evaluated after the phase completes (advisory in V1). */
+  successCriteria?: string;
+  rollbackPlan?: string;
 }
 
 export interface WorkflowOutputConfig {
   /** Marks this node as part of the workflow's operator-facing output surface. */
   isOutput?: boolean;
+  /**
+   * Declared cost estimate (cents) for this node. Accumulated per-phase by the
+   * engine for budget governance (Layer 5.3) and surfaced in the audit trail.
+   */
+  estimatedCostCents?: number;
 }
 
 export type WorkflowNodeConfig = (
@@ -134,6 +161,7 @@ export type WorkflowNodeConfig = (
   | IntegrationNodeConfig
   | HttpRequestNodeConfig
   | WorkflowStoreNodeConfig
+  | WorkspaceStoreNodeConfig
   | EvaluatorNodeConfig
   | GuardrailsNodeConfig
   | LoopNodeConfig
@@ -179,6 +207,20 @@ export interface AgentTaskNodeConfig {
   inputKeys: string[];
   outputKeys: string[];
   retryPolicy?: AgentRetryPolicy;
+  /** Behavioral skill protocols (§2.5) injected into the prompt at dispatch. */
+  skills?: string[];
+  /** Per-node model override (does not change the agent's global config). */
+  modelOverride?: string;
+  /** One-sentence rationale for the chosen specialist role (shown in the inspector). */
+  castingReason?: string;
+  /**
+   * Run this task in-process via the agentic tool-use loop (§2.2) instead of
+   * dispatching to an external adapter. Requires `agentRole` + a configured LLM
+   * runtime; the loop is bounded by the role's tool manifest and `maxToolSteps`.
+   */
+  useRoleTools?: boolean;
+  /** Cap on tool-use loop steps when `useRoleTools` is set (default 6, max 12). */
+  maxToolSteps?: number;
 }
 
 /**
@@ -364,6 +406,22 @@ export interface WorkflowStoreNodeConfig {
   }>;
 }
 
+/**
+ * Workspace-scoped persistent KV (Tier 3). Same operation shape as
+ * `workflow_store`, but the key space is shared across every workflow in the
+ * workspace. Surfaced to templates as `{{workspace.kv.*}}`.
+ */
+export interface WorkspaceStoreNodeConfig {
+  kind: 'workspace_store';
+  operations: Array<{
+    op: 'get' | 'set' | 'delete' | 'increment' | 'append' | 'get_all';
+    key?: string;
+    value?: string;
+    outputKey?: string;
+    incrementBy?: number;
+  }>;
+}
+
 // ────────────────────────────────────────────────────────────
 // Intelligence
 // ────────────────────────────────────────────────────────────
@@ -494,15 +552,21 @@ export interface BrowserNodeConfig {
     | 'screenshot'      // screenshot a URL (or inline html) → image artifact
     | 'pdf'             // print a URL (or inline html) to PDF → document artifact
     | 'navigate'        // load a URL, return { title, text, html }
-    | 'extract_text';   // load a URL/html, return visible text under selector
+    | 'extract_text'    // load a URL/html, return visible text under selector
+    | 'fill_form'       // fill fields by selector, optionally submit
+    | 'extract_table';  // extract a <table> into row objects
   /** Target URL. Supports `{{variable}}` interpolation. */
   url?: string;
   /** Inline HTML to render (serve_html / screenshot / pdf). Supports templates. */
   html?: string;
   /** Dot path into the node input to read the HTML from (chains after a transform). */
   htmlPath?: string;
-  /** CSS selector for extract_text (defaults to body). */
+  /** CSS selector for extract_text / extract_table (defaults to body / first table). */
   selector?: string;
+  /** For fill_form: selector → value map. Supports `{{variable}}` in values. */
+  formData?: Record<string, string>;
+  /** For fill_form: optional element to click after filling (submit). */
+  submitSelector?: string;
   /** Full-page screenshot (default true). */
   fullPage?: boolean;
   /** Open a visible browser window on the operator's desktop (default false → headless). */

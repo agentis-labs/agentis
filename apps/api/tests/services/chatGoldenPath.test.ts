@@ -122,15 +122,19 @@ describe('chat golden path', () => {
     expect(workflows).toHaveLength(1);
     expect(workflows[0]!.title).toBe('Hello World');
     const graph = workflows[0]!.graph as WorkflowGraph;
+    // build_workflow now emits trigger → transform (produces value) → return_output
+    // with a renderAs viewer hint (Layer 6), instead of a transform+isOutput idiom.
     expect(graph.nodes).toEqual([
       expect.objectContaining({ id: 'trigger_manual', type: 'trigger' }),
       expect.objectContaining({
-        id: 'return_output',
+        id: 'produce_output',
         type: 'transform',
-        config: expect.objectContaining({
-          expression: '{"text":"Workflow is working"}',
-          isOutput: true,
-        }),
+        config: expect.objectContaining({ expression: '{"text":"Workflow is working"}' }),
+      }),
+      expect.objectContaining({
+        id: 'return_output',
+        type: 'return_output',
+        config: expect.objectContaining({ kind: 'return_output', renderAs: 'text' }),
       }),
     ]);
     expect(captured.events.some((event) => event.envelope.event === REALTIME_EVENTS.CANVAS_BUILD_COMPLETE)).toBe(true);

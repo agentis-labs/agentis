@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   slug                TEXT NOT NULL,
   default_ambient_id  TEXT,
   issue_prefix        TEXT NOT NULL DEFAULT 'AGT',
+  daily_budget_cents  INTEGER,
   created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(user_id, slug)
@@ -179,6 +180,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   settings              TEXT NOT NULL DEFAULT '{}',
   is_from_registry      INTEGER NOT NULL DEFAULT 0,
   max_concurrent_runs   INTEGER,
+  budget_cents          INTEGER,
   concurrency_overflow  TEXT NOT NULL DEFAULT 'queue',
   tags                  TEXT NOT NULL DEFAULT '[]',
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -213,6 +215,34 @@ CREATE TABLE IF NOT EXISTS workflow_kv_entries (
   updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(workflow_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS workspace_kv (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  key           TEXT NOT NULL,
+  value         TEXT NOT NULL,
+  version       INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(workspace_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS audit_entries (
+  id             TEXT PRIMARY KEY,
+  workspace_id   TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  run_id         TEXT NOT NULL,
+  phase_id       TEXT,
+  node_id        TEXT,
+  agent_id       TEXT,
+  action         TEXT NOT NULL,
+  actor_type     TEXT NOT NULL,
+  actor_id       TEXT NOT NULL,
+  input_summary  TEXT,
+  output_summary TEXT,
+  cost_cents     INTEGER,
+  at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_run ON audit_entries(run_id, at);
 CREATE INDEX IF NOT EXISTS idx_workflow_kv_lookup ON workflow_kv_entries(workflow_id, key);
 CREATE INDEX IF NOT EXISTS idx_workflow_kv_workspace ON workflow_kv_entries(workspace_id, updated_at DESC);
 
@@ -500,6 +530,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   content         TEXT NOT NULL DEFAULT '',
   thumbnail_url   TEXT,
   metadata        TEXT NOT NULL DEFAULT '{}',
+  pinned          INTEGER NOT NULL DEFAULT 0,
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

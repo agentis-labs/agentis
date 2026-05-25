@@ -22,11 +22,12 @@ import './components/shared/ThemeToggle';
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
 const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage').then((m) => ({ default: m.WorkflowsPage })));
 const WorkflowCanvasPage = lazy(() => import('./pages/WorkflowCanvasPage').then((m) => ({ default: m.WorkflowCanvasPage })));
+const WorkflowBuilderPage = lazy(() => import('./pages/WorkflowBuilderPage').then((m) => ({ default: m.WorkflowBuilderPage })));
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((m) => ({ default: m.RunDetailPage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })));
 const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })));
 const PackagesPage = lazy(() => import('./pages/PackagesPage').then((m) => ({ default: m.PackagesPage })));
-const KnowledgePage = lazy(() => import('./pages/KnowledgePage').then((m) => ({ default: m.KnowledgePage })));
+const BrainPage = lazy(() => import('./pages/BrainPage').then((m) => ({ default: m.BrainPage })));
 const KnowledgeBasePage = lazy(() => import('./pages/KnowledgeBasePage').then((m) => ({ default: m.KnowledgeBasePage })));
 const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ default: m.HistoryPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
@@ -190,8 +191,10 @@ export function App() {
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agents/:id" element={<AgentDetailPage />} />
               <Route path="/workflows" element={<WorkflowsPage />} />
+              <Route path="/workflows/build" element={<WorkflowBuilderPage />} />
               <Route path="/workflows/:id" element={<WorkflowCanvasPage />} />
-              <Route path="/knowledge" element={<KnowledgePage />} />
+              <Route path="/brain" element={<BrainPage />} />
+              <Route path="/knowledge" element={<BrainPage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/packages" element={<PackagesPage />} />

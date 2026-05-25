@@ -8,13 +8,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Network, List as ListIcon, MessageCircle, Settings as SettingsIcon, SearchX } from 'lucide-react';
+import { Bot, Plus, Network, List as ListIcon, MessageCircle, Settings as SettingsIcon, Search, SearchX, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { Button } from '../components/shared/Button';
-import { SearchInput } from '../components/shared/SearchInput';
-import { FilterBar } from '../components/shared/FilterBar';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { Skeleton, SkeletonCard } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
@@ -119,7 +117,11 @@ export function AgentsPage() {
   }, [view]);
 
   useEffect(() => {
-    if (view !== 'fleet') setSelectedAgent(null);
+    if (view !== 'fleet') {
+      setSelectedAgent(null);
+      setFilter('all');
+      setSearch('');
+    }
   }, [view]);
 
   useEffect(() => {
@@ -210,6 +212,15 @@ export function AgentsPage() {
           <h1 className="text-display text-text-primary">Agents</h1>
           <div className="mt-0.5 text-[12px] text-text-muted">{total} {total === 1 ? 'agent' : 'agents'}</div>
         </div>
+        {view === 'fleet' && total > 0 && (
+          <AgentFleetHeaderControls
+            filter={filter}
+            search={search}
+            onFilterChange={setFilter}
+            onSearchChange={setSearch}
+            onClear={() => { setSearch(''); setFilter('all'); }}
+          />
+        )}
         <div className="ml-auto flex items-center gap-2">
           <div className="flex h-9 items-center gap-0.5 rounded-btn border border-line bg-surface-2 p-0.5">
             <button
@@ -241,46 +252,38 @@ export function AgentsPage() {
         </div>
       </div>
 
-      {/* Filter row */}
-      <div className="flex flex-wrap items-center gap-3 border-b border-line px-6 py-3">
-        <FilterBar options={FILTERS} value={filter} onChange={setFilter} />
-        <div className="ml-auto w-full sm:w-72">
-          <SearchInput value={search} onChange={setSearch} placeholder="Search agents…" bindSlashShortcut />
-        </div>
-      </div>
-
       {/* List body */}
-      <div className="flex-1 overflow-y-auto px-6 py-5">
-        {filteredCount === 0 ? (
-          total === 0 ? (
-            <EmptyState
-              icon={<Bot size={48} />}
-              title="No agents yet"
-              body="Create your first agent to start automating work."
-              primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreating(true)}>Add agent</Button>}
-              variant="page"
-            />
-          ) : (
-            <EmptyState
-              icon={<SearchX size={48} />}
-              title="No matching agents"
-              body="Try adjusting your search or filters."
-              primaryAction={<Button variant="secondary" size="sm" onClick={() => { setSearch(''); setFilter('all'); }}>Clear filters</Button>}
-              variant="page"
-            />
-          )
+      <div className={clsx('min-h-0 flex-1 overflow-hidden', view === 'fleet' ? 'px-0 py-0' : 'px-6 py-5')}>
+        {total === 0 ? (
+          <EmptyState
+            icon={<Bot size={48} />}
+            title="No agents yet"
+            body="Create your first agent to start automating work."
+            primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreating(true)}>Add agent</Button>}
+            variant="page"
+          />
+        ) : view === 'fleet' ? (
+          <AgentHierarchyCanvas
+            agents={agents}
+            filter={filter}
+            search={search}
+            onClearFilters={() => { setSearch(''); setFilter('all'); }}
+            onChanged={() => void refresh()}
+            onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
+            selectedAgent={selectedAgent}
+            onCloseSelection={() => setSelectedAgent(null)}
+            onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
+          />
+        ) : filteredCount === 0 ? (
+          <EmptyState
+            icon={<SearchX size={48} />}
+            title="No matching agents"
+            body="Try adjusting your search or filters."
+            primaryAction={<Button variant="secondary" size="sm" onClick={() => { setSearch(''); setFilter('all'); }}>Clear filters</Button>}
+            variant="page"
+          />
         ) : (
-          view === 'fleet' ? (
-            <AgentHierarchyCanvas
-              agents={filteredAgents}
-              onChanged={() => void refresh()}
-              onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
-              selectedAgent={selectedAgent}
-              onCloseSelection={() => setSelectedAgent(null)}
-              onCreate={() => setCreating(true)}
-              onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
-            />
-          ) : Array.from(grouped.entries()).map(([spaceKey, list]) => {
+          Array.from(grouped.entries()).map(([spaceKey, list]) => {
             const space = spaces.find((s) => s.id === spaceKey);
             const groupLabel = space?.name ?? (spaceKey === '__ungrouped__' ? 'Ungrouped' : 'Other');
             return (
@@ -315,6 +318,63 @@ export function AgentsPage() {
         initialSpaceId={creatingPreset?.spaceId}
         lockInitialRole={Boolean(creatingPreset?.role)}
       />
+    </div>
+  );
+}
+
+function AgentFleetHeaderControls({
+  filter,
+  search,
+  onFilterChange,
+  onSearchChange,
+  onClear,
+}: {
+  filter: FilterValue;
+  search: string;
+  onFilterChange: (value: FilterValue) => void;
+  onSearchChange: (value: string) => void;
+  onClear: () => void;
+}) {
+  const hasFilters = filter !== 'all' || search.trim().length > 0;
+  return (
+    <div className="flex min-w-[min(100%,34rem)] flex-1 flex-wrap items-center gap-2">
+      <div className="flex flex-wrap gap-1">
+        {FILTERS.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onFilterChange(option.value)}
+            className={clsx(
+              'inline-flex h-8 items-center rounded-pill border px-3 text-[12px] transition-colors',
+              filter === option.value
+                ? 'border-accent/45 bg-accent-soft text-accent'
+                : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary',
+            )}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      <label className="flex h-8 min-w-[220px] flex-1 items-center gap-2 rounded-xl border border-line bg-surface-2 px-2.5 text-text-muted focus-within:border-line-strong focus-within:text-text-primary xl:max-w-sm">
+        <Search size={13} />
+        <input
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder="Search agents..."
+          className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+          aria-label="Search agents"
+        />
+        {hasFilters && (
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label="Clear agent filters"
+            className="inline-flex h-5 w-5 items-center justify-center rounded-md text-text-muted hover:bg-surface-3 hover:text-text-primary"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </label>
     </div>
   );
 }

@@ -139,7 +139,7 @@ describe('POST /v1/conversations/:agentId/read', () => {
 });
 
 describe('POST /v1/conversations/:agentId/new', () => {
-  it('archives the current thread and starts a fresh active one', async () => {
+  it('keeps the old thread in active history and starts a fresh active one', async () => {
     const agentId = seedAgent();
 
     const sendRes = await app().request(`/v1/conversations/${agentId}/send`, {
@@ -164,11 +164,45 @@ describe('POST /v1/conversations/:agentId/new', () => {
     const history = (await historyRes.json()) as {
       conversations: Array<{ id: string; archivedAt: string | null; lastMessagePreview: string | null }>;
     };
-    const archived = history.conversations.find((conversation) => conversation.archivedAt);
-    expect(archived?.lastMessagePreview).toBe('hello');
+    const prevConv = history.conversations.find((conversation) => conversation.lastMessagePreview === 'hello');
+    expect(prevConv).toBeDefined();
+    expect(prevConv?.archivedAt).toBeNull();
 
-    const archivedRes = await app().request(`/v1/conversations/${agentId}?conversationId=${archived!.id}`, { headers: ctx.authHeaders });
-    const archivedBody = (await archivedRes.json()) as { messages: Array<{ body: string }> };
-    expect(archivedBody.messages.map((message) => message.body)).toContain('hello');
+    const oldRes = await app().request(`/v1/conversations/${agentId}?conversationId=${prevConv!.id}`, { headers: ctx.authHeaders });
+    const oldBody = (await oldRes.json()) as { messages: Array<{ body: string }> };
+    expect(oldBody.messages.map((message) => message.body)).toContain('hello');
   });
 });
+
+describe('PATCH /v1/conversations/session/:conversationId', () => {
+  it('updates title and archived status', async () => {
+    const agentId = seedAgent();
+    // Fetch once to create the active conversation
+    const res = await app().request(`/v1/conversations/${agentId}`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { conversation: { id: string } };
+    const conversationId = body.conversation.id;
+
+    // PATCH with archived: true
+    const patchRes = await app().request(`/v1/conversations/session/${conversationId}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ archived: true, title: 'Archived Conversation' }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patchBody = (await patchRes.json()) as { conversation: { archivedAt: string | null; title: string | null } };
+    expect(patchBody.conversation.archivedAt).not.toBeNull();
+    expect(patchBody.conversation.title).toBe('Archived Conversation');
+
+    // PATCH with archived: false
+    const patchRes2 = await app().request(`/v1/conversations/session/${conversationId}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ archived: false }),
+    });
+    expect(patchRes2.status).toBe(200);
+    const patchBody2 = (await patchRes2.json()) as { conversation: { archivedAt: string | null } };
+    expect(patchBody2.conversation.archivedAt).toBeNull();
+  });
+});
+

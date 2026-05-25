@@ -67,18 +67,31 @@ export function derivePlanItems(
 export function PlanList({ items }: { items: PlanItemView[] }) {
   if (items.length === 0) return null;
 
+  const doneCount = items.filter((item) => item.status === 'done').length;
+  const totalCount = items.length;
+  const percentage = Math.round((doneCount / totalCount) * 100);
+
   return (
-    <div className="mb-2 rounded-xl border border-line/70 bg-canvas/65 p-2.5 text-[12px] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-      <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">Plan</div>
-      <ol className="space-y-1.5">
+    <div className="mb-3 rounded-xl border border-line/50 bg-canvas/40 backdrop-blur-sm p-3 text-[12px] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+      <div className="mb-1.5 flex items-center justify-between text-[9.5px] font-mono tracking-wider text-text-muted">
+        <span className="font-semibold uppercase tracking-[0.15em] text-text-secondary">Execution Plan</span>
+        <span className="font-bold text-accent">{doneCount}/{totalCount} Completed</span>
+      </div>
+      <div className="mb-3 h-1.5 w-full rounded-full bg-canvas/60 overflow-hidden border border-line/10">
+        <div 
+          className="h-full bg-accent rounded-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(20,184,166,0.4)]" 
+          style={{ width: `${percentage}%` }}
+        />
+      </div>
+      <ol className="space-y-2">
         {items.map((item, index) => (
-          <li key={`${index}-${item.label}`} className="flex items-start gap-2">
+          <li key={`${index}-${item.label}`} className="flex items-start gap-2.5">
             <PlanStatusIcon status={item.status} />
             <span className={clsx(
-              'min-w-0 flex-1 leading-relaxed transition-colors duration-300',
-              item.status === 'pending' && 'text-text-muted',
-              item.status === 'running' && 'text-text-primary',
-              item.status === 'done' && 'text-text-secondary line-through decoration-line/80',
+              'min-w-0 flex-1 leading-relaxed transition-colors duration-300 font-medium',
+              item.status === 'pending' && 'text-text-muted/70',
+              item.status === 'running' && 'text-text-primary font-semibold',
+              item.status === 'done' && 'text-text-muted line-through decoration-line/40',
               item.status === 'failed' && 'text-danger',
             )}>
               {item.label}

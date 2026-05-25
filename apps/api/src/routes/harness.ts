@@ -78,12 +78,14 @@ export function buildHarnessRoutes(deps: HarnessRoutesDeps) {
     });
   });
 
-  app.get('/models/:adapterType', (c) => {
+  app.get('/models/:adapterType', async (c) => {
     const adapterType = c.req.param('adapterType');
     if (!HARNESS_ADAPTER_TYPES.has(adapterType)) {
       throw new AgentisError('VALIDATION_FAILED', `'${adapterType}' is not a supported runtime.`);
     }
-    return c.json(listRuntimeModels(adapterType as V1HarnessAdapterType));
+    const agentId = c.req.query('agentId') || null;
+    const catalog = await listRuntimeModels(adapterType as V1HarnessAdapterType, agentId, deps.db);
+    return c.json(catalog);
   });
 
   /**

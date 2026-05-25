@@ -43,10 +43,6 @@ export async function hydrateAgentRuntimes(deps: AgentRuntimeHydratorDeps): Prom
     }))
     .filter((agent) => agent.adapterType && !agent.isPaused && agent.status !== 'paused');
 
-  for (const agent of eligibleAgents) {
-    setAgentStatus(deps, agent.workspaceId, agent.id, 'setting_up');
-  }
-
   const detections = await detectHarnesses().catch((err) => {
     deps.logger.warn('agent_runtime_hydrator.detect_failed', { err: (err as Error).message });
     return [];
@@ -84,9 +80,7 @@ export async function hydrateAgentRuntimes(deps: AgentRuntimeHydratorDeps): Prom
         adapterType,
         err: (err as Error).message,
       });
-      if (agent.status !== 'setting_up') {
-        setAgentStatus(deps, agent.workspaceId, agent.id, 'offline');
-      }
+      setAgentStatus(deps, agent.workspaceId, agent.id, 'error');
     }
   });
 
@@ -118,7 +112,7 @@ function setAgentStatus(
   deps: AgentRuntimeHydratorDeps,
   workspaceId: string,
   agentId: string,
-  status: 'setting_up' | 'online' | 'offline',
+  status: 'online' | 'offline' | 'error',
 ): void {
   const now = new Date().toISOString();
   deps.db.update(schema.agents)

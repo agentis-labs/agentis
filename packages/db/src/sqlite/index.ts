@@ -80,6 +80,12 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Workspace issue queue defaults.
   addColumn('workspaces', 'issue_prefix', "TEXT NOT NULL DEFAULT 'AGT'");
 
+  // Layer 5 §5.3 — workspace/day cost ceiling.
+  addColumn('workspaces', 'daily_budget_cents', 'INTEGER');
+
+  // Layer 6 §6.4 — pin artifacts to the workspace output gallery.
+  addColumn('artifacts', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
+
   // Company OS layer (migration v2): conversation messages can be linked to an
   // issue. embedded-sql.ts predates this column — patch the drift here.
   addColumn('conversation_messages', 'issue_id', 'TEXT');
@@ -87,7 +93,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   addColumn('conversations', 'archived_at', 'TEXT');
   sqlite.exec(`
 DROP INDEX IF EXISTS uq_conversation_agent;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_agent_active ON conversations(workspace_id, agent_id) WHERE archived_at IS NULL;
+DROP INDEX IF EXISTS uq_conversation_agent_active;
 CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_id, agent_id, archived_at, last_message_at);
 `);
 
@@ -110,6 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_i
 
   // PackagerService: workflow concurrency + tagging.
   addColumn('workflows', 'max_concurrent_runs', 'INTEGER');
+  // §5.3 — per-run workflow cost ceiling.
+  addColumn('workflows', 'budget_cents', 'INTEGER');
   addColumn('workflows', 'concurrency_overflow', "TEXT NOT NULL DEFAULT 'queue'");
   addColumn('workflows', 'tags', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('workflows', 'intended_behavior', 'TEXT');

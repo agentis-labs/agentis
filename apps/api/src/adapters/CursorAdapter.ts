@@ -1,13 +1,26 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type {
   AgentAdapter,
   AdapterCapabilities,
   AdapterHealthStatus,
+  ChatDelta,
+  ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
+  ToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import {
+  buildMarkerToolPrompt,
+  extractMarkerToolCalls,
+  isProcessNoiseLine,
+  stripProcessNoise,
+} from './markerToolProtocol.js';
+
+/** Safety cap for one interactive chat turn when no explicit timeout is configured. */
+const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
 
 export interface CursorAdapterOptions {
   agentId: string;
@@ -41,10 +54,9 @@ export class CursorAdapter implements AgentAdapter {
 
   capabilities(): AdapterCapabilities {
     return {
-      interactiveChat: false,
-      toolCalling: false,
-      toolForwarding: 'none',
-      limitations: ['Cursor adapter currently supports workflow task dispatch, not interactive Agentis chat tools.'],
+      interactiveChat: true,
+      toolCalling: true,
+      toolForwarding: 'marker_protocol',
     };
   }
 
@@ -192,6 +204,146 @@ export class CursorAdapter implements AgentAdapter {
     this.#inFlight.delete(taskId);
   }
 
+  async *chat(messages: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
+    const controller = new AbortController();
+    const binary = this.opts.binaryPath ?? 'agent';
+    const args = [
+      '--output-format',
+      'stream-json',
+      ...(this.opts.model ? [`--model=${this.opts.model}`] : []),
+      ...(this.#sessionId ? ['--resume', this.#sessionId] : []),
+      ...(this.opts.extraArgs ?? []),
+    ];
+    const queue = createChatQueue();
+    let childProcess: ReturnType<typeof spawn>;
+    let timeout: NodeJS.Timeout | undefined;
+
+    try {
+      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
+      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
+      childProcess = spawn(target.command, target.args, {
+        cwd: this.opts.cwd,
+        env,
+        windowsHide: true,
+        signal: controller.signal,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const message = `Cursor adapter failed to start: ${(err as Error).message}`;
+      this.opts.logger.warn('cursor.chat.spawn_failed', { err: message });
+      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
+
+    const chatTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
+      ? this.opts.timeoutSec * 1000
+      : DEFAULT_CHAT_TURN_TIMEOUT_MS;
+    timeout = setTimeout(() => controller.abort(), chatTimeoutMs);
+    timeout.unref?.();
+
+    let stderrText = '';
+    childProcess.stderr?.on('data', (data) => {
+      const chunk = String(data);
+      stderrText = `${stderrText}${chunk}`.slice(-1024);
+      this.opts.logger.warn('cursor.chat.stderr', { data: chunk.slice(0, 512) });
+    });
+
+    childProcess.on('error', (err) => {
+      queue.push({
+        type: 'tool_result',
+        id: 'adapter',
+        name: 'adapter.chat',
+        result: null,
+        error: `Cursor error: ${err.message}`,
+      });
+      queue.push({ type: 'done', finishReason: 'error' });
+      queue.close();
+      if (timeout) clearTimeout(timeout);
+    });
+
+    let buffer = '';
+    let transcript = '';
+    let rawFallback = '';
+    const pendingToolCalls: ChatDelta[] = [];
+
+    childProcess.stdout?.on('data', (chunk) => {
+      buffer += String(chunk);
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line) continue;
+        try {
+          const event = JSON.parse(line) as CursorJsonEvent;
+          const sessionId = firstString(event.session_id, event.sessionId, objectOf(event.session)?.id);
+          if (sessionId) this.#sessionId = sessionId;
+
+          if (isReasoningEvent(event)) {
+            const reasoning = extractText(event);
+            if (reasoning) queue.push({ type: 'thinking', delta: reasoning });
+          } else {
+            const text = extractText(event);
+            if (text) transcript += text;
+            const toolCall = extractToolCall(event);
+            if (toolCall) {
+              pendingToolCalls.push({
+                type: 'tool_call',
+                id: randomUUID(),
+                name: toolCall.tool,
+                args: toolCall.input,
+              });
+            }
+          }
+        } catch {
+          if (!isProcessNoiseLine(line)) rawFallback += `${line}\n`;
+        }
+      }
+    });
+
+    childProcess.on('exit', (code) => {
+      if (timeout) clearTimeout(timeout);
+      if (code !== 0) {
+        const details = stderrText.trim();
+        queue.push({
+          type: 'tool_result',
+          id: 'adapter',
+          name: 'adapter.chat',
+          result: null,
+          error: details ? `Cursor exited ${code}: ${details}` : `Cursor exited ${code}`,
+        });
+        queue.push({ type: 'done', finishReason: 'error' });
+        queue.close();
+        return;
+      }
+
+      const source = transcript.trim().length > 0 ? transcript : stripProcessNoise(rawFallback);
+      const { calls: markerCalls, cleaned } = extractMarkerToolCalls(source);
+      if (cleaned) queue.push({ type: 'text', delta: cleaned });
+      const allToolCalls: ChatDelta[] = [
+        ...pendingToolCalls,
+        ...markerCalls.map((call) => ({
+          type: 'tool_call' as const,
+          id: randomUUID(),
+          name: call.name,
+          args: call.args,
+        })),
+      ];
+      for (const call of allToolCalls) queue.push(call);
+      queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop' });
+      queue.close();
+    });
+
+    childProcess.stdin?.end(buildCursorChatPrompt(messages, tools));
+
+    try {
+      yield* queue.iterate();
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      controller.abort();
+    }
+  }
+
   #emit(event: NormalizedAgentEvent): void {
     for (const handler of this.#handlers) {
       try {
@@ -302,4 +454,66 @@ function firstString(...values: unknown[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function buildCursorChatPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {
+  return [
+    buildMarkerToolPrompt(tools),
+    '',
+    'Conversation:',
+    formatMessagesForCursor(messages),
+  ].join('\n');
+}
+
+function formatMessagesForCursor(messages: ChatMessage[]): string {
+  return messages.map((message) => {
+    const content = typeof message.content === 'string' ? message.content : safeJson(message.content);
+    if (message.role === 'tool') {
+      return `TOOL RESULT (${message.toolCallId ?? 'unknown'}):\n${content}`;
+    }
+    if (message.role === 'assistant' && message.toolCalls?.length) {
+      return [
+        'ASSISTANT:',
+        content,
+        'REQUESTED TOOLS:',
+        safeJson(message.toolCalls),
+      ].join('\n');
+    }
+    return `${message.role.toUpperCase()}:\n${content}`;
+  }).join('\n\n---\n\n');
+}
+
+function isReasoningEvent(event: CursorJsonEvent): boolean {
+  const type = String(event.type ?? '').toLowerCase();
+  if (type.includes('reason') || type.includes('think')) return true;
+  const item = objectOf(event.item);
+  const itemType = String(item?.type ?? '').toLowerCase();
+  return itemType.includes('reason') || itemType.includes('think');
+}
+
+function createChatQueue() {
+  const pending: ChatDelta[] = [];
+  const waiters: Array<() => void> = [];
+  let closed = false;
+  return {
+    push(delta: ChatDelta) {
+      if (closed) return;
+      pending.push(delta);
+      waiters.shift()?.();
+    },
+    close() {
+      closed = true;
+      while (waiters.length > 0) waiters.shift()?.();
+    },
+    async *iterate(): AsyncIterable<ChatDelta> {
+      while (!closed || pending.length > 0) {
+        const next = pending.shift();
+        if (next) {
+          yield next;
+          continue;
+        }
+        await new Promise<void>((resolve) => waiters.push(resolve));
+      }
+    },
+  };
 }

@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Data Steward",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["data-cleaning", "validation", "enrichment"],
         "config": {},
         "instructions": "Preserve original values, explain transformations, and mark uncertain enrichments.",

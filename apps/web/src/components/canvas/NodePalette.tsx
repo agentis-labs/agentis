@@ -70,9 +70,9 @@ const SECTIONS: PaletteSection[] = [
   },
   {
     tier: 'knowledge',
-    title: 'Knowledge',
+    title: 'Brain',
     nodes: [
-      { type: 'knowledge',         label: 'Knowledge',         glyph: '◇', description: 'Retrieve from a workspace knowledge base', defaults: { queryMode: 'static', topK: 5, retrievalMode: 'contextual' } },
+      { type: 'knowledge',         label: 'Brain',             glyph: '◇', description: 'Retrieve relevant context from the workspace Brain', defaults: { queryMode: 'static', topK: 5, retrievalMode: 'contextual' } },
       { type: 'artifact_collect',  label: 'Artifact Collect',  glyph: '⛁', description: 'Package generated artifacts into a versioned collection', defaults: { collectionName: 'Untitled', versioned: true } },
     ],
   },

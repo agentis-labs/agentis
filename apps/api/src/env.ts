@@ -68,6 +68,14 @@ const envSchema = z.object({
   AGENTIS_EVALUATOR_API_KEY: z.string().optional(),
   AGENTIS_EVALUATOR_MODEL: z.string().optional(),
 
+  // Workflow synthesis runtime (§6). Dedicated model for `build_workflow` LLM
+  // synthesis so it is NOT gated behind the evaluator config. When unset, falls
+  // back to the evaluator runtime; when neither is set, build_workflow uses the
+  // deterministic regex/template path.
+  WORKFLOW_SYNTHESIS_BASE_URL: z.string().url().optional(),
+  WORKFLOW_SYNTHESIS_API_KEY: z.string().optional(),
+  WORKFLOW_SYNTHESIS_MODEL: z.string().default('gpt-4o-mini'),
+
   // Orchestrator chat runtime — opt-in fast path for the operator-facing chat.
   // When set, interactive chat turns for agents whose runtime is a slow
   // marker-protocol CLI (Codex / Claude Code) are answered by this native
@@ -78,6 +86,19 @@ const envSchema = z.object({
   AGENTIS_ORCHESTRATOR_BASE_URL: z.string().url().optional(),
   AGENTIS_ORCHESTRATOR_API_KEY: z.string().optional(),
   AGENTIS_ORCHESTRATOR_MODEL: z.string().optional(),
+
+  // Inline OAuth (ORCHESTRATOR-CREATION §7). Public base URL the provider
+  // redirects back to — must match the registered OAuth app redirect URI
+  // (`<AGENTIS_PUBLIC_URL>/v1/oauth/<provider>/callback`). Defaults to the
+  // local HTTP host:port. A provider's "Sign in with X" button only appears
+  // when its client id + secret are configured.
+  AGENTIS_PUBLIC_URL: z.string().url().optional(),
+  OAUTH_GOOGLE_CLIENT_ID: z.string().optional(),
+  OAUTH_GOOGLE_CLIENT_SECRET: z.string().optional(),
+  OAUTH_SLACK_CLIENT_ID: z.string().optional(),
+  OAUTH_SLACK_CLIENT_SECRET: z.string().optional(),
+  OAUTH_GITHUB_CLIENT_ID: z.string().optional(),
+  OAUTH_GITHUB_CLIENT_SECRET: z.string().optional(),
 });
 
 export type AgentisEnv = z.infer<typeof envSchema>;

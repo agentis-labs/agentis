@@ -48,8 +48,8 @@ describe('ApprovalInboxService', () => {
     expect(svc.list('ws1', 'all')).toHaveLength(1);
   });
 
-  it('resolve(approve) on a checkpoint fires the bound handler', async () => {
-    let handlerCalled: { runId: string; approvalId: string } | null = null;
+  it('resolve(approve) on a checkpoint fires the resume handler with decision', async () => {
+    let handlerCalled: { runId: string; approvalId: string; source: string; decision: string } | null = null;
     svc.bindCheckpointHandler(async (a) => {
       handlerCalled = a;
     });
@@ -60,13 +60,15 @@ describe('ApprovalInboxService', () => {
       decision: 'approve',
     });
     expect(resolved.status).toBe('approved');
-    expect(handlerCalled).toEqual({ runId: 'r1', approvalId: created.id });
+    // Human-gate enforcement: the handler carries source + decision so the
+    // engine can resume the held run.
+    expect(handlerCalled).toMatchObject({ runId: 'r1', approvalId: created.id, source: 'checkpoint', decision: 'approve' });
   });
 
-  it('resolve(reject) does not call checkpoint handler', async () => {
-    let called = false;
-    svc.bindCheckpointHandler(async () => {
-      called = true;
+  it('resolve(reject) fires the handler so the run-gate can fail deterministically', async () => {
+    let handlerCalled: { decision: string } | null = null;
+    svc.bindCheckpointHandler(async (a) => {
+      handlerCalled = a;
     });
     const created = await svc.create(baseArgs);
     const resolved = await svc.resolve({
@@ -77,7 +79,8 @@ describe('ApprovalInboxService', () => {
     });
     expect(resolved.status).toBe('rejected');
     expect(resolved.resolutionReason).toBe('no thanks');
-    expect(called).toBe(false);
+    // Reject must reach the engine (failRunForGate) — not silently drop.
+    expect(handlerCalled).toMatchObject({ decision: 'reject' });
   });
 
   it('throws RESOURCE_CONFLICT when resolving an already-resolved approval', async () => {

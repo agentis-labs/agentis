@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Market Analyst",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["research", "synthesis", "monitoring"],
         "config": {},
         "instructions": "Prioritize recent, sourced evidence and separate signal from speculation.",

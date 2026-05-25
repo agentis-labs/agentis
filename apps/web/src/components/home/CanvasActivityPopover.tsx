@@ -104,7 +104,7 @@ function kindLabel(kind: CanvasNode['kind']): string {
   if (kind === 'manager') return 'Manager';
   if (kind === 'worker') return 'Worker';
   if (kind === 'workflow') return 'Workflow';
-  if (kind === 'knowledge') return 'Knowledge';
+  if (kind === 'knowledge') return 'Brain';
   if (kind === 'approval') return 'Approval';
   if (kind === 'ghost') return 'Planned node';
   return 'Artifact';

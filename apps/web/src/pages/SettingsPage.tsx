@@ -70,7 +70,6 @@ interface RuntimeRow {
 }
 
 const RUNTIME_MATRIX: RuntimeRow[] = [
-  { type: 'hermes', label: 'Hermes', interactiveChat: true, support: 'native', note: 'OpenAI-compatible. Streams native tool calls token-by-token. Best chat experience.' },
   { type: 'local_llm', label: 'Local LLM', interactiveChat: true, support: 'native', note: 'Ollama / LM Studio / vLLM. Native tool calls when the served model supports them.' },
   { type: 'http', label: 'HTTP', interactiveChat: true, support: 'http', note: 'Tools forwarded over the HTTP contract when the endpoint sets supportsTools. Otherwise relay.' },
   { type: 'codex', label: 'Codex CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Slower (re-spawns per tool round). Use the orchestrator fast path for native speed.' },

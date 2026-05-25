@@ -19,6 +19,7 @@ export function CanvasNodeDetailPanel({
   if (!node) return null;
   const hasRoute = Boolean(node.route);
   const canChat = Boolean(node.agent);
+  const state = node.operationalState ?? (node.warn ? 'attention' : node.active ? 'active' : 'idle');
 
   async function resolveApproval(decision: 'approve' | 'reject') {
     if (!node?.approval?.id) return;
@@ -36,7 +37,13 @@ export function CanvasNodeDetailPanel({
           <div
             className={clsx(
               'flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-card border',
-              node.warn ? 'border-warn/40 bg-warn-soft text-warn' : node.active ? 'border-accent/35 bg-accent-soft text-accent' : 'border-line bg-surface-2 text-text-secondary',
+              state === 'error'
+                ? 'border-danger/45 bg-danger/10 text-danger'
+                : state === 'attention'
+                  ? 'border-warn/40 bg-warn-soft text-warn'
+                  : state === 'active'
+                    ? 'border-white/40 bg-white/10 text-text-primary'
+                    : 'border-line bg-surface-2 text-text-secondary',
             )}
             style={{ color: node.accent ?? undefined }}
           >
@@ -45,8 +52,9 @@ export function CanvasNodeDetailPanel({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-[10px] font-semibold uppercase text-text-muted">
               <span>{node.kind}</span>
-              {node.active && <span className="rounded-pill bg-accent-soft px-1.5 py-0.5 text-accent">live</span>}
-              {node.warn && <span className="rounded-pill bg-warn-soft px-1.5 py-0.5 text-warn">attention</span>}
+              {state === 'active' && <span className="rounded-pill bg-white/10 px-1.5 py-0.5 text-text-primary">executing</span>}
+              {state === 'attention' && <span className="rounded-pill bg-warn-soft px-1.5 py-0.5 text-warn">attention</span>}
+              {state === 'error' && <span className="rounded-pill bg-danger-soft px-1.5 py-0.5 text-danger">error</span>}
             </div>
             <h2 className="mt-1 truncate text-heading text-text-primary">{node.title}</h2>
             <p className="mt-1 text-[12px] text-text-secondary">{node.subtitle}</p>
@@ -63,12 +71,7 @@ export function CanvasNodeDetailPanel({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-          {node.currentTask && (
-            <section className="mb-4 rounded-card border border-line bg-canvas/50 px-3 py-3">
-              <div className="text-[10px] font-semibold uppercase text-text-muted">Current task</div>
-              <div className="mt-1 text-[13px] text-text-primary">{node.currentTask}</div>
-            </section>
-          )}
+          {node.agent && <AgentLiveState node={node} />}
 
           {node.tooltipLines.length > 0 && (
             <section className="space-y-2">
@@ -90,7 +93,7 @@ export function CanvasNodeDetailPanel({
                 <button
                   type="button"
                   onClick={() => void resolveApproval('approve')}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-2.5 text-[12px] font-medium text-canvas hover:bg-accent-hover"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-text-primary px-2.5 text-[12px] font-medium text-canvas hover:bg-white active:scale-[0.98]"
                 >
                   <Check size={13} />
                   Approve
@@ -118,10 +121,10 @@ export function CanvasNodeDetailPanel({
             <button
               type="button"
               onClick={() => onOpenChat(node)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-medium text-canvas hover:bg-accent-hover"
+              className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-text-primary px-3 text-[12px] font-medium text-canvas hover:bg-white active:scale-[0.98]"
             >
               <MessageCircle size={14} />
-              Chat
+              Give instruction
             </button>
           )}
           {hasRoute && (
@@ -147,5 +150,61 @@ export function CanvasNodeDetailPanel({
         </footer>
       </aside>
     </div>
+  );
+}
+
+function AgentLiveState({ node }: { node: CanvasNode }) {
+  const state = node.operationalState ?? (node.warn ? 'attention' : node.active ? 'active' : 'idle');
+  const label =
+    state === 'active'
+      ? 'Executing'
+      : state === 'error'
+        ? 'Error'
+        : state === 'offline'
+          ? 'Offline'
+          : state === 'attention'
+            ? 'Waiting on operator'
+            : 'Idle';
+  const output = node.outputLines?.slice(-5) ?? [];
+
+  return (
+    <section className="mb-4 rounded-card border border-line bg-canvas/55 px-3 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
+          <div className="mt-1 text-[13px] text-text-primary">
+            {node.currentTask ?? (state === 'idle' ? 'No active run. Showing last known workspace state.' : 'Awaiting live execution details.')}
+          </div>
+        </div>
+        <span className="font-mono text-[10px] text-text-muted">{node.artifactCount ?? 0} today</span>
+      </div>
+
+      {node.currentTool && (
+        <div className="mt-3 rounded-card border border-line bg-[#141414] px-3 py-2">
+          <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">Current tool call</div>
+          <div className="mt-1 truncate font-mono text-[12px] text-text-primary">{node.currentTool}</div>
+        </div>
+      )}
+
+      {node.runtimeError && (
+        <div className="mt-3 rounded-card border border-danger/30 bg-danger/5 px-3 py-2">
+          <div className="font-mono text-[10px] uppercase tracking-wide text-danger">Failure detail</div>
+          <div className="mt-1 text-[12px] leading-relaxed text-text-secondary">{node.runtimeError}</div>
+        </div>
+      )}
+
+      {output.length > 0 && (
+        <div className="mt-3 rounded-card border border-line bg-[#141414] px-3 py-2">
+          <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">Output stream</div>
+          <div className="mt-2 space-y-1">
+            {output.map((line, index) => (
+              <div key={`${line}-${index}`} className="truncate font-mono text-[12px] text-text-secondary">
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

@@ -51,6 +51,7 @@ export class ConversationStore {
           isNull(schema.conversations.archivedAt),
         ),
       )
+      .orderBy(desc(schema.conversations.createdAt), desc(schema.conversations.lastMessageAt))
       .get();
     if (existing) {
       if (args.mirroredSessionId && !existing.mirroredSessionId) {
@@ -271,7 +272,6 @@ export class ConversationStore {
       .update(schema.conversations)
       .set({
         title: conversationTitle(firstOperator?.body ?? latestMessages[0]?.body ?? null),
-        archivedAt: now,
         unreadCount: 0,
         updatedAt: now,
       })
@@ -361,6 +361,40 @@ export class ConversationStore {
     );
     return row;
   }
+
+  updateSession(workspaceId: string, conversationId: string, fields: { title?: string | null; archived?: boolean }) {
+    const conversation = this.#loadConversation(workspaceId, conversationId);
+    const now = new Date().toISOString();
+    const updateData: Record<string, any> = { updatedAt: now };
+
+    if (fields.title !== undefined) {
+      updateData.title = fields.title;
+    }
+    if (fields.archived !== undefined) {
+      updateData.archivedAt = fields.archived ? now : null;
+    }
+
+    this.deps.db
+      .update(schema.conversations)
+      .set(updateData)
+      .where(eq(schema.conversations.id, conversationId))
+      .run();
+
+    return { ...conversation, ...updateData };
+  }
+
+  deleteConversation(workspaceId: string, conversationId: string) {
+    const conversation = this.#loadConversation(workspaceId, conversationId);
+
+    this.deps.db
+      .delete(schema.conversations)
+      .where(and(
+        eq(schema.conversations.workspaceId, workspaceId),
+        eq(schema.conversations.id, conversationId)
+      ))
+      .run();
+  }
+
 
   #loadConversation(workspaceId: string, conversationId: string) {
     const conversation = this.deps.db

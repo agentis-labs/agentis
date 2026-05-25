@@ -10,7 +10,8 @@
  * version entries here.
  *
  * Adding a migration:
- *   1. Pick the next version number (monotonic, no gaps).
+ *   1. Pick the next never-issued version number. Versions remain reserved
+ *      even if the release that introduced them is later removed from code.
  *   2. Add a new entry to SQLITE_MIGRATIONS with `version`, `name`, `sql`.
  *   3. The SQL must be idempotent (CREATE TABLE IF NOT EXISTS, etc.).
  *   4. Mirror the change in src/sqlite/schema.ts so drizzle stays in sync.
@@ -35,5 +36,23 @@ export const SQLITE_MIGRATIONS: readonly Migration[] = [
     version: 1,
     name: 'init',
     sql: EMBEDDED_INIT_SQL,
+  },
+  // Pre-v1 builds issued versions 2 through 38. Existing workspaces still
+  // carry those rows in schema_migrations, so those IDs cannot be reused.
+  {
+    version: 39,
+    name: 'agent_memories',
+    sql: `
+CREATE TABLE IF NOT EXISTS agent_memories (
+  id           TEXT PRIMARY KEY,
+  agent_id     TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  section      TEXT NOT NULL DEFAULT 'Notes',
+  content      TEXT NOT NULL,
+  tags         TEXT NOT NULL DEFAULT '[]',
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_memories_agent ON agent_memories(agent_id, workspace_id);
+`,
   },
 ];

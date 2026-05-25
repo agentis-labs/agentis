@@ -15,7 +15,7 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
-export type ToolCallStatus = 'running' | 'success' | 'error';
+export type ToolCallStatus = 'running' | 'success' | 'error' | 'paused';
 
 export interface ToolCallPillData {
   /** Stable id from the streaming protocol. */
@@ -42,7 +42,7 @@ export function ToolCallPill({ data }: { data: ToolCallPillData }) {
     <div
       className={clsx(
         'rounded-md border bg-canvas/70 text-[11px]',
-        data.status === 'error' ? 'border-danger/40' : 'border-line/60',
+        data.status === 'error' ? 'border-danger/40' : data.status === 'paused' ? 'border-warn/45' : 'border-line/60',
       )}
       data-testid="tool-call-pill"
       data-status={data.status}
@@ -70,6 +70,12 @@ export function ToolCallPill({ data }: { data: ToolCallPillData }) {
             <>
               <Loader2 size={10} className="animate-spin text-accent" />
               <span className="text-accent">running</span>
+            </>
+          )}
+          {data.status === 'paused' && (
+            <>
+              <span className="text-warn">⏱</span>
+              <span className="text-warn">paused</span>
             </>
           )}
           {data.status === 'success' && (

@@ -111,4 +111,42 @@ describe('<AgentConfigPanel /> runtime connection', () => {
     expect(installCalls).toHaveLength(0);
     expect(agentPatchCalls).toHaveLength(0);
   });
+
+  it('clears stale setting_up status when the CLI runtime is missing', async () => {
+    const onSaved = vi.fn();
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/v1/harness/detect') {
+        return jsonResponse({
+          harnesses: [
+            {
+              adapterType: 'claude_code',
+              harness: 'Claude Code',
+              status: 'not_found',
+              detail: 'Command not found in PATH: "claude"',
+            },
+          ],
+        });
+      }
+      if (path === '/v1/agents/agent-1' && init?.method === 'PATCH') return jsonResponse({ ok: true });
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    render(<AgentConfigPanel agent={{ ...baseAgent, status: 'setting_up' }} allAgents={[]} onSaved={onSaved} />);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/v1/agents/agent-1',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'error' }),
+        }),
+      );
+    });
+
+    const installCalls = fetchSpy.mock.calls.filter(([input]) => String(input) === '/v1/harness/install');
+    expect(installCalls).toHaveLength(0);
+    expect(onSaved).toHaveBeenCalled();
+  });
 });

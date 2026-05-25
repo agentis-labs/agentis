@@ -113,6 +113,11 @@ export async function commissionAgent(deps: AgentCommissionDeps, input: Commissi
         .run();
     } catch (err) {
       deps.logger.warn('agents.register_failed', { id, err: (err as Error).message });
+      deps.db
+        .update(schema.agents)
+        .set({ status: 'error', updatedAt: new Date().toISOString() })
+        .where(eq(schema.agents.id, id))
+        .run();
     }
   }
 

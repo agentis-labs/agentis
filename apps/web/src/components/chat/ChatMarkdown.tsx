@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
 
 /**
  * ChatMarkdown — a tiny, dependency-free Markdown renderer for assistant
@@ -13,6 +13,131 @@ import { Fragment, type ReactNode } from 'react';
  * (e.g. an unclosed ``` fence or `**bold`) degrades to literal text rather than
  * throwing, which is exactly what we want while tokens are still arriving.
  */
+function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) {
+  const [copied, setCopied] = useState(false);
+  const parts = lang.split(':');
+  const rawLang = parts[0]?.trim() || '';
+  const filePath = parts[1]?.trim() || '';
+
+  const displayLang = rawLang || 'code';
+  const isShell = ['bash', 'sh', 'shell', 'zsh', 'powershell', 'cmd'].includes(rawLang.toLowerCase());
+  const isDiff = rawLang.toLowerCase().startsWith('diff');
+
+  function handleCopy() {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  }
+
+  if (isDiff) {
+    const lines = content.split('\n');
+    return (
+      <div className="my-3 overflow-hidden rounded-xl border border-line bg-surface shadow-[0_4px_24px_rgba(0,0,0,0.12)]">
+        <div className="flex items-center justify-between border-b border-line bg-surface-2 px-3 py-1.5 font-mono text-[11px] text-text-muted">
+          <div className="flex items-center gap-1.5 font-semibold text-text-primary">
+            <span className="h-2 w-2 rounded-full bg-accent" />
+            <span className="uppercase tracking-wider">Diff</span>
+            {filePath && <span className="opacity-60">· {filePath}</span>}
+          </div>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="flex items-center gap-1 rounded bg-canvas px-2 py-0.5 transition hover:bg-surface-3 hover:text-text-primary"
+          >
+            {copied ? (
+              <>
+                <svg className="h-3 w-3 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                <span className="text-success font-semibold">Copied!</span>
+              </>
+            ) : (
+              <>
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                </svg>
+                <span>Copy</span>
+              </>
+            )}
+          </button>
+        </div>
+        <div className="overflow-x-auto bg-canvas/40 p-2 font-mono text-[11px] leading-5">
+          {lines.map((line, idx) => {
+            let lineCls = 'text-text-secondary px-2';
+            if (line.startsWith('+')) {
+              lineCls = 'bg-[rgba(34,197,94,0.12)] text-[rgb(34,197,94)] border-l-2 border-green-500 px-2 font-semibold';
+            } else if (line.startsWith('-')) {
+              lineCls = 'bg-[rgba(239,68,68,0.12)] text-[rgb(239,68,68)] border-l-2 border-red-500 px-2 opacity-90';
+            } else if (line.startsWith('@@')) {
+              lineCls = 'text-[rgb(59,130,246)] bg-blue-500/5 px-2 font-semibold';
+            }
+            return (
+              <div key={idx} className={`${lineCls} whitespace-pre break-all`}>
+                {line}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="my-3 overflow-hidden rounded-xl border border-line bg-surface shadow-[0_4px_24px_rgba(0,0,0,0.12)]">
+      <div className={`flex items-center justify-between border-b border-line bg-surface-2 px-3 py-1.5 font-mono text-[11px] text-text-muted ${
+        isShell ? 'bg-black/95 border-b border-white/10' : ''
+      }`}>
+        <div className="flex items-center gap-1.5">
+          {isShell ? (
+            <>
+              <div className="flex gap-1">
+                <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f56]" />
+                <span className="h-2.5 w-2.5 rounded-full bg-[#ffbd2e]" />
+                <span className="h-2.5 w-2.5 rounded-full bg-[#27c93f]" />
+              </div>
+              <span className="font-semibold text-white/80 uppercase ml-1 tracking-wider">Terminal</span>
+            </>
+          ) : (
+            <>
+              <span className="rounded bg-canvas/80 px-1.5 py-0.5 font-bold text-accent uppercase tracking-wider text-[9px]">{displayLang}</span>
+              {filePath && <span className="font-semibold text-text-primary text-[11px]">{filePath}</span>}
+            </>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className={`flex items-center gap-1 rounded bg-canvas px-2 py-0.5 transition hover:bg-surface-3 hover:text-text-primary ${
+            isShell ? 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white' : ''
+          }`}
+        >
+          {copied ? (
+            <>
+              <svg className="h-3 w-3 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+              <span className="text-success font-semibold">Copied!</span>
+            </>
+          ) : (
+            <>
+              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+              </svg>
+              <span>Copy</span>
+            </>
+          )}
+        </button>
+      </div>
+      <pre className={`overflow-x-auto p-3 text-[11.5px] leading-relaxed ${
+        isShell ? 'bg-black/90 font-mono text-green-400' : 'bg-canvas/40'
+      }`}>
+        <code className={`font-mono ${isShell ? 'text-green-400' : 'text-text-secondary'}`}>{content}</code>
+      </pre>
+    </div>
+  );
+}
+
 export function ChatMarkdown({ text }: { text: string }) {
   const blocks = parseBlocks(text);
   return <div className="space-y-2 break-words">{blocks.map((block, i) => renderBlock(block, i))}</div>;
@@ -119,14 +244,7 @@ function parseBlocks(input: string): Block[] {
 function renderBlock(block: Block, key: number): ReactNode {
   switch (block.kind) {
     case 'code':
-      return (
-        <pre
-          key={key}
-          className="overflow-x-auto rounded-md border border-line/60 bg-canvas/80 p-2.5 text-[11.5px] leading-relaxed"
-        >
-          <code className="font-mono text-text-secondary">{block.content}</code>
-        </pre>
-      );
+      return <PremiumCodeBlock key={key} lang={block.lang} content={block.content} />;
     case 'heading': {
       const sizes: Record<number, string> = {
         1: 'text-[15px] font-semibold',

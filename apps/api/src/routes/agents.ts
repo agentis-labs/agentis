@@ -143,6 +143,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         const stats = statsByAgent.get(agent.id) ?? createAgentNodeStats();
         return {
           ...presentAgent(agent, deps.adapters),
+          managerId: agent.reportsTo ?? null,
+          domainColor: space?.color ?? agent.colorHex ?? null,
+          canvasAngle: canvasAngleFromPosition(agent.canvasPosition),
           spaceName: space?.name,
           spaceColorHex: space?.color,
           runsToday: stats.runsToday,
@@ -317,6 +320,15 @@ function runCostCents(run: { runState: unknown } & Record<string, unknown>) {
   const observability = objectRecord(state.observability);
   const nested = observability.costMicros;
   return typeof nested === 'number' && Number.isFinite(nested) ? Math.max(0, Math.round(nested / 10_000)) : 0;
+}
+
+function canvasAngleFromPosition(value: unknown): number | null {
+  const pos = objectRecord(value);
+  const x = typeof pos.x === 'number' ? pos.x : null;
+  const y = typeof pos.y === 'number' ? pos.y : null;
+  if (x == null || y == null || (!x && !y)) return null;
+  const angle = Math.atan2(y, x) * (180 / Math.PI);
+  return Math.round((angle + 360) % 360);
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {

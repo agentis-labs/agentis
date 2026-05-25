@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { V1HarnessAdapterType } from './harnessProbe.js';
@@ -38,10 +38,26 @@ export function listAgentInstructionFiles(agent: AgentInstructionOwner): AgentIn
 
   const seen = new Set(files.map((file) => file.key));
   for (const candidate of instructionCandidates(agent)) {
+    const key = fileKeyFor(candidate.path);
+    if (seen.has(key)) continue;
     const file = readCandidate(candidate);
-    if (!file || seen.has(file.key)) continue;
-    seen.add(file.key);
-    files.push(file);
+    if (file) {
+      seen.add(key);
+      files.push(file);
+    } else if (candidate.primary) {
+      // Surface the runtime's canonical instruction file even when it doesn't
+      // exist yet, so the operator can create + edit it inline from the UI.
+      // Done uniformly for every runtime (codex / claude_code / cursor / hermes).
+      seen.add(key);
+      files.push({
+        key,
+        name: displayName(candidate.path),
+        description: `${candidate.description} — ${friendlyPath(candidate.path)} (not created yet)`,
+        content: '',
+        source: candidate.source,
+        path: candidate.path,
+      });
+    }
   }
   return files;
 }
@@ -56,6 +72,9 @@ export function resolveWritableInstructionFile(agent: AgentInstructionOwner, key
 }
 
 export function writeInstructionFile(target: { kind: 'file'; path: string }, content: string) {
+  // Create the parent dir on demand so a not-yet-created canonical runtime file
+  // (e.g. ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md) can be written from the UI.
+  mkdirSync(path.dirname(target.path), { recursive: true });
   writeFileSync(target.path, content, 'utf8');
 }
 
@@ -64,6 +83,8 @@ interface InstructionCandidate {
   source: InstructionSource;
   description: string;
   readonly?: boolean;
+  /** Canonical runtime file — surfaced (creatable) even when it doesn't exist. */
+  primary?: boolean;
 }
 
 function instructionCandidates(agent: AgentInstructionOwner): InstructionCandidate[] {
@@ -77,26 +98,28 @@ function instructionCandidates(agent: AgentInstructionOwner): InstructionCandida
     addWorkspaceCandidates(candidates, cwd);
   }
 
+  // Runtime home instruction files — one canonical (always-surfaced, creatable)
+  // file per runtime, plus any legacy variants we also recognize. Every CLI
+  // runtime is handled uniformly here.
   if (adapterType === 'codex') {
     const codexHome = firstString(process.env.CODEX_HOME) ?? path.join(home, '.codex');
+    addFile(candidates, path.join(codexHome, 'AGENTS.md'), 'runtime', 'Codex home instructions', { primary: true });
     addFile(candidates, path.join(codexHome, 'AGENTS'), 'runtime', 'Codex home instructions');
-    addFile(candidates, path.join(codexHome, 'AGENTS.md'), 'runtime', 'Codex home instructions');
   }
 
   if (adapterType === 'claude_code') {
     const claudeHome = firstString(process.env.CLAUDE_CONFIG_DIR) ?? path.join(home, '.claude');
-    addFile(candidates, path.join(claudeHome, 'CLAUDE.md'), 'runtime', 'Claude home instructions');
-    addFile(candidates, path.join(claudeHome, 'agents.md'), 'runtime', 'Claude home instructions');
+    addFile(candidates, path.join(claudeHome, 'CLAUDE.md'), 'runtime', 'Claude Code home instructions', { primary: true });
   }
 
   if (adapterType === 'cursor') {
-    addFile(candidates, path.join(home, '.cursorrules'), 'runtime', 'Cursor user rules');
+    addFile(candidates, path.join(home, '.cursorrules'), 'runtime', 'Cursor user rules', { primary: true });
     addDirectory(candidates, path.join(home, '.cursor', 'rules'), 'runtime', 'Cursor user rule');
   }
 
   if (adapterType === 'hermes_agent') {
     const hermesHome = firstString(process.env.HERMES_HOME) ?? path.join(home, '.hermes');
-    addFile(candidates, path.join(hermesHome, 'AGENTS.md'), 'runtime', 'Hermes home instructions');
+    addFile(candidates, path.join(hermesHome, 'AGENTS.md'), 'runtime', 'Hermes home instructions', { primary: true });
     addFile(candidates, path.join(hermesHome, 'HERMES.md'), 'runtime', 'Hermes home instructions');
   }
 
@@ -127,8 +150,8 @@ function addDirectory(candidates: InstructionCandidate[], dir: string, source: I
   }
 }
 
-function addFile(candidates: InstructionCandidate[], filePath: string, source: InstructionSource, description: string) {
-  candidates.push({ path: path.resolve(filePath), source, description });
+function addFile(candidates: InstructionCandidate[], filePath: string, source: InstructionSource, description: string, opts?: { primary?: boolean; readonly?: boolean }) {
+  candidates.push({ path: path.resolve(filePath), source, description, primary: opts?.primary, readonly: opts?.readonly });
 }
 
 function readCandidate(candidate: InstructionCandidate): AgentInstructionFile | null {

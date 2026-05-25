@@ -113,6 +113,20 @@ export function AgentConfigPanel({
     });
   }
 
+  async function markRuntimeMissing(message: string) {
+    setRuntimeRepair({ phase: 'missing', message });
+    if (agent.status !== 'setting_up') return;
+    try {
+      await api(`/v1/agents/${agent.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'error' }),
+      });
+      onSaved();
+    } catch {
+      // Best-effort cleanup: the visible panel state still stops showing setup.
+    }
+  }
+
   async function saveRuntime() {
     setSavingRuntime(true);
     try {
@@ -157,7 +171,7 @@ export function AgentConfigPanel({
       }
 
       const message = missingRuntimeMessage(adapterType, detection);
-      setRuntimeRepair({ phase: 'missing', message });
+      await markRuntimeMissing(message);
       if (trigger === 'manual') toast.warn('Runtime not found', message);
       return false;
     } catch (error) {

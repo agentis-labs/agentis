@@ -12,16 +12,20 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { REALTIME_EVENTS } from '@agentis/core';
 import {
+  AlertTriangle,
   Bot,
   Boxes,
   BrainCircuit,
   BookOpen,
+  CheckCircle2,
+  Clock,
   Database,
   FileText,
   Layers,
   PackageOpen,
   ShieldCheck,
   Workflow,
+  X,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../../lib/api';
@@ -35,7 +39,7 @@ import type {
   WorkspaceFleetOverview,
   WorkspaceUser,
 } from '../../lib/workspaceData';
-import { useChatPanelStore } from '../chat/ChatPanelStore';
+import { useChatPanelStore, type ChatPanelState } from '../chat/ChatPanelStore';
 import { AgentCreateWizard } from '../agents/AgentCreateWizard';
 import { captureFlip, type FlipSnapshot } from '../shared/flip';
 import { AgentLiveFeed } from './AgentLiveFeed';
@@ -50,6 +54,7 @@ import type {
   CanvasEdge,
   CanvasModel,
   CanvasNode,
+  CanvasOperationalState,
   ComposerRecentCompletion,
   EcosystemData,
   EdgeAnimation,
@@ -137,9 +142,13 @@ const ECOSYSTEM_REFRESH_EVENTS = [
 ] as const;
 
 const NODE = {
-  orchestrator: { width: 258, height: 96 },
-  manager: { width: 230, height: 84 },
-  worker: { width: 214, height: 80 },
+  orchestrator: { width: 292, height: 110 },
+  manager: { width: 224, height: 84 },
+  worker: { width: 178, height: 66 },
+  workflow: { width: 196, height: 68 },
+  knowledge: { width: 176, height: 62 },
+  approval: { width: 190, height: 68 },
+  artifact: { width: 150, height: 48 },
   resource: { width: 190, height: 70 },
 };
 
@@ -177,12 +186,14 @@ export function WorkspaceEcosystemCanvas({
   const [viewport, setViewportState] = useState<CanvasViewport>({ pan: { x: 0, y: 0 }, zoom: 1 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [triageOpen, setTriageOpen] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [entrancePhase, setEntrancePhase] = useState<EntrancePhase>('idle');
   const [createPreset, setCreatePreset] = useState<{ role: 'orchestrator' | 'manager' | 'worker'; flipFrom: FlipSnapshot | null; lock: boolean } | null>(null);
   const chatState = useChatPanelStore((state) => state.state);
+  const dockedWidth = useChatPanelStore((state) => state.dockedWidth);
 
   const refresh = useCallback(async () => {
     setData((current) => ({ ...current, loading: true }));
@@ -246,14 +257,32 @@ export function WorkspaceEcosystemCanvas({
     };
   }, []);
 
+  const artifactFocusWorkflowId = useMemo(() => {
+    if (selectedNodeId?.startsWith('workflow-')) return selectedNodeId.slice('workflow-'.length);
+    if (selectedNodeId?.startsWith('artifact-')) {
+      const artifactId = selectedNodeId.slice('artifact-'.length);
+      return artifacts.find((artifact) => artifact.id === artifactId)?.workflowId ?? null;
+    }
+    return null;
+  }, [artifacts, selectedNodeId]);
+  const revealKnowledgeNodes = shouldRevealKnowledgeNodes(selectedNodeId, agents);
+  const canvasData = useMemo<EcosystemData>(
+    () => revealKnowledgeNodes ? data : { ...data, knowledgeBases: [] },
+    [data, revealKnowledgeNodes],
+  );
+  const canvasArtifacts = useMemo(
+    () => selectCanvasArtifacts(artifacts, artifactFocusWorkflowId),
+    [artifactFocusWorkflowId, artifacts],
+  );
+
   const virtualSize = useMemo(
-    () => computeVirtualCanvasSize(data, agents, activeRuns, artifacts, approvals, containerSize),
-    [data, agents, activeRuns, artifacts, approvals, containerSize],
+    () => computeVirtualCanvasSize(canvasData, agents, activeRuns, canvasArtifacts, approvals, containerSize),
+    [canvasData, agents, activeRuns, canvasArtifacts, approvals, containerSize],
   );
 
   const model = useMemo(
-    () => buildCanvasModel(data, agents, activeRuns, artifacts, approvals, failedRuns, virtualSize),
-    [data, agents, activeRuns, artifacts, approvals, failedRuns, virtualSize],
+    () => buildCanvasModel(canvasData, agents, activeRuns, canvasArtifacts, approvals, failedRuns, virtualSize),
+    [canvasData, agents, activeRuns, canvasArtifacts, approvals, failedRuns, virtualSize],
   );
   const contentBounds = useMemo(() => computeCanvasContentBounds(model.nodes), [model.nodes]);
 
@@ -269,9 +298,23 @@ export function WorkspaceEcosystemCanvas({
   const focusedNodeIds = useMemo(() => {
     if (!selectedNodeId) return null;
     const ids = new Set<string>([selectedNodeId]);
-    for (const edge of model.edges) {
-      if (edge.from === selectedNodeId) ids.add(edge.to);
-      if (edge.to === selectedNodeId) ids.add(edge.from);
+    const descendants = [selectedNodeId];
+    while (descendants.length > 0) {
+      const current = descendants.shift()!;
+      for (const edge of model.edges) {
+        if (edge.from !== current || ids.has(edge.to)) continue;
+        ids.add(edge.to);
+        descendants.push(edge.to);
+      }
+    }
+    const ancestors = [selectedNodeId];
+    while (ancestors.length > 0) {
+      const current = ancestors.shift()!;
+      for (const edge of model.edges) {
+        if (edge.to !== current || ids.has(edge.from)) continue;
+        ids.add(edge.from);
+        ancestors.push(edge.from);
+      }
     }
     return ids;
   }, [model.edges, selectedNodeId]);
@@ -283,10 +326,10 @@ export function WorkspaceEcosystemCanvas({
   useEffect(() => {
     if (initialCenteredRef.current && userMovedRef.current) return;
     if (containerSize.width <= 0 || model.nodes.length === 0) return;
-    const next = computeHomeViewport(containerSize, contentBounds);
+    const next = computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth);
     setViewport(next);
     initialCenteredRef.current = true;
-  }, [containerSize, contentBounds, model.nodes.length]);
+  }, [chatState, containerSize, contentBounds, dockedWidth, model.nodes.length]);
 
   const orchestratorNode = model.orchestratorId
     ? model.nodes.find((node) => node.id === model.orchestratorId) ?? null
@@ -294,13 +337,16 @@ export function WorkspaceEcosystemCanvas({
   const orchestratorScreen = orchestratorNode ? canvasToScreen(orchestratorNode, viewport) : null;
   const hoverScreen = hoveredNode ? canvasToScreen(hoveredNode, viewport) : null;
   const loading = (data.loading || snapshotLoading) && model.nodes.every((node) => node.ghost);
+  const runningCount = counts?.activeRuns ?? activeRuns.filter(isActiveRun).length;
   const fleetCounts: FleetCounts = {
-    activeAgents: counts?.liveAgents ?? model.activeAgentIds.size,
-    idleAgents: Math.max(0, agents.length - (counts?.liveAgents ?? model.activeAgentIds.size)),
+    activeAgents: runningCount,
+    runningAgents: runningCount,
+    idleAgents: Math.max(0, agents.length - runningCount),
     attentionCount: approvals.length + failedRuns.length,
     approvalCount: approvals.length,
     failedRunCount: failedRuns.length,
     workflows: data.workflows.length || activeRuns.length || fleet?.runs.active || 0,
+    artifactsToday: artifactsProducedToday(artifacts),
   };
   const recentCompletions = useMemo<ComposerRecentCompletion[]>(
     () => artifacts.map((artifact) => ({
@@ -380,7 +426,7 @@ export function WorkspaceEcosystemCanvas({
   }
 
   function centerOnNode(node: CanvasNode) {
-    const insets = computeViewportInsets(containerSize);
+    const insets = computeViewportInsets(containerSize, chatState, dockedWidth);
     const safeWidth = Math.max(1, containerSize.width - insets.left - insets.right);
     const safeHeight = Math.max(1, containerSize.height - insets.top - insets.bottom);
     const safeCenter = {
@@ -400,8 +446,8 @@ export function WorkspaceEcosystemCanvas({
   const resetViewport = useCallback(() => {
     userMovedRef.current = false;
     setSelectedNodeId(null);
-    animateViewportTo(computeHomeViewport(containerSize, contentBounds), 340);
-  }, [containerSize, contentBounds]);
+    animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth), 340);
+  }, [chatState, containerSize, contentBounds, dockedWidth]);
 
   const toggleFullscreen = useCallback(async () => {
     if (isFullscreen || document.fullscreenElement) {
@@ -422,10 +468,10 @@ export function WorkspaceEcosystemCanvas({
     if (!isFullscreen) return;
     userMovedRef.current = false;
     const timer = window.setTimeout(() => {
-      animateViewportTo(computeHomeViewport(containerSize, contentBounds), 280);
+      animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth), 280);
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [isFullscreen, containerSize, contentBounds]);
+  }, [isFullscreen, chatState, containerSize, contentBounds, dockedWidth]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -619,6 +665,7 @@ export function WorkspaceEcosystemCanvas({
       setSelectedNodeId(null);
       return;
     }
+    userMovedRef.current = true;
     setSelectedNodeId((current) => (current === node.id ? null : node.id));
     centerOnNode(node);
   }
@@ -668,7 +715,7 @@ export function WorkspaceEcosystemCanvas({
             if (!from || !to) return null;
             const path = edgePath(from, to, edge.type);
             const animation = computeEdgeAnimation(edge.activeRunCount, edge.type);
-            const focused = !focusedNodeIds || focusedNodeIds.has(edge.from) || focusedNodeIds.has(edge.to);
+            const focused = !focusedNodeIds || (focusedNodeIds.has(edge.from) && focusedNodeIds.has(edge.to));
             const revealed = phaseReached(entrancePhase, edgeRevealPhase(edge, nodeMap));
             return (
               <g key={edge.id} className={clsx(focused ? undefined : 'opacity-[0.14]', !revealed && 'invisible')}>
@@ -769,9 +816,23 @@ export function WorkspaceEcosystemCanvas({
         onRefresh={refresh}
       />
 
+      <CanvasTriagePanel
+        open={triageOpen}
+        activeRuns={activeRuns.filter(isActiveRun)}
+        approvals={approvals}
+        onClose={() => setTriageOpen(false)}
+        onNavigate={(route) => {
+          setTriageOpen(false);
+          nav(route);
+        }}
+        onRefresh={refresh}
+      />
+
       <CanvasHudBar
         counts={fleetCounts}
+        connected={fleet?.gateways.connected ? fleet.gateways.connected > 0 : true}
         isFullscreen={isFullscreen}
+        onOpenTriage={() => setTriageOpen(true)}
         onToggleFullscreen={() => void toggleFullscreen()}
         onResetView={resetViewport}
       />
@@ -821,8 +882,12 @@ export function buildCanvasModel(
   const roles = classifyAgents(agents);
   const managerCount = Math.max(roles.managers.length, agents.length === 0 ? 2 : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0);
   const workerCount = Math.max(roles.workers.length, agents.length === 0 ? 4 : roles.workers.length === 0 ? Math.max(2, roles.managers.length) : 0);
+  const workerSize = computeWorkerNodeSize(workerCount);
+  const workerColumns = computeWorkerColumns(workerCount);
+  const workerRows = Math.max(1, Math.ceil(workerCount / Math.max(1, workerColumns)));
   const managerPositions = distributeRow(managerCount, canvasSize.width, 350, NODE.manager.width);
-  const workerPositions = distributeRow(workerCount, canvasSize.width, 530, NODE.worker.width);
+  const workerPositions = distributeLayer(workerCount, canvasSize.width, 530, workerSize.width, workerSize.height + 42, workerColumns);
+  const resourceStartY = 530 + workerRows * (workerSize.height + 42) + 68;
   const availableCommandSourceIds = new Set<string>();
 
   const orchestratorId = roles.orchestrator ? `agent-${roles.orchestrator.id}` : 'ghost-orchestrator';
@@ -845,17 +910,15 @@ export function buildCanvasModel(
   for (let index = roles.managers.length; index < managerCount; index += 1) {
     const id = `ghost-manager-${index}`;
     const pos = managerPositions[index] ?? { x: canvasSize.width / 2, y: 350 };
-    nodes.push(ghostNode(id, 'manager', index === 0 ? 'Manager layer' : `Manager ${index + 1}`, 'assign a space or team', pos, NODE.manager));
+    nodes.push(ghostNode(id, 'manager', index === 0 ? 'Manager layer' : `Manager ${index + 1}`, 'assign a team or domain', pos, NODE.manager));
     managerNodeIds.push(id);
     edges.push(commandEdge(orchestratorId, id, false));
   }
 
-  const workerNodeIds: string[] = [];
   roles.workers.forEach((agent, index) => {
     const pos = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
-    const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, activeRuns);
+    const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, activeRuns, workerSize);
     nodes.push(node);
-    workerNodeIds.push(node.id);
     const parentId = findParentManager(agent, managerNodeIds, roles.managers, index) ?? orchestratorId;
     if (workingAgentIds.has(agent.id)) managerActiveWorkers.set(parentId, (managerActiveWorkers.get(parentId) ?? 0) + 1);
     edges.push(commandEdge(parentId, node.id, workingAgentIds.has(agent.id) && availableCommandSourceIds.has(parentId)));
@@ -863,8 +926,7 @@ export function buildCanvasModel(
   for (let index = roles.workers.length; index < workerCount; index += 1) {
     const id = `ghost-worker-${index}`;
     const pos = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
-    nodes.push(ghostNode(id, 'worker', `Worker ${index + 1}`, 'ready for a task agent', pos, NODE.worker));
-    workerNodeIds.push(id);
+    nodes.push(ghostNode(id, 'worker', `Worker ${index + 1}`, 'ready for a task agent', pos, workerSize));
     edges.push(commandEdge(managerNodeIds[index % Math.max(1, managerNodeIds.length)] ?? orchestratorId, id, false));
   }
 
@@ -874,13 +936,10 @@ export function buildCanvasModel(
     }
   }
 
-  const resourceNodes = buildResourceNodes(data, activeRuns, artifacts, approvals, failedRuns, canvasSize, activeWorkflowIds);
+  const resourceNodes = buildResourceNodes(data, activeRuns, artifacts, approvals, failedRuns, canvasSize, activeWorkflowIds, resourceStartY);
   nodes.push(...resourceNodes);
-
   for (const resource of resourceNodes) {
-    const targetIds = resource.connectedAgentIds?.length ? resource.connectedAgentIds : [orchestratorId];
-    for (const targetId of targetIds) {
-      const from = nodes.some((node) => node.id === targetId) ? targetId : orchestratorId;
+    for (const from of resolveResourceSourceIds(resource, nodes, orchestratorId)) {
       edges.push({
         id: `resource-${from}-${resource.id}`,
         from,
@@ -945,6 +1004,31 @@ function CanvasNodeCard({
   onLeave: () => void;
 }) {
   const elapsed = node.startedAt ? formatElapsed(node.startedAt, now) : null;
+  const isAgentNode = node.kind === 'orchestrator' || node.kind === 'manager' || node.kind === 'worker';
+  const isOperationalWarning = Boolean(node.outOfCredits || node.warn);
+  const compact = node.height <= 60 || node.kind === 'artifact';
+  const showSubtitle = !compact || node.kind !== 'worker';
+  const titleClass = node.kind === 'orchestrator'
+    ? 'text-[14px]'
+    : compact
+      ? 'text-[11px]'
+      : 'text-[12px]';
+  const avatarClass = node.kind === 'orchestrator'
+    ? 'h-12 w-12'
+    : node.kind === 'manager'
+      ? 'h-10 w-10'
+      : node.kind === 'worker' || node.kind === 'workflow'
+        ? compact ? 'h-7 w-7 rounded-[8px]' : 'h-9 w-9 rounded-[10px]'
+        : node.kind === 'artifact'
+          ? 'h-7 w-7 rounded-[8px]'
+          : 'h-9 w-9';
+  const statusLabelText = node.warn
+    ? node.status === 'offline'
+      ? 'offline'
+      : 'needs attention'
+    : node.online
+      ? 'online'
+      : 'idle';
   const style = {
     left: node.x,
     top: node.y,
@@ -963,7 +1047,8 @@ function CanvasNodeCard({
       onMouseEnter={onHover}
       onMouseLeave={onLeave}
       className={clsx(
-        'home-node-enter absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border px-3 text-left shadow-card transition duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-muted focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
+        'home-node-enter absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border text-left shadow-card transition duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-muted focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
+        compact ? 'px-2' : 'px-3',
         node.kind === 'orchestrator' && node.status !== 'offline' && node.status !== 'error' && 'home-orchestrator-aura',
         node.ghost && 'home-ghost-breathe',
         node.outOfCredits
@@ -976,14 +1061,15 @@ function CanvasNodeCard({
                 ? 'border-dashed border-line bg-surface/45 text-text-muted'
                 : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
         selected && 'ring-2 ring-violet-300/55',
-        dimmed && 'opacity-25',
+        dimmed && 'opacity-[0.32] saturate-[0.6]',
       )}
       style={{ ...style, visibility: revealed ? 'visible' : 'hidden' }}
     >
-      <div className="flex h-full items-center gap-3">
+      <div className={clsx('flex h-full items-center', compact ? 'gap-2' : 'gap-3')}>
         <span
           className={clsx(
-            'relative flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-card border',
+            'relative flex shrink-0 items-center justify-center overflow-hidden rounded-card border',
+            avatarClass,
             node.outOfCredits
               ? 'border-warn/50 bg-warn/10 text-warn shadow-[0_0_8px_rgba(245,158,11,0.2)]'
               : node.warn
@@ -994,20 +1080,154 @@ function CanvasNodeCard({
                     ? 'border-line bg-canvas/50 text-text-muted'
                     : 'border-line bg-surface-2 text-text-secondary',
           )}
-          style={{ color: node.accent ?? undefined }}
+          style={{ color: isOperationalWarning ? undefined : node.accent ?? undefined }}
         >
           {node.imageUrl ? <img src={node.imageUrl} alt="" className="h-full w-full object-cover" /> : node.icon}
-          {node.active && !node.progress && <span className="absolute right-1 top-1 h-2 w-2 animate-pulse-dot rounded-full bg-accent" />}
+          {isAgentNode && !isOperationalWarning && (
+            <span
+              role="status"
+              aria-label={`${node.title} ${statusLabelText}`}
+              title={`${node.title} ${statusLabelText}`}
+              className={clsx(
+                'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-canvas',
+                node.online
+                  ? 'bg-success shadow-[0_0_12px_rgba(74,222,128,0.75)]'
+                  : 'bg-text-muted',
+                node.active && 'animate-pulse-dot',
+              )}
+            >
+              <span className="sr-only">{node.title} {statusLabelText}</span>
+            </span>
+          )}
           {node.progress != null && node.active && <ProgressRing progress={node.progress} />}
-          {node.warn && <span className="absolute bottom-1 left-1 h-2 w-2 animate-pulse-dot rounded-full bg-warn" />}
+          {isOperationalWarning && (
+            <span
+              role={isAgentNode ? 'status' : undefined}
+              aria-label={isAgentNode ? `${node.title} ${statusLabelText}` : undefined}
+              title={isAgentNode ? `${node.title} ${statusLabelText}` : undefined}
+              className={clsx(
+                'absolute bottom-1 left-1 h-2 w-2 animate-pulse-dot rounded-full',
+                node.status === 'offline' ? 'bg-danger' : 'bg-warn',
+              )}
+            />
+          )}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] font-semibold text-text-primary">{node.title}</span>
-          <span className="mt-0.5 block truncate text-[11px] text-text-muted">{node.subtitle}</span>
+          <span className={clsx('block truncate font-semibold text-text-primary', titleClass)}>{node.title}</span>
+          {showSubtitle && <span className="mt-0.5 block truncate text-[10px] text-text-muted">{node.subtitle}</span>}
           {elapsed && <span className="mt-1 block text-[10px] font-semibold text-accent">{elapsed}</span>}
         </span>
       </div>
     </button>
+  );
+}
+
+function CanvasTriagePanel({
+  open,
+  activeRuns,
+  approvals,
+  onClose,
+  onNavigate,
+  onRefresh,
+}: {
+  open: boolean;
+  activeRuns: WorkspaceActiveRun[];
+  approvals: WorkspaceApproval[];
+  onClose: () => void;
+  onNavigate: (route: string) => void;
+  onRefresh: () => void;
+}) {
+  if (!open) return null;
+  const hasLiveTriage = activeRuns.length > 0 || approvals.length > 0;
+
+  async function resolveApproval(approval: WorkspaceApproval, decision: 'approve' | 'reject') {
+    await api(`/v1/approvals/${approval.id}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    }).catch(() => undefined);
+    onRefresh();
+  }
+
+  return (
+    <div data-canvas-control className="absolute bottom-20 right-4 z-50 w-[min(420px,calc(100%-2rem))] rounded-2xl border border-line bg-surface/96 shadow-2xl backdrop-blur-xl" role="dialog" aria-label="Workspace triage">
+      <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">Workspace triage</div>
+          <h2 className="mt-1 text-heading text-text-primary">Live action queue</h2>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close triage"
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        >
+          <X size={15} />
+        </button>
+      </header>
+
+      <div className="max-h-[420px] overflow-y-auto px-4 py-4">
+        {!hasLiveTriage && (
+          <div className="rounded-card border border-line bg-canvas/45 px-4 py-5 text-center">
+            <CheckCircle2 size={28} className="mx-auto text-accent" />
+            <div className="mt-3 text-subheading text-text-primary">Nothing needs live triage.</div>
+            <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
+              No runs are executing and there are no pending approvals. Failed runs and viewed alerts stay in Notifications.
+            </p>
+          </div>
+        )}
+
+        {activeRuns.length > 0 && (
+          <section className="space-y-2">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+              <Clock size={13} />
+              Running now
+            </div>
+            {activeRuns.map((run) => (
+              <button
+                key={run.id}
+                type="button"
+                onClick={() => onNavigate(`/runs/${run.id}`)}
+                className="block w-full rounded-card border border-line bg-canvas/45 px-3 py-2 text-left hover:border-line-strong hover:bg-surface-2"
+              >
+                <div className="truncate text-[13px] font-medium text-text-primary">{run.workflowName}</div>
+                <div className="mt-0.5 truncate text-[11px] text-text-muted">{activeRunSubtitle(run)}</div>
+              </button>
+            ))}
+          </section>
+        )}
+
+        {approvals.length > 0 && (
+          <section className={clsx('space-y-2', activeRuns.length > 0 && 'mt-5')}>
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+              <AlertTriangle size={13} className="text-warn" />
+              Pending approvals
+            </div>
+            {approvals.map((approval) => (
+              <div key={approval.id} className="rounded-card border border-warn/25 bg-warn-soft px-3 py-2">
+                <div className="truncate text-[13px] font-medium text-text-primary">{approval.workflowName ?? 'Approval needed'}</div>
+                <div className="mt-1 text-[12px] leading-relaxed text-text-secondary">{approval.summary ?? approval.agentName ?? 'Waiting for an operator decision.'}</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void resolveApproval(approval, 'approve')}
+                    className="inline-flex h-7 items-center rounded-btn bg-text-primary px-2.5 text-[11px] font-medium text-canvas hover:bg-white"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void resolveApproval(approval, 'reject')}
+                    className="inline-flex h-7 items-center rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1065,15 +1285,19 @@ function computeVirtualCanvasSize(
   const resources = data.workflows.length + data.knowledgeBases.length + artifacts.length + approvals.length;
   const managerCount = Math.max(roles.managers.length, agents.length === 0 ? 2 : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0);
   const workerCount = Math.max(roles.workers.length, agents.length === 0 ? 4 : roles.workers.length === 0 ? Math.max(2, roles.managers.length) : 0);
+  const workerSize = computeWorkerNodeSize(workerCount);
+  const workerColumns = computeWorkerColumns(workerCount);
+  const workerRows = Math.max(1, Math.ceil(workerCount / Math.max(1, workerColumns)));
   const width = Math.max(
     containerSize.width,
     1180,
-    managerCount * 270 + 320,
-    workerCount * 230 + 320,
+    managerCount * (NODE.manager.width + 62) + 320,
+    Math.min(workerCount, workerColumns) * (workerSize.width + 48) + 320,
     Math.min(resources, 8) * 220 + 260,
   );
   const resourceRows = Math.max(1, Math.ceil(Math.max(resources, 4) / Math.max(4, Math.floor(width / 220))));
-  const height = Math.max(containerSize.height, 820, 700 + resourceRows * 110, activeRuns.length > 4 ? 920 : 820);
+  const resourceStartY = 530 + workerRows * (workerSize.height + 42) + 68;
+  const height = Math.max(containerSize.height, 780, resourceStartY + resourceRows * 112, activeRuns.length > 4 ? 900 : 780);
   return { width, height };
 }
 
@@ -1101,17 +1325,21 @@ function computeCanvasContentBounds(nodes: CanvasNode[]): CanvasBounds {
   };
 }
 
-function computeViewportInsets(containerSize: VirtualCanvasSize): CanvasInsets {
+function computeViewportInsets(containerSize: VirtualCanvasSize, chatState: ChatPanelState = 'hidden', dockedWidth = 0): CanvasInsets {
+  const baseSideInset = clamp(containerSize.width * 0.035, 24, 52);
+  const dockedChatInset = chatState === 'docked'
+    ? Math.min(containerSize.width * 0.44, dockedWidth + 32)
+    : 0;
   return {
-    top: clamp(containerSize.height * 0.24, 168, 208),
-    right: clamp(containerSize.width * 0.04, 24, 56),
-    bottom: clamp(containerSize.height * 0.14, 92, 122),
-    left: clamp(containerSize.width * 0.04, 24, 56),
+    top: clamp(containerSize.height * (chatState === 'docked' ? 0.14 : 0.16), 96, 138),
+    right: baseSideInset + dockedChatInset,
+    bottom: clamp(containerSize.height * 0.14, 96, 126),
+    left: baseSideInset,
   };
 }
 
-function computeHomeViewport(containerSize: VirtualCanvasSize, bounds: CanvasBounds): CanvasViewport {
-  const insets = computeViewportInsets(containerSize);
+function computeHomeViewport(containerSize: VirtualCanvasSize, bounds: CanvasBounds, chatState: ChatPanelState = 'hidden', dockedWidth = 0): CanvasViewport {
+  const insets = computeViewportInsets(containerSize, chatState, dockedWidth);
   const safeWidth = Math.max(1, containerSize.width - insets.left - insets.right);
   const safeHeight = Math.max(1, containerSize.height - insets.top - insets.bottom);
   const zoom = clamp(Math.min(safeWidth / bounds.width, safeHeight / bounds.height, 1) * 0.98, VIEWPORT_MIN, 1);
@@ -1144,16 +1372,27 @@ function agentNode(
   workingAgentIds: Set<string>,
   approvals: WorkspaceApproval[],
   activeRuns: WorkspaceActiveRun[],
+  sizeOverride?: { width: number; height: number },
 ): CanvasNode {
   const record = agent as unknown as Record<string, unknown>;
   const activeRun = activeRuns.find((run) => run.agents?.some((runAgent) => runAgent.id === agent.id));
   const active = workingAgentIds.has(agent.id);
+  const online = isAvailableAgent(agent.status);
   const approval = approvals.find((item) => item.agentName === agent.name);
-  const size = role === 'orchestrator' ? NODE.orchestrator : role === 'manager' ? NODE.manager : NODE.worker;
-  const status = statusLabel(agent.status, active ? 'working' : isAvailableAgent(agent.status) ? 'online' : 'idle');
+  const size = sizeOverride ?? (role === 'orchestrator' ? NODE.orchestrator : role === 'manager' ? NODE.manager : NODE.worker);
+  const status = statusLabel(agent.status, active ? 'working' : online ? 'online' : 'idle');
   const monthlyBudgetCents = agent.monthlyBudgetCents;
   const currentMonthSpendCents = agent.currentMonthSpendCents;
   const outOfCredits = monthlyBudgetCents !== undefined && monthlyBudgetCents !== null && currentMonthSpendCents !== undefined && currentMonthSpendCents >= monthlyBudgetCents;
+  const operationalState: CanvasOperationalState = outOfCredits || agent.status === 'error'
+    ? 'error'
+    : agent.status === 'offline'
+      ? 'offline'
+      : approval
+        ? 'attention'
+        : active
+          ? 'active'
+          : 'idle';
   return {
     id: `agent-${agent.id}`,
     kind: role,
@@ -1166,9 +1405,11 @@ function agentNode(
     height: size.height,
     role,
     active,
+    online,
     warn: Boolean(approval) || agent.status === 'error' || agent.status === 'offline' || outOfCredits,
     outOfCredits,
     status: agent.status,
+    operationalState,
     route: `/agents/${agent.id}`,
     accent: stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? '#a78bfa' : undefined),
     imageUrl: imageFromRecord(record, ['avatarUrl', 'avatarDataUrl', 'imageUrl', 'imageDataUrl', 'iconUrl', 'photoUrl', 'pictureUrl']),
@@ -1228,16 +1469,20 @@ function buildResourceNodes(
   failedRuns: WorkspaceFailedRun[],
   canvasSize: VirtualCanvasSize,
   activeWorkflowIds: Set<string>,
+  resourceStartY: number,
 ): CanvasNode[] {
   const resources: CanvasNode[] = [];
-  const columns = Math.max(4, Math.floor(canvasSize.width / 220));
+  const workflowPositions = new Map<string, Vec2>();
+  const workflowArtifactIndex = new Map<string, number>();
+  const artifactCountsByWorkflow = countArtifactsByWorkflow(artifacts);
+  const columns = Math.max(3, Math.floor(canvasSize.width / 240));
   const positions = (index: number): Vec2 => {
     const col = index % columns;
     const row = Math.floor(index / columns);
     const margin = 120;
     const available = canvasSize.width - margin * 2;
     const x = columns === 1 ? canvasSize.width / 2 : margin + (available * col) / Math.max(1, columns - 1);
-    return { x, y: 710 + row * 108 };
+    return { x, y: resourceStartY + row * 104 };
   };
 
   let index = 0;
@@ -1261,8 +1506,8 @@ function buildResourceNodes(
       subtitle: run ? activeRunSubtitle(run) : statusLabel(workflow.status, 'workflow'),
       x: pos.x,
       y: pos.y,
-      width: NODE.resource.width,
-      height: NODE.resource.height,
+      width: NODE.workflow.width,
+      height: NODE.workflow.height,
       active: Boolean(run) || activeWorkflowIds.has(workflow.id),
       warn: Boolean(failed),
       route: `/workflows/${workflow.id}`,
@@ -1270,6 +1515,7 @@ function buildResourceNodes(
       icon: <Workflow size={17} />,
       progress: runProgress(run),
       startedAt: run?.startedAt,
+      artifactCount: artifactCountsByWorkflow.get(workflow.id) ?? 0,
       tooltipLines: compactStrings([
         `Status: ${run ? activeRunSubtitle(run) : statusLabel(workflow.status, 'idle')}`,
         run?.currentStep ? `Step: ${run.currentStep}` : undefined,
@@ -1278,6 +1524,7 @@ function buildResourceNodes(
       workflow,
       connectedAgentIds,
     });
+    workflowPositions.set(workflow.id, pos);
   }
 
   for (const base of [...data.knowledgeBases].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -1290,8 +1537,8 @@ function buildResourceNodes(
       subtitle: 'knowledge base',
       x: pos.x,
       y: pos.y,
-      width: NODE.resource.width,
-      height: NODE.resource.height,
+      width: NODE.knowledge.width,
+      height: NODE.knowledge.height,
       active: false,
       route: `/knowledge/bases/${base.id}`,
       imageUrl: imageFromRecord(base, ['imageUrl', 'iconUrl']),
@@ -1302,17 +1549,23 @@ function buildResourceNodes(
   }
 
   for (const artifact of artifacts) {
-    const pos = positions(index++);
+    const workflowId = artifact.workflowId ?? null;
+    const workflowPos = workflowId ? workflowPositions.get(workflowId) : undefined;
+    const localIndex = workflowId ? workflowArtifactIndex.get(workflowId) ?? 0 : 0;
+    if (workflowId) workflowArtifactIndex.set(workflowId, localIndex + 1);
+    const pos = workflowPos
+      ? artifactDetailPosition(workflowPos, localIndex, workflowId ? artifactCountsByWorkflow.get(workflowId) ?? 1 : 1)
+      : positions(index++);
     resources.push({
       id: `artifact-${artifact.id}`,
       kind: 'artifact',
-      tier: 3,
+      tier: 4,
       title: artifact.title,
-      subtitle: artifact.agent ? `built by ${artifact.agent}` : 'latest output',
+      subtitle: artifact.agent ? artifact.agent : 'generated asset',
       x: pos.x,
       y: pos.y,
-      width: NODE.resource.width,
-      height: NODE.resource.height,
+      width: NODE.artifact.width,
+      height: NODE.artifact.height,
       active: false,
       route: '/artifacts',
       imageUrl: artifactImageUrl(artifact),
@@ -1337,8 +1590,8 @@ function buildResourceNodes(
       subtitle: approval.workflowName ?? 'human decision',
       x: pos.x,
       y: pos.y,
-      width: NODE.resource.width,
-      height: NODE.resource.height,
+      width: NODE.approval.width,
+      height: NODE.approval.height,
       active: false,
       warn: true,
       route: '/history?tab=runs',
@@ -1377,12 +1630,80 @@ function buildResourceNodes(
   return resources;
 }
 
+function selectCanvasArtifacts(artifacts: WorkspaceArtifact[], focusWorkflowId: string | null): WorkspaceArtifact[] {
+  if (!focusWorkflowId) return [];
+  const scoped = artifacts.filter((artifact) => {
+    return artifact.workflowId === focusWorkflowId;
+  });
+  return scoped.slice(0, 8);
+}
+
+function shouldRevealKnowledgeNodes(selectedNodeId: string | null, agents: WorkspaceAgent[]): boolean {
+  if (!selectedNodeId) return false;
+  if (selectedNodeId === 'ghost-orchestrator' || selectedNodeId.startsWith('knowledge-')) return true;
+  if (!selectedNodeId.startsWith('agent-')) return false;
+  const agentId = selectedNodeId.slice('agent-'.length);
+  const agent = agents.find((item) => item.id === agentId);
+  return Boolean(agent && normalizeRole(agent) === 'orchestrator');
+}
+
+function countArtifactsByWorkflow(artifacts: WorkspaceArtifact[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const artifact of artifacts) {
+    if (!artifact.workflowId) continue;
+    counts.set(artifact.workflowId, (counts.get(artifact.workflowId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function artifactDetailPosition(parent: Vec2, index: number, total: number): Vec2 {
+  const columns = Math.min(3, Math.max(1, total));
+  const col = index % columns;
+  const row = Math.floor(index / columns);
+  const gap = NODE.artifact.width + 18;
+  return {
+    x: parent.x + (col - (columns - 1) / 2) * gap,
+    y: parent.y + NODE.workflow.height / 2 + 64 + row * 58,
+  };
+}
+
+function computeWorkerNodeSize(count: number): { width: number; height: number } {
+  if (count >= 24) return { width: 132, height: 52 };
+  if (count >= 14) return { width: 148, height: 56 };
+  if (count >= 9) return { width: 160, height: 60 };
+  return NODE.worker;
+}
+
+function computeWorkerColumns(count: number): number {
+  if (count <= 0) return 1;
+  if (count <= 8) return count;
+  if (count <= 16) return 8;
+  return 10;
+}
+
 function distributeRow(count: number, width: number, y: number, nodeWidth: number): Vec2[] {
   if (count <= 0) return [];
   const spacing = Math.max(nodeWidth + 70, 230);
   const rowWidth = (count - 1) * spacing;
   const start = width / 2 - rowWidth / 2;
   return Array.from({ length: count }, (_, index) => ({ x: start + index * spacing, y }));
+}
+
+function distributeLayer(count: number, width: number, startY: number, nodeWidth: number, rowGap: number, maxColumns: number): Vec2[] {
+  if (count <= 0) return [];
+  const columns = Math.max(1, Math.min(count, maxColumns));
+  const spacing = nodeWidth + (count >= 14 ? 34 : count >= 9 ? 46 : 64);
+  const positions: Vec2[] = [];
+  for (let row = 0; positions.length < count; row += 1) {
+    const remaining = count - positions.length;
+    const rowCount = Math.min(columns, remaining);
+    const rowWidth = (rowCount - 1) * spacing;
+    const start = width / 2 - rowWidth / 2;
+    for (let col = 0; col < rowCount; col += 1) {
+      positions.push({ x: start + col * spacing, y: startY + row * rowGap });
+    }
+  }
+  return positions;
 }
 
 function commandEdge(from: string, to: string, active: boolean): CanvasEdge {
@@ -1394,6 +1715,35 @@ function commandEdge(from: string, to: string, active: boolean): CanvasEdge {
     activeRunCount: active ? 1 : 0,
     active,
   };
+}
+
+function resolveResourceSourceIds(resource: CanvasNode, nodes: CanvasNode[], orchestratorId: string): string[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const agentCandidates = (resource.connectedAgentIds ?? []).filter((id) => byId.has(id));
+
+  if (resource.kind === 'artifact' && resource.artifact?.workflowId) {
+    const workflowId = `workflow-${resource.artifact.workflowId}`;
+    if (byId.has(workflowId)) return [workflowId];
+  }
+
+  if (resource.kind === 'approval' && resource.approval?.agentName) {
+    const assignee = nodes.find((node) => node.agent?.name === resource.approval?.agentName);
+    if (assignee) return [assignee.id];
+  }
+
+  const bestAgentId = pickBestAgentSource(agentCandidates, byId);
+  if (bestAgentId) return [bestAgentId];
+
+  return byId.has(orchestratorId) ? [orchestratorId] : [];
+}
+
+function pickBestAgentSource(candidates: string[], byId: Map<string, CanvasNode>): string | null {
+  if (candidates.length === 0) return null;
+  return candidates.find((id) => byId.get(id)?.kind === 'manager')
+    ?? candidates.find((id) => byId.get(id)?.kind === 'worker')
+    ?? candidates.find((id) => byId.get(id)?.kind === 'orchestrator')
+    ?? candidates[0]
+    ?? null;
 }
 
 function nodeRevealPhase(node: CanvasNode): EntrancePhase {
@@ -1427,10 +1777,21 @@ function findParentManager(agent: WorkspaceAgent, managerNodeIds: string[], mana
 }
 
 function edgePath(from: CanvasNode, to: CanvasNode, type: 'command' | 'resource'): string {
-  const fromY = from.y + from.height / 2;
-  const toY = to.y - to.height / 2;
-  const midY = type === 'command' ? (fromY + toY) / 2 : fromY + Math.max(55, (toY - fromY) * 0.45);
-  const sway = type === 'resource' ? (to.x - from.x) * 0.12 : 0;
+  const verticalGap = to.y - from.y;
+  if (Math.abs(verticalGap) < Math.max(from.height, to.height)) {
+    const fromX = from.x + Math.sign(to.x - from.x || 1) * from.width / 2;
+    const toX = to.x - Math.sign(to.x - from.x || 1) * to.width / 2;
+    const midX = (fromX + toX) / 2;
+    return `M ${fromX} ${from.y} C ${midX} ${from.y}, ${midX} ${to.y}, ${toX} ${to.y}`;
+  }
+
+  const downward = verticalGap >= 0;
+  const fromY = from.y + (downward ? from.height / 2 : -from.height / 2);
+  const toY = to.y + (downward ? -to.height / 2 : to.height / 2);
+  const midY = type === 'command'
+    ? (fromY + toY) / 2
+    : fromY + (toY - fromY) * 0.42;
+  const sway = type === 'resource' ? (to.x - from.x) * 0.08 : 0;
   return `M ${from.x} ${fromY} C ${from.x + sway} ${midY}, ${to.x - sway} ${midY}, ${to.x} ${toY}`;
 }
 
@@ -1456,6 +1817,20 @@ function activeRunSubtitle(run: WorkspaceActiveRun): string {
   if (run.stepIndex != null && run.totalSteps != null) return `running - step ${run.stepIndex}/${run.totalSteps}`;
   if (run.currentStep) return run.currentStep;
   return 'running now';
+}
+
+function isActiveRun(run: WorkspaceActiveRun): boolean {
+  return run.status.toLowerCase() === 'running';
+}
+
+function artifactsProducedToday(artifacts: WorkspaceArtifact[]): number {
+  const start = startOfLocalDayMs();
+  return artifacts.filter((artifact) => Date.parse(artifact.createdAt) >= start).length;
+}
+
+function startOfLocalDayMs(): number {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 }
 
 function statusLabel(status: string | undefined, fallback: string): string {

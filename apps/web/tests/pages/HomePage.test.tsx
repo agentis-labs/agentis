@@ -118,7 +118,7 @@ describe('<HomePage />', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(screen.getByLabelText(/workspace authority canvas/i)).toBeInTheDocument();
     expect(await screen.findByText('Thomas')).toBeInTheDocument();
-    expect(screen.getByLabelText(/message the orchestrator/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/message/i)).toBeInTheDocument();
   });
 });
 
@@ -138,7 +138,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
     document.body.classList.remove('agentis-canvas-fullscreen');
   });
 
-  it('maps apps, workflows, agents, knowledge, and recent output', async () => {
+  it('maps the hierarchy directly and reveals contextual output on selection', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -147,7 +147,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
           return jsonResponse({ apps: [{ id: 'app-1', slug: 'newsletter', name: 'Newsletter App', status: 'active', category: 'Marketing' }] });
         }
         if (path === '/v1/workflows') {
-          return jsonResponse({ workflows: [{ id: 'wf-1', title: 'Weekly newsletter', status: 'active' }] });
+          return jsonResponse({ workflows: [{ id: 'wf-1', title: 'Weekly newsletter', status: 'active', spaceId: 'space-content' }] });
         }
         if (path === '/v1/knowledge-bases') {
           return jsonResponse({ knowledgeBases: [{ id: 'kb-1', name: 'Content Brain' }] });
@@ -159,19 +159,67 @@ describe('<WorkspaceEcosystemCanvas />', () => {
     render(
       <MemoryRouter>
         <WorkspaceEcosystemCanvas
-          agents={[{ id: 'a1', name: 'Thomas', status: 'online' }]}
+          agents={[
+            { id: 'orch-1', name: 'Orchestrator Prime', role: 'orchestrator', status: 'online' },
+            { id: 'mgr-1', name: 'Content Lead', role: 'manager', status: 'online', spaceId: 'space-content' },
+            { id: 'a1', name: 'Thomas', role: 'worker', status: 'online', spaceId: 'space-content' },
+          ]}
           activeRuns={[{ id: 'run-1', workflowId: 'wf-1', workflowName: 'Weekly newsletter', status: 'RUNNING', startedAt: new Date().toISOString() }]}
-          artifacts={[{ id: 'art-1', title: 'Newsletter draft', createdAt: new Date().toISOString(), agent: 'Thomas' }]}
+          artifacts={[{ id: 'art-1', title: 'Newsletter draft', createdAt: new Date().toISOString(), agent: 'Thomas', workflowId: 'wf-1' }]}
           snapshotLoading={false}
         />
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Newsletter App')).toBeInTheDocument();
-    expect(screen.getAllByText('Weekly newsletter').length).toBeGreaterThan(0);
+    expect(await screen.findByText('Content Lead')).toBeInTheDocument();
     expect(screen.getByText('Thomas')).toBeInTheDocument();
-    expect(screen.getByText('Content Brain')).toBeInTheDocument();
-    expect(screen.getAllByText('Newsletter draft').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Weekly newsletter').length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/Orchestrator Prime online/i)).toBeInTheDocument();
+    expect(screen.queryByText('Content Brain')).not.toBeInTheDocument();
+    expect(screen.queryByText('Newsletter draft')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Orchestrator Prime'));
+    expect(await screen.findByText('Content Brain')).toBeInTheDocument();
+
+    const focusedWorkflowLabels = await screen.findAllByText('Weekly newsletter');
+    fireEvent.click(focusedWorkflowLabels[0]!);
+    expect(await screen.findByText('Newsletter draft')).toBeInTheDocument();
+  });
+
+  it('opens triage without duplicating notification-only failed and attention counts', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === '/v1/apps') return jsonResponse({ apps: [] });
+        if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
+        if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
+        return jsonResponse({});
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkspaceEcosystemCanvas
+          agents={[{ id: 'a1', name: 'Thomas', status: 'online' }]}
+          activeRuns={[]}
+          failedRuns={[{ id: 'failed-1', workflowName: 'Old failed workflow' }]}
+          artifacts={[]}
+          snapshotLoading={false}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('Thomas');
+    expect(screen.getByText('running').parentElement).toHaveTextContent('0running');
+    expect(screen.getByText('idle').parentElement).toHaveTextContent('1idle');
+    expect(screen.queryByText('attention')).not.toBeInTheDocument();
+    expect(screen.queryByText('failed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/failed runs/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /triage/i }));
+    expect(screen.getByRole('dialog', { name: /workspace triage/i })).toBeInTheDocument();
+    expect(screen.getByText(/nothing needs live triage/i)).toBeInTheDocument();
   });
 
   it('keeps panning when pointer movement is delivered outside the canvas element', async () => {
@@ -247,9 +295,9 @@ describe('<WorkspaceEcosystemCanvas />', () => {
 
     expect(requestFullscreen).toHaveBeenCalled();
     expect(document.body).toHaveClass('agentis-canvas-fullscreen');
-    expect(screen.getByText('Workspace Live')).toBeInTheDocument();
-    expect(screen.getAllByText('Social Digest').length).toBeGreaterThan(0);
-    expect(screen.getByText(/need operator attention/i)).toBeInTheDocument();
+    expect(screen.getByText('Agentis Workspace')).toBeInTheDocument();
+    expect(screen.queryByText('attention')).not.toBeInTheDocument();
+    expect(screen.queryByText('failed')).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/open monitor/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/show chat/i)).not.toBeInTheDocument();
   });

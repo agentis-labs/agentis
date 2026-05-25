@@ -49,16 +49,16 @@ export function KnowledgeStatusCard({ hideWhenSeeded = false }: { hideWhenSeeded
           <BookOpen size={16} />
         </span>
         <div className="min-w-0 flex-1">
-          <h2 className="text-subheading text-text-primary">{empty ? 'Seed your workspace knowledge' : 'Workspace knowledge'}</h2>
+          <h2 className="text-subheading text-text-primary">{empty ? 'Seed your workspace Brain' : 'Workspace Brain'}</h2>
           <p className="mt-1 text-[12px] leading-relaxed text-text-muted">
             {empty ? 'Add documents so agents and workflows start with useful context.' : 'Documents and knowledge bases are available to agents and workflows.'}
           </p>
         </div>
-        <Button variant="primary" size="sm" iconRight={<ArrowRight size={12} />} onClick={() => nav('/knowledge')}>Open Knowledge</Button>
+        <Button variant="primary" size="sm" iconRight={<ArrowRight size={12} />} onClick={() => nav('/brain')}>Open Brain</Button>
       </div>
       <div className="mt-4 grid gap-2 sm:grid-cols-2">
-        <Metric icon={<FileText size={13} />} label="Documents" value={snapshot.documents.length} onClick={() => nav('/knowledge?tab=documents')} />
-        <Metric icon={<BookOpen size={13} />} label="Bases" value={snapshot.bases.length} onClick={() => nav('/knowledge?tab=bases')} />
+        <Metric icon={<FileText size={13} />} label="Documents" value={snapshot.documents.length} onClick={() => nav('/brain?tab=documents')} />
+        <Metric icon={<BookOpen size={13} />} label="Bases" value={snapshot.bases.length} onClick={() => nav('/brain?tab=bases')} />
       </div>
     </section>
   );

@@ -203,8 +203,16 @@ export function AgentQuickDetailPanel({
   const status = liveStatus ?? agent.status ?? 'offline';
   const installComplete = installSession?.phase === 'complete';
   const installFailed = installSession?.phase === 'error';
-  const isSettingUp = installSession ? !installComplete && !installFailed : status === 'setting_up';
-  const readiness = installComplete ? ('live' as Readiness) : installFailed ? ('failed' as Readiness) : isSettingUp ? ('setting_up' as Readiness) : readinessOf(status, agent.currentTaskId, agent.isPaused, agent.lastHeartbeatAt);
+  const installActive = installSession?.phase === 'installing' || installSession?.phase === 'verifying';
+  const staleSetup = status === 'setting_up' && !installSession;
+  const isSettingUp = installActive;
+  const readiness = installComplete
+    ? ('live' as Readiness)
+    : installFailed || staleSetup
+      ? ('failed' as Readiness)
+      : isSettingUp
+        ? ('setting_up' as Readiness)
+        : readinessOf(status, agent.currentTaskId, agent.isPaused, agent.lastHeartbeatAt);
   const dotClass =
     readiness === 'setting_up' ? 'bg-cyan-500' :
     readiness === 'running' ? 'bg-warn' :
@@ -302,7 +310,11 @@ export function AgentQuickDetailPanel({
                   )}
                 </div>
               ) : readiness === 'failed' ? (
-                <div className="text-[13px] text-danger">Last run failed — needs review.</div>
+                <div className="text-[13px] text-danger">
+                  {staleSetup
+                    ? 'Runtime setup is not running. Open Runtime settings to find/connect or install the harness.'
+                    : 'Last run failed - needs review.'}
+                </div>
               ) : (
                 <div className="text-[13px] text-text-secondary">
                   Waiting for work. <span className="text-text-muted">Last: {relativeTime(agent.lastActiveAt ?? agent.lastHeartbeatAt)}</span>
@@ -386,8 +398,7 @@ export function AgentQuickDetailPanel({
 function SetupPendingPanel() {
   return (
     <div className="flex items-center gap-2 text-[13px] text-text-secondary">
-      <Loader2 size={12} className="animate-spin text-cyan-400" />
-      Runtime setup is in progress. The live install log will appear here once this browser starts the background job.
+      Runtime setup is not running. Open Runtime settings to find/connect or install the harness.
     </div>
   );
 }

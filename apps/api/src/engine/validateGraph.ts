@@ -44,8 +44,8 @@ export function validateWorkflowGraph(
     const kind = node.config.kind;
     switch (kind) {
       case 'agent_task':
-        if (!node.config.agentId && (!node.config.capabilityTags || node.config.capabilityTags.length === 0)) {
-          warnings.push(`Node ${node.id} (${kind}): no agentId or capabilityTags — runs will fail until one is assigned`);
+        if (!node.config.agentId && !node.config.agentRole && (!node.config.capabilityTags || node.config.capabilityTags.length === 0)) {
+          warnings.push(`Node ${node.id} (${kind}): no agentId, agentRole, or capabilityTags — runs will fail until one is assigned`);
         }
         break;
       case 'skill_task':
@@ -89,6 +89,11 @@ export function validateWorkflowGraph(
           throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (workflow_store) must declare at least one operation`);
         }
         break;
+      case 'workspace_store':
+        if (!Array.isArray(node.config.operations) || node.config.operations.length === 0) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (workspace_store) must declare at least one operation`);
+        }
+        break;
       case 'evaluator':
         if (!node.config.targetPath) {
           throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (evaluator) missing targetPath`);
@@ -104,7 +109,7 @@ export function validateWorkflowGraph(
         break;
       case 'browser': {
         const op = node.config.operation;
-        if (op === 'navigate' || op === 'extract_text' || op === 'screenshot' || op === 'pdf') {
+        if (op !== 'serve_html') {
           if (!node.config.url && !node.config.html && !node.config.htmlPath) {
             throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Node ${node.id} (browser ${op}) requires url, html, or htmlPath`);
           }

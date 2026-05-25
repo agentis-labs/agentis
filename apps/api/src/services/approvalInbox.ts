@@ -25,13 +25,23 @@ export interface ApprovalCreateArgs {
   runId: string | null;
   taskId: string | null;
   gatewayId: string | null;
-  source: 'checkpoint' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
+  source: 'checkpoint' | 'phase_gate' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
   title: string;
   summary: string;
   confidence: number | null;
 }
 
-export type CheckpointResumeHandler = (args: { runId: string; approvalId: string }) => Promise<void>;
+/**
+ * Invoked when a run-resuming approval (`checkpoint` or `phase_gate`) is resolved.
+ * `targetId` carries the gated entity id — the checkpoint node id, or the phase id.
+ */
+export type CheckpointResumeHandler = (args: {
+  runId: string;
+  approvalId: string;
+  source: string;
+  targetId: string | null;
+  decision: 'approve' | 'reject';
+}) => Promise<void>;
 
 export class ApprovalInboxService {
   #onCheckpointResolved: CheckpointResumeHandler | null = null;
@@ -121,12 +131,17 @@ export class ApprovalInboxService {
       resolvedAt,
     });
     if (
-      args.decision === 'approve' &&
-      row.source === 'checkpoint' &&
       row.runId &&
+      (row.source === 'checkpoint' || row.source === 'phase_gate') &&
       this.#onCheckpointResolved
     ) {
-      await this.#onCheckpointResolved({ runId: row.runId, approvalId: row.id });
+      await this.#onCheckpointResolved({
+        runId: row.runId,
+        approvalId: row.id,
+        source: row.source,
+        targetId: row.taskId ?? null,
+        decision: args.decision,
+      });
     }
     return { ...row, status: next, resolvedAt, resolutionReason: args.reason ?? null };
   }

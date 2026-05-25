@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Research Assistant",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["research", "citations", "synthesis"],
         "config": {},
         "instructions": "Use citations for claims, identify uncertainty, and produce concise structured briefs.",

@@ -26,6 +26,7 @@ const createArtifactSchema = z.object({
 });
 
 const updateArtifactSchema = createArtifactSchema.partial();
+const pinSchema = z.object({ pinned: z.boolean().default(true) });
 
 export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus }) {
   const app = new Hono();
@@ -43,6 +44,7 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
     if (runId) filters.push(eq(schema.artifacts.runId, runId));
     if (conversationId) filters.push(eq(schema.artifacts.conversationId, conversationId));
     if (agentId) filters.push(eq(schema.artifacts.agentId, agentId));
+    if (c.req.query('pinned') === 'true') filters.push(eq(schema.artifacts.pinned, true));
     const rows = deps.db.select().from(schema.artifacts)
       .where(and(...filters))
       .orderBy(desc(schema.artifacts.createdAt))
@@ -96,6 +98,16 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
     };
     deps.db.update(schema.artifacts).set(next).where(eq(schema.artifacts.id, existing.id)).run();
     const artifact = { ...existing, ...next };
+    deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ARTIFACT_UPDATED, { artifact });
+    return c.json({ artifact });
+  });
+
+  app.post('/:id/pin', async (c) => {
+    const ws = getWorkspace(c);
+    const existing = loadArtifact(deps.db, ws.workspaceId, c.req.param('id'));
+    const pinned = pinSchema.parse(await c.req.json().catch(() => ({}))).pinned;
+    deps.db.update(schema.artifacts).set({ pinned, updatedAt: new Date().toISOString() }).where(eq(schema.artifacts.id, existing.id)).run();
+    const artifact = { ...existing, pinned };
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ARTIFACT_UPDATED, { artifact });
     return c.json({ artifact });
   });

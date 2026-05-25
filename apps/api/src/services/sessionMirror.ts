@@ -83,6 +83,38 @@ export class SessionMirror {
         });
         return;
       }
+      case 'agent.thinking': {
+        const payload = {
+          workspaceId: agent.workspaceId,
+          agentId,
+          agentName: agent.name,
+          runId: event.runId,
+          workflowId: event.workflowId,
+          taskId: event.taskId ?? null,
+          message: event.text ?? '',
+          at: event.timestamp,
+        };
+        this.deps.bus.publish(REALTIME_ROOMS.workspace(agent.workspaceId), REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE, payload);
+        this.deps.bus.publish(REALTIME_ROOMS.agent(agentId), REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE, payload);
+        return;
+      }
+      case 'agent.tool_call': {
+        const payload = {
+          workspaceId: agent.workspaceId,
+          agentId,
+          agentName: agent.name,
+          runId: event.runId,
+          workflowId: event.workflowId,
+          taskId: event.taskId,
+          tool: event.tool,
+          input: event.input,
+          result: event.result ?? null,
+          at: event.timestamp,
+        };
+        this.deps.bus.publish(REALTIME_ROOMS.workspace(agent.workspaceId), REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL, payload);
+        this.deps.bus.publish(REALTIME_ROOMS.agent(agentId), REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL, payload);
+        return;
+      }
       case 'agent.status': {
         this.deps.db
           .update(schema.agents)

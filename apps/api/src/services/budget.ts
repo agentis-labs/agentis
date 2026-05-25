@@ -5,12 +5,14 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { ApprovalInboxService } from './approvalInbox.js';
+import type { AuditTrailService } from './auditTrail.js';
 
 export class BudgetService {
   constructor(private readonly deps: {
     db: AgentisSqliteDb;
     bus: EventBus;
     approvals: ApprovalInboxService;
+    audit?: AuditTrailService;
   }) {}
 
   list(workspaceId: string) {
@@ -21,7 +23,23 @@ export class BudgetService {
       .where(eq(schema.budgetEvents.workspaceId, workspaceId))
       .all()
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return { agents, events };
+    const workspace = this.deps.db
+      .select({ dailyBudgetCents: schema.workspaces.dailyBudgetCents })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .get();
+    const startOfDay = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
+    const todaySpendCents = this.deps.audit?.workspaceSpendSince(workspaceId, startOfDay) ?? 0;
+    return { agents, events, dailyBudgetCents: workspace?.dailyBudgetCents ?? null, todaySpendCents };
+  }
+
+  /** Set (or clear, with null) the workspace/day cost ceiling (§5.3). */
+  setDailyBudget(workspaceId: string, dailyBudgetCents: number | null): void {
+    this.deps.db
+      .update(schema.workspaces)
+      .set({ dailyBudgetCents, updatedAt: new Date().toISOString() })
+      .where(eq(schema.workspaces.id, workspaceId))
+      .run();
   }
 
   /**

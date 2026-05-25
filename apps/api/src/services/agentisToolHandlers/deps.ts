@@ -19,6 +19,7 @@ import type { PartialReplayService } from '../partialReplay.js';
 import type { KnowledgeBaseService } from '../knowledgeBase.js';
 import type { EvaluatorRuntime } from '../evaluatorRuntime.js';
 import type { WorkspaceIntelligenceService } from '../workspaceIntelligence.js';
+import type { AgentLibraryService } from '../agentLibrary.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -34,6 +35,10 @@ export interface ToolHandlerDeps {
   knowledgeBases?: KnowledgeBaseService;
   /** Optional — used by NL workflow synthesis for structured-output LLM calls. */
   evaluatorRuntime?: EvaluatorRuntime;
+  /** Optional — dedicated workflow-synthesis runtime (§6). Falls back to evaluatorRuntime. */
+  synthesisRuntime?: EvaluatorRuntime;
   /** Optional — Layer 1 workspace context injected into build_workflow synthesis. */
   workspaceIntelligence?: WorkspaceIntelligenceService;
+  /** Optional — Principle #11 agent-as-file library; expands the casting vocabulary with custom roles. */
+  agentLibrary?: AgentLibraryService;
 }

@@ -9,6 +9,7 @@
 
 import { useState } from 'react';
 import { Code2, Database, FileText, Globe, Image as ImageIcon, Download, Eye } from 'lucide-react';
+import { DataTableViewer, CodeViewer, ImageViewer, PdfViewer, VideoPlayer, AudioPlayer, DiffViewer, CodebaseViewer, DashboardViewer, WebsitePreview, DeploymentCard, APIExplorer, dashboardSpecFrom, filesFrom, deploymentSpecFrom, openApiFrom, rowsFrom } from './OutputViewers';
 
 export interface RunArtifact {
   id: string;
@@ -72,7 +73,7 @@ function ArtifactCard({ artifact }: { artifact: RunArtifact }) {
             {artifact.type} · {formatBytes(size)}
           </div>
         </div>
-        {artifact.type === 'html' && (
+        {canPreview(artifact) && (
           <button
             type="button"
             onClick={() => setPreviewing((p) => !p)}
@@ -91,23 +92,67 @@ function ArtifactCard({ artifact }: { artifact: RunArtifact }) {
           <Download size={12} /> Download
         </button>
       </div>
-      {previewing && artifact.type === 'html' && (
-        <div className="border-t border-line bg-white p-2">
-          <iframe
-            title={`Preview of ${name}`}
-            sandbox="allow-scripts"
-            srcDoc={artifact.content}
-            className="h-[360px] w-full rounded border border-line bg-white"
-          />
-        </div>
-      )}
-      {artifact.type === 'image' && /^(https?:|data:)/.test(artifact.content ?? '') && (
+      {previewing && (
         <div className="border-t border-line p-2">
-          <img src={artifact.content} alt={name} className="max-h-64 w-full rounded object-contain" />
+          <ArtifactPreview artifact={artifact} name={name} />
         </div>
       )}
     </div>
   );
+}
+
+/** Whether an artifact has an inline viewer (drives the Preview toggle). */
+function canPreview(a: RunArtifact): boolean {
+  if (a.type === 'html' || a.type === 'code') return true;
+  if (a.type === 'image') return /^(https?:|data:)/.test(a.content ?? '');
+  if (a.type === 'document') return (a.content ?? '').startsWith('data:application/pdf');
+  if (a.type === 'data') return true;
+  return false;
+}
+
+/** Dispatch an artifact to its Layer 6 viewer. */
+function ArtifactPreview({ artifact, name }: { artifact: RunArtifact; name: string }) {
+  const content = artifact.content ?? '';
+  if (artifact.type === 'html') {
+    return <iframe title={`Preview of ${name}`} sandbox="allow-scripts" srcDoc={content} className="h-[360px] w-full rounded border border-line bg-white" />;
+  }
+  if (artifact.type === 'image') {
+    return <ImageViewer src={content} alt={name} />;
+  }
+  if (artifact.type === 'document' && content.startsWith('data:application/pdf')) {
+    return <PdfViewer src={content} name={name} />;
+  }
+  if (/^data:video\//.test(content) || /\.(mp4|webm|mov)(\?|$)/i.test(content)) {
+    return <VideoPlayer src={content} name={name} />;
+  }
+  if (/^data:audio\//.test(content) || /\.(mp3|wav|ogg|m4a)(\?|$)/i.test(content)) {
+    return <AudioPlayer src={content} name={name} />;
+  }
+  if (artifact.type === 'data') {
+    try {
+      const parsed = JSON.parse(content);
+      const api = openApiFrom(parsed);
+      if (api) return <APIExplorer spec={api} />;
+      const deploy = deploymentSpecFrom(parsed);
+      if (deploy) return <DeploymentCard spec={deploy} />;
+      const files = filesFrom(parsed);
+      if (files) return <CodebaseViewer files={files} />;
+      const dash = dashboardSpecFrom(parsed);
+      if (dash) return <DashboardViewer spec={dash} />;
+      const rows = rowsFrom(parsed);
+      if (rows) return <DataTableViewer rows={rows} />;
+      return <CodeViewer code={JSON.stringify(parsed, null, 2)} language="json" />;
+    } catch {
+      return <CodeViewer code={content} language="text" />;
+    }
+  }
+  if (artifact.type === 'code' && /^(diff --git |@@ |--- |\+\+\+ )/m.test(content)) {
+    return <DiffViewer diff={content} />;
+  }
+  if (artifact.type === 'document' && /^https?:\/\/\S+$/.test(content.trim())) {
+    return <WebsitePreview url={content.trim()} />;
+  }
+  return <CodeViewer code={content} language={artifact.type === 'code' ? 'code' : 'text'} />;
 }
 
 export function WorkflowArtifactGrid({ artifacts }: { artifacts: RunArtifact[] }) {

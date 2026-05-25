@@ -15,6 +15,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { Bot, Database, FileText, GitBranch, PauseCircle, Braces, Globe, Monitor, Tablet, Smartphone, ExternalLink } from 'lucide-react';
 import { ChatMarkdown } from '../chat/ChatMarkdown';
+import { DataTableViewer, rowsFrom } from './OutputViewers';
 
 export type OutputRenderAs = 'html' | 'markdown' | 'table' | 'json' | 'text';
 
@@ -434,8 +435,10 @@ function renderByRenderAs(renderAs: OutputRenderAs, value: unknown): React.React
         ? <div className="rounded-input border border-line bg-surface-2 p-4 text-[13px] leading-relaxed text-text-primary"><ChatMarkdown text={md} /></div>
         : <SmartArtifact value={value} />;
     }
-    case 'table':
-      return <TableArtifact value={value} />;
+    case 'table': {
+      const rows = rowsFrom(value) ?? (Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []);
+      return rows.length > 0 ? <DataTableViewer rows={rows} /> : <TableArtifact value={value} />;
+    }
     case 'text': {
       const t = extractText(value);
       return t != null ? <TextBlock text={t} /> : <JsonBlock value={value} />;

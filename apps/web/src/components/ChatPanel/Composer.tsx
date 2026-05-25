@@ -81,6 +81,10 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, []);
 
+  useEffect(() => {
+    adjustHeight();
+  }, [text, adjustHeight]);
+
   // Suggestion sources — agents for @, workflows/runs for #, slash for /.
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
   const [workflows, setWorkflows] = useState<Array<{ id: string; title: string }>>([]);

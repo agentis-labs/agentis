@@ -29,7 +29,14 @@ export function isAgentRole(value: unknown): value is AgentRole {
   return typeof value === 'string' && (AGENT_ROLES as readonly string[]).includes(value);
 }
 
-/** Capabilities the engine grants a role at dispatch time (the agentic tool-use loop). */
+/**
+ * Capabilities the engine grants a role at dispatch time (the agentic tool-use loop).
+ *
+ * The Brain tools — `knowledge_search`, `memory_append`, `workflow_memory_read`,
+ * `workflow_memory_write` — let an agent read from and write back to the
+ * workspace Brain (knowledge bases, the MEMORY.md learning log, and per-workflow
+ * persistent state) during its own reasoning loop, not just via graph nodes.
+ */
 export type AgentTool =
   | 'web_search'
   | 'read_url'
@@ -40,19 +47,41 @@ export type AgentTool =
   | 'git_diff'
   | 'git_status'
   | 'knowledge_search'
+  | 'memory_append'
+  | 'agent_memory_search'
+  | 'workflow_memory_read'
+  | 'workflow_memory_write'
   | 'call_workflow';
 
 export const ROLE_TOOLS: Record<AgentRole, AgentTool[]> = {
-  planner: ['knowledge_search', 'call_workflow'],
-  researcher: ['web_search', 'read_url', 'knowledge_search'],
+  planner: ['knowledge_search', 'memory_append', 'agent_memory_search', 'workflow_memory_read', 'workflow_memory_write', 'call_workflow'],
+  researcher: ['web_search', 'read_url', 'knowledge_search', 'memory_append', 'agent_memory_search'],
   coder: ['read_file', 'write_file', 'run_code', 'search_code', 'git_status'],
   reviewer: ['read_file', 'git_diff', 'search_code', 'run_code'],
-  analyst: ['read_file', 'run_code', 'knowledge_search'],
+  analyst: ['read_file', 'run_code', 'knowledge_search', 'memory_append', 'agent_memory_search', 'workflow_memory_read', 'workflow_memory_write'],
   writer: ['web_search', 'read_url', 'read_file'],
-  monitor: ['read_url', 'knowledge_search', 'call_workflow'],
+  monitor: ['read_url', 'knowledge_search', 'memory_append', 'agent_memory_search', 'workflow_memory_read', 'workflow_memory_write', 'call_workflow'],
   architect: ['read_file', 'search_code', 'knowledge_search', 'git_diff'],
   debugger: ['read_file', 'run_code', 'search_code', 'git_diff', 'git_status'],
   deployer: ['read_file', 'call_workflow'],
+};
+
+/** One-line tool descriptions offered to the agentic tool-use loop. */
+export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
+  web_search: 'Search the web for recent information. args: { query: string }',
+  read_url: 'Fetch a URL and return its extracted text. args: { url: string }',
+  read_file: 'Read a file from the workspace volume. args: { path: string }',
+  write_file: 'Create or overwrite a workspace file. args: { path: string, content: string }',
+  search_code: 'Find text across workspace files. args: { query: string, dir?: string }',
+  run_code: 'Evaluate a sandboxed JS expression — no I/O, pure compute. args: { expression: string, input?: object }',
+  git_diff: 'Show the working-tree diff (git-backed workspaces only).',
+  git_status: 'Show git status (git-backed workspaces only).',
+  knowledge_search: 'Search the workspace Brain (knowledge bases) for relevant passages. args: { query: string, topK?: number }',
+  memory_append: 'Record a finding or decision so future runs start knowing it. scope "workspace" (default) writes the shared log every agent sees; scope "agent" writes your own private memory. args: { section: string, entry: string, scope?: "workspace" | "agent" }',
+  agent_memory_search: 'Recall your own past findings from your personal memory (separate from the shared workspace log). args: { query: string, topK?: number }',
+  workflow_memory_read: 'Read persistent state this workflow saved on a prior run (cursors, dedup keys, accumulated findings). args: { key?: string }',
+  workflow_memory_write: 'Persist state for future runs of this workflow. args: { key: string, value: unknown }',
+  call_workflow: 'Invoke another workflow in this workspace. args: { workflowId: string, inputs?: object }',
 };
 
 export interface SpecialistDefinition {

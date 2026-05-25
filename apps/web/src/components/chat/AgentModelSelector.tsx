@@ -70,6 +70,7 @@ export function AgentModelSelector({
   return (
     <ModelChooser
       adapterType={adapterType}
+      agentId={agentId}
       value={selectedModel}
       onChange={(next) => void updateModel(next)}
       disabled={saving}

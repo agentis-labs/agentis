@@ -66,82 +66,77 @@ export function ChatPage() {
       .catch(() => {});
   }, [agentId]);
 
+  useEffect(() => {
+    function onConversationDeleted() {
+      setSelected(null);
+      nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
+    }
+    window.addEventListener('agentis:active-conversation-deleted', onConversationDeleted);
+    return () => {
+      window.removeEventListener('agentis:active-conversation-deleted', onConversationDeleted);
+    };
+  }, [appCreationMode, nav]);
+
   const appCreationDraft = appCreationMode
     ? '/newapp '
     : undefined;
   const initialDraft = appCreationDraft ?? (routedDraft || undefined);
 
   function requestNewChat() {
-    if (!currentThread) return;
-    clearDraft(`${currentThread.kind}:${currentThread.id}`);
-    if (currentThread.kind === 'agent') {
-      window.dispatchEvent(new CustomEvent('agentis:chat-new-conversation', {
-        detail: { kind: currentThread.kind, id: currentThread.id },
-      }));
+    const targetAgentId = currentThread?.kind === 'agent' ? currentThread.id : orchestrator?.id;
+    if (!targetAgentId) {
+      if (currentThread?.kind === 'room') {
+        setRoomCreateOpen(true);
+      }
       return;
     }
-    setRoomCreateOpen(true);
+    clearDraft(`agent:${targetAgentId}`);
+    window.dispatchEvent(new CustomEvent('agentis:chat-new-conversation', {
+      detail: { kind: 'agent', id: targetAgentId },
+    }));
   }
 
   return (
     <div className="flex h-full">
       <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-surface">
         <header className="flex h-12 items-center justify-between border-b border-line px-3">
-          <span className="text-subheading text-text-primary">Chat</span>
+          <span className="text-subheading text-text-primary">Chat Sessions</span>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setHistoryOpen(true)}
-              aria-label="History"
-              title="History"
+              onClick={requestNewChat}
+              aria-label="New chat"
+              title="New chat"
               className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
             >
-              <Clock size={14} />
+              <Plus size={14} />
             </button>
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {historyOpen ? (
-            <SessionHistoryPanel
-              onBack={() => setHistoryOpen(false)}
-              onOpenAgent={(id, name, options) => {
-                setHistoryOpen(false);
-                setSelected({ kind: 'agent', id, name, conversationId: options?.conversationId ?? null, archivedAt: options?.archivedAt ?? null });
-                nav(`/chat/agent/${id}`, { replace: true });
-              }}
-              onOpenRoom={(id, name) => {
-                setHistoryOpen(false);
-                setSelected({ kind: 'room', id, name });
-                nav('/chat', { replace: true });
-              }}
-              onOpenBroadcast={() => {
-                setHistoryOpen(false);
-                setSelected({ kind: 'room', id: '__broadcast__', name: 'Fleet broadcast' });
-                nav('/chat', { replace: true });
-              }}
-            />
-          ) : loading ? (
+          {loading ? (
             <div className="space-y-2 px-3 py-4">
-              <div className="h-8 rounded bg-surface-2" />
-              <div className="h-8 rounded bg-surface-2" />
+              <div className="h-8 rounded bg-surface-2 animate-pulse" />
+              <div className="h-8 rounded bg-surface-2 animate-pulse" />
             </div>
           ) : missingOrchestrator && !selected ? (
             <EmptyOrchestratorState onOpenAgents={() => nav('/agents')} compact />
           ) : (
-            <div className="p-3">
-              {selected && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelected(null);
-                    nav(appCreationMode ? '/chat?intent=new-app' : '/chat', { replace: true });
-                  }}
-                  className="mt-2 w-full rounded-btn border border-line bg-surface-2 px-3 py-2 text-[12px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-                >
-                  Back to {orchestrator?.name ?? 'orchestrator'}
-                </button>
-              )}
-            </div>
+            <SessionHistoryPanel
+              activeConversationId={currentThread?.kind === 'agent' ? currentThread.conversationId : null}
+              onOpenAgent={(id, name, options) => {
+                setSelected({ kind: 'agent', id, name, conversationId: options?.conversationId ?? null, archivedAt: options?.archivedAt ?? null });
+                nav(`/chat/agent/${id}`, { replace: true });
+              }}
+              onOpenRoom={(id, name) => {
+                setSelected({ kind: 'room', id, name });
+                nav('/chat', { replace: true });
+              }}
+              onOpenBroadcast={() => {
+                setSelected({ kind: 'room', id: '__broadcast__', name: 'Fleet broadcast' });
+                nav('/chat', { replace: true });
+              }}
+            />
           )}
         </div>
       </aside>

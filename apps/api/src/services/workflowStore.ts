@@ -1,15 +1,12 @@
 /**
- * WorkflowStoreService — workflow-scoped persistent KV.
+ * WorkflowStoreService — workflow-scoped persistent KV. Part of the Brain's
+ * workflow-memory layer.
  *
  * The `scratchpad` service is run-scoped and disposed on completion.
  * `workflow_kv_entries` is workflow-scoped and persists indefinitely — the
  * foundation for long-running automations (daily/weekly/monthly workflows
- * that need to remember state across runs).
- *
- * Brain-apps compatibility: the schema carries `workspace_id` so the future
- * Brain can index these entries as structured facts without a migration.
- * The shape is intentionally distinct from `app_data` / `data_write` (which
- * write to app-scoped tables) — they coexist without conflict.
+ * that need to remember state across runs). Carrying `workspace_id` lets the
+ * Brain surface index these entries as structured workspace facts.
  */
 
 import { randomUUID } from 'node:crypto';

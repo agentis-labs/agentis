@@ -12,10 +12,14 @@ export interface WorkspaceAgent {
   name: string;
   status?: string;
   role?: string | null;
+  managerId?: string | null;
   reportsTo?: string | null;
   runtimeModel?: string | null;
   adapterType?: string | null;
   colorHex?: string | null;
+  domainColor?: string | null;
+  canvasAngle?: number | null;
+  canvasPosition?: { x: number; y: number } | null;
   avatarGlyph?: string | null;
   spaceId?: string | null;
   spaceName?: string | null;

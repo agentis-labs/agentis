@@ -76,6 +76,36 @@ describe('runSqliteMigrations', () => {
     }
   });
 
+  it('applies new migrations after historical migration ids from older builds', () => {
+    const path = tempDbPath();
+    const sqlite = new Database(path);
+    try {
+      sqlite.exec(EMBEDDED_INIT_SQL);
+      sqlite.exec(`
+CREATE TABLE schema_migrations (
+  version    INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL,
+  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT INTO schema_migrations (version, name) VALUES (1, 'init'), (2, 'company_os_layer');
+`);
+
+      const memoryMigration = SQLITE_MIGRATIONS.find((migration) => migration.name === 'agent_memories');
+      expect(memoryMigration?.version).toBeGreaterThan(38);
+      expect(
+        sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memories'`).get(),
+      ).toBeUndefined();
+
+      const result = runSqliteMigrations(sqlite);
+      expect(result.applied.map((migration) => migration.name)).toContain('agent_memories');
+      expect(
+        sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memories'`).get(),
+      ).toBeDefined();
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('openSqlite wires the runner — schema_migrations is present after open', () => {
     const path = tempDbPath();
     const { sqlite } = openSqlite({ path });

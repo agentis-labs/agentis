@@ -8,7 +8,7 @@
 
 import type { ChatDelta, ChatMessage, ToolDefinition } from './chat.js';
 
-export type AdapterType = 'openclaw' | 'claude_code' | 'http' | 'codex' | 'cursor' | 'hermes' | 'hermes_agent' | 'local_llm';
+export type AdapterType = 'openclaw' | 'claude_code' | 'http' | 'codex' | 'cursor' | 'hermes_agent' | 'local_llm';
 
 export interface AgentAdapter {
   readonly adapterType: AdapterType;

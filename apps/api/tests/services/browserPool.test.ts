@@ -31,4 +31,18 @@ describe('BrowserPool', () => {
     expect(text.title).toBeDefined();
     expect(text.text).toMatch(/Body copy/);
   }, 60_000);
+
+  it('extracts a table into row objects', async () => {
+    const html = '<table><tr><th>Name</th><th>Score</th></tr><tr><td>Ada</td><td>99</td></tr><tr><td>Linus</td><td>87</td></tr></table>';
+    const rows = await pool.extractTable({ html });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({ Name: 'Ada', Score: '99' });
+    expect(rows[1]!.Name).toBe('Linus');
+  }, 60_000);
+
+  it('fills a form and reads the value back', async () => {
+    const html = '<form><input id="email" value="" /></form>';
+    const r = await pool.fillForm({ html, formData: { '#email': 'ada@lovelace.dev' } });
+    expect(r.values['#email']).toBe('ada@lovelace.dev');
+  }, 60_000);
 });

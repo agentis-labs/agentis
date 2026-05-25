@@ -82,7 +82,9 @@ describe('<AgentsPage />', () => {
       </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByText('Hermes')).toBeInTheDocument());
-    expect(screen.getByText(/Managers/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^All$/i })).toBeInTheDocument();
+    expect(screen.queryByText(/Fleet map/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Managers$/i)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /Table view/i }));
     expect(screen.getByText(/HTTP \/ Webhook/i)).toBeInTheDocument();
@@ -173,7 +175,90 @@ describe('<AgentsPage />', () => {
         '/v1/agents/a1',
         expect.objectContaining({
           method: 'PATCH',
-          body: JSON.stringify({ canvasPosition: { x: 0, y: 250 } }),
+          body: JSON.stringify({ canvasPosition: { x: 0, y: 300 } }),
+        }),
+      );
+    });
+  });
+
+  it('reparents managers to the current orchestrator when roles change', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
+      if (path === '/v1/agents/mgr' && init?.method === 'PATCH') return jsonResponse({ ok: true });
+      return jsonResponse({
+        agents: [
+          {
+            id: 'orch',
+            name: 'The Brain',
+            adapterType: 'codex',
+            role: 'orchestrator',
+            status: 'online',
+          },
+          {
+            id: 'mgr',
+            name: 'Social Analyst',
+            adapterType: 'http',
+            role: 'manager',
+            reportsTo: 'old-orchestrator',
+            status: 'online',
+          },
+        ],
+      });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    render(
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText('Social Analyst')).toBeInTheDocument());
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/v1/agents/mgr',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ reportsTo: 'orch' }),
+        }),
+      );
+    });
+  });
+
+  it('clears stale manager parents when there is no orchestrator', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
+      if (path === '/v1/agents/mgr' && init?.method === 'PATCH') return jsonResponse({ ok: true });
+      return jsonResponse({
+        agents: [
+          {
+            id: 'mgr',
+            name: 'Social Analyst',
+            adapterType: 'http',
+            role: 'manager',
+            reportsTo: 'old-orchestrator',
+            status: 'online',
+          },
+        ],
+      });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    render(
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText('Social Analyst')).toBeInTheDocument());
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/v1/agents/mgr',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ reportsTo: null }),
         }),
       );
     });

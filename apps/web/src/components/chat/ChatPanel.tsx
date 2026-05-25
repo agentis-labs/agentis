@@ -101,6 +101,16 @@ export function ChatPanel() {
     if (openRequestId > 0) setHistoryOpen(false);
   }, [openRequestId]);
 
+  useEffect(() => {
+    function onConversationDeleted() {
+      selectThread(null);
+    }
+    window.addEventListener('agentis:active-conversation-deleted', onConversationDeleted);
+    return () => {
+      window.removeEventListener('agentis:active-conversation-deleted', onConversationDeleted);
+    };
+  }, [selectThread]);
+
   if (state === 'hidden') return null;
 
   function handleResizeStart(event: React.PointerEvent<HTMLDivElement>) {
@@ -128,15 +138,17 @@ export function ChatPanel() {
   }
 
   function requestNewChat() {
-    if (!currentThread) return;
-    clearDraft(`${currentThread.kind}:${currentThread.id}`);
-    if (currentThread.kind === 'agent') {
-      window.dispatchEvent(new CustomEvent('agentis:chat-new-conversation', {
-        detail: { kind: currentThread.kind, id: currentThread.id },
-      }));
+    const targetAgentId = currentThread?.kind === 'agent' ? currentThread.id : orchestrator?.id;
+    if (!targetAgentId) {
+      if (currentThread?.kind === 'room') {
+        setRoomCreateOpen(true);
+      }
       return;
     }
-    setRoomCreateOpen(true);
+    clearDraft(`agent:${targetAgentId}`);
+    window.dispatchEvent(new CustomEvent('agentis:chat-new-conversation', {
+      detail: { kind: 'agent', id: targetAgentId },
+    }));
   }
 
   return (
@@ -292,9 +304,10 @@ export function ChatPanel() {
           )}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 flex flex-col">
           {historyOpen ? (
             <SessionHistoryPanel
+              activeConversationId={currentThread?.kind === 'agent' && 'conversationId' in currentThread ? currentThread.conversationId : null}
               onBack={() => setHistoryOpen(false)}
               onOpenAgent={(id, name, options) => {
                 setHistoryOpen(false);

@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "SDR Operator",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["prospecting", "enrichment", "outreach"],
         "config": {},
         "instructions": "Qualify leads, write concise outreach, and hand off only accounts that match the ICP.",

@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Content Producer",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["writing", "editing", "distribution"],
         "config": {},
         "instructions": "Create useful, brand-safe content and preserve factual claims for review.",

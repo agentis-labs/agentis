@@ -67,11 +67,21 @@ export const REALTIME_EVENTS = {
 
   // Loop / phase progress
   LOOP_PROGRESS: 'loop.progress',
+  PHASE_STARTED: 'phase.started',
   PHASE_COMPLETED: 'phase.completed',
   PHASE_FAILED: 'phase.failed',
+  PHASE_SLA_BREACHED: 'phase.sla_breached',
+  BUDGET_PHASE_EXCEEDED: 'budget.phase_exceeded',
+  BUDGET_RUN_EXCEEDED: 'budget.run_exceeded',
+  BUDGET_WORKSPACE_EXCEEDED: 'budget.workspace_exceeded',
+  /** Builder Session §3/§9 — the cast specialist team, emitted before the graph streams. */
+  WORKFLOW_TEAM_ROSTER: 'workflow.team_roster',
 
   // Contracts
   CONTRACT_VIOLATION: 'contract.violation',
+
+  // Self-improvement
+  INSTINCT_PROPOSED: 'instinct.proposed',
 
   // Scheduler / event chains
   SCHEDULE_FIRED: 'schedule.fired',

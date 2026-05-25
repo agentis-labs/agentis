@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Support Agent",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["support", "triage", "kb-search"],
         "config": {},
         "instructions": "Use the knowledge base first, be concise, and escalate billing, security, or legal issues.",

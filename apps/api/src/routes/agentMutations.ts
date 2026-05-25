@@ -27,6 +27,7 @@ import { HermesAgentAdapter } from '../adapters/HermesAgentAdapter.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
+import { defaultInstructionsForRole, isDefaultRoleInstructions } from '../data/playbook-library.js';
 import { joinUrl, normalizeOpenClawGatewayUrl, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
 import { repairCliHarnessConfig } from '../services/harnessConfigRepair.js';
 
@@ -150,6 +151,12 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           .run();
       } catch (err) {
         deps.logger.warn('agents.register_failed', { id, err: (err as Error).message });
+        status = 'error';
+        deps.db
+          .update(schema.agents)
+          .set({ status, updatedAt: new Date().toISOString() })
+          .where(eq(schema.agents.id, id))
+          .run();
       }
     }
     return c.json({
@@ -175,6 +182,19 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
       ? nextIsPaused ? 'paused' : existing.status
       : body.status;
     const nextRole = body.role === undefined ? existing.role : body.role;
+    const nextName = body.name ?? existing.name;
+    // Regenerate the platform `agentis.md` when the role changes — but only when
+    // the operator hasn't customized it (current text is an unedited playbook
+    // default). Works for every role; never clobbers hand-written instructions.
+    let nextInstructions = body.instructions === undefined ? existing.instructions : body.instructions;
+    if (
+      body.instructions === undefined &&
+      nextRole !== existing.role &&
+      isDefaultRoleInstructions(existing.instructions, existing.name)
+    ) {
+      const regenerated = defaultInstructionsForRole(nextRole, nextName);
+      if (regenerated) nextInstructions = regenerated;
+    }
     if (body.reportsTo) ensureReportsToTarget(deps.db, ws.workspaceId, body.reportsTo, id);
     const rawNextConfig = body.config ?? (existing.config as Record<string, unknown>);
     const repairedConfig = await repairCliHarnessConfig(existing.adapterType as V1HarnessAdapterType, rawNextConfig);
@@ -189,7 +209,7 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           spaceId: body.spaceId === undefined ? existing.spaceId : body.spaceId,
           capabilityTags: body.capabilityTags ?? (existing.capabilityTags as string[]),
           config: nextConfig,
-          instructions: body.instructions === undefined ? existing.instructions : body.instructions,
+          instructions: nextInstructions,
           avatarGlyph: body.avatarGlyph === undefined ? existing.avatarGlyph : body.avatarGlyph,
           runtimeModel: body.runtimeModel === undefined ? existing.runtimeModel : body.runtimeModel,
           role: nextRole,
@@ -228,7 +248,7 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           deps.logger.warn('agents.reregister_failed', { id, err: (err as Error).message });
           deps.db
             .update(schema.agents)
-            .set({ status: 'offline', updatedAt: new Date().toISOString() })
+            .set({ status: 'error', updatedAt: new Date().toISOString() })
             .where(eq(schema.agents.id, id))
             .run();
         }

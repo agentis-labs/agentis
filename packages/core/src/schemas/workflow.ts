@@ -30,6 +30,11 @@ const agentTaskConfigSchema = z.object({
   prompt: z.string().min(1),
   inputKeys: z.array(z.string()).default([]),
   outputKeys: z.array(z.string()).default([]),
+  skills: z.array(z.string()).optional(),
+  modelOverride: z.string().optional(),
+  castingReason: z.string().optional(),
+  useRoleTools: z.boolean().optional(),
+  maxToolSteps: z.number().int().min(1).max(12).optional(),
 });
 
 const skillTaskConfigSchema = z.object({
@@ -96,6 +101,18 @@ const scratchpadConfigSchema = z.object({
   valuePath: z.string().optional(),
 });
 
+const workspaceStoreConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('workspace_store'),
+  operations: z.array(z.object({
+    op: z.enum(['get', 'set', 'delete', 'increment', 'append', 'get_all']),
+    key: z.string().optional(),
+    value: z.string().optional(),
+    outputKey: z.string().optional(),
+    incrementBy: z.number().optional(),
+  })).default([]),
+});
+
 const returnOutputConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('return_output'),
@@ -116,11 +133,13 @@ const artifactSaveConfigSchema = z.object({
 const browserConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('browser'),
-  operation: z.enum(['serve_html', 'screenshot', 'pdf', 'navigate', 'extract_text']),
+  operation: z.enum(['serve_html', 'screenshot', 'pdf', 'navigate', 'extract_text', 'fill_form', 'extract_table']),
   url: z.string().optional(),
   html: z.string().optional(),
   htmlPath: z.string().optional(),
   selector: z.string().optional(),
+  formData: z.record(z.string(), z.string()).optional(),
+  submitSelector: z.string().optional(),
   fullPage: z.boolean().optional(),
   headless: z.boolean().optional(),
   viewport: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
@@ -161,6 +180,7 @@ export const workflowNodeConfigSchema = z.union([
   checkpointConfigSchema,
   subflowConfigSchema,
   scratchpadConfigSchema,
+  workspaceStoreConfigSchema,
   returnOutputConfigSchema,
   artifactSaveConfigSchema,
   browserConfigSchema,

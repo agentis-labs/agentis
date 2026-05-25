@@ -33,6 +33,10 @@ export interface TemplateContext {
   scratchpad: Record<string, unknown>;
   /** Workflow-scoped persistent store snapshot. */
   store: Record<string, unknown>;
+  /** Workspace-scoped state (Tier 3): `{{workspace.id}}`, `{{workspace.kv.*}}`. */
+  workspace?: { id?: string; kv: Record<string, unknown> };
+  /** Current run metadata: `{{run.id}}`, `{{run.startedAt}}`, `{{run.triggeredBy}}`. */
+  run?: { id?: string; startedAt?: string; triggeredBy?: string };
   /** Loop-body context — only present inside a loop's child run. */
   loop?: { item: unknown; index: number };
   /** Brain-apps placeholder — left empty on main. */
@@ -115,6 +119,12 @@ function readPath(ctx: TemplateContext, expression: string): unknown {
       break;
     case 'store':
       root = ctx.store;
+      break;
+    case 'workspace':
+      root = ctx.workspace;
+      break;
+    case 'run':
+      root = ctx.run;
       break;
     case 'loop':
       root = ctx.loop;
@@ -218,6 +228,10 @@ export function buildTemplateContext(args: {
   scratchpad: Record<string, unknown>;
   /** Workflow-scoped store snapshot. */
   store: Record<string, unknown>;
+  /** Workspace-scoped KV snapshot (Tier 3) + workspace id. */
+  workspace?: { id?: string; kv: Record<string, unknown> };
+  /** Run metadata. */
+  run?: { id?: string; startedAt?: string; triggeredBy?: string };
   /** Loop iteration context, if any. */
   loop?: { item: unknown; index: number };
 }): TemplateContext {
@@ -226,6 +240,8 @@ export function buildTemplateContext(args: {
     nodes: args.nodeOutputs,
     scratchpad: args.scratchpad,
     store: args.store,
+    workspace: args.workspace,
+    run: args.run,
     loop: args.loop,
     apps: {},
     warnings: [],

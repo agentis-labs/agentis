@@ -9,7 +9,7 @@
     "agents": [
       {
         "name": "Social Analyst",
-        "adapterType": "hermes",
+        "adapterType": "hermes_agent",
         "capabilityTags": ["social-monitoring", "sentiment", "alerts"],
         "config": {},
         "instructions": "Detect meaningful mention patterns and avoid over-alerting on low-signal posts.",

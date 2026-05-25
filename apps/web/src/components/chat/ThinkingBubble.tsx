@@ -34,29 +34,29 @@ export function ThinkingBubble({
   return (
     <div
       className={clsx(
-        'mb-2 rounded-lg border border-line/70 bg-canvas/70 px-2.5 py-2 text-[11px] leading-relaxed text-text-muted shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]',
-        streaming && 'border-accent/25',
+        'mb-3 rounded-xl border border-line/50 bg-canvas/40 backdrop-blur-sm px-3 py-2 text-[11px] leading-relaxed text-text-muted shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] transition-all duration-300',
+        streaming ? 'border-accent/30 shadow-[0_0_15px_rgba(20,184,166,0.03)]' : 'border-line/45',
       )}
     >
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="inline-flex items-center gap-1.5 font-semibold not-italic text-text-secondary">
-          {streaming ? <Loader2 size={12} className="animate-spin text-accent" /> : <MessageSquareText size={12} />}
-          Thinking
+      <div className="mb-1.5 flex items-center justify-between gap-2 border-b border-line/20 pb-1">
+        <span className="inline-flex items-center gap-1.5 font-mono font-semibold uppercase tracking-wider text-[9.5px] text-accent">
+          {streaming ? <Loader2 size={11} className="animate-spin" /> : <MessageSquareText size={11} />}
+          {streaming ? 'Thinking…' : 'Thought process'}
         </span>
         {!streaming && (
           <button
             type="button"
             onClick={() => setOpen(false)}
-            className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-text-muted transition hover:bg-surface-2 hover:text-text-primary"
+            className="inline-flex items-center gap-1 rounded-[6px] border border-line bg-surface px-1.5 py-0.5 text-[9.5px] font-medium text-text-secondary transition hover:bg-surface-3 hover:text-text-primary"
           >
-            <ChevronDown size={11} />
-            Hide
+            <ChevronDown size={10} />
+            Collapse
           </button>
         )}
       </div>
-      <div className="whitespace-pre-wrap break-words italic">
+      <div className="whitespace-pre-wrap break-words font-mono text-[10.5px] text-text-muted/80 leading-relaxed italic">
         {trimmed}
-        {streaming && <span className="ml-0.5 inline-block h-3 w-px animate-pulse bg-accent align-[-2px]" />}
+        {streaming && <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-accent align-[-1.5px] rounded-sm" />}
       </div>
     </div>
   );

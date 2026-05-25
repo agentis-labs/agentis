@@ -1,7 +1,7 @@
 /**
  * Sidebar — primary navigation rail (5 items + Spaces + Settings).
  *
- * Home / Workflows / Agents / Knowledge / Packages / SPACES / Settings.
+ * Home / Workflows / Agents / Brain / Packages / SPACES / Settings.
  * Live badges on Agents (live count) and Workflows (active runs).
  * Auto-collapse when ChatPanel is docked.
  */
@@ -13,7 +13,7 @@ import {
   Home as HomeIcon,
   Bot,
   Workflow as WorkflowIcon,
-  BookOpen,
+  Brain as BrainIcon,
   Package as PackageIcon,
   Settings as SettingsIcon,
   ChevronsLeft,
@@ -46,7 +46,7 @@ const NAV: NavItem[] = [
   { to: '/home',      label: 'Home',      icon: HomeIcon },
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
   { to: '/agents',    label: 'Agents',    icon: Bot,         badge: 'liveAgents' },
-  { to: '/knowledge', label: 'Knowledge', icon: BookOpen },
+  { to: '/brain',     label: 'Brain',     icon: BrainIcon },
   { to: '/packages',  label: 'Packages',  icon: PackageIcon },
 ];
 
