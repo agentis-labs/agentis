@@ -7,6 +7,12 @@ type ManifestSeed = Omit<IntegrationManifest, 'version' | 'nodeConfig' | 'builti
 const bearerCredential = { type: 'bearer_token', fields: ['token'] };
 const oauthCredential = { type: 'oauth2', fields: ['access_token'] };
 const apiKeyCredential = { type: 'api_key', fields: ['apiKey', 'headerName'] };
+const jiraCredential = { type: 'api_key', fields: ['siteUrl', 'email', 'apiToken'] };
+const supabaseCredential = { type: 'api_key', fields: ['projectUrl', 'apiKey'] };
+const trelloCredential = { type: 'api_key', fields: ['apiKey', 'token'] };
+const twilioCredential = { type: 'api_key', fields: ['accountSid', 'authToken'] };
+const wordpressCredential = { type: 'api_key', fields: ['siteUrl', 'username', 'applicationPassword'] };
+const zendeskCredential = { type: 'api_key', fields: ['subdomain', 'email', 'apiToken'] };
 const noCredential = { type: 'none', fields: [] };
 
 const seeds: ManifestSeed[] = [
@@ -14,6 +20,7 @@ const seeds: ManifestSeed[] = [
   manifest('webhook_send', 'Webhook Send', 'Core', 'Send signed outbound webhook payloads.', ['send'], { type: 'shared_secret', fields: ['secret'] }, undefined, 'implemented'),
   manifest('slack', 'Slack', 'Communication', 'Post messages and reactions to Slack workspaces.', ['send_message', 'add_reaction'], bearerCredential, 'https://api.slack.com/methods', 'implemented'),
   manifest('gmail', 'Gmail', 'Communication', 'Send Gmail messages through the Google API.', ['send_email'], oauthCredential, 'https://developers.google.com/gmail/api/reference/rest', 'implemented'),
+  manifest('agentmail', 'AgentMail', 'Communication', 'Email built for agents — each agent gets its own inbox to send and receive mail with just an API key (no user OAuth).', ['send_message', 'create_inbox', 'list_inboxes', 'list_messages'], bearerCredential, 'https://docs.agentmail.to/llms.txt', 'implemented'),
   manifest('github', 'GitHub', 'Code', 'Create issues, comment, and trigger GitHub Actions workflows.', ['create_issue', 'comment_issue', 'trigger_workflow', 'get_run_status'], bearerCredential, 'https://docs.github.com/rest', 'implemented'),
   manifest('google_sheets', 'Google Sheets', 'Productivity', 'Read, append, update, and clear spreadsheet ranges.', ['append_row', 'read_range', 'update_range', 'clear_range'], oauthCredential, 'https://developers.google.com/sheets/api/reference/rest', 'implemented'),
   manifest('email_smtp', 'SMTP Email', 'Communication', 'Send email through a configured SMTP transport.', ['send_email'], { type: 'smtp', fields: ['host', 'port', 'username', 'password'] }),
@@ -21,14 +28,14 @@ const seeds: ManifestSeed[] = [
   manifest('discord', 'Discord', 'Communication', 'Send messages and create threads.', ['send_message', 'create_thread'], bearerCredential),
   manifest('telegram', 'Telegram', 'Communication', 'Send Telegram messages and photos.', ['send_message', 'send_photo'], bearerCredential),
   manifest('outlook', 'Outlook', 'Communication', 'Send and search Outlook mail.', ['send_email', 'read_inbox', 'search'], oauthCredential),
-  manifest('twilio', 'Twilio', 'SMS & Voice', 'Send SMS, WhatsApp, and voice calls.', ['send_sms', 'make_call', 'send_whatsapp'], apiKeyCredential),
+  manifest('twilio', 'Twilio', 'SMS & Voice', 'Send SMS, WhatsApp, and voice calls.', ['send_sms', 'make_call', 'send_whatsapp'], twilioCredential),
   manifest('vonage', 'Vonage', 'SMS & Voice', 'Send SMS and make calls.', ['send_sms', 'make_call'], apiKeyCredential),
   manifest('notion', 'Notion', 'Productivity', 'Create pages, update pages, and query databases.', ['create_page', 'update_page', 'query_database', 'append_block'], bearerCredential),
   manifest('airtable', 'Airtable', 'Productivity', 'Create, update, query, and delete records.', ['create_record', 'update_record', 'query', 'delete_record'], bearerCredential),
   manifest('google_docs', 'Google Docs', 'Productivity', 'Create documents, append text, and read document content.', ['create_doc', 'append_text', 'read_doc'], oauthCredential),
-  manifest('trello', 'Trello', 'Productivity', 'Create cards, move cards, and add comments.', ['create_card', 'update_card', 'move_card', 'add_comment'], apiKeyCredential),
+  manifest('trello', 'Trello', 'Productivity', 'Create cards, move cards, and add comments.', ['create_card', 'update_card', 'move_card', 'add_comment'], trelloCredential),
   manifest('linear', 'Linear', 'Productivity', 'Create issues, update issues, and add comments.', ['create_issue', 'update_issue', 'add_comment'], bearerCredential),
-  manifest('jira', 'Jira', 'Productivity', 'Create, update, comment, and transition issues.', ['create_issue', 'update_issue', 'add_comment', 'transition'], apiKeyCredential),
+  manifest('jira', 'Jira', 'Productivity', 'Create, update, comment, and transition issues.', ['create_issue', 'update_issue', 'add_comment', 'transition'], jiraCredential),
   manifest('asana', 'Asana', 'Productivity', 'Create tasks, update tasks, and add comments.', ['create_task', 'update_task', 'add_comment'], bearerCredential),
   manifest('clickup', 'ClickUp', 'Productivity', 'Create tasks, update tasks, and set statuses.', ['create_task', 'update_task', 'set_status'], apiKeyCredential),
   manifest('gitlab', 'GitLab', 'Code', 'Create issues, create merge requests, and trigger pipelines.', ['create_issue', 'create_mr', 'trigger_pipeline'], bearerCredential),
@@ -36,13 +43,13 @@ const seeds: ManifestSeed[] = [
   manifest('hubspot', 'HubSpot', 'CRM', 'Create contacts, update contacts, create deals, and add notes.', ['create_contact', 'update_contact', 'create_deal', 'add_note'], bearerCredential),
   manifest('salesforce', 'Salesforce', 'CRM', 'Create records, update records, and run SOQL queries.', ['create_record', 'update_record', 'query'], oauthCredential),
   manifest('pipedrive', 'Pipedrive', 'CRM', 'Create deals, update deals, and create people.', ['create_deal', 'update_deal', 'create_person'], apiKeyCredential),
-  manifest('zendesk', 'Zendesk', 'Support', 'Create, update, comment, and close tickets.', ['create_ticket', 'update_ticket', 'add_comment', 'close_ticket'], apiKeyCredential),
+  manifest('zendesk', 'Zendesk', 'Support', 'Create, update, comment, and close tickets.', ['create_ticket', 'update_ticket', 'add_comment', 'close_ticket'], zendeskCredential),
   manifest('intercom', 'Intercom', 'Support', 'Create conversations, send messages, and tag users.', ['create_conversation', 'send_message', 'tag_user'], bearerCredential),
   manifest('freshdesk', 'Freshdesk', 'Support', 'Create tickets, update tickets, and reply to tickets.', ['create_ticket', 'update_ticket', 'reply_to_ticket'], apiKeyCredential),
   manifest('mysql', 'MySQL', 'Data', 'Execute SQL and write rows to MySQL databases.', ['execute_query', 'insert', 'update', 'upsert'], { type: 'connection_string', fields: ['connectionString'] }),
   manifest('mongodb', 'MongoDB', 'Data', 'Find, insert, update, and delete documents.', ['find', 'find_one', 'insert_one', 'update_one', 'delete_one'], { type: 'connection_string', fields: ['connectionString'] }),
   manifest('redis', 'Redis', 'Data', 'Get, set, delete, expire, and publish Redis values.', ['get', 'set', 'del', 'expire', 'publish'], { type: 'connection_string', fields: ['connectionString'] }),
-  manifest('supabase', 'Supabase', 'Data', 'Select, insert, update, and delete via Supabase REST.', ['select', 'insert', 'update', 'delete'], apiKeyCredential),
+  manifest('supabase', 'Supabase', 'Data', 'Select, insert, update, and delete via Supabase REST.', ['select', 'insert', 'update', 'delete'], supabaseCredential),
   manifest('elasticsearch', 'Elasticsearch', 'Search', 'Index documents, search, and delete documents.', ['index_document', 'search', 'delete_document'], apiKeyCredential),
   manifest('algolia', 'Algolia', 'Search', 'Save, search, delete, and partially update objects.', ['save_object', 'search', 'delete_object', 'partial_update'], apiKeyCredential),
   manifest('sqs', 'Amazon SQS', 'Queues', 'Send, receive, and delete queue messages.', ['send_message', 'receive_messages', 'delete_message'], apiKeyCredential),
@@ -56,7 +63,7 @@ const seeds: ManifestSeed[] = [
   manifest('contentful', 'Contentful', 'CMS', 'Get, create, update, and publish entries.', ['get_entry', 'create_entry', 'update_entry', 'publish'], bearerCredential),
   manifest('sanity', 'Sanity', 'CMS', 'Get, create, and patch documents.', ['get_document', 'create_document', 'patch_document'], bearerCredential),
   manifest('strapi', 'Strapi', 'CMS', 'Find, create, update, and delete content.', ['find', 'find_one', 'create', 'update', 'delete'], bearerCredential),
-  manifest('wordpress', 'WordPress', 'CMS', 'Get, create, and update posts through WP REST.', ['get_post', 'create_post', 'update_post'], apiKeyCredential),
+  manifest('wordpress', 'WordPress', 'CMS', 'Get, create, and update posts through WP REST.', ['get_post', 'create_post', 'update_post'], wordpressCredential),
   manifest('shopify', 'Shopify', 'Ecommerce', 'Get orders, create orders, update products, and get customers.', ['get_order', 'create_order', 'update_product', 'get_customer'], bearerCredential),
   manifest('woocommerce', 'WooCommerce', 'Ecommerce', 'Get orders, create products, and update orders.', ['get_order', 'create_product', 'update_order'], apiKeyCredential),
   manifest('typeform', 'Typeform', 'Forms', 'Get responses, forms, and form lists.', ['get_responses', 'get_form', 'list_forms'], bearerCredential),

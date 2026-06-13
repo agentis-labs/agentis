@@ -83,6 +83,16 @@ export const REALTIME_EVENTS = {
   // Self-improvement
   INSTINCT_PROPOSED: 'instinct.proposed',
 
+  // Listener runtime (persistent_listener v2)
+  LISTENER_CONNECTED: 'listener.connected',
+  LISTENER_DISCONNECTED: 'listener.disconnected',
+  LISTENER_EVENT_RECEIVED: 'listener.event.received',
+  LISTENER_PREDICATE_PASS: 'listener.predicate.pass',
+  LISTENER_PREDICATE_FAIL: 'listener.predicate.fail',
+  LISTENER_FIRE_SUPPRESSED: 'listener.fire.suppressed',
+  LISTENER_FIRED: 'listener.fired',
+  LISTENER_ERROR: 'listener.error',
+
   // Scheduler / event chains
   SCHEDULE_FIRED: 'schedule.fired',
   EVENT_CHAIN_FIRED: 'event_chain.fired',
@@ -158,6 +168,32 @@ export const REALTIME_EVENTS = {
   CANVAS_NODE_PLACED: 'canvas.node.placed',
   CANVAS_EDGE_CONNECTED: 'canvas.edge.connected',
   CANVAS_BUILD_COMPLETE: 'canvas.build.complete',
+
+  // Workflow creation pipeline — inspectable phase narration (analyzing →
+  // planning → drafting → repairing → reviewing → building → complete) plus
+  // each repair action and reviewer critique, so the chat can show a live,
+  // fully-inspectable build timeline. (10X-CREATION-SWARM-PLAN §6.)
+  WORKFLOW_BUILD_PHASE: 'workflow.build.phase',
+  WORKFLOW_BUILD_REPAIR: 'workflow.build.repair',
+  WORKFLOW_BUILD_CRITIQUE: 'workflow.build.critique',
+
+  // Brain
+  BRAIN_ATOM_CREATED: 'brain.atom.created',
+  BRAIN_ATOM_REINFORCED: 'brain.atom.reinforced',
+  BRAIN_DISPUTE_FLAGGED: 'brain.dispute.flagged',
+  BRAIN_DISPUTE_RESOLVED: 'brain.dispute.resolved',
+  BRAIN_DISPUTE_AUTO_RESOLVED: 'brain.dispute.auto_resolved',
+  BRAIN_MAINTENANCE_COMPLETED: 'brain.maintenance.completed',
+  BRAIN_CONFIG_DEGRADED: 'brain.config.degraded',
+  BRAIN_EMBEDDING_MIGRATION_STARTED: 'brain.embedding.migration_started',
+  BRAIN_EMBEDDING_MIGRATION_COMPLETED: 'brain.embedding.migration_completed',
+  BRAIN_LINK_CREATED: 'brain.link.created',
+  BRAIN_CONTEXT_INJECTED: 'brain.context.injected',
+  BRAIN_DISCOURSE_SYNTHESIZED: 'brain.discourse.synthesized',
+  BRAIN_PEER_UPDATED: 'brain.peer.updated',
+  BRAIN_DREAM_PASS_COMPLETED: 'brain.dream_pass.completed',
+  BRAIN_BELIEF_CONTRADICTION: 'brain.belief.contradiction',
+  BRAIN_REFRESH_TRIGGERED: 'brain.refresh.triggered',
 } as const;
 
 export type RealtimeEventName = (typeof REALTIME_EVENTS)[keyof typeof REALTIME_EVENTS];

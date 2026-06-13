@@ -12,6 +12,12 @@ out/
 .agentis/
 .claude/
 
+# Smoke-test working dirs (generated DB + per-run secrets — never commit)
+.agentis-smoke/
+.agentis-cli-smoke/
+**/.agentis-smoke/
+**/.agentis-cli-smoke/
+
 # Env / secrets
 .env
 .env.local
@@ -39,3 +45,8 @@ playwright-report/
 test-results/
 .agentis-e2e/
 apps/api/.agentis-e2e/
+
+# Editor backups / stray compiler dumps
+*.bak
+*.orig
+tsc.out

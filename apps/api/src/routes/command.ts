@@ -11,7 +11,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 
 const executeBodySchema = z.object({
-  type: z.enum(['workflow', 'agent', 'gateway', 'run', 'approval', 'skill', 'conversation']),
+  type: z.enum(['workflow', 'agent', 'gateway', 'run', 'approval', 'extension', 'conversation']),
   id: z.string().min(1),
 });
 

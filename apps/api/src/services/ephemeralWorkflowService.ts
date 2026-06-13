@@ -121,7 +121,7 @@ export function promoteEphemeralWorkflow(deps: { db: AgentisSqliteDb }, input: {
   userId: string;
   runId: string;
   title?: string | null;
-  summary?: string | null;
+  description?: string | null;
 }) {
   const run = deps.db
     .select()
@@ -142,8 +142,7 @@ export function promoteEphemeralWorkflow(deps: { db: AgentisSqliteDb }, input: {
     ambientId: input.ambientId,
     userId: input.userId,
     title: input.title?.trim() || run.ephemeralTitle || 'Promoted ephemeral workflow',
-    summary: input.summary ?? null,
-    intendedBehavior: input.summary?.trim() || null,
+    description: input.description?.trim() || null,
     graph,
     settings: { promotedFromRunId: run.id, promotedAt: now },
     concurrencyOverflow: 'queue' as const,

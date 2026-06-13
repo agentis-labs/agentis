@@ -151,7 +151,7 @@ export function HomeLauncher() {
   }, []);
 
   const activeRuns = useMemo(
-    () => runs.filter((run) => run.status === 'RUNNING' || run.status === 'running'),
+    () => runs.filter((run) => ['RUNNING', 'WAITING', 'CREATED', 'running', 'waiting', 'paused', 'pending'].includes(run.status)),
     [runs],
   );
 

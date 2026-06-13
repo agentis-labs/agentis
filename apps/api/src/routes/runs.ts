@@ -3,9 +3,11 @@
  */
 
 import { Hono } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
   AgentisError,
+  REALTIME_ROOMS,
   schemas,
   type WorkflowGraph,
   type WorkflowGraphPatch,
@@ -14,16 +16,21 @@ import {
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
+import type { EventBus } from '../event-bus.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { LedgerService } from '../services/ledger.js';
+import type { ScratchpadService } from '../services/scratchpad.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
+import { failedNodeCount, firstFailedNodeId, isFailedNodeId } from '../services/runStateFailures.js';
 
 export function buildRunRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
   engine: WorkflowEngine;
   ledger: LedgerService;
+  scratchpad: ScratchpadService;
+  bus: EventBus;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -32,9 +39,11 @@ export function buildRunRoutes(deps: {
     const ws = getWorkspace(c);
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 50), 1), 200);
     const status = normalizeRunStatus(c.req.query('status'));
-    const predicate = status.length > 0
-      ? and(eq(schema.workflowRuns.workspaceId, ws.workspaceId), inArray(schema.workflowRuns.status, status))
-      : eq(schema.workflowRuns.workspaceId, ws.workspaceId);
+    const workflowId = c.req.query('workflowId')?.trim() || null;
+    const filters = [eq(schema.workflowRuns.workspaceId, ws.workspaceId)];
+    if (status.length > 0) filters.push(inArray(schema.workflowRuns.status, status));
+    if (workflowId) filters.push(eq(schema.workflowRuns.workflowId, workflowId));
+    const predicate = filters.length > 1 ? and(...filters) : filters[0];
     const rows = deps.db
       .select()
       .from(schema.workflowRuns)
@@ -47,6 +56,53 @@ export function buildRunRoutes(deps: {
     return c.json({
       runs: rows.map((row) => presentRunSummary(row, workflowsById.get(row.workflowId ?? ''), agentsById)),
     });
+  });
+
+  // Per-node run history — one call backs the canvas node card's
+  // realtime/history/output view so it never has to fan out to N run details.
+  // Returns recent runs of a workflow projected onto a single node:
+  // status, duration, output summary + full output, error.
+  app.get('/node-history', (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.query('workflowId');
+    const nodeId = c.req.query('nodeId');
+    if (!workflowId || !nodeId) {
+      throw new AgentisError('VALIDATION_FAILED', 'workflowId and nodeId are required');
+    }
+    const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 8), 1), 30);
+    const workflow = deps.db
+      .select()
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.id, workflowId), eq(schema.workflows.workspaceId, ws.workspaceId)))
+      .get() ?? null;
+    const rows = deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(and(eq(schema.workflowRuns.workspaceId, ws.workspaceId), eq(schema.workflowRuns.workflowId, workflowId)))
+      .orderBy(desc(schema.workflowRuns.createdAt))
+      .limit(limit)
+      .all();
+    const history = rows.map((run) => {
+      const state = run.runState as WorkflowRunState;
+      const graph = resolveRunGraph(run, workflow ?? undefined);
+      const node = buildRunNodes(graph, state).find((n) => n.nodeId === nodeId) ?? null;
+      return {
+        runId: run.id,
+        runStatus: mapRunStatus(run.status),
+        startedAt: run.startedAt ?? run.createdAt,
+        finishedAt: run.completedAt ?? undefined,
+        node: node
+          ? {
+              status: node.status,
+              durationMs: node.durationMs,
+              outputSummary: node.outputSummary,
+              output: node.output,
+              error: node.error,
+            }
+          : null,
+      };
+    });
+    return c.json({ history });
   });
 
   app.get('/:id', (c) => {
@@ -72,6 +128,73 @@ export function buildRunRoutes(deps: {
     return c.json({ ok: true });
   });
 
+  app.post('/:id/resume', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadRunRow(deps.db, ws.workspaceId, id);
+    const result = await deps.engine.resumeBlockedRun(id);
+    return c.json({ ok: true, ...result });
+  });
+
+  // LAYER 1: replayable activity tail — a surface opened mid-run back-fills the
+  // recent reasoning/tool/step history, then streams live (no "EVENTS 0").
+  app.get('/:id/activity', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadRunRow(deps.db, ws.workspaceId, id);
+    return c.json({ activity: deps.engine.getRunActivity(id) });
+  });
+
+  // TRANSPORT: a run-scoped SSE stream — every run-room event (node/run status,
+  // agent reasoning, tool calls) live, independent of the websocket. This is what
+  // makes a watched run's realtime work even when the socket can't connect. It
+  // first replays the in-memory tail (so a late joiner sees recent history), then
+  // relays raw bus envelopes for the run room with their original event names so
+  // the client's `useRealtime` consumers pick them up unchanged.
+  app.get('/:id/stream', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadRunRow(deps.db, ws.workspaceId, id);
+    const runRoom = REALTIME_ROOMS.run(id);
+    return streamSSE(c, async (stream) => {
+      let closed = false;
+      let unsubscribe: () => void = () => {};
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        unsubscribe();
+        if (heartbeat) clearInterval(heartbeat);
+      };
+      const write = async (event: string, data: unknown) => {
+        if (closed) return;
+        try {
+          await stream.writeSSE({ event, data: JSON.stringify(data) });
+        } catch {
+          close();
+        }
+      };
+      // Replay the recent tail first.
+      for (const env of deps.engine.getRunActivity(id)) {
+        await write(env.event, env.payload);
+      }
+      // Then stream live run-room events.
+      unsubscribe = deps.bus.subscribe((message) => {
+        if (message.room !== runRoom) return;
+        void write(message.envelope.event, message.envelope.payload);
+      });
+      heartbeat = setInterval(() => {
+        void write('heartbeat', { type: 'HEARTBEAT', at: new Date().toISOString() });
+      }, 15_000);
+      if (typeof heartbeat === 'object' && 'unref' in heartbeat) heartbeat.unref();
+      c.req.raw.signal.addEventListener('abort', close, { once: true });
+      await new Promise<void>((resolve) => {
+        c.req.raw.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      close();
+    });
+  });
+
   app.get('/:id/ledger', async (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
@@ -82,6 +205,19 @@ export function buildRunRoutes(deps: {
     const limit = c.req.query('limit') ? Number(c.req.query('limit')) : undefined;
     const events = await deps.ledger.listForRun({ runId: id, afterSequence: after, limit });
     return c.json({ events });
+  });
+
+  app.get('/:id/scratchpad', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadRunRow(deps.db, ws.workspaceId, id);
+    const scratchpad = deps.scratchpad.snapshotOf(id);
+    const entries = Object.entries(scratchpad).map(([key, value]) => ({
+      key,
+      value,
+      updatedAt: new Date().toISOString(),
+    }));
+    return c.json({ scratchpad, entries });
   });
 
   // V1-SPEC §6.6 — apply a graph patch to a (possibly live) run.
@@ -100,9 +236,20 @@ export function buildRunRoutes(deps: {
 function normalizeRunStatus(status: string | undefined): string[] {
   const value = status?.trim().toUpperCase();
   if (!value) return [];
-  if (value === 'ACTIVE') return ['RUNNING'];
+  if (value === 'ACTIVE') return ['RUNNING', 'WAITING', 'CREATED'];
   if (value === 'PENDING') return ['CREATED', 'PLANNING', 'WAITING'];
-  const allowed = new Set(['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'COMPLETED', 'FAILED', 'CANCELLED']);
+  if (value === 'FAILED') return ['FAILED', 'COMPLETED_WITH_ERRORS'];
+  const allowed = new Set([
+    'CREATED',
+    'PLANNING',
+    'RUNNING',
+    'WAITING',
+    'COMPLETED',
+    'COMPLETED_WITH_CONTRACT_VIOLATION',
+    'COMPLETED_WITH_ERRORS',
+    'FAILED',
+    'CANCELLED',
+  ]);
   return allowed.has(value) ? [value] : [];
 }
 
@@ -173,17 +320,18 @@ function presentRunSummary(
   const graph = resolveRunGraph(run, workflow);
   const currentNodeId = currentRunNodeId(state);
   const currentNode = currentNodeId ? graph.nodes.find((node) => node.id === currentNodeId) : null;
-  const failedNodeId = state.failedNodeIds?.[0] ?? null;
+  const failedNodeId = firstFailedNodeId(state);
   const failedNode = failedNodeId ? graph.nodes.find((node) => node.id === failedNodeId) : null;
   const totalSteps = graph.nodes.length > 0 ? graph.nodes.length : undefined;
+  const failed = failedNodeCount(state);
   const stepIndex = totalSteps
-    ? Math.min(totalSteps, (state.completedNodeIds?.length ?? 0) + (state.failedNodeIds?.length ?? 0) + (currentNode ? 1 : 0))
+    ? Math.min(totalSteps, (state.completedNodeIds?.length ?? 0) + failed + (currentNode ? 1 : 0))
     : undefined;
   return {
     id: run.id,
     workflowId: run.workflowId ?? '',
     workflowName: workflow?.title ?? run.ephemeralTitle ?? undefined,
-    status: mapRunStatus(run.status),
+    status: mapRunSummaryStatus(run, state),
     createdAt: run.createdAt,
     startedAt: run.startedAt ?? run.createdAt,
     completedAt: run.completedAt ?? null,
@@ -209,13 +357,20 @@ function presentRunDetail(
   const completedCount = nodes.filter((node) => node.status === 'completed').length;
   const failedCount = nodes.filter((node) => node.status === 'failed').length;
   const activeAgents = collectRunAgents(state, agentsById);
+  // A run blocked on a recoverable failure (out of credits) is PAUSED — distinct
+  // from a generic WAITING (scheduled/approval) — so the UI shows Resume + reason.
+  const blockedNode = Object.values(state?.nodeStates ?? {}).find((n) => n?.status === 'WAITING' && n?.blockedReason);
+  const status = blockedNode
+    ? 'paused' as const
+    : run.status === 'WAITING'
+      ? 'waiting' as const
+      : mapRunStatus(run.status);
   return {
     id: run.id,
     workflowId: run.workflowId ?? '',
     workflowName: workflow?.title ?? run.ephemeralTitle ?? 'Run',
-    appSlug: undefined,
-    appName: undefined,
-    status: mapRunStatus(run.status),
+    status,
+    ...(blockedNode?.blockedReason ? { blockedReason: blockedNode.blockedReason } : {}),
     startedAt: run.startedAt ?? run.createdAt,
     finishedAt: run.completedAt ?? undefined,
     durationMs: computeDurationMs(run.startedAt ?? run.createdAt, run.completedAt),
@@ -251,6 +406,7 @@ function buildRunNodes(graph: WorkflowGraph, state: WorkflowRunState) {
       outputSummary: summarizeValue(nodeState?.outputData),
       inputs: nodeState?.inputData,
       error: nodeState?.error,
+      ...(nodeState?.blockedReason ? { blockedReason: nodeState.blockedReason } : {}),
     };
   });
 }
@@ -281,11 +437,19 @@ function collectRunAgents(
   return [...ids].map((id) => ({ id, name: agentsById.get(id)?.name ?? id }));
 }
 
+function mapRunSummaryStatus(run: WorkflowRunRow, state: WorkflowRunState): 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting' {
+  const blockedNode = Object.values(state.nodeStates ?? {}).find((node) => node.status === 'WAITING' && node.blockedReason);
+  if (blockedNode) return 'paused';
+  if (run.status === 'WAITING') return 'waiting';
+  return mapRunStatus(run.status);
+}
+
 function mapRunStatus(status: string): 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' {
   switch (status) {
     case 'COMPLETED':
     case 'COMPLETED_WITH_CONTRACT_VIOLATION':
       return 'completed';
+    case 'COMPLETED_WITH_ERRORS':
     case 'FAILED':
       return 'failed';
     case 'CANCELLED':
@@ -297,11 +461,12 @@ function mapRunStatus(status: string): 'running' | 'completed' | 'failed' | 'pen
   }
 }
 
-function mapNodeStatus(nodeId: string, state: WorkflowRunState): 'completed' | 'failed' | 'running' | 'skipped' | 'pending' {
-  if (state.failedNodeIds?.includes(nodeId) || state.nodeStates?.[nodeId]?.status === 'FAILED') return 'failed';
+function mapNodeStatus(nodeId: string, state: WorkflowRunState): 'completed' | 'failed' | 'running' | 'skipped' | 'pending' | 'waiting' {
+  if (isFailedNodeId(state, nodeId)) return 'failed';
   if (state.completedNodeIds?.includes(nodeId) || state.nodeStates?.[nodeId]?.status === 'COMPLETED') return 'completed';
   if (state.skippedNodeIds?.includes(nodeId) || state.nodeStates?.[nodeId]?.status === 'SKIPPED') return 'skipped';
   if (state.activeExecutions?.[nodeId] || state.nodeStates?.[nodeId]?.status === 'RUNNING') return 'running';
+  if (state.nodeStates?.[nodeId]?.status === 'WAITING') return 'waiting';
   return 'pending';
 }
 

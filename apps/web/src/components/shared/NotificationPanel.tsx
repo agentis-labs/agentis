@@ -10,7 +10,7 @@ import { Bell, Check, X, Eye, RotateCcw, AlertTriangle, XCircle, Clock } from 'l
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { ManagerGlyph, OrchestratorGlyph } from '../agents/AgentRoleGlyphs';
-import { api } from '../../lib/api';
+import { api, apiErrorMessage } from '../../lib/api';
 import { refreshWorkspaceSnapshot, useWorkspaceData } from '../../lib/workspaceData';
 import { useToast } from './Toast';
 
@@ -102,7 +102,7 @@ export function NotificationPanel() {
       toast.success('Approved');
       void refreshWorkspaceSnapshot();
     } catch (e) {
-      toast.error('Failed to approve', String(e));
+      toast.error('Failed to approve', apiErrorMessage(e));
     }
   }
 
@@ -117,7 +117,7 @@ export function NotificationPanel() {
       toast.success('Rejected');
       void refreshWorkspaceSnapshot();
     } catch (e) {
-      toast.error('Failed to reject', String(e));
+      toast.error('Failed to reject', apiErrorMessage(e));
     }
   }
 
@@ -129,7 +129,7 @@ export function NotificationPanel() {
       toast.success('Retry started');
       void refreshWorkspaceSnapshot();
     } catch (e) {
-      toast.error('Retry failed', String(e));
+      toast.error('Retry failed', apiErrorMessage(e));
     }
   }
 

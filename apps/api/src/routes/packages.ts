@@ -1,62 +1,31 @@
 /**
- * /v1/packages — agent package CRUD + install-from-local-manifest.
+ * /v1/packages — workflow package CRUD + install-from-local-manifest.
  *
- * V1-SPEC §11. Registry-installed packages persist to
- * `installed_registry_artifacts` via /v1/skills/registry/install; this route
- * handles **local** packages (e.g. a developer authoring a package on disk
- * and installing it without going through the registry) and lists/get/delete
- * of installed packages regardless of source.
- *
- * Installing a package fans out into:
- *   - one `agent_packages` row,
- *   - one `skills` row per declared skill,
- *   - one `agents` row per declared agent (in `offline` state until the
- *     operator binds credentials),
- *   - one `workflows` row per declared template (graph copied verbatim).
- *
- * Skills declared inside a local package are forced to `node_worker` runtime
- * unless the manifest explicitly declares `builtin` (rejected for local
- * packages — only Nexseed-shipped builtins are trusted).
+ * The public packages surface now stays focused on workflows. Abilities have
+ * their own dedicated library at /v1/abilities.
  */
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { AgentisError, CONSTANTS } from '@agentis/core';
 import type { AgentisPackageContents, PackageContents, PackageManifest } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
+import type { AbilityService } from '../services/abilityService.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { PackagerService } from '../services/packager.js';
 
-const skillDefSchema = z.object({
-  name: z.string().min(1),
-  slug: z.string().min(1),
-  version: z.string().min(1),
-  runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox']),
-  entrypoint: z.string(),
-  capabilityTags: z.array(z.string()).default([]),
-  inputSchema: z.record(z.unknown()).default({}),
-  outputSchema: z.record(z.unknown()).default({}),
-  timeoutMs: z.number().int().positive().max(CONSTANTS.SKILL_EXECUTION_MAX_TIMEOUT_MS).optional(),
-});
-
-const agentDefSchema = z.object({
-  name: z.string().min(1),
-  adapterType: z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']),
-  capabilityTags: z.array(z.string()).default([]),
-  defaultConfig: z.record(z.unknown()).default({}),
-});
-
 const templateDefSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
-  summary: z.string().default(''),
+  description: z.string().default(''),
+  summary: z.string().optional(),
   graph: z.object({
     version: z.literal(1),
     nodes: z.array(z.unknown()),
@@ -64,6 +33,31 @@ const templateDefSchema = z.object({
     viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }).optional(),
   }),
   variables: z.array(z.unknown()).default([]),
+});
+
+const extensionDefSchema = z.object({
+  name: z.string().min(1),
+  slug: z.string().min(1),
+  version: z.string().min(1),
+  runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox']),
+  entrypoint: z.string().optional(),
+  capabilityTags: z.array(z.string()).default([]),
+  operations: z.array(z.object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    inputSchema: z.record(z.unknown()).default({}),
+    outputSchema: z.record(z.unknown()).default({}),
+  })).min(1).optional(),
+  inputSchema: z.record(z.unknown()).optional(),
+  outputSchema: z.record(z.unknown()).optional(),
+  timeoutMs: z.number().int().positive().max(CONSTANTS.EXTENSION_EXECUTION_MAX_TIMEOUT_MS).optional(),
+});
+
+const agentDefSchema = z.object({
+  name: z.string().min(1),
+  adapterType: z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']),
+  capabilityTags: z.array(z.string()).default([]),
+  defaultConfig: z.record(z.unknown()).default({}),
 });
 
 const knowledgeSeedSchema = z.object({
@@ -79,7 +73,7 @@ const manifestSchema = z.object({
   version: z.string().min(1),
   summary: z.string().default(''),
   agents: z.array(agentDefSchema).default([]),
-  skills: z.array(skillDefSchema).default([]),
+  extensions: z.array(extensionDefSchema).default([]),
   workflowTemplates: z.array(templateDefSchema).default([]),
   credentials: z.array(z.unknown()).default([]),
   knowledgeSeeds: z.array(knowledgeSeedSchema).default([]),
@@ -96,11 +90,9 @@ const createPackageSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1).optional(),
   version: z.string().min(1).default('1.0.0'),
-  kind: z.enum(['workflow', 'agent', 'skill', 'app']).default('workflow'),
+  kind: z.literal('workflow').default('workflow'),
   description: z.string().default(''),
   workflowIds: z.array(z.string()).default([]),
-  agentIds: z.array(z.string()).default([]),
-  skillIds: z.array(z.string()).default([]),
 });
 
 const packMetaSchema = z.object({
@@ -116,12 +108,14 @@ export function buildPackageRoutes(deps: {
   auth: AuthService;
   bus?: EventBus;
   logger?: Logger;
+  abilities?: AbilityService;
 }) {
   const app = new Hono();
   const packager = new PackagerService({
     db: deps.db,
     bus: deps.bus,
     logger: deps.logger,
+    abilities: deps.abilities,
   });
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -131,23 +125,22 @@ export function buildPackageRoutes(deps: {
   }
 
   function toPackageDto(row: typeof schema.libraryPackages.$inferSelect) {
+    const isAgent = row.kind === 'agent';
+    const role = isAgent ? (row.contents as any).agent?.role : undefined;
     return {
       id: row.id,
       name: row.name,
       slug: row.slug,
-      kind: (row.kind === 'agentis' ? 'app' : row.kind) as 'app' | 'workflow' | 'agent' | 'skill' | 'integration',
+      kind: row.kind as any,
       version: row.version,
       description: row.description ?? '',
       isTemplate: false,
+      ...(isAgent ? { role } : {}),
     };
   }
 
   function isSupportedPackageRow(row: typeof schema.libraryPackages.$inferSelect) {
-    return row.kind === 'agentis'
-      || row.kind === 'workflow'
-      || row.kind === 'agent'
-      || row.kind === 'skill'
-      || row.kind === 'integration';
+    return row.kind === 'workflow' || row.kind === 'agent';
   }
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -176,20 +169,11 @@ export function buildPackageRoutes(deps: {
     return c.json({ package: { ...toPackageDto(row), checksum: row.checksum } }, 201);
   });
 
-  app.post('/pack/skill/:skillId', async (c) => {
-    const row = packager.packFromSkill(
-      scope(c),
-      c.req.param('skillId'),
-      packMetaSchema.parse(await c.req.json().catch(() => ({}))),
-    );
-    return c.json({ package: { ...toPackageDto(row), checksum: row.checksum } }, 201);
-  });
-
   app.get('/:id/export', (c) => {
     const ws = getWorkspace(c);
     const row = packager.get(c.req.param('id'), ws.workspaceId);
     if (!isSupportedPackageRow(row)) {
-      throw new AgentisError('VALIDATION_FAILED', 'knowledge packages are temporarily disabled');
+      throw new AgentisError('VALIDATION_FAILED', 'only workflow and agent packages are exposed here');
     }
     return c.json(packager.exportEnvelope(c.req.param('id'), ws.workspaceId));
   });
@@ -198,7 +182,7 @@ export function buildPackageRoutes(deps: {
     const ws = getWorkspace(c);
     const row = packager.get(c.req.param('id'), ws.workspaceId);
     if (!isSupportedPackageRow(row)) {
-      throw new AgentisError('VALIDATION_FAILED', 'knowledge packages are temporarily disabled');
+      throw new AgentisError('VALIDATION_FAILED', 'only workflow and agent packages are exposed here');
     }
     const result = packager.usePackage(scope(c), c.req.param('id'));
     return c.json(result, 201);
@@ -211,115 +195,46 @@ export function buildPackageRoutes(deps: {
 
     const libRow = packager.get(id, ws.workspaceId);
     if (!isSupportedPackageRow(libRow)) {
-      throw new AgentisError('VALIDATION_FAILED', 'knowledge packages are temporarily disabled');
+      throw new AgentisError('VALIDATION_FAILED', 'only workflow and agent packages are exposed here');
     }
     const contents = libRow.contents as PackageContents;
     const manifest = packager.manifestFromRow(libRow);
     const pkgDto = toPackageDto(libRow);
 
-    let workflows: { id: string; title: string }[] = [];
-    let agents: { id: string; name: string; status: string; adapterType: string }[] = [];
-    let skills: { id: string; name: string; slug: string; version: string; runtime: string }[] = [];
+    const workflows = contents.kind === 'workflow'
+      ? [{ id: libRow.sourceId ?? '', title: contents.workflow.title }]
+      : [];
 
-    if (contents.kind === 'workflow') {
-      workflows = [{ id: libRow.sourceId ?? '', title: contents.workflow.title }];
-    } else if (contents.kind === 'agent') {
-      agents = [{ id: libRow.sourceId ?? '', name: contents.agent.name, status: 'offline', adapterType: contents.agent.adapterType }];
-    } else if (contents.kind === 'skill') {
-      skills = [{ id: libRow.sourceId ?? '', name: contents.skill.name, slug: contents.skill.slug, version: contents.skill.version, runtime: contents.skill.runtime }];
-    } else if (contents.kind === 'agentis') {
-      workflows = contents.workflows.map((w, i) => ({ id: `pkg:${i}`, title: w.title }));
-      agents = contents.agents.map((a, i) => ({ id: `pkg:${i}`, name: a.name, status: 'offline', adapterType: a.adapterType }));
-      skills = contents.skills.map((s, i) => ({ id: `pkg:${i}`, name: s.name, slug: s.slug, version: s.version, runtime: s.runtime }));
-    }
+    const agents = contents.kind === 'agent'
+      ? [{ id: libRow.sourceId ?? '', name: contents.agent.name, role: contents.agent.role }]
+      : [];
 
-    return c.json({ package: { ...pkgDto, installedAt: libRow.createdAt, manifest }, workflows, agents, skills });
+    return c.json({ package: { ...pkgDto, installedAt: libRow.createdAt, manifest }, workflows, agents });
   });
 
   // ── Create ─────────────────────────────────────────────────────────────────
   app.post('/', async (c) => {
     const s = scope(c);
-    const ws = getWorkspace(c);
     const body = createPackageSchema.parse(await c.req.json());
     const meta = { name: body.name, slug: body.slug, version: body.version, description: body.description };
 
-    // Single-resource shortcuts → typed packager methods
-    if (body.kind === 'workflow' && body.workflowIds.length === 1 && !body.agentIds.length && !body.skillIds.length) {
-      const row = packager.packFromWorkflow(s, body.workflowIds[0]!, meta);
-      return c.json(toPackageDto(row), 201);
+    if (body.workflowIds.length !== 1) {
+      throw new AgentisError('VALIDATION_FAILED', 'workflowIds must contain exactly one workflow');
     }
-    if (body.kind === 'agent' && body.agentIds.length === 1 && !body.workflowIds.length && !body.skillIds.length) {
-      const row = packager.packFromAgent(s, body.agentIds[0]!, meta);
-      return c.json(toPackageDto(row), 201);
-    }
-    if (body.kind === 'skill' && body.skillIds.length === 1 && !body.workflowIds.length && !body.agentIds.length) {
-      const row = packager.packFromSkill(s, body.skillIds[0]!, meta);
-      return c.json(toPackageDto(row), 201);
-    }
-    // App bundle / multi-resource → agentis package with snapshotted contents
-    const workflows = body.workflowIds.length > 0
-      ? deps.db.select().from(schema.workflows)
-          .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), inArray(schema.workflows.id, body.workflowIds)))
-          .all()
-      : [];
-    const agents = body.agentIds.length > 0
-      ? deps.db.select().from(schema.agents)
-          .where(and(eq(schema.agents.workspaceId, ws.workspaceId), inArray(schema.agents.id, body.agentIds)))
-          .all()
-      : [];
-    const skills = body.skillIds.length > 0
-      ? deps.db.select().from(schema.skills)
-          .where(and(eq(schema.skills.workspaceId, ws.workspaceId), inArray(schema.skills.id, body.skillIds)))
-          .all()
-      : [];
+    const workflow = deps.db.select().from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, getWorkspace(c).workspaceId), eq(schema.workflows.id, body.workflowIds[0]!)))
+      .get();
+    if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', 'workflow not found');
 
-    const contents: AgentisPackageContents = {
-      kind: 'agentis',
-      agents: agents.map((a) => ({
-        name: a.name,
-        adapterType: a.adapterType,
-        capabilityTags: (a.capabilityTags as string[]) ?? [],
-        config: (a.config as Record<string, unknown>) ?? {},
-        instructions: a.instructions ?? null,
-        avatarGlyph: a.avatarGlyph ?? null,
-        runtimeModel: a.runtimeModel ?? null,
-        role: a.role ?? null,
-      })),
-      workflows: workflows.map((w) => ({
-        slug: w.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-        title: w.title,
-        summary: w.summary ?? null,
-        graph: w.graph,
-        settings: (w.settings as Record<string, unknown>) ?? {},
-        maxConcurrentRuns: w.maxConcurrentRuns ?? null,
-        concurrencyOverflow: (w.concurrencyOverflow as 'queue' | 'reject' | 'replace_oldest' | null | undefined),
-      })),
-      skills: skills.map((s) => {
-        const sm = (s.manifest as Record<string, unknown>) ?? {};
-        return {
-          name: s.name, slug: s.slug, version: s.version,
-          runtime: s.runtime as 'builtin' | 'node_worker' | 'docker_sandbox',
-          manifest: {
-            name: s.name, slug: s.slug, version: s.version,
-            runtime: s.runtime as 'builtin' | 'node_worker' | 'docker_sandbox',
-            entrypoint: (sm['entrypoint'] as string) ?? '',
-            capabilityTags: (sm['capabilityTags'] as string[]) ?? [],
-            inputSchema: (sm['inputSchema'] as Record<string, unknown>) ?? {},
-            outputSchema: (sm['outputSchema'] as Record<string, unknown>) ?? {},
-            timeoutMs: sm['timeoutMs'] as number | undefined,
-          },
-        };
-      }),
-      integrations: [], credentialSlots: [],
-      knowledgeSeeds: [],
-      screenshotUrls: [],
-    };
-
-    const row = packager.create(s, meta, 'agentis', contents);
+    const row = packager.packFromWorkflow(s, workflow.id, meta);
     return c.json(toPackageDto(row), 201);
   });
 
   // ── Import a PackageManifest (exported via exportEnvelope / drawerExport) ──
+  // Accepts: raw PackageManifest, { manifest: ... }, or { packageManifest: ... }
+  // (the last shape is what exportEnvelope produces as PackageExportEnvelope).
+  // Validates checksum + security scan, stores the package, then instantiates it
+  // via usePackage() so the caller gets a ready-to-navigate workflowId + path.
   app.post('/import', async (c) => {
     const s = scope(c);
     const body = (await c.req.json()) as { manifest?: PackageManifest; packageManifest?: PackageManifest } | PackageManifest;
@@ -331,9 +246,15 @@ export function buildPackageRoutes(deps: {
     if (!manifest || typeof manifest !== 'object' || !('contents' in manifest)) {
       throw new AgentisError('VALIDATION_FAILED', 'manifest is required');
     }
-    const result = packager.importManifest(s, manifest as PackageManifest);
-    const row = packager.get(result.packageId, s.workspaceId);
-    return c.json({ ...toPackageDto(row), warnings: result.warnings }, 201);
+    const imported = packager.importManifest(s, manifest as PackageManifest);
+    const used = packager.usePackage(s, imported.packageId);
+    return c.json({
+      packageId: imported.packageId,
+      ...(used.kind === 'workflow' ? { workflowId: used.resourceId } : { agentId: used.resourceId }),
+      resourceId: used.resourceId,
+      path: used.path,
+      warnings: imported.warnings,
+    }, 201);
   });
 
   // ── Duplicate a package by ID ───────────────────────────────────────────────
@@ -358,11 +279,11 @@ export function buildPackageRoutes(deps: {
     const m = body.manifest;
 
     // V1 trust rule (§9.2): local install cannot ship `builtin`.
-    for (const s of m.skills) {
+    for (const s of m.extensions) {
       if (s.runtime === 'builtin') {
         throw new AgentisError(
           'VALIDATION_FAILED',
-          `skill ${s.slug}: builtin runtime is reserved for Nexseed-shipped skills`,
+          `extension ${s.slug}: builtin runtime is reserved for Nexseed-shipped extensions`,
         );
       }
     }
@@ -376,32 +297,36 @@ export function buildPackageRoutes(deps: {
         config: agent.defaultConfig,
         role: 'agent',
       })),
-      skills: m.skills.map((skill) => ({
-        name: skill.name,
-        slug: skill.slug,
-        version: skill.version,
-        runtime: skill.runtime,
+      extensions: m.extensions.map((extension) => ({
+        name: extension.name,
+        slug: extension.slug,
+        version: extension.version,
+        runtime: extension.runtime,
         manifest: {
-          name: skill.name,
-          slug: skill.slug,
-          version: skill.version,
-          runtime: skill.runtime,
-          entrypoint: skill.entrypoint,
-          capabilityTags: skill.capabilityTags,
-          inputSchema: skill.inputSchema,
-          outputSchema: skill.outputSchema,
-          timeoutMs: skill.timeoutMs,
+          name: extension.name,
+          slug: extension.slug,
+          version: extension.version,
+          runtime: extension.runtime,
+          entrypoint: extension.entrypoint,
+          capabilityTags: extension.capabilityTags,
+          operations: extension.operations ?? [{
+            name: 'execute',
+            inputSchema: extension.inputSchema ?? {},
+            outputSchema: extension.outputSchema ?? {},
+          }],
+          timeoutMs: extension.timeoutMs,
         },
       })),
       workflows: m.workflowTemplates.map((tpl) => ({
         slug: tpl.slug,
         title: tpl.name,
-        summary: tpl.summary,
+        description: tpl.description || tpl.summary || null,
         graph: tpl.graph,
         settings: { variables: tpl.variables },
       })),
       integrations: [],
       credentialSlots: [],
+      abilities: [],
       knowledgeSeeds: m.knowledgeSeeds,
       screenshotUrls: [],
     };
@@ -421,7 +346,7 @@ export function buildPackageRoutes(deps: {
         path: installed.path,
         name: m.name,
         version: m.version,
-        skills: contents.skills.map((skill) => ({ slug: skill.slug })),
+        extensions: contents.extensions.map((extension) => ({ slug: extension.slug })),
         agents: contents.agents.map((agent) => ({ name: agent.name })),
         workflows: contents.workflows.map((workflow) => ({ slug: workflow.slug, title: workflow.title })),
       },

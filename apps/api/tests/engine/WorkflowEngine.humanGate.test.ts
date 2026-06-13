@@ -18,29 +18,33 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
 let engine: WorkflowEngine;
 let approvals: ApprovalInboxService;
 
-beforeEach(async () => {
-  ctx = await createTestContext();
-  approvals = new ApprovalInboxService(ctx.db, ctx.bus);
-  engine = new WorkflowEngine({
+function createEngine(): WorkflowEngine {
+  const next = new WorkflowEngine({
     db: ctx.db, bus: ctx.bus, logger: ctx.logger,
     ledger: new LedgerService(ctx.db, ctx.bus),
     scratchpad: new ScratchpadService(ctx.bus, ctx.logger),
     activity: new ActivityFeedService(ctx.db, ctx.bus),
     approvals,
-    skills: {} as unknown as SkillRuntime,
+    skills: {} as unknown as ExtensionRuntime,
     adapters: new AdapterManager(ctx.logger),
   });
-  // Mirror the bootstrap wiring: approval resolution drives the engine.
   approvals.bindCheckpointHandler(async ({ runId, approvalId, decision }) => {
-    await engine.resolveApproval({ runId, approvalId, decision });
+    await next.resolveApproval({ runId, approvalId, decision });
   });
+  return next;
+}
+
+beforeEach(async () => {
+  ctx = await createTestContext();
+  approvals = new ApprovalInboxService(ctx.db, ctx.bus);
+  engine = createEngine();
 });
 
 afterEach(() => ctx.close());
@@ -123,5 +127,18 @@ describe('WorkflowEngine — phase human gate', () => {
     await approvals.resolve({ workspaceId: ctx.workspace.id, approvalId: approval.id, decision: 'reject' });
     await waitForStatus(runId, 'FAILED');
     expect(loadRun(runId).status).toBe('FAILED');
+  });
+
+  it('restores a pending phase gate after an engine restart', async () => {
+    const { runId } = startRun(gatedGraph());
+    const approval = await waitForApproval();
+
+    engine = createEngine();
+    const summary = await engine.recoverInterruptedRuns();
+    expect(summary).toEqual({ resumed: 1, failed: 0 });
+
+    await approvals.resolve({ workspaceId: ctx.workspace.id, approvalId: approval.id, decision: 'approve' });
+    await waitForStatus(runId, 'COMPLETED');
+    expect(loadRun(runId).status).toBe('COMPLETED');
   });
 });

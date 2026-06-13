@@ -21,9 +21,11 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { AgentisError } from '@agentis/core';
 import type { Logger } from '../logger.js';
+import { assertSafeUrl } from './safeUrl.js';
 
 // ── Minimal Playwright shim (only what we use) ──────────────────────────────
 interface PWPage {
+  route(pattern: string, handler: (route: PWRoute) => Promise<void>): Promise<void>;
   setContent(html: string, opts?: { waitUntil?: string; timeout?: number }): Promise<void>;
   goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
   screenshot(opts?: { fullPage?: boolean; type?: 'png' | 'jpeg' }): Promise<Buffer>;
@@ -37,6 +39,11 @@ interface PWPage {
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   emulateMedia(opts: { media?: 'screen' | 'print' }): Promise<void>;
   close(): Promise<void>;
+}
+interface PWRoute {
+  request(): { url(): string };
+  abort(errorCode?: string): Promise<void>;
+  continue(): Promise<void>;
 }
 interface PWBrowser {
   newPage(): Promise<PWPage>;
@@ -197,6 +204,7 @@ export class BrowserPool {
         browser = await this.#sharedBrowser();
       }
       page = await browser.newPage();
+      await this.#guardNetworkRequests(page);
       return await fn(page);
     } catch (err) {
       throw new AgentisError('BROWSER_OPERATION_FAILED', `browser op failed: ${(err as Error).message}`);
@@ -223,10 +231,27 @@ export class BrowserPool {
     if (opts.html != null) {
       await page.setContent(opts.html, { waitUntil: 'networkidle', timeout });
     } else if (opts.url) {
-      await page.goto(opts.url, { waitUntil: 'networkidle', timeout });
+      const url = await assertSafeUrl(opts.url, { allowPrivate: browserPrivateNetworkAllowed() });
+      await page.goto(url.toString(), { waitUntil: 'networkidle', timeout });
     } else {
       throw new Error('browser op requires either html or url');
     }
+  }
+
+  async #guardNetworkRequests(page: PWPage): Promise<void> {
+    await page.route('**/*', async (route) => {
+      const url = route.request().url();
+      if (url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) {
+        await route.continue();
+        return;
+      }
+      try {
+        await assertSafeUrl(url, { allowPrivate: browserPrivateNetworkAllowed() });
+        await route.continue();
+      } catch {
+        await route.abort('blockedbyclient');
+      }
+    });
   }
 
   /** Ensure Playwright is loaded and Chromium is installed (single-flight). */
@@ -315,6 +340,10 @@ export class BrowserPool {
 function resolveConcurrency(): number {
   const raw = Number(process.env.AGENTIS_BROWSER_CONCURRENCY);
   return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 16) : 3;
+}
+
+function browserPrivateNetworkAllowed(): boolean {
+  return String(process.env.AGENTIS_BROWSER_ALLOW_PRIVATE ?? '').toLowerCase() === 'true';
 }
 
 /** Resolve the Playwright CLI entrypoint for the on-demand install. */

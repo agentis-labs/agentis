@@ -68,7 +68,7 @@ function deps(): ToolHandlerDeps {
     logger: ctx.logger,
     bus: ctx.bus,
     engine: { cancelRun: async () => undefined } as ToolHandlerDeps['engine'],
-    adapters: {} as ToolHandlerDeps['adapters'],
+    adapters: { get: () => undefined, list: () => [] } as unknown as ToolHandlerDeps['adapters'],
     ledger: { listForRun: async () => [] } as unknown as ToolHandlerDeps['ledger'],
     scratchpad: {} as ToolHandlerDeps['scratchpad'],
     approvals: { list: () => [] } as unknown as ToolHandlerDeps['approvals'],
@@ -78,27 +78,13 @@ function deps(): ToolHandlerDeps {
 }
 
 describe('chat golden path', () => {
-  it('creates a Hello World workflow through the chat tool loop instead of advising manually', async () => {
+  it('builds a workflow directly from a chat request (deterministic fast-path, no model round-trip)', async () => {
     const captured = ctx.captureBus();
-    const adapter = new ScriptedChatAdapter(async function* (_messages, tools, callIndex) {
-      expect(tools.some((tool) => tool.name === 'agentis.build_workflow')).toBe(true);
-      if (callIndex === 0) {
-        yield { type: 'thinking', delta: 'I can build this directly.' };
-        yield {
-          type: 'tool_call',
-          id: 'call_build_hello',
-          name: 'agentis.build_workflow',
-          args: {
-            title: 'Hello World',
-            description: 'Create a manual Hello World workflow that returns the fixed object { text: "Workflow is working" }.',
-          },
-        };
-        yield { type: 'done', finishReason: 'tool_calls' };
-        return;
-      }
-      expect(_messages.some((message) => message.role === 'tool' && String(message.content).includes('Workflow'))).toBe(true);
-      yield { type: 'text', delta: 'Built it. Opening the workflow canvas now.' };
-      yield { type: 'done', finishReason: 'stop' };
+    // The model must NOT be called for a clear build request — the fast-path
+    // compiles the graph deterministically and streams it. If chat() is invoked
+    // the test fails loudly.
+    const adapter = new ScriptedChatAdapter(async function* () {
+      throw new Error('model should not be called for a direct build request');
     });
 
     const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'Build a Hello World workflow.', {
@@ -109,34 +95,38 @@ describe('chat golden path', () => {
       conversationId: 'conv_golden',
     }));
 
+    expect(adapter.calls).toHaveLength(0);
     expect(deltas.some((delta) => delta.type === 'confirmation_required')).toBe(false);
-    expect(deltas).toContainEqual(expect.objectContaining({
-      type: 'tool_result',
-      id: 'call_build_hello',
-      name: 'agentis.build_workflow',
-    }));
-    expect(deltas).toContainEqual({ type: 'text', delta: 'Built it. Opening the workflow canvas now.' });
-    expect(adapter.calls).toHaveLength(2);
 
+    // The build ran as a real tool and produced a workflow id (not advice).
+    const toolResult = deltas.find(
+      (d): d is Extract<ChatDelta, { type: 'tool_result' }> =>
+        d.type === 'tool_result' && d.name === 'agentis.build_workflow',
+    );
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.error).toBeUndefined();
+    expect((toolResult!.result as { workflowId?: string }).workflowId).toBeTruthy();
+
+    // Never a blank turn — it tells the operator what happened, then stops cleanly.
+    expect(deltas.some((d) => d.type === 'text' && /built/i.test(d.delta))).toBe(true);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+
+    // Exactly one workflow persisted, with the deterministic Hello-World graph.
     const workflows = ctx.db.select().from(schema.workflows).all();
     expect(workflows).toHaveLength(1);
-    expect(workflows[0]!.title).toBe('Hello World');
+    expect(workflows[0]!.title).toContain('Hello World');
     const graph = workflows[0]!.graph as WorkflowGraph;
-    // build_workflow now emits trigger → transform (produces value) → return_output
-    // with a renderAs viewer hint (Layer 6), instead of a transform+isOutput idiom.
-    expect(graph.nodes).toEqual([
-      expect.objectContaining({ id: 'trigger_manual', type: 'trigger' }),
-      expect.objectContaining({
-        id: 'produce_output',
-        type: 'transform',
-        config: expect.objectContaining({ expression: '{"text":"Workflow is working"}' }),
-      }),
-      expect.objectContaining({
-        id: 'return_output',
-        type: 'return_output',
-        config: expect.objectContaining({ kind: 'return_output', renderAs: 'text' }),
-      }),
-    ]);
+    expect(graph.nodes.map((n) => n.id)).toEqual(['trigger', 'produce_output', 'return_output']);
+    expect(graph.nodes[1]).toEqual(expect.objectContaining({
+      type: 'transform',
+      config: expect.objectContaining({ expression: '{"text":"Workflow is working"}' }),
+    }));
+    expect(graph.nodes[2]).toEqual(expect.objectContaining({
+      type: 'return_output',
+      config: expect.objectContaining({ kind: 'return_output', renderAs: 'text' }),
+    }));
+
+    // The canvas receives a build-complete signal for the live UI.
     expect(captured.events.some((event) => event.envelope.event === REALTIME_EVENTS.CANVAS_BUILD_COMPLETE)).toBe(true);
     captured.stop();
   });

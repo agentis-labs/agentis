@@ -66,29 +66,29 @@ export const CONSTANTS = {
   WEBHOOK_MAX_RETRY_ATTEMPTS: 5,
 
   // ────────────────────────────────────────────────────────────
-  // Skill registry
+  // extension registry
   // ────────────────────────────────────────────────────────────
 
-  SKILL_REGISTRY_TIMEOUT_MS: 10_000,
-  SKILL_REGISTRY_RETRY_COUNT: 2,
-  SKILL_REGISTRY_CACHE_TTL_SECONDS: 300,
+  EXTENSION_REGISTRY_TIMEOUT_MS: 10_000,
+  EXTENSION_REGISTRY_RETRY_COUNT: 2,
+  EXTENSION_REGISTRY_CACHE_TTL_SECONDS: 300,
 
   // ────────────────────────────────────────────────────────────
-  // Skill runtime — three-tier trust model (V1-SPEC §9.2)
+  // Extension runtime — three-tier trust model (V1-SPEC §9.2)
   // ────────────────────────────────────────────────────────────
 
-  SKILL_EXECUTION_TIMEOUT_MS: 30_000,
-  SKILL_EXECUTION_MAX_TIMEOUT_MS: 300_000,
+  EXTENSION_EXECUTION_TIMEOUT_MS: 30_000,
+  EXTENSION_EXECUTION_MAX_TIMEOUT_MS: 300_000,
 
-  SKILL_ISOLATE_HEAP_MB: 128,
-  SKILL_ISOLATE_POOL_DEFAULT: 'auto' as 'auto' | number,
+  EXTENSION_ISOLATE_HEAP_MB: 128,
+  EXTENSION_ISOLATE_POOL_DEFAULT: 'auto' as 'auto' | number,
 
-  SKILL_DOCKER_MEMORY_MB: 256,
-  SKILL_DOCKER_CPU_QUOTA: 0.5,
-  SKILL_DOCKER_TMP_MAX_MB: 64,
-  SKILL_DOCKER_POOL_SIZE: 2,
-  SKILL_DOCKER_WARM_LATENCY_TARGET_MS: 200,
-  SKILL_DOCKER_COLD_START_TIMEOUT_MS: 10_000,
+  EXTENSION_DOCKER_MEMORY_MB: 256,
+  EXTENSION_DOCKER_CPU_QUOTA: 0.5,
+  EXTENSION_DOCKER_TMP_MAX_MB: 64,
+  EXTENSION_DOCKER_POOL_SIZE: 2,
+  EXTENSION_DOCKER_WARM_LATENCY_TARGET_MS: 200,
+  EXTENSION_DOCKER_COLD_START_TIMEOUT_MS: 10_000,
 
   // ────────────────────────────────────────────────────────────
   // Conversation layer
@@ -138,6 +138,43 @@ export const CONSTANTS = {
 
   DEFAULT_HTTP_PORT: 3737,
   DEFAULT_DATA_DIR: '.agentis',
+
+  // ────────────────────────────────────────────────────────────
+  // Abilities — docs/brain/ABILITIES.md §7.3 + §3
+  // ────────────────────────────────────────────────────────────
+
+  ABILITY_COMPACT_MODE: true,
+  /** Default total tokens across all injected abilities. Per-ability + per-workspace overrides apply. */
+  ABILITY_TOKEN_BUDGET: 3_000,
+  /** Minimum budget to bother injecting an ability — skip when remaining budget falls below. */
+  MIN_ABILITY_TOKENS: 300,
+  /** Cosine threshold for semantic pool injection. Below this, the ability is skipped entirely. */
+  ABILITY_MIN_RELEVANCE_SCORE: 0.35,
+  /** Per-ability max examples retrieved at dispatch. */
+  ABILITY_MAX_EXAMPLES: 3,
+  /** Per-ability max knowledge chunks retrieved at dispatch. */
+  ABILITY_MAX_KNOWLEDGE: 5,
+  /** Cap on abilities injected in a single dispatch (defense-in-depth above token budget). */
+  ABILITY_MAX_INJECTED: 4,
+  /** Synthetic-example importance threshold during compile §4 step 3. */
+  ABILITY_SYNTHETIC_IMPORTANCE_THRESHOLD: 0.6,
+
+  // ────────────────────────────────────────────────────────────
+  // Agent sessions — docs/SMARTER-AGENTS-10X.md §VI–IX
+  // ────────────────────────────────────────────────────────────
+
+  /** Hard cap on cognitive steps a single session takes before forced completion. */
+  SESSION_MAX_STEPS: 40,
+  /** Token budget for a session's context window; compaction fires past the threshold. */
+  SESSION_CONTEXT_TOKEN_BUDGET: 24_000,
+  /** Fraction of the budget that triggers auto-compaction (0–1). */
+  SESSION_COMPACTION_THRESHOLD: 0.7,
+  /** Fraction of in-context messages evicted per compaction pass. */
+  SESSION_COMPACTION_EVICT_FRACTION: 0.4,
+  /** Max nested delegation depth — a session may delegate, but not infinitely. */
+  SESSION_MAX_DELEGATION_DEPTH: 4,
+  /** Cap on retained messages per run-scoped agent channel. */
+  CHANNEL_MAX_MESSAGES: 200,
 } as const;
 
 export type AgentColor = (typeof CONSTANTS.AGENT_COLOR_PALETTE)[number];

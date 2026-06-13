@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import os from 'node:os';
 import path from 'node:path';
 import type { V1HarnessAdapterType } from './harnessProbe.js';
+import { harnessAgentInstructionsPath } from './harnessAgentHome.js';
 
 export type InstructionSource = 'platform' | 'workspace' | 'runtime';
 
@@ -16,6 +17,7 @@ export interface AgentInstructionFile {
 }
 
 interface AgentInstructionOwner {
+  id?: string | null;
   adapterType?: string | null;
   config?: unknown;
   instructions?: string | null;
@@ -63,7 +65,7 @@ export function listAgentInstructionFiles(agent: AgentInstructionOwner): AgentIn
 }
 
 export function resolveWritableInstructionFile(agent: AgentInstructionOwner, key: string): { kind: 'platform' } | { kind: 'file'; path: string } | null {
-  if (key.startsWith('platform:')) return { kind: 'platform' };
+  if (key === 'platform:agentis.md' || key === 'platform:system.md') return { kind: 'platform' };
   for (const candidate of instructionCandidates(agent)) {
     const fileKey = fileKeyFor(candidate.path);
     if (fileKey === key && !candidate.readonly) return { kind: 'file', path: candidate.path };
@@ -118,9 +120,16 @@ function instructionCandidates(agent: AgentInstructionOwner): InstructionCandida
   }
 
   if (adapterType === 'hermes_agent') {
+    // The agent's NATIVE instruction file: Agentis writes the agent's persona to
+    // this per-agent `AGENTS.md` and runs the Hermes session there, so the harness
+    // auto-injects it. Editing it here edits the exact file the agent loads. (Only
+    // when no explicit cwd is configured — a real project cwd owns its own AGENTS.md.)
+    if (agent.id && !cwd) {
+      addFile(candidates, harnessAgentInstructionsPath(agent.id), 'runtime', 'Agent instructions (loaded natively by Hermes)', { primary: true });
+    }
     const hermesHome = firstString(process.env.HERMES_HOME) ?? path.join(home, '.hermes');
-    addFile(candidates, path.join(hermesHome, 'AGENTS.md'), 'runtime', 'Hermes home instructions', { primary: true });
-    addFile(candidates, path.join(hermesHome, 'HERMES.md'), 'runtime', 'Hermes home instructions');
+    addFile(candidates, path.join(hermesHome, 'AGENTS.md'), 'runtime', 'Hermes global home instructions');
+    addFile(candidates, path.join(hermesHome, 'HERMES.md'), 'runtime', 'Hermes global home instructions');
   }
 
   return candidates;

@@ -50,7 +50,7 @@ describe('HttpAdapter chat', () => {
       headers: { 'content-type': 'application/json' },
     }));
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubEnv('AGENTIS_SKILL_HTTP_ALLOW_PRIVATE', 'true');
+    vi.stubEnv('AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE', 'true');
     const adapter = new HttpAdapter({
       agentId: 'agent-http',
       dispatchUrl: 'http://127.0.0.1/dispatch',

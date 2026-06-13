@@ -1,12 +1,11 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import clsx from 'clsx';
-import { AppWindow, CircleAlert, Plus, Workflow } from 'lucide-react';
+import { CircleAlert, Plus, Workflow } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { FleetFilterValue } from './FleetToolbar';
 
 export type AgentHierarchyCreatePreset = {
   role?: 'orchestrator' | 'manager' | 'worker';
-  spaceId?: string | null;
 };
 
 export interface AgentHierarchyAgent {
@@ -29,13 +28,8 @@ export interface AgentHierarchyAgent {
   runsToday?: number | null;
   spendTodayCents?: number | null;
   pendingApprovals?: number | null;
-  spaceId?: string | null;
-  spaceName?: string | null;
-  spaceColorHex?: string | null;
   connectionSummary?: {
-    apps: Array<{ id: string; slug: string; name: string; description?: string | null; category?: string | null }>;
     workflows: Array<{ id: string; name: string; lastRunStatus?: string | null; lastRunAt?: string | null }>;
-    totalApps: number;
     totalWorkflows: number;
   } | null;
   duplicateOrchestrator?: boolean;
@@ -70,15 +64,8 @@ export function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   const status = agentStatus(agent);
   const GlyphIcon = role === 'orchestrator' ? OrchestratorGlyph : role === 'manager' ? ManagerGlyph : WorkerGlyph;
   const isGhost = Boolean(agent.isGhost);
-  const connections = agent.connectionSummary ?? { apps: [], workflows: [], totalApps: 0, totalWorkflows: 0 };
+  const connections = agent.connectionSummary ?? { workflows: [], totalWorkflows: 0 };
   const chips = [
-    ...connections.apps.map((app) => ({
-      id: `app-${app.id}`,
-      icon: AppWindow,
-      label: app.name,
-      title: app.description ? `${app.name} - ${app.description}` : app.category ? `${app.name} - ${app.category}` : app.name,
-      onClick: () => nav(`/apps/${app.slug}`),
-    })),
     ...connections.workflows.map((workflow) => ({
       id: `workflow-${workflow.id}`,
       icon: Workflow,
@@ -89,14 +76,14 @@ export function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
       onClick: () => nav(`/workflows/${workflow.id}`),
     })),
   ].slice(0, 2);
-  const overflow = Math.max(0, connections.totalApps + connections.totalWorkflows - chips.length);
+  const overflow = Math.max(0, connections.totalWorkflows - chips.length);
 
   if (isGhost) {
     return (
       <div className={ghostCardClass(data)}>
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-dashed border-zinc-600 bg-zinc-900/70 text-zinc-300">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-dashed border-line bg-surface-2 text-text-secondary">
               ?
             </span>
             <div className="min-w-0">
@@ -145,18 +132,6 @@ export function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <span className={roleBadgeClass(role, tier)}>{roleBadge(role, tier)}</span>
           </div>
-          {role === 'manager' ? (
-            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-text-secondary">
-              {agent.spaceName ? (
-                <>
-                  <span className="truncate">{agent.spaceName}</span>
-                  <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: agent.spaceColorHex ?? '#71717a' }} />
-                </>
-              ) : (
-                <span className="text-zinc-500">No space assigned</span>
-              )}
-            </div>
-          ) : null}
           <div className="mt-1.5 truncate text-[11px] text-text-muted">{harnessLabel(agent.adapterType)}{agent.runtimeModel ? ` - ${agent.runtimeModel}` : ''}</div>
           {chips.length > 0 || overflow > 0 ? (
             <div className="mt-3 flex flex-wrap gap-1.5">
@@ -171,7 +146,7 @@ export function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
                       event.stopPropagation();
                       chip.onClick();
                     }}
-                    className="inline-flex items-center gap-1 rounded-sm border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300 transition-colors hover:border-zinc-600 hover:text-white"
+                    className="inline-flex items-center gap-1 rounded-sm border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-line-strong hover:text-text-primary"
                   >
                     <ChipIcon size={11} />
                     <span className="max-w-[110px] truncate">{chip.label}</span>
@@ -179,7 +154,7 @@ export function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
                 );
               })}
               {overflow > 0 ? (
-                <span className="inline-flex items-center rounded-sm border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300">
+                <span className="inline-flex items-center rounded-sm border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-text-secondary">
                   +{overflow}
                 </span>
               ) : null}
@@ -219,7 +194,7 @@ export function matchesFleetFilter(agent: AgentHierarchyAgent, filter: FleetFilt
 export function matchesFleetSearch(agent: AgentHierarchyAgent, search: string): boolean {
   if (!search.trim()) return true;
   const query = search.trim().toLowerCase();
-  return [agent.name, agent.spaceName, agent.runtimeModel, harnessLabel(agent.adapterType)]
+  return [agent.name, agent.runtimeModel, harnessLabel(agent.adapterType)]
     .filter((value): value is string => typeof value === 'string' && value.length > 0)
     .some((value) => value.toLowerCase().includes(query));
 }
@@ -237,7 +212,7 @@ function agentStatus(agent: AgentHierarchyAgent): 'active' | 'idle' | 'error' | 
 function cardClass(data: AgentNodeData, role: ReturnType<typeof displayRole>, tier: ReturnType<typeof layoutTier>) {
   return clsx(
     'relative w-[240px] rounded-lg border bg-surface px-3 py-3 shadow-card transition-all',
-    role === 'orchestrator' ? 'border-violet-500/30' : role === 'manager' ? 'border-cyan-500/30' : role === 'worker' ? 'border-blue-400/25' : 'border-zinc-700 border-dashed',
+    role === 'orchestrator' ? 'border-violet-500/30' : role === 'manager' ? 'border-cyan-500/30' : role === 'worker' ? 'border-blue-400/25' : 'border-line border-dashed',
     tier === 'unassigned' && role === 'worker' && 'opacity-60',
     data.highlighted && 'ring-1 ring-accent/50',
     data.dimmed && 'pointer-events-none opacity-25',
@@ -246,7 +221,7 @@ function cardClass(data: AgentNodeData, role: ReturnType<typeof displayRole>, ti
 
 function ghostCardClass(data: AgentNodeData) {
   return clsx(
-    'w-[240px] rounded-lg border border-dashed border-zinc-700 bg-surface px-3 py-3 shadow-card',
+    'w-[240px] rounded-lg border border-dashed border-line bg-surface px-3 py-3 shadow-card',
     data.highlighted && 'ring-1 ring-accent/50',
     data.dimmed && 'pointer-events-none opacity-25',
   );
@@ -272,7 +247,7 @@ function roleBadgeClass(role: ReturnType<typeof displayRole>, tier: ReturnType<t
     effectiveRole === 'orchestrator' && 'bg-violet-500/15 text-violet-300',
     effectiveRole === 'manager' && 'bg-cyan-500/15 text-cyan-300',
     effectiveRole === 'worker' && 'bg-blue-400/15 text-blue-300',
-    effectiveRole === 'unassigned' && 'bg-zinc-700/50 text-zinc-400',
+    effectiveRole === 'unassigned' && 'bg-surface-3 text-text-muted',
   );
 }
 
@@ -291,7 +266,7 @@ function StatusDot({ status }: { status: ReturnType<typeof agentStatus> }) {
         className={clsx(
           'relative inline-flex h-2.5 w-2.5 rounded-full',
           status === 'active' && 'bg-emerald-400 animate-pulse',
-          status === 'idle' && 'bg-zinc-500',
+          status === 'idle' && 'bg-text-disabled',
           status === 'paused' && 'bg-amber-400',
           (status === 'error' || status === 'setup_needed') && 'bg-red-500',
         )}
@@ -307,7 +282,7 @@ function harnessLabel(adapterType?: string | null) {
     case 'claude_code': return 'Claude Code';
     case 'codex': return 'Codex';
     case 'cursor': return 'Cursor';
-    case 'http': return 'HTTP / Webhook';
+    case 'http': return 'HTTP';
     default: return 'Runtime';
   }
 }

@@ -17,18 +17,30 @@ import type {
   AdapterCapabilities,
   AdapterHealthStatus,
   ChatDelta,
+  ChatInvocationOptions,
   ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
+  RuntimeContext,
+  RuntimeDescriptor,
+  RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
-import { buildMarkerToolPrompt, extractMarkerToolCalls, formatToolManifestAwareness, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
-
-/** Safety cap for one interactive chat turn when no explicit timeout is configured. */
-const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
+import { buildMarkerToolPrompt, formatToolManifestAwareness } from './markerToolProtocol.js';
+import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
+import { linkAbortSignal } from './abort.js';
+import {
+  chatHardCeilingMs,
+  clampChatTimeout,
+  DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  runCliChatTurn,
+  type CliChatPart,
+} from './cliChatRuntime.js';
+import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import { probeCliRuntime } from './cliRuntimeProbe.js';
 
 export interface ClaudeCodeAdapterOptions {
   agentId: string;
@@ -42,14 +54,23 @@ export interface ClaudeCodeAdapterOptions {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
+  dangerouslySkipPermissions?: boolean;
+  /**
+   * Agentis MCP servers to mount (`--mcp-config`) so the harness calls Agentis
+   * tools natively in its own loop. When set, `toolForwarding` becomes
+   * `mcp_native`. (UNIVERSAL-HARNESS §5.)
+   */
+  mcpServers?: McpHarnessServer[];
+  workspaceId?: string;
+  sessionStore?: RuntimeSessionStore;
   logger: Logger;
 }
-
 export class ClaudeCodeAdapter implements AgentAdapter {
   readonly adapterType = 'claude_code' as const;
   readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
   readonly #inFlight = new Map<string, AbortController>();
-  #sessionId: string | undefined;
+  readonly #sessions = new Map<string, string>();
+  #version: string | null = null;
 
   constructor(private readonly opts: ClaudeCodeAdapterOptions) {}
 
@@ -60,15 +81,95 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   async healthCheck(): Promise<AdapterHealthStatus> {
-    return { isHealthy: true, checkedAt: new Date().toISOString() };
+    const result = await probeCliRuntime({
+      binary: this.opts.binaryPath ?? 'claude',
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      logger: this.opts.logger,
+      logTag: 'claude_code',
+    });
+    this.#version = result.version;
+    return result.health;
+  }
+
+  #mcpNative(): boolean {
+    return (this.opts.mcpServers?.length ?? 0) > 0;
   }
 
   capabilities(): AdapterCapabilities {
     return {
       interactiveChat: true,
       toolCalling: true,
-      toolForwarding: 'marker_protocol',
+      toolForwarding: this.#mcpNative() ? 'mcp_native' : 'marker_protocol',
+      // Claude Code is a filesystem/terminal-native CLI that speaks MCP directly;
+      // surfacing these affordances lets the engine route capability-tagged work
+      // to it (parity with the Codex/Hermes adapters).
+      affordances: {
+        fileSystem: true,
+        terminal: true,
+        nativeMcp: true,
+      },
+      memory: {
+        ingestible: true,
+        injectable: true,
+      },
     };
+  }
+
+  async getRuntimeContext(): Promise<RuntimeContext> {
+    const configuredModel = this.opts.model?.trim();
+    const currentModel = configuredModel || 'runtime-default';
+    return {
+      provider: 'Anthropic',
+      models: configuredModel
+        ? [{
+          id: configuredModel,
+          label: configuredModel,
+          source: 'agent_config',
+          verified: false,
+        }]
+        : [],
+      currentModel,
+      currentModelSource: configuredModel ? 'agent_config' : 'fallback',
+      currentModelVerified: false,
+      fastModeSupported: false,
+    };
+  }
+
+  async describeRuntime(): Promise<Partial<RuntimeDescriptor>> {
+    const observedAt = new Date().toISOString();
+    return {
+      version: this.#version
+        ? { value: this.#version, source: 'runtime', observedAt, verified: true }
+        : null,
+      process: {
+        warm: false,
+        activeSessions: this.#sessions.size,
+      },
+    };
+  }
+
+  async listRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
+    if (this.opts.sessionStore && this.opts.workspaceId) {
+      return this.opts.sessionStore.list(this.opts.workspaceId, this.opts.agentId);
+    }
+    const now = new Date().toISOString();
+    return [...this.#sessions.entries()].map(([sessionKey, runtimeSessionId]) => ({
+      id: `${this.opts.agentId}:${sessionKey}`,
+      sessionKey,
+      runtimeSessionId,
+      status: 'idle',
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now,
+    }));
+  }
+
+  async closeRuntimeSession(sessionKey: string): Promise<void> {
+    this.#sessions.delete(sessionKey);
+    if (this.opts.sessionStore && this.opts.workspaceId) {
+      this.opts.sessionStore.remove(this.opts.workspaceId, this.opts.agentId, sessionKey);
+    }
   }
 
   onEvent(handler: (e: NormalizedAgentEvent) => void): void {
@@ -77,6 +178,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
     const ctrl = new AbortController();
+    const unlinkAbort = linkAbortSignal(task.signal, ctrl);
     this.#inFlight.set(task.taskId, ctrl);
     const bin = this.opts.binaryPath ?? 'claude';
     const args = [
@@ -84,16 +186,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       '--output-format=stream-json',
       `--max-turns=${this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24}`,
       '--dangerously-skip-permissions',
-      ...(this.opts.model ? [`--model=${this.opts.model}`] : []),
+      ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
-      ...(this.#sessionId ? ['--resume', this.#sessionId] : []),
+      // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
+      ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
       ...(this.opts.extraArgs ?? []),
     ];
     let child: ReturnType<typeof spawn>;
     let terminalEventEmitted = false;
     let timeout: NodeJS.Timeout | undefined;
     try {
-      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
+      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
       const target = resolveSpawnTarget(bin, args, this.opts.cwd ?? process.cwd(), env);
       child = spawn(target.command, target.args, {
         cwd: this.opts.cwd,
@@ -104,6 +207,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       });
     } catch (err) {
       this.#emitFailure(task, `claude_code_spawn_failed: ${(err as Error).message}`);
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       return;
     }
@@ -127,6 +231,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       if (terminalEventEmitted) return;
       terminalEventEmitted = true;
       this.#emitFailure(task, `claude_code_error: ${err.message}`);
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
     });
@@ -146,8 +251,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         if (!line) continue;
         try {
           const ev = JSON.parse(line) as { type: string; [k: string]: unknown };
-          const sessionId = firstString(ev.session_id, ev.sessionId, objectOf(ev.session)?.id);
-          if (sessionId) this.#sessionId = sessionId;
           if (ev.type === 'assistant' || ev.type === 'thinking') {
             turns += 1;
             this.#emit({
@@ -188,6 +291,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     });
 
     child.on('exit', (code) => {
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
       if (terminalEventEmitted) return;
@@ -216,123 +320,82 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     this.#inFlight.delete(taskId);
   }
 
-  async *chat(messages: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
-    const ctrl = new AbortController();
-    const bin = this.opts.binaryPath ?? 'claude';
+  async *chat(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    options?: ChatInvocationOptions,
+  ): AsyncIterable<ChatDelta> {
+    const sessionKey = options?.sessionKey?.trim() || 'default';
+    const storedSession = this.#sessions.get(sessionKey)
+      ?? (this.opts.sessionStore && this.opts.workspaceId
+        ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
+        : undefined);
+    const maxTurns = options?.latencyClass === 'interactive'
+      ? Math.min(this.opts.maxTurns ?? 4, 4)
+      : this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24;
     const args = [
       '--print',
       '--output-format=stream-json',
-      `--max-turns=${this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24}`,
+      `--max-turns=${maxTurns}`,
       '--dangerously-skip-permissions',
-      ...(this.opts.model ? [`--model=${this.opts.model}`] : []),
+      ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
-      ...(this.#sessionId ? ['--resume', this.#sessionId] : []),
+      ...(storedSession ? ['--resume', storedSession] : []),
+      // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
+      ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
       ...(this.opts.extraArgs ?? []),
     ];
-    const queue = createChatQueue();
-    let child: ReturnType<typeof spawn>;
-    let timeout: NodeJS.Timeout | undefined;
-    try {
-      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
-      const target = resolveSpawnTarget(bin, args, this.opts.cwd ?? process.cwd(), env);
-      child = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
-        env,
-        windowsHide: true,
-        signal: ctrl.signal,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      const message = `Claude Code adapter failed to start: ${(err as Error).message}`;
-      this.opts.logger.warn('claude_code.chat.spawn_failed', { err: message });
-      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
-      yield { type: 'done', finishReason: 'error' };
-      return;
-    }
-
-    // Bound a single chat turn even when no timeout is configured, so a CLI
-    // that wanders off can't hang the conversation forever.
-    const chatTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
+    const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
       : DEFAULT_CHAT_TURN_TIMEOUT_MS;
-    timeout = setTimeout(() => ctrl.abort(), chatTimeoutMs);
-    timeout.unref?.();
+    const idleTimeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
 
-    let stderrText = '';
-    child.stderr?.on('data', (data) => {
-      const chunk = String(data);
-      stderrText = `${stderrText}${chunk}`.slice(-1024);
-      this.opts.logger.warn('claude_code.chat.stderr', { data: chunk.slice(0, 512) });
-    });
-    child.on('error', (err) => {
-      queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: `Claude Code error: ${err.message}` });
-      queue.push({ type: 'done', finishReason: 'error' });
-      queue.close();
-      if (timeout) clearTimeout(timeout);
-    });
-
-    let buffer = '';
-    let transcript = '';
-    let rawFallback = '';
-    const pendingToolCalls: ChatDelta[] = [];
-    child.stdout?.on('data', (chunk) => {
-      buffer += String(chunk);
-      let nl: number;
-      while ((nl = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        try {
-          const ev = JSON.parse(line) as { type?: string; [k: string]: unknown };
-          const sessionId = firstString(ev.session_id, ev.sessionId, objectOf(ev.session)?.id);
-          if (sessionId) this.#sessionId = sessionId;
-          const text = extractClaudeText(ev);
-          if (text) transcript += text;
-          for (const call of extractClaudeToolCalls(ev)) {
-            pendingToolCalls.push({ type: 'tool_call', id: randomUUID(), name: call.name, args: call.args });
-          }
-        } catch {
-          // stream-json mode emits JSON per line; non-JSON output is environment
-          // noise (process-kill chatter). Keep it out of the visible transcript.
-          if (!isProcessNoiseLine(line)) rawFallback += `${line}\n`;
+    // Walk each event's content blocks so every kind goes to the right channel:
+    // thinking → ThinkingBubble, the harness's OWN tool use → a live activity step
+    // (never an executable tool_call — Agentis must not re-run what Claude ran),
+    // text → the answer body. Executable Agentis tool calls come ONLY from markers
+    // in that answer text (extracted by the runtime at exit).
+    const interpret = (event: unknown): CliChatPart[] => {
+      const ev = event as { type?: string; [k: string]: unknown };
+      const sessionId = firstString(ev.session_id, ev.sessionId, objectOf(ev.session)?.id);
+      if (sessionId) {
+        this.#sessions.set(sessionKey, sessionId);
+        if (this.opts.sessionStore && this.opts.workspaceId) {
+          this.opts.sessionStore.upsert({
+            workspaceId: this.opts.workspaceId,
+            agentId: this.opts.agentId,
+            conversationId: sessionKey,
+            sessionKey,
+            runtimeSessionId: sessionId,
+            selectedModel: options?.preferredModel ?? this.opts.model ?? null,
+            status: 'idle',
+          });
         }
       }
-    });
-    child.on('exit', (code) => {
-      if (timeout) clearTimeout(timeout);
-      if (code !== 0) {
-        const details = stderrText.trim();
-        queue.push({
-          type: 'tool_result',
-          id: 'adapter',
-          name: 'adapter.chat',
-          result: null,
-          error: details ? `Claude Code exited ${code}: ${details}` : `Claude Code exited ${code}`,
-        });
-        queue.push({ type: 'done', finishReason: 'error' });
-        queue.close();
-        return;
-      }
+      return interpretClaudeChatEvent(ev);
+    };
 
-      const source = transcript.trim().length > 0 ? transcript : stripProcessNoise(rawFallback);
-      const { calls: markerCalls, cleaned } = extractMarkerToolCalls(source);
-      if (cleaned) queue.push({ type: 'text', delta: cleaned });
-      const allToolCalls: ChatDelta[] = [
-        ...pendingToolCalls,
-        ...markerCalls.map((call) => ({ type: 'tool_call' as const, id: randomUUID(), name: call.name, args: call.args })),
-      ];
-      for (const call of allToolCalls) queue.push(call);
-      queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop' });
-      queue.close();
+    yield* runCliChatTurn({
+      binary: this.opts.binaryPath ?? 'claude',
+      args,
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      stdin: buildClaudeCodeChatPrompt(messages, tools, this.#mcpNative()),
+      displayName: 'Claude Code',
+      logTag: 'claude_code.chat',
+      logger: this.opts.logger,
+      signal: options?.signal,
+      idleTimeoutMs,
+      hardCeilingMs: chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_CLAUDE_CHAT_HARD_CEILING_MS'),
+      interpret,
+      formatExitError: (code, stderr) => {
+        let details = stderr.trim();
+        if (code === 1 && (details.includes('ERRO:') || details.includes('taskkill') || !details)) {
+          details = 'The runtime process crashed. This is usually caused by an invalid API key, insufficient credits/quota, or a misconfigured model.\n\nRaw error: ' + details;
+        }
+        return details;
+      },
     });
-    child.stdin?.end(buildClaudeCodeChatPrompt(messages, tools));
-
-    try {
-      yield* queue.iterate();
-    } finally {
-      if (timeout) clearTimeout(timeout);
-      ctrl.abort();
-    }
   }
 
   #emit(event: NormalizedAgentEvent): void {
@@ -384,29 +447,74 @@ function extractClaudeText(event: { [k: string]: unknown }): string {
   return firstString(message?.text, message?.content) ?? '';
 }
 
-function extractClaudeToolCalls(event: { [k: string]: unknown }): Array<{ name: string; args: unknown }> {
-  const calls: Array<{ name: string; args: unknown }> = [];
-  const add = (value: unknown) => {
-    const object = objectOf(value);
-    if (!object) return;
-    const type = String(object.type ?? event.type ?? '').toLowerCase();
-    if (!type.includes('tool') && !type.includes('function')) return;
-    const name = firstString(object.name, object.tool, event.name, event.tool);
-    if (!name) return;
-    calls.push({ name, args: object.input ?? object.arguments ?? event.input ?? event.arguments ?? {} });
-  };
-  add(event);
-  const message = objectOf(event.message);
-  const content = message?.content ?? event.content;
+type ClaudeChatPart =
+  | { kind: 'text'; text: string }
+  | { kind: 'thinking'; text: string }
+  | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> };
+
+/**
+ * Split one Claude Code `stream-json` event into typed parts so each goes to the
+ * right channel: `thinking` blocks → ThinkingBubble, the harness's OWN tool use
+ * → a live activity step (never an executable tool_call), and `text` blocks →
+ * the answer body. Walks the assistant message's content-block array (the modern
+ * shape) and falls back to the flat text fields for simpler events.
+ */
+function interpretClaudeChatEvent(ev: { type?: string; [k: string]: unknown }): ClaudeChatPart[] {
+  const parts: ClaudeChatPart[] = [];
+  const message = objectOf(ev.message);
+  const content = message?.content ?? ev.content;
   if (Array.isArray(content)) {
-    for (const item of content) add(item);
+    for (const block of content) {
+      if (typeof block === 'string') { if (block) parts.push({ kind: 'text', text: block }); continue; }
+      const b = objectOf(block);
+      if (!b) continue;
+      const bt = String(b.type ?? '').toLowerCase();
+      if (bt.includes('thinking') || bt.includes('reason')) {
+        const t = firstString(b.thinking, b.text, b.content);
+        if (t) parts.push({ kind: 'thinking', text: t });
+      } else if (bt.includes('tool') || bt.includes('function') || bt.includes('mcp') || bt.includes('server_tool')) {
+        parts.push({ kind: 'activity', delta: claudeToolActivity(b) });
+      } else {
+        const t = firstString(b.text, b.content);
+        if (t) parts.push({ kind: 'text', text: t });
+      }
+    }
+    return parts;
   }
-  return calls;
+  // Flat / non-block events (legacy `{type:'thinking'|'assistant', text}`, result).
+  const evType = String(ev.type ?? '').toLowerCase();
+  if (evType === 'thinking') {
+    const t = extractClaudeText(ev);
+    if (t) parts.push({ kind: 'thinking', text: t });
+    return parts;
+  }
+  if (evType.includes('tool') || evType.includes('function')) {
+    parts.push({ kind: 'activity', delta: claudeToolActivity(ev) });
+    return parts;
+  }
+  const text = extractClaudeText(ev);
+  if (text) parts.push({ kind: 'text', text });
+  return parts;
 }
 
-function buildClaudeCodeChatPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {
+/** A live activity step for one of Claude Code's own (Bash/Read/MCP) tool uses. */
+function claudeToolActivity(b: Record<string, unknown>): Extract<ChatDelta, { type: 'activity' }> {
+  const id = `claude-${String(b.id ?? randomUUID())}`;
+  const raw = firstString(b.name, b.tool) ?? 'a tool';
+  // MCP tools arrive namespaced as `mcp__agentis__build_workflow`; show the verb.
+  const pretty = raw.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ').trim() || 'a tool';
+  return { type: 'activity', id, phase: 'tool', status: 'running', label: `Using ${pretty}`, startedAt: new Date().toISOString() };
+}
+
+function buildClaudeCodeChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], mcpNative = false): string {
+  // MCP-native: Claude Code mounts the `agentis` MCP server and calls those tools
+  // in its own loop, so we drop the marker-protocol instructions and hand it the
+  // conversation directly.
+  const toolPreamble = mcpNative
+    ? 'You have the Agentis platform tools available via the "agentis" MCP server (build workflows, run them, inspect the workspace, dispatch agents, etc.). Use them directly to fulfill the request, then reply with a concise final answer.'
+    : buildMarkerToolPrompt(tools);
   return [
-    buildMarkerToolPrompt(tools),
+    toolPreamble,
     '',
     'Conversation:',
     formatMessagesForClaude(messages),
@@ -437,31 +545,4 @@ function safeJson(value: unknown): string {
   } catch {
     return '[unserializable]';
   }
-}
-
-function createChatQueue() {
-  const pending: ChatDelta[] = [];
-  const waiters: Array<() => void> = [];
-  let closed = false;
-  return {
-    push(delta: ChatDelta) {
-      if (closed) return;
-      pending.push(delta);
-      waiters.shift()?.();
-    },
-    close() {
-      closed = true;
-      while (waiters.length > 0) waiters.shift()?.();
-    },
-    async *iterate(): AsyncIterable<ChatDelta> {
-      while (!closed || pending.length > 0) {
-        const next = pending.shift();
-        if (next) {
-          yield next;
-          continue;
-        }
-        await new Promise<void>((resolve) => waiters.push(resolve));
-      }
-    },
-  };
 }

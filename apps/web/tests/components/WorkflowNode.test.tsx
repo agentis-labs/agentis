@@ -17,12 +17,12 @@ describe('<WorkflowNode />', () => {
   it('renders the label, type, and the kind glyph', () => {
     renderNode(
       <WorkflowNode
-        data={{ label: 'Run echo', kind: 'skill_task', type: 'skill_task' }}
+        data={{ label: 'Run echo', kind: 'extension_task', type: 'extension_task' }}
       />,
     );
     expect(screen.getByText('Run echo')).toBeInTheDocument();
-    expect(screen.getByText('skill_task')).toBeInTheDocument();
-    expect(screen.getByText(NODE_GLYPH.skill_task!)).toBeInTheDocument();
+    expect(screen.getByText('extension_task')).toBeInTheDocument();
+    expect(screen.getByText(NODE_GLYPH.extension_task!)).toBeInTheDocument();
   });
 
   it('falls back to the bullet glyph for an unknown kind', () => {

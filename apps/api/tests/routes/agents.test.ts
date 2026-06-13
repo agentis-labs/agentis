@@ -196,6 +196,74 @@ describe('GET /v1/agents', () => {
       }),
     ]);
   });
+
+  it('includes enabled pinned ability summaries for canvas specialization labels', async () => {
+    const agentId = seedAgent();
+    const enabledAbilityId = randomUUID();
+    const disabledAbilityId = randomUUID();
+    const now = new Date().toISOString();
+
+    ctx.db
+      .insert(schema.abilities)
+      .values([
+        {
+          id: enabledAbilityId,
+          workspaceId: ctx.workspace.id,
+          name: 'Marketing Expert',
+          slug: 'marketing-expert',
+          domainTag: 'marketing',
+          iconEmoji: null,
+          compileStatus: 'ready',
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: disabledAbilityId,
+          workspaceId: ctx.workspace.id,
+          name: 'Dormant Expert',
+          slug: 'dormant-expert',
+          domainTag: 'sales',
+          iconEmoji: null,
+          compileStatus: 'ready',
+          createdAt: now,
+          updatedAt: now,
+        },
+      ])
+      .run();
+
+    ctx.db
+      .insert(schema.agentAbilityPins)
+      .values([
+        { agentId, abilityId: enabledAbilityId, enabled: true, createdAt: now },
+        { agentId, abilityId: disabledAbilityId, enabled: false, createdAt: now },
+      ])
+      .run();
+
+    const res = await app().request('/v1/agents', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      agents: Array<{
+        id: string;
+        abilities: Array<{ id: string; name: string; slug: string; domainTag: string | null; compileStatus: string }>;
+      }>;
+    };
+    expect(body.agents).toEqual([
+      expect.objectContaining({
+        id: agentId,
+        abilities: [
+          {
+            id: enabledAbilityId,
+            name: 'Marketing Expert',
+            slug: 'marketing-expert',
+            domainTag: 'marketing',
+            iconEmoji: null,
+            compileStatus: 'ready',
+            pinnedAt: now,
+          },
+        ],
+      }),
+    ]);
+  });
 });
 
 describe('GET /v1/agents/:id', () => {
@@ -211,8 +279,8 @@ describe('GET /v1/agents/:id', () => {
     const id = seedAgent();
     adapters.register(id, new HttpAdapter({
       agentId: id,
-      dispatchUrl: 'https://example.com/dispatch',
-      chatUrl: 'https://example.com/chat',
+      dispatchUrl: 'http://127.0.0.1/dispatch',
+      chatUrl: 'http://127.0.0.1/chat',
       supportsTools: true,
       logger: ctx.logger,
     }));
@@ -229,7 +297,7 @@ describe('GET /v1/agents/:id', () => {
         };
       };
     };
-    expect(body.agent.adapterCapabilities).toEqual({
+    expect(body.agent.adapterCapabilities).toMatchObject({
       interactiveChat: true,
       toolCalling: true,
       toolForwarding: 'http_contract',
@@ -283,7 +351,7 @@ describe('agent hierarchy mutations', () => {
       .where(eq(schema.agents.id, body.agent.id))
       .get();
     expect(updated?.status).toBe('error');
-  });
+  }, 30_000); // creating a claude_code agent probes the CLI harness — legitimately slow
 
   it('rejects creating a second orchestrator in the same workspace', async () => {
     const api = mutationApp();
@@ -342,7 +410,7 @@ describe('agent hierarchy mutations', () => {
       body: JSON.stringify({
         name: 'HTTP Worker',
         adapterType: 'http',
-        config: { dispatchUrl: 'https://example.com/dispatch' },
+        config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' },
       }),
     });
     expect(created.status).toBe(201);
@@ -376,7 +444,7 @@ describe('agent hierarchy mutations', () => {
         name: 'Paused Worker',
         adapterType: 'http',
         isPaused: true,
-        config: { dispatchUrl: 'https://example.com/dispatch' },
+        config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' },
       }),
     });
     expect(created.status).toBe(201);

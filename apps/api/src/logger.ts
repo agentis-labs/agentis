@@ -6,7 +6,7 @@
  * formatter is used because tailing JSON in a terminal is painful.
  *
  * The `Logger` interface itself lives in @agentis/core so that packages
- * (adapters, skills, db) can depend on the contract without depending on
+ * (adapters, extensions, db) can depend on the contract without depending on
  * the apps/api process.
  */
 

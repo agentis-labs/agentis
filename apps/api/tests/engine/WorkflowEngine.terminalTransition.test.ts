@@ -20,7 +20,7 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import type { SubflowExecutor } from '../../src/services/subflowExecutor.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -43,7 +43,7 @@ function buildEngine(subflows: SubflowStub) {
   const activity = new ActivityFeedService(ctx.db, ctx.bus);
   const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
   const adapters = new AdapterManager(ctx.logger);
-  const skills = {} as unknown as SkillRuntime;
+  const skills = {} as unknown as ExtensionRuntime;
   return new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,

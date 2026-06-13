@@ -27,9 +27,9 @@ describe('CONSTANTS', () => {
     expect(CONSTANTS.WEBHOOK_TIMESTAMP_TOLERANCE_MS).toBeGreaterThanOrEqual(60_000);
   });
 
-  it('skill execution max ≥ default', () => {
-    expect(CONSTANTS.SKILL_EXECUTION_MAX_TIMEOUT_MS).toBeGreaterThanOrEqual(
-      CONSTANTS.SKILL_EXECUTION_TIMEOUT_MS,
+  it('extension execution max ≥ default', () => {
+    expect(CONSTANTS.EXTENSION_EXECUTION_MAX_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      CONSTANTS.EXTENSION_EXECUTION_TIMEOUT_MS,
     );
   });
 

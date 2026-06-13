@@ -2,8 +2,9 @@
 
 **Self-hostable, multi-agent orchestration with a workflow canvas, a ledger,
 and an inbox.** Agentis runs on your laptop or your server with zero external
-dependencies. It speaks to OpenClaw fleets, Claude Code sessions, and any
-HTTP-shaped agent through the same NormalizedTask contract.
+dependencies. It speaks to OpenClaw fleets, Claude Code sessions, Codex,
+Cursor, Hermes Agent, and local HTTP models through the same NormalizedTask
+contract.
 
 > Status: **V1 — pre-release (0.1.x).** Spec 1.4.0 implementation is complete
 > and typechecks cleanly across the workspace. The CLI is published as
@@ -135,7 +136,7 @@ not `eval`, not `expr-eval`. See D07.
   realtime, eight node kinds, live graph patches, partial replay.
 - ✅ Skill runtime: `builtin` (echo + http_fetch), `node_isolate`
   (vm sandbox), `docker_sandbox` (opt-in).
-- ✅ Adapters: OpenClaw, Claude Code, HTTP — normalised through
+- ✅ Adapters: OpenClaw, Claude Code, Codex, Cursor, Hermes Agent, and HTTP — normalised through
   `AdapterManager` + `CircuitBreaker`.
 - ✅ Trigger runtime: manual, cron, webhook, persistent listener.
 - ✅ Subflows, conversation continuity, channel bridge

@@ -20,7 +20,7 @@
  *    run will request fresh ones at the same checkpoint.
  *
  * Side-effect safety:
- *  - We NEVER call adapters/skills again for nodes we keep.
+ *  - We NEVER call adapters/extensions again for nodes we keep.
  *  - All approvals from the source run are NOT carried over; if the new
  *    run reaches a checkpoint it raises a fresh ApprovalRequest.
  */
@@ -36,6 +36,7 @@ import {
   type WorkflowRunState,
 } from '@agentis/core';
 import { buildInitialRunState } from '../engine/initialRunState.js';
+import { collectFailedNodeIds } from './runStateFailures.js';
 
 export type ReplayMode =
   | 'replay-from-node'
@@ -199,7 +200,7 @@ export class PartialReplayService {
   }): Set<string> {
     const keep = new Set<string>();
     const completed = new Set(args.sourceState.completedNodeIds);
-    const failed = new Set(args.sourceState.failedNodeIds);
+    const failed = new Set(collectFailedNodeIds(args.sourceState));
 
     if (args.mode === 'replay-from-node' || args.mode === 'replay-with-edited-node' || args.mode === 'replay-from-checkpoint') {
       if (!args.targetNodeId) throw new AgentisError('REPLAY_TARGET_INVALID', 'targetNodeId required');

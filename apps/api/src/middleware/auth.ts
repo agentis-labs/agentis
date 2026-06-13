@@ -6,11 +6,12 @@
  */
 
 import type { Context, MiddlewareHandler } from 'hono';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { AgentisError, type AuthenticatedUser } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
+import { hashApiKey } from '../services/apiKeys.js';
 
 export type AuthVariables = {
   user: AuthenticatedUser;
@@ -23,11 +24,30 @@ export function requireAuth(deps: { db: AgentisSqliteDb; auth: AuthService }): M
       throw new AgentisError('AUTH_TOKEN_INVALID', 'Missing bearer token');
     }
     const token = header.slice('bearer '.length).trim();
-    const claims = await deps.auth.verify(token, 'access');
+    let userId: string;
+    try {
+      const claims = await deps.auth.verify(token, 'access');
+      userId = claims.sub;
+    } catch (err) {
+      const workspaceId = c.req.header('x-agentis-workspace');
+      if (!token.startsWith('agt_') || !workspaceId) throw err;
+      const key = deps.db
+        .select()
+        .from(schema.apiKeys)
+        .where(and(
+          eq(schema.apiKeys.workspaceId, workspaceId),
+          eq(schema.apiKeys.keyHash, hashApiKey(token)),
+          isNull(schema.apiKeys.revokedAt),
+        ))
+        .get();
+      if (!key) throw new AgentisError('AUTH_TOKEN_INVALID', 'Invalid API key');
+      userId = key.userId;
+      deps.db.update(schema.apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(eq(schema.apiKeys.id, key.id)).run();
+    }
     const row = deps.db
       .select()
       .from(schema.users)
-      .where(eq(schema.users.id, claims.sub))
+      .where(eq(schema.users.id, userId))
       .get();
     if (!row) {
       throw new AgentisError('AUTH_TOKEN_INVALID', 'User no longer exists');

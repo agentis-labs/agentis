@@ -12,7 +12,7 @@ import { Typewriter } from '../shared/Typewriter';
 
 export const NODE_GLYPH: Record<string, string> = {
   trigger: '◉',
-  skill_task: '✦',
+  extension_task: '⬡',
   agent_task: '◎',
   router: '⤳',
   merge: '⟴',
@@ -29,6 +29,7 @@ export interface WorkflowNodeData {
   label: string;
   kind: string;
   type: string;
+  operationName?: string;
   toolPreview?: string;
 }
 
@@ -65,6 +66,9 @@ export function WorkflowNode({ data }: { data: WorkflowNodeData }) {
         </span>
         <div className="leading-tight">
           <div className="text-sm text-text-primary">{data.label}</div>
+          {data.kind === 'extension_task' && data.operationName && (
+            <div className="font-mono text-[10px] text-accent">{data.operationName}</div>
+          )}
           <div className="text-[10px] uppercase tracking-wide text-text-muted">{data.type}</div>
         </div>
       </div>

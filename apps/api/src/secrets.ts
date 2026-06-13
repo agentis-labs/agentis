@@ -11,7 +11,7 @@
  * Generated locally, never sent over the wire, never logged.
  */
 
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AgentisEnv } from './env.js';
@@ -22,7 +22,7 @@ export interface AgentisSecrets {
   /** base64-encoded 32-byte key for AES-256-GCM. */
   credentialKeyB64: string;
   /**
-   * Single-use auto-login token for the local CLI launch flow.
+   * Auto-login token for the local CLI launch flow.
    * Written to AGENTIS_DATA_DIR/token; the CLI opens the browser
    * with ?token=<launchToken> and the /v1/auth/launch route exchanges
    * it for a normal JWT session without requiring a password.
@@ -30,6 +30,8 @@ export interface AgentisSecrets {
    * Not present when secrets come from environment variables (server deploy).
    */
   launchToken?: string;
+  /** Verify a matching local launch token. */
+  consumeLaunchToken?: (candidate: string) => boolean;
 }
 
 interface SecretsFile {
@@ -58,7 +60,7 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as SecretsFile;
     // Read (or generate) the launch token from the token file.
-    let launchToken: string;
+    let launchToken: string | undefined;
     if (existsSync(tokenPath)) {
       launchToken = readFileSync(tokenPath, 'utf8').trim();
     } else {
@@ -71,6 +73,7 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
       jwtPublicKeyPem: parsed.jwtPublicKeyPem,
       credentialKeyB64: parsed.credentialKeyB64,
       launchToken,
+      consumeLaunchToken: createLaunchTokenVerifier(() => launchToken),
     };
   }
 
@@ -82,7 +85,7 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   });
   const credentialKey = randomBytes(32).toString('base64');
-  const launchToken = randomBytes(32).toString('base64url');
+  let launchToken: string | undefined = randomBytes(32).toString('base64url');
 
   const file: SecretsFile = {
     jwtPrivateKeyPem: privateKey,
@@ -107,5 +110,22 @@ export function loadOrCreateSecrets(env: AgentisEnv): AgentisSecrets {
     jwtPublicKeyPem: file.jwtPublicKeyPem,
     credentialKeyB64: file.credentialKeyB64,
     launchToken,
+    consumeLaunchToken: createLaunchTokenVerifier(() => launchToken),
   };
+}
+
+function createLaunchTokenVerifier(
+  readToken: () => string | undefined,
+): (candidate: string) => boolean {
+  return (candidate) => {
+    const expected = readToken();
+    if (!expected || !constantTimeEqual(expected, candidate)) return false;
+    return true;
+  };
+}
+
+function constantTimeEqual(expected: string, candidate: string): boolean {
+  const left = Buffer.from(expected);
+  const right = Buffer.from(candidate);
+  return left.length === right.length && timingSafeEqual(left, right);
 }

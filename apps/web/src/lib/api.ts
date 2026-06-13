@@ -93,7 +93,10 @@ async function rawFetch(path: string, init: RequestInit = {}, retry = true): Pro
   const amb = ambient.get();
   if (amb) headers.set('x-agentis-ambient', amb);
 
-  const res = await fetch(path, { ...init, headers });
+  // Agentis API reads are operational state, not cacheable documents. A stale
+  // GET can otherwise leave listeners, runs, approvals, and monitors showing a
+  // previous lifecycle state after the server has already transitioned.
+  const res = await fetch(path, { cache: 'no-store', ...init, headers });
   if (res.status === 401 && retry) {
     const refreshed = await tryRefresh();
     if (refreshed) return rawFetch(path, init, false);

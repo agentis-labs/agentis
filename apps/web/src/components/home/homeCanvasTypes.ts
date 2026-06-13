@@ -55,9 +55,19 @@ export interface HomeKnowledgeBase {
   imageUrl?: string | null;
 }
 
+export interface HomeSpace {
+  id: string;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  colorHex?: string | null;
+  icon?: string | null;
+}
+
 export interface EcosystemData {
   workflows: HomeWorkflow[];
   knowledgeBases: HomeKnowledgeBase[];
+  spaces: HomeSpace[];
   loading: boolean;
 }
 
@@ -80,6 +90,8 @@ export interface CanvasNode {
   online?: boolean;
   operationalState?: CanvasOperationalState;
   route?: string;
+  spaceId?: string | null;
+  spaceName?: string | null;
   accent?: string;
   artifactCount?: number;
   imageUrl?: string | null;

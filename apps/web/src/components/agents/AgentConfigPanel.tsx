@@ -56,7 +56,9 @@ export function AgentConfigPanel({
   const [savingRuntime, setSavingRuntime] = useState(false);
   const [testingRuntime, setTestingRuntime] = useState(false);
   const [testResult, setTestResult] = useState<HarnessTestResult | null>(null);
-  const [runtimeRepair, setRuntimeRepair] = useState<RuntimeRepairState>({ phase: 'idle' });
+  const [runtimeRepair, setRuntimeRepair] = useState<RuntimeRepairState>(() =>
+    runtimeRepairState(agent.status, adapterType),
+  );
   const installSession = useAgentInstallSession(agent.id);
   const autoConnectStartedRef = useRef('');
   const handledInstallPhaseRef = useRef('');
@@ -70,18 +72,19 @@ export function AgentConfigPanel({
   useEffect(() => {
     setRuntimeConfig(configToRuntimeConfig(adapterType, storedConfig));
     setTestResult(null);
-    setRuntimeRepair({ phase: 'idle' });
+    setRuntimeRepair(runtimeRepairState(agent.status, adapterType));
     autoConnectStartedRef.current = '';
     handledInstallPhaseRef.current = '';
-  }, [agent.id, adapterType]);
+  }, [agent.id, agent.status, adapterType]);
 
   useEffect(() => {
+    if (agent.status !== 'setting_up') return;
     if (installSession?.phase === 'installing' || installSession?.phase === 'verifying') return;
     const connectKey = `${agent.id}:${adapterType}`;
     if (autoConnectStartedRef.current === connectKey) return;
     autoConnectStartedRef.current = connectKey;
     void connectRuntime('auto');
-  }, [agent.id, adapterType, installSession?.phase]);
+  }, [agent.id, agent.status, adapterType, installSession?.phase]);
 
   useEffect(() => {
     if (!installSession) return;
@@ -280,6 +283,7 @@ export function AgentConfigPanel({
           onInstall={isAutoInstallableAdapter(adapterType) ? () => void startRuntimeInstall() : undefined}
         />
         <RuntimePicker
+          agentId={agent.id}
           adapterType={adapterType}
           runtimeConfig={runtimeConfig}
           onAdapterChange={() => {}}
@@ -441,6 +445,22 @@ function RuntimeConnectPanel({
   );
 }
 
+function runtimeRepairState(status: CommandAgent['status'], adapterType: AdapterType): RuntimeRepairState {
+  if (status === 'online' || status === 'busy') {
+    return {
+      phase: 'connected',
+      message: `${runtimeDisplayName(adapterType)} is connected.`,
+    };
+  }
+  if (status === 'setting_up') {
+    return {
+      phase: 'checking',
+      message: `Checking this machine for ${runtimeDisplayName(adapterType)}...`,
+    };
+  }
+  return { phase: 'idle' };
+}
+
 function isAutoInstallableAdapter(adapterType: AdapterType): adapterType is 'claude_code' | 'codex' {
   return adapterType === 'claude_code' || adapterType === 'codex';
 }
@@ -467,11 +487,7 @@ function runtimeConfigFromDetection(config: RuntimeConfig, adapterType: AdapterT
   }
   if (adapterType === 'http') {
     const baseUrl = detectionConfigString(detection, 'baseUrl');
-    const dispatchPath = detectionConfigString(detection, 'dispatchPath');
-    const healthPath = detectionConfigString(detection, 'healthPath');
     if (baseUrl) next = { ...next, httpBaseUrl: baseUrl };
-    if (dispatchPath) next = { ...next, httpDispatchPath: dispatchPath };
-    if (healthPath) next = { ...next, httpHealthPath: healthPath };
     return next;
   }
   const command = detectionCommand(detection);
@@ -494,6 +510,7 @@ function setRuntimeModel(config: RuntimeConfig, adapterType: AdapterType, model:
   if (adapterType === 'codex') return { ...config, codexModel: config.codexModel || model };
   if (adapterType === 'cursor') return { ...config, cursorModel: config.cursorModel || model };
   if (adapterType === 'hermes_agent') return { ...config, hermesModel: config.hermesModel || model };
+  if (adapterType === 'http') return { ...config, httpModel: config.httpModel || model };
   return config;
 }
 
@@ -511,7 +528,7 @@ function detectionCommand(detection: HarnessDetectionResult): string {
 
 function missingRuntimeMessage(adapterType: AdapterType, detection?: HarnessDetectionResult): string {
   if (adapterType === 'openclaw') return detection?.detail ?? 'No OpenClaw gateway was discovered. Connect a gateway URL or configure OPENCLAW_GATEWAY_URL, then run detection again.';
-  if (adapterType === 'http') return detection?.detail ?? 'No HTTP endpoint was discovered. Add the endpoint URL in connection settings, then save and test the runtime.';
+  if (adapterType === 'http') return detection?.detail ?? 'No HTTP endpoint was discovered. Add the HTTP base URL in connection settings, then save and test the runtime.';
   const runtimeName = runtimeDisplayName(adapterType);
   return detection?.detail ?? `${runtimeName} was not found on PATH. Install it or set its binary path, then run detection again.`;
 }

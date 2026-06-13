@@ -29,7 +29,7 @@ export function relativeTime(iso?: string | null): string {
 
 export interface WorkflowRunSummary {
   id: string;
-  status: 'running' | 'completed' | 'completed_with_violation' | 'failed' | 'pending' | 'cancelled';
+  status: 'running' | 'completed' | 'completed_with_violation' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting';
   startedAt: string | null;
   finishedAt: string | null;
   durationMs: number | null;

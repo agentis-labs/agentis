@@ -13,7 +13,6 @@ interface ChatPanelOpenDetail {
   initialViewportOverride?: ViewportContext | null;
   viewportOverride?: ViewportContext | null;
   autoSendInitialDraft?: boolean;
-  buildSession?: { appId?: string; slug?: string; name?: string };
 }
 
 export function ChatPanelMount() {
@@ -29,12 +28,11 @@ export function ChatPanelMount() {
       const detail = (event as CustomEvent<ChatPanelOpenDetail>).detail;
       setState('docked');
       markOpenRequested();
-      setLaunchContext(detail?.initialDraft || detail?.viewportOverride || detail?.initialViewportOverride || detail?.buildSession
+      setLaunchContext(detail?.initialDraft || detail?.viewportOverride || detail?.initialViewportOverride
         ? {
             initialDraft: detail.initialDraft,
             initialViewportOverride: detail.initialViewportOverride ?? detail.viewportOverride ?? null,
             autoSendInitialDraft: detail.autoSendInitialDraft,
-            buildSession: detail.buildSession,
           }
         : null);
       if (detail?.agentId) {
@@ -62,7 +60,7 @@ function ChatPanelFallback({ width }: { width: number }) {
   return (
     <aside
       className="relative z-30 flex shrink-0 flex-col border-l border-line bg-surface"
-      style={{ width }}
+      style={{ width: `min(${width}px, 100vw)`, maxWidth: '100vw' }}
       role="complementary"
       aria-label="Chat panel"
     >

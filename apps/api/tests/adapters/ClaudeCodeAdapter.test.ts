@@ -25,11 +25,20 @@ describe('ClaudeCodeAdapter chat', () => {
   it('reports marker-protocol tool capability', () => {
     const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger });
 
-    expect(adapter.capabilities()).toEqual({
+    expect(adapter.capabilities()).toEqual(expect.objectContaining({
       interactiveChat: true,
       toolCalling: true,
       toolForwarding: 'marker_protocol',
-    });
+      affordances: expect.objectContaining({
+        fileSystem: true,
+        terminal: true,
+        nativeMcp: true,
+      }),
+      memory: expect.objectContaining({
+        ingestible: true,
+        injectable: true,
+      }),
+    }));
   });
 
   it('turns AGENTIS_TOOL_CALL markers into chat tool calls', async () => {
@@ -68,6 +77,30 @@ describe('ClaudeCodeAdapter chat', () => {
       args: { description: 'Hello World' },
     }));
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
+  });
+
+  it('streams thinking and the harness own tool use as live deltas, answer as text', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'look around' }], [])) deltas.push(delta);
+    })();
+
+    // One assistant message carrying a thinking block, a native tool_use block,
+    // and the answer text — the real stream-json content-block shape.
+    child.stdout.write('{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Let me check the files."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}},{"type":"text","text":"It is a TypeScript repo."}]}}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    // Thinking → ThinkingBubble; the harness's own Bash → a live activity step
+    // (NOT an executable tool_call); answer → text.
+    expect(deltas).toContainEqual({ type: 'thinking', delta: 'Let me check the files.' });
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'tool', status: 'running', label: 'Using Bash' }));
+    expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'It is a TypeScript repo.' });
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
 
   it('does not yield chat spawn failures as assistant text', async () => {

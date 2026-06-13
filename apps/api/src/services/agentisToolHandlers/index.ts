@@ -14,6 +14,7 @@ import { registerBuildTools } from './build.js';
 import { registerEnvironmentTools } from './environment.js';
 import { registerAgentTools } from './agent.js';
 import { registerEphemeralTools } from './ephemeral.js';
+import { registerCapabilityTools } from './capability.js';
 
 export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registerInspectTools(registry, deps);
@@ -22,6 +23,7 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerAgentTools(registry, deps);
   registerEnvironmentTools(registry, deps);
   registerEphemeralTools(registry, deps);
+  registerCapabilityTools(registry, deps);
 }
 
 export type { ToolHandlerDeps } from './deps.js';

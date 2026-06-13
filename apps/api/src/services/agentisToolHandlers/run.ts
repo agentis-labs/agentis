@@ -1,5 +1,5 @@
-/**
- * Run tools — agent triggers, cancels, replays, resumes work.
+﻿/**
+ * Run tools â€” agent triggers, cancels, replays, resumes work.
  *
  * Mutating tools always require explicit ids; the registry's argument
  * validation refuses calls missing required keys before reaching here.
@@ -11,6 +11,7 @@ import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type WorkflowRunState } from '@agentis/core';
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
+import { collectFailedNodeIds, failedNodeCount } from '../runStateFailures.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -182,7 +183,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
             : 'No explicit failure events found in the recent ledger slice. Check active nodes and adapter health.',
           suggestedActions: [
             'Inspect the failed node payload.',
-            'Check the assigned agent or skill configuration.',
+            'Check the assigned agent or extension configuration.',
             'Patch timeout or routing settings before retrying if the cause is configuration-related.',
           ],
         };
@@ -230,6 +231,206 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         return { runId: handle.runId, parentRunId: String(args.sourceRunId), status: 'started' };
       },
     },
+    {
+      definition: {
+        id: 'agentis.memory.write',
+        family: 'run',
+        description: 'Store a new memory entry in the workspace persistent memory.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            content: { type: 'string' },
+            kind: { type: 'string' },
+            importance: { type: 'string' },
+            tags: { type: 'string' },
+            agentId: { type: 'string' },
+          },
+          required: ['title', 'content'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        const title = String(args.title);
+        const content = String(args.content);
+        const kind = String(args.kind ?? 'fact');
+        const scopeId = String(args.agentId ?? '');
+
+        let importanceVal = 0.5;
+        if (args.importance !== undefined && args.importance !== null) {
+          const num = Number(args.importance);
+          if (Number.isFinite(num)) {
+            importanceVal = num > 1 ? Math.min(num / 10, 1) : Math.max(0, num);
+          }
+        }
+
+        let parsedTags: string[] = [];
+        if (args.tags) {
+          if (Array.isArray(args.tags)) {
+            parsedTags = args.tags.map(String);
+          } else if (typeof args.tags === 'string') {
+            try {
+              const parsed = JSON.parse(args.tags);
+              parsedTags = Array.isArray(parsed) ? parsed.map(String) : [String(args.tags)];
+            } catch {
+              parsedTags = args.tags.split(',').map((t) => t.trim()).filter(Boolean);
+            }
+          }
+        }
+
+        deps.db
+          .insert(schema.workspaceMemory)
+          .values({
+            id,
+            workspaceId: ctx.workspaceId,
+            scopeId,
+            kind,
+            source: 'operator',
+            title,
+            content,
+            trust: '0.7',
+            importance: String(importanceVal),
+            tags: parsedTags,
+            provenance: {},
+            reinforcedAt: null,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .run();
+
+        return { id, title, kind, importance: importanceVal, tags: parsedTags, status: 'created' };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.memory.delete',
+        family: 'run',
+        description: 'Delete a memory entry from the workspace persistent memory.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            agentId: { type: 'string' },
+          },
+          required: ['id'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const id = String(args.id);
+        const scopeId = String(args.agentId ?? '');
+        const result = deps.db
+          .delete(schema.workspaceMemory)
+          .where(
+            and(
+              eq(schema.workspaceMemory.workspaceId, ctx.workspaceId),
+              eq(schema.workspaceMemory.scopeId, scopeId),
+              eq(schema.workspaceMemory.id, id),
+            ),
+          )
+          .run();
+
+        if (result.changes === 0) {
+          const fallbackResult = deps.db
+            .delete(schema.workspaceMemory)
+            .where(
+              and(
+                eq(schema.workspaceMemory.workspaceId, ctx.workspaceId),
+                eq(schema.workspaceMemory.id, id),
+              ),
+            )
+            .run();
+          if (fallbackResult.changes === 0) {
+            throw new Error(`Memory entry ${id} not found in workspace`);
+          }
+        }
+        return { id, deleted: true };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.knowledge.write',
+        family: 'run',
+        description: 'Index a document into the workspace knowledge base.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            content: { type: 'string' },
+            url: { type: 'string' },
+            tags: { type: 'string' },
+            knowledgeBaseId: { type: 'string' },
+          },
+          required: ['title', 'content'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.knowledgeBases) {
+          throw new Error('Knowledge base service not available');
+        }
+
+        let kbId = args.knowledgeBaseId ? String(args.knowledgeBaseId) : '';
+        if (!kbId) {
+          const bases = deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId);
+          if (bases.length > 0) {
+            kbId = bases[0]!.id;
+          } else {
+            const defaultKb = deps.knowledgeBases.createKnowledgeBase({
+              workspaceId: ctx.workspaceId,
+              name: 'Default Knowledge Base',
+              description: 'Automatically created for agent inputs',
+            });
+            kbId = defaultKb.id;
+          }
+        }
+
+        const title = String(args.title);
+        const content = String(args.content);
+
+        const doc = await deps.knowledgeBases.addDocument({
+          workspaceId: ctx.workspaceId,
+          knowledgeBaseId: kbId,
+          name: title,
+          content,
+        });
+
+        return {
+          id: doc.id,
+          name: title,
+          knowledgeBaseId: kbId,
+          status: 'ready',
+          chunks: doc.chunks,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.knowledge.archive',
+        family: 'run',
+        description: 'Archive a document in the knowledge base by documentId and knowledgeBaseId.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            documentId: { type: 'string' },
+            knowledgeBaseId: { type: 'string' },
+          },
+          required: ['documentId', 'knowledgeBaseId'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.knowledgeBases) {
+          throw new Error('Knowledge base service not available');
+        }
+        const documentId = String(args.documentId);
+        const knowledgeBaseId = String(args.knowledgeBaseId);
+        const result = deps.knowledgeBases.archiveDocument(ctx.workspaceId, knowledgeBaseId, documentId);
+        return result;
+      },
+    },
   ]);
 }
 
@@ -265,7 +466,8 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
   const graph = (workflow?.graph ?? run.graphSnapshot ?? undefined) as WorkflowGraph | undefined;
   const total = Math.max(Object.keys(state.nodeStates ?? {}).length, graph?.nodes.length ?? 0, 1);
   const completed = state.completedNodeIds?.length ?? 0;
-  const failed = state.failedNodeIds?.length ?? 0;
+  const failed = failedNodeCount(state);
+  const failedNodeIds = collectFailedNodeIds(state);
   const activeNodeId = Object.keys(state.activeExecutions ?? {})[0] ?? state.readyQueue?.[0]?.nodeId ?? null;
   const activeNode = activeNodeId ? graph?.nodes.find((node) => node.id === activeNodeId) : null;
   return {
@@ -279,7 +481,7 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     currentNode: activeNode ? { id: activeNode.id, title: activeNode.title, type: activeNode.type } : null,
     completedNodeCount: completed,
     failedNodeCount: failed,
-    failedNodes: (state.failedNodeIds ?? []).map((nodeId) => ({
+    failedNodes: failedNodeIds.map((nodeId) => ({
       nodeId,
       title: graph?.nodes.find((node) => node.id === nodeId)?.title ?? nodeId,
       error: state.nodeStates[nodeId]?.error ?? null,
@@ -331,6 +533,7 @@ function listRuns(
 function normalizeStatus(status: string): string {
   const upper = status.toUpperCase();
   if (upper === 'PENDING') return 'CREATED';
+  if (upper === 'COMPLETED_WITH_ERRORS') return 'FAILED';
   return upper;
 }
 

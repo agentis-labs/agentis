@@ -8,13 +8,19 @@
  * posts in the in-app conversation.
  */
 
-export type ChannelKind = 'telegram' | 'discord' | 'slack';
+export type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp';
 
 export interface ParsedInboundMessage {
   /** Adapter-issued unique id for idempotency (e.g. Telegram update_id). */
   externalId: string;
   /** Channel-side conversation address used for replies. */
   chatId: string;
+  /**
+   * Subject boundary within a channel (Slack thread_ts, Discord thread id,
+   * Telegram forum topic). When set, the orchestrator scopes turn history to it
+   * so unrelated threads don't bleed together (OMNICHANNEL §5.3).
+   */
+  threadId?: string;
   body: string;
   from?: string;
 }

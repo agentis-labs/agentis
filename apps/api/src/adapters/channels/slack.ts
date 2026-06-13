@@ -48,9 +48,11 @@ export class SlackChannelAdapter implements ChannelAdapter {
     const channel = event.channel;
     const ts = event.ts;
     if (!channel || !ts) return null;
+    const threadTs = event.thread_ts ?? ts;
     return {
       externalId: payload.event_id ?? `${channel}:${ts}`,
-      chatId: `${channel}:thread:${event.thread_ts ?? ts}`,
+      chatId: `${channel}:thread:${threadTs}`,
+      threadId: `${channel}:${threadTs}`,
       body: String(event.text ?? '').replace(/<@[^>]+>/g, '').trim(),
       from: event.user,
     };

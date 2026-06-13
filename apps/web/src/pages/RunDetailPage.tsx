@@ -7,15 +7,20 @@
  * Stays inside Shell. Back link is context-aware via document.referrer.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-  ArrowLeft, FileText, Code as CodeIcon, BookOpen, RotateCcw, ChevronRight,
+  ArrowLeft, FileText, Code as CodeIcon, BookOpen, RotateCcw, ChevronRight, Square, Play, RadioTower,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
+import {
+  REALTIME_ACTIVITY_EVENTS,
+  describeRealtimeActivity,
+  type RealtimeActivity,
+} from '../lib/realtimeActivity';
 import { useToast } from '../components/shared/Toast';
 import { Button } from '../components/shared/Button';
 import { Skeleton } from '../components/shared/Skeleton';
@@ -28,7 +33,7 @@ interface RunNode {
   title: string;
   type: string;
   kind?: string;
-  status: 'completed' | 'failed' | 'running' | 'skipped' | 'pending';
+  status: 'completed' | 'failed' | 'running' | 'skipped' | 'pending' | 'waiting';
   startedAt?: string;
   finishedAt?: string;
   durationMs?: number;
@@ -45,7 +50,8 @@ interface RunDetail {
     workflowName?: string;
     appSlug?: string;
     appName?: string;
-    status: 'running' | 'completed' | 'failed' | 'pending' | 'cancelled';
+    status: 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting';
+    blockedReason?: string;
     startedAt: string;
     finishedAt?: string;
     durationMs?: number;
@@ -79,6 +85,12 @@ function relativeTime(iso?: string): string {
   } catch { return ''; }
 }
 
+function formatJsonForDisplay(value: unknown): string {
+  if (typeof value === 'string') return value;
+  const str = JSON.stringify(value ?? {}, null, 2);
+  return str.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
+}
+
 export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
@@ -87,6 +99,8 @@ export function RunDetailPage() {
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<Mode>('story');
   const [selectedNode, setSelectedNode] = useState<RunNode | null>(null);
+  const [activityFeed, setActivityFeed] = useState<RealtimeActivity[]>([]);
+  const activitySeqRef = useRef(0);
 
   async function refresh() {
     if (!id) return;
@@ -99,9 +113,11 @@ export function RunDetailPage() {
 
   useEffect(() => {
     const ws = wsStore.get();
-    const unsubscribe = ws ? rtSubscribe('workspace', { workspaceId: ws }) : undefined;
+    const unsubs: Array<() => void> = [];
+    if (ws) unsubs.push(rtSubscribe('workspace', { workspaceId: ws }));
+    if (id) unsubs.push(rtSubscribe('run', { runId: id }));
     void refresh();
-    return () => unsubscribe?.();
+    return () => unsubs.forEach((unsubscribe) => unsubscribe());
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [id]);
 
@@ -111,15 +127,56 @@ export function RunDetailPage() {
     REALTIME_EVENTS.RUN_RUNNING,
     REALTIME_EVENTS.NODE_COMPLETED,
     REALTIME_EVENTS.NODE_FAILED,
+    REALTIME_EVENTS.NODE_WAITING_FOR_INPUT,
   ], (evt) => {
     const payload = evt.payload as { runId?: string; id?: string };
     if (payload?.runId === id || payload?.id === id) void refresh();
+  });
+
+  useRealtime([...REALTIME_ACTIVITY_EVENTS], (evt) => {
+    const payload = evt.payload as { runId?: string; id?: string };
+    if (payload?.runId !== id && payload?.id !== id) return;
+    const activity = describeRealtimeActivity(evt, {
+      nodeTitle: (nodeId) => data?.run.nodes.find((node) => node.nodeId === nodeId || node.id === nodeId)?.title,
+    });
+    if (!activity) return;
+    activitySeqRef.current += 1;
+    setActivityFeed((current) => [
+      { ...activity, id: `${activity.id}:${activitySeqRef.current}` },
+      ...current,
+    ].slice(0, 60));
   });
 
   async function handleRetry() {
     if (!data) return;
     try { await api(`/v1/runs/${data.run.id}/retry`, { method: 'POST' }); toast.success('Retry started'); void refresh(); }
     catch (e) { toast.error('Retry failed', String(e)); }
+  }
+
+  async function handleStop() {
+    if (!data) return;
+    try { await api(`/v1/runs/${data.run.id}/cancel`, { method: 'POST' }); toast.success('Stopping run…'); void refresh(); }
+    catch (e) { toast.error('Stop failed', String(e)); }
+  }
+
+  async function handleResume() {
+    if (!data) return;
+    try { await api(`/v1/runs/${data.run.id}/resume`, { method: 'POST' }); toast.success('Resuming run…'); void refresh(); }
+    catch (e) { toast.error('Resume failed', String(e)); }
+  }
+
+  async function handleReplayFromNode(node: RunNode) {
+    if (!data) return;
+    try {
+      const res = await api<{ runId: string }>(`/v1/runs/${data.run.id}/replay`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'replay-from-node', targetNodeId: node.nodeId }),
+      });
+      toast.success('Replay started', `Restarting from ${node.title}.`);
+      nav(`/runs/${res.runId}`);
+    } catch (e) {
+      toast.error('Replay failed', String(e));
+    }
   }
 
   if (loading && !data) return <div className="p-6"><Skeleton height={500} /></div>;
@@ -165,8 +222,19 @@ export function RunDetailPage() {
             {' · '}{relativeTime(r.startedAt)}
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {(r.status === 'running' || r.status === 'waiting') && (
+              <Button variant="secondary" size="sm" iconLeft={<Square size={11} />} onClick={() => void handleStop()}>Stop</Button>
+            )}
+            {r.status === 'paused' && (
+              <Button variant="primary" size="sm" iconLeft={<Play size={11} />} onClick={() => void handleResume()}>Resume</Button>
+            )}
             {r.status === 'failed' && (
               <Button variant="secondary" size="sm" iconLeft={<RotateCcw size={11} />} onClick={() => void handleRetry()}>Retry</Button>
+            )}
+            {failedNode && (
+              <Button variant="secondary" size="sm" iconLeft={<RotateCcw size={11} />} onClick={() => void handleReplayFromNode(failedNode)}>
+                Retry from failed node
+              </Button>
             )}
             <div className="flex h-9 items-center gap-0.5 rounded-btn border border-line bg-surface-2 p-0.5">
               <button
@@ -194,7 +262,24 @@ export function RunDetailPage() {
         </div>
       </div>
 
+      {r.status === 'paused' && r.blockedReason && (
+        <div className="border-b border-warn/30 bg-warn-soft px-6 py-3">
+          <div className="flex items-start gap-2">
+            <Square size={14} className="mt-0.5 shrink-0 text-warn" />
+            <div className="min-w-0">
+              <div className="text-[12px] font-medium text-text-primary">Run paused — action needed</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-text-muted">{r.blockedReason}</div>
+            </div>
+            <Button variant="primary" size="sm" className="ml-auto" iconLeft={<Play size={11} />} onClick={() => void handleResume()}>Resume</Button>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-6 py-5">
+        {(r.status === 'running' || r.status === 'waiting' || r.status === 'paused' || activityFeed.length > 0) && (
+          <LiveRunActivity feed={activityFeed} />
+        )}
+
         {mode === 'story' ? <StoryView run={r} onSelectNode={setSelectedNode} /> : <TechnicalView run={r} onSelectNode={setSelectedNode} />}
 
         {/* Node Inspector (slides in from right via DetailPanel pattern, but inline for simplicity) */}
@@ -203,30 +288,41 @@ export function RunDetailPage() {
             <div className="mb-3 flex items-center gap-2">
               <h2 className="text-heading text-text-primary">{selectedNode.title}</h2>
               <span className="font-mono text-[11px] text-text-muted">{selectedNode.kind ?? selectedNode.type}</span>
+              {selectedNode.status === 'failed' && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="ml-auto"
+                  iconLeft={<RotateCcw size={11} />}
+                  onClick={() => void handleReplayFromNode(selectedNode)}
+                >
+                  Retry from this node
+                </Button>
+              )}
               <button
                 type="button"
                 onClick={() => setSelectedNode(null)}
-                className="ml-auto -m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                className={clsx(selectedNode.status === 'failed' ? '' : 'ml-auto', '-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary')}
               >
                 <span aria-label="Close">×</span>
               </button>
             </div>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr_3fr]">
+              <div className="min-w-0">
                 <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-text-muted">Input</div>
-                <pre className="max-h-72 overflow-auto rounded-input border border-line bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-primary">
-                  {JSON.stringify(selectedNode.inputs ?? {}, null, 2)}
+                <pre className="w-full max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded-input border border-line bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-primary">
+                  {formatJsonForDisplay(selectedNode.inputs)}
                 </pre>
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-text-muted">Output</div>
                 {selectedNode.error ? (
-                  <pre className="max-h-72 overflow-auto rounded-input border border-danger/20 bg-danger-soft p-3 font-mono text-[12px] leading-relaxed text-danger">
+                  <pre className="w-full max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded-input border border-danger/20 bg-danger-soft p-3 font-mono text-[12px] leading-relaxed text-danger">
                     {selectedNode.error}
                   </pre>
                 ) : (
-                  <pre className="max-h-72 overflow-auto rounded-input border border-line bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-primary">
-                    {JSON.stringify(selectedNode.output ?? {}, null, 2)}
+                  <pre className="w-full max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded-input border border-line bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-primary">
+                    {formatJsonForDisplay(selectedNode.output)}
                   </pre>
                 )}
               </div>
@@ -246,6 +342,8 @@ function StoryView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode:
     if (run.status === 'completed') lines.push(`This workflow ran successfully in ${formatDuration(run.durationMs)}.`);
     else if (run.status === 'failed') lines.push(`This workflow failed after ${formatDuration(run.durationMs)}.`);
     else if (run.status === 'running') lines.push('This workflow is currently running.');
+    else if (run.status === 'paused') lines.push('This workflow is paused and needs operator action.');
+    else if (run.status === 'waiting') lines.push('This workflow is waiting before it can continue.');
     return lines.join(' ');
   }, [run]);
 
@@ -301,7 +399,7 @@ function StoryView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode:
         <div className="rounded-card border border-danger/20 bg-danger-soft p-4">
           <h3 className="text-subheading text-danger">Failed at "{failedNode.title}"</h3>
           {failedNode.error && (
-            <pre className="mt-2 max-h-40 overflow-auto rounded-input bg-surface-2 p-3 font-mono text-[12px] text-danger">
+            <pre className="w-full mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-input bg-surface-2 p-3 font-mono text-[12px] text-danger">
               {failedNode.error}
             </pre>
           )}
@@ -311,6 +409,37 @@ function StoryView({ run, onSelectNode }: { run: RunDetail['run']; onSelectNode:
 
       <p className="text-[12px] text-text-muted">Click any step above to inspect its inputs and outputs.</p>
     </div>
+  );
+}
+
+function LiveRunActivity({ feed }: { feed: RealtimeActivity[] }) {
+  return (
+    <section className="mb-5 overflow-hidden rounded-card border border-line bg-surface">
+      <header className="flex items-center gap-2 border-b border-line bg-surface-2 px-4 py-3">
+        <span className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-accent/30 bg-accent-soft text-accent">
+          <RadioTower size={14} />
+        </span>
+        <div className="min-w-0">
+          <div className="text-[12px] font-semibold text-text-primary">Live execution</div>
+          <div className="text-[11px] text-text-muted">Runtime trace</div>
+        </div>
+      </header>
+      {feed.length === 0 ? (
+        <div className="px-4 py-4 text-[12px] text-text-muted">No live events yet.</div>
+      ) : (
+        <div className="max-h-64 overflow-y-auto divide-y divide-line/70">
+          {feed.slice(0, 12).map((item) => (
+            <div key={item.id} className="grid grid-cols-[88px_1fr] gap-3 px-4 py-2.5">
+              <span className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{item.kind}</span>
+              <div className="min-w-0">
+                <div className="truncate text-[12px] font-medium text-text-primary">{item.nodeTitle ?? item.title}</div>
+                <div className="mt-0.5 line-clamp-2 font-mono text-[10px] leading-snug text-text-secondary">{item.detail}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

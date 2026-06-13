@@ -90,7 +90,7 @@ export interface Persistence {
 }
 ```
 
-No service, route, or engine module imports `better-sqlite3` or `pg` directly. Ever. Linted by `eslint-plugin-no-restricted-imports`.
+No service, route, or engine module imports `better-sqlite3` or `pg` directly. Ever. Linted by the restricted-imports ESLint rule.
 
 **Step 2 — Two implementations.**
 - `packages/db-sqlite/` — wraps `better-sqlite3`, fakes async (resolved promises). Local-only.

@@ -1,15 +1,8 @@
 /**
- * InstinctEngine — Layer 7 §7.2.
+ * InstinctEngine.
  *
- * Runs after every failed run. Detects when the *same node* has failed with the
- * *same root cause* across enough recent runs to be a pattern, records the
- * learning to MEMORY.md (so future agent calls avoid it), and emits an
- * `INSTINCT_PROPOSED` event the operator can act on. This is the mechanism by
- * which the platform gets more reliable the longer it runs (Principle #6) and a
- * concrete instance of the "autonomy is earned" dial (Principle #13).
- *
- * V1 proposes; it does not auto-patch. Auto-apply via `applyGraphPatch` is the
- * Phase-6 follow-up once confidence scoring is calibrated.
+ * Detects repeated workflow failure patterns, records the lesson into the
+ * canonical DB brain, and emits an operator-visible proposal.
  */
 
 import { and, desc, eq } from 'drizzle-orm';
@@ -19,7 +12,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { validateWorkflowGraph } from '../engine/validateGraph.js';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import type { WorkspaceIntelligenceService } from './workspaceIntelligence.js';
+import type { MemoryStore } from './memoryStore.js';
 
 export interface InstinctProposal {
   workspaceId: string;
@@ -31,14 +24,14 @@ export interface InstinctProposal {
   suggestion: string;
 }
 
-const DEFAULT_THRESHOLD = 3;     // failures of the same node+cause to call it a pattern
-const SCAN_WINDOW = 25;          // recent runs to scan
+const DEFAULT_THRESHOLD = 3;
+const SCAN_WINDOW = 25;
 
 export class InstinctEngine {
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly bus: EventBus,
-    private readonly intelligence: WorkspaceIntelligenceService,
+    private readonly memory: MemoryStore,
     private readonly logger?: Logger,
     private readonly threshold = DEFAULT_THRESHOLD,
   ) {}
@@ -61,7 +54,6 @@ export class InstinctEngine {
     const error = state.nodeStates?.[failedNodeId]?.error ?? '';
     const rootCause = classifyRootCause(error);
 
-    // Count recent runs of this workflow where the same node failed with the same class.
     const recent = this.db
       .select({ id: schema.workflowRuns.id, runState: schema.workflowRuns.runState })
       .from(schema.workflowRuns)
@@ -86,10 +78,24 @@ export class InstinctEngine {
     const suggestion = suggestionFor(rootCause, failedNodeId);
     const proposal: InstinctProposal = { workspaceId, workflowId, nodeId: failedNodeId, rootCause, occurrences, confidence, suggestion };
 
-    // Persist the learning to MEMORY.md so future agent calls carry it.
-    const entry = `[${today()}][uses:0][wf:${workflowId.slice(0, 8)}][conf:${confidence.toFixed(2)}] `
-      + `Node "${failedNodeId}" repeatedly fails (${rootCause}, ${occurrences}x). ${suggestion}`;
-    await this.intelligence.appendMemory(workspaceId, 'Patterns That Failed', entry).catch(() => {});
+    this.memory.write({
+      workspaceId,
+      scopeId: null,
+      kind: 'lesson',
+      source: 'system',
+      title: `Repeated failure: ${failedNodeId}`,
+      content: `Node "${failedNodeId}" repeatedly fails (${rootCause}, ${occurrences}x). ${suggestion}`,
+      trust: confidence,
+      importance: 0.72,
+      tags: ['instinct', 'failure_pattern', rootCause],
+      provenance: {
+        source: 'instinct_engine',
+        workflowId,
+        nodeId: failedNodeId,
+        runId: args.runId,
+        occurrences,
+      },
+    });
 
     this.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.INSTINCT_PROPOSED, proposal);
     this.logger?.info('instinct.proposed', { workspaceId, workflowId, nodeId: failedNodeId, rootCause, occurrences });
@@ -97,11 +103,8 @@ export class InstinctEngine {
   }
 
   /**
-   * Apply an instinct (operator-approved) to the workflow's stored graph so future
-   * runs benefit (§7.2 "When approved: the engine patches the workflow graph").
-   * Config-only fixes (retry/timeout) mutate the node; `context_too_long` inserts a
-   * truncation transform before the node and rewires its inbound edges. Returns
-   * whether a patch was applied. Records the fix to MEMORY's effective patterns.
+   * Apply an operator-approved instinct to the workflow graph and record the
+   * effective pattern into the DB brain.
    */
   async applyInstinct(args: { workspaceId: string; workflowId: string; nodeId: string; rootCause: string }): Promise<{ applied: boolean; reason?: string }> {
     const wf = this.db.select().from(schema.workflows)
@@ -131,9 +134,23 @@ export class InstinctEngine {
       .where(eq(schema.workflows.id, args.workflowId))
       .run();
 
-    await this.intelligence.appendMemory(args.workspaceId, 'Effective Patterns',
-      `[${today()}][uses:0][wf:${args.workflowId.slice(0, 8)}][conf:0.80] Auto-patched "${args.nodeId}" for ${args.rootCause} — verify next run.`,
-    ).catch(() => {});
+    this.memory.write({
+      workspaceId: args.workspaceId,
+      scopeId: null,
+      kind: 'pattern',
+      source: 'system',
+      title: `Auto-patch applied: ${args.nodeId}`,
+      content: `Auto-patched "${args.nodeId}" for ${args.rootCause}. Verify the next run.`,
+      trust: 0.8,
+      importance: 0.68,
+      tags: ['instinct', 'effective_pattern', args.rootCause],
+      provenance: {
+        source: 'instinct_engine',
+        workflowId: args.workflowId,
+        nodeId: args.nodeId,
+        rootCause: args.rootCause,
+      },
+    });
     this.logger?.info('instinct.applied', { ...args });
     return { applied: true };
   }
@@ -161,7 +178,7 @@ function mutateNodeForReliability(graph: WorkflowGraph, node: WorkflowNode, root
 /** Insert a truncation transform before `node` and rewire its inbound edges. */
 function insertTruncationBefore(graph: WorkflowGraph, node: WorkflowNode): WorkflowGraph {
   const truncId = `instinct_truncate_${node.id}`;
-  if (graph.nodes.some((n) => n.id === truncId)) return graph; // already patched
+  if (graph.nodes.some((n) => n.id === truncId)) return graph;
   const truncNode: WorkflowNode = {
     id: truncId,
     type: 'transform',
@@ -169,7 +186,6 @@ function insertTruncationBefore(graph: WorkflowGraph, node: WorkflowNode): Workf
     position: { x: Math.max(0, node.position.x - 220), y: node.position.y },
     config: {
       kind: 'transform',
-      // Cap any array-valued input field to the top 20 items to avoid context overflow.
       expression: 'Object.fromEntries(Object.entries(input).map(([k, v]) => [k, Array.isArray(v) ? v.slice(0, 20) : v]))',
     },
   };
@@ -195,12 +211,8 @@ function suggestionFor(rootCause: string, nodeId: string): string {
     case 'context_too_long': return `Add a Transform before "${nodeId}" to truncate the input (e.g. top 20 items).`;
     case 'rate_limit': return `Add retry + backoff (3 attempts, 2s initial) to "${nodeId}".`;
     case 'timeout': return `Raise the timeout on "${nodeId}" or split its work into smaller steps.`;
-    case 'auth': return `Check the credential bound to "${nodeId}" — it may be missing or expired.`;
+    case 'auth': return `Check the credential bound to "${nodeId}" - it may be missing or expired.`;
     case 'parse_error': return `Add an evaluator/guardrails gate after "${nodeId}" to enforce output shape.`;
-    default: return `Review "${nodeId}" — it has failed repeatedly with the same root cause.`;
+    default: return `Review "${nodeId}" - it has failed repeatedly with the same root cause.`;
   }
-}
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
 }

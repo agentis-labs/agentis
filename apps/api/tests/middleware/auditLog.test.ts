@@ -118,6 +118,35 @@ describe('auditLog middleware', () => {
     expect(rows[0]!.entityId).toBe(wfId);
   });
 
+  it('records mutations on stateful surfaces added after the original prefix list', async () => {
+    const expected = [
+      ['/v1/auth/api-keys', 'api_key.create'],
+      ['/v1/bootstrap', 'bootstrap.create'],
+      ['/v1/artifacts', 'artifact.create'],
+      ['/v1/brain/dream-pass', 'brain.create'],
+      ['/v1/knowledge-bases', 'knowledge_base.create'],
+      ['/v1/scheduler/schedules', 'scheduler.create'],
+      ['/v1/integrations', 'integration.create'],
+      ['/v1/rooms', 'room.create'],
+      ['/v1/teams', 'team.create'],
+      ['/v1/budgets/spend', 'budget.create'],
+    ] as const;
+    const app = buildApp((a) => {
+      for (const [path] of expected) a.post(path, (c) => c.json({ ok: true }, 201));
+    });
+
+    for (const [requestPath] of expected) {
+      const res = await app.request(requestPath, {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: '{}',
+      });
+      expect(res.status).toBe(201);
+    }
+
+    expect(activityRows().map((row) => row.eventType)).toEqual(expected.map(([, eventType]) => eventType));
+  });
+
   it('does not record GET requests', async () => {
     const app = buildApp((a) => {
       a.get('/v1/workflows', (c) => c.json({ workflows: [] }));
@@ -160,12 +189,12 @@ describe('auditLog middleware', () => {
     expect(activityRows()).toHaveLength(0);
   });
 
-  it('skips paths under /v1/skills/registry (already records its own activity)', async () => {
+  it('skips paths under /v1/extensions/registry (already records its own activity)', async () => {
     const app = buildApp((a) => {
-      a.post('/v1/skills/registry/install/:slug', (c) => c.json({ ok: true }, 201));
+      a.post('/v1/extensions/registry/install/:slug', (c) => c.json({ ok: true }, 201));
     });
 
-    const res = await app.request('/v1/skills/registry/install/abc', {
+    const res = await app.request('/v1/extensions/registry/install/abc', {
       method: 'POST',
       headers: ctx.authHeaders,
       body: '{}',

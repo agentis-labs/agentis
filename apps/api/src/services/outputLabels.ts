@@ -7,7 +7,7 @@
  * a set of completed runs.
  *
  * If a run has no outputCounts, we fall back to counting the run as one
- * "success" event so single-output apps still appear in the stat bar.
+ * "success" event so single-output workflows still appear in the stat bar.
  */
 
 export interface RunWithState {
@@ -35,7 +35,7 @@ export function aggregateOutputLabels(
         totals[k] = (totals[k] ?? 0) + n;
       }
     } else if (labels.length === 1) {
-      // Single-label apps without explicit counts: count successful run as 1.
+      // Single-label workflows without explicit counts: count successful run as 1.
       totals[labels[0]!] = (totals[labels[0]!] ?? 0) + 1;
     }
   }

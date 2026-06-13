@@ -35,7 +35,7 @@ export function AgentOrgChart({ agents, onChanged }: { agents: OrgAgent[]; onCha
           onChanged();
         }}
       >
-        <Background color="#22262d" gap={28} />
+        <Background color="var(--color-canvas-grid)" gap={28} />
         <Controls />
       </ReactFlow>
     </div>

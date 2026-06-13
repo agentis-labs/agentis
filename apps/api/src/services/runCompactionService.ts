@@ -12,7 +12,7 @@
  *   - Delete ledger_events for runs older than `keepLedgerDays` (default 90).
  *
  * Pure background work — never blocks request handling and never touches
- * runs that are still active. Brain-apps will plug into the same service to
+ * runs that are still active. The Brain will plug into the same service to
  * archive memory promotions older than its retention window.
  */
 
@@ -39,7 +39,7 @@ interface RunCompactionSummary {
   durationMs: number;
 }
 
-const TERMINAL_STATUSES = ['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'FAILED', 'CANCELLED'];
+const TERMINAL_STATUSES = ['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'COMPLETED_WITH_ERRORS', 'FAILED', 'CANCELLED'];
 
 export class RunCompactionService {
   readonly #db: AgentisSqliteDb;

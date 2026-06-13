@@ -55,10 +55,26 @@ export interface RouteBranchArgs {
 export class EvaluatorRuntime {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
+  /**
+   * Request parameters this endpoint has rejected as unsupported, learned at
+   * runtime via {@link EvaluatorRuntime.#negotiate} so we never re-send them.
+   * Keeps the runtime model-agnostic: we adapt to whatever the server says
+   * rather than branching on a model family. (`max_tokens` here also covers the
+   * `max_completion_tokens` rename — see {@link EvaluatorRuntime.#maxTokensField}.)
+   */
+  readonly #omit = new Set<string>();
+  #maxTokensField: 'max_tokens' | 'max_completion_tokens' = 'max_tokens';
+  /** The last failure reason, exposed so callers can surface the real error. */
+  #lastError: string | null = null;
 
   constructor(private readonly opts: EvaluatorRuntimeOptions) {
     this.#fetch = opts.fetchImpl ?? fetch;
     this.#timeoutMs = opts.timeoutMs ?? 30_000;
+  }
+
+  /** The last failure reason from a completion that returned null, or null. */
+  get lastError(): string | null {
+    return this.#lastError;
   }
 
   async evaluate(args: EvaluateArgs): Promise<EvaluatorVerdict> {
@@ -137,70 +153,136 @@ export class EvaluatorRuntime {
     user: string;
     maxTokens?: number;
     maxAttempts?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<T | null> {
     const attempts = Math.max(1, Math.min(args.maxAttempts ?? 3, 5));
+    const callTimeout = args.timeoutMs ?? this.#timeoutMs;
     let lastError: string | null = null;
     let userPrompt = args.user;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      // Stop before starting another (billable) attempt once the turn is canceled.
+      if (args.signal?.aborted) {
+        this.#lastError = 'canceled';
+        return null;
+      }
       try {
         const raw = await this.#callJson({
           system: args.system,
           user: userPrompt,
           maxTokens: args.maxTokens ?? 1500,
+          timeoutMs: callTimeout,
+          ...(args.signal ? { signal: args.signal } : {}),
         });
         const parsed = parseGeneric(raw) as T | null;
-        if (parsed) return parsed;
+        if (parsed) {
+          this.#lastError = null;
+          return parsed;
+        }
         lastError = 'response was not parseable as a JSON object';
       } catch (err) {
         lastError = (err as Error).message;
       }
       userPrompt = `${args.user}\n\nPREVIOUS ATTEMPT FAILED: ${lastError}. Return strict JSON only — no prose, no code fences.`;
     }
+    this.#lastError = lastError;
     this.opts.logger.warn('evaluator.completeStructured.exhausted', { lastError, attempts });
     return null;
   }
 
-  async #callJson(req: { system: string; user: string; maxTokens?: number }): Promise<string> {
+  async #callJson(req: { system: string; user: string; maxTokens?: number; timeoutMs?: number; signal?: AbortSignal }): Promise<string> {
     const url = this.opts.baseUrl.replace(/\/+$/, '') + '/chat/completions';
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.opts.apiKey) headers['authorization'] = `Bearer ${this.opts.apiKey}`;
+    const messages = [
+      { role: 'system', content: req.system },
+      { role: 'user', content: req.user },
+    ];
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
-    try {
-      const res = await this.#fetch(url, {
-        method: 'POST',
-        headers,
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: this.opts.model,
-          temperature: 0,
-          response_format: { type: 'json_object' },
-          max_tokens: req.maxTokens ?? 800,
-          messages: [
-            { role: 'system', content: req.system },
-            { role: 'user', content: req.user },
-          ],
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new AgentisError(
-          'INTEGRATION_OPERATION_FAILED',
-          `evaluator backend returned ${res.status}: ${text.slice(0, 200)}`,
-        );
+    // We start with the broadly-useful params (deterministic temperature, JSON
+    // response format, a token cap) and, if the endpoint rejects one as
+    // unsupported, drop/adapt it and retry. This negotiation is generic — it
+    // reacts to the server's own error, so it works for any model/provider
+    // without hardcoding model-family quirks. The loop is bounded by the small,
+    // fixed set of negotiable params.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const body: Record<string, unknown> = { model: this.opts.model, messages };
+      if (!this.#omit.has('temperature')) body.temperature = 0;
+      if (!this.#omit.has('response_format')) body.response_format = { type: 'json_object' };
+      if (!this.#omit.has('max_tokens')) body[this.#maxTokensField] = req.maxTokens ?? 800;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), req.timeoutMs ?? this.#timeoutMs);
+      // Fold the external cancel signal into this request's controller so a client
+      // disconnect aborts the in-flight HTTP call (not just the next attempt).
+      const onExternalAbort = () => controller.abort();
+      if (req.signal) {
+        if (req.signal.aborted) controller.abort();
+        else req.signal.addEventListener('abort', onExternalAbort, { once: true });
       }
-      const body = (await res.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      const content = body.choices?.[0]?.message?.content;
-      if (typeof content !== 'string') {
-        throw new AgentisError('INTEGRATION_OPERATION_FAILED', 'evaluator backend returned no content');
+      let res: Response;
+      try {
+        res = await this.#fetch(url, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify(body) });
+      } finally {
+        clearTimeout(timer);
+        req.signal?.removeEventListener('abort', onExternalAbort);
       }
-      return content;
-    } finally {
-      clearTimeout(timer);
+
+      if (res.ok) {
+        const parsed = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const content = parsed.choices?.[0]?.message?.content;
+        if (typeof content !== 'string') {
+          throw new AgentisError('INTEGRATION_OPERATION_FAILED', 'model backend returned no content');
+        }
+        return content;
+      }
+
+      const text = await res.text();
+      // If the failure is an unsupported parameter we can adapt, retry; the
+      // learned omission persists on this runtime so later calls skip it too.
+      if (this.#negotiate(res.status, text)) {
+        this.opts.logger.debug?.('evaluator.param_negotiated', {
+          status: res.status,
+          omit: [...this.#omit],
+          maxTokensField: this.#maxTokensField,
+        });
+        continue;
+      }
+      throw new AgentisError(
+        'INTEGRATION_OPERATION_FAILED',
+        `model backend returned ${res.status}: ${text.slice(0, 200)}`,
+      );
     }
+    throw new AgentisError('INTEGRATION_OPERATION_FAILED', 'model backend rejected every supported parameter combination');
+  }
+
+  /**
+   * Inspect a 4xx error body and, if it names a request parameter the endpoint
+   * doesn't support, drop or adapt it for the retry. Returns true when an
+   * adjustment was made (so the caller should retry), false otherwise.
+   */
+  #negotiate(status: number, body: string): boolean {
+    if (status !== 400 && status !== 422 && status !== 404) return false;
+    const t = body.toLowerCase();
+    const looksUnsupported = /unsupported|not supported|does ?n[o']t support|unexpected|unknown|unrecognized|invalid(?:_request)?|use ['"]?max_completion_tokens/.test(t);
+    if (!looksUnsupported) return false;
+    // max_tokens rename — the most common modern divergence. Try the alternate
+    // field name before giving up on a token cap entirely.
+    if (this.#maxTokensField === 'max_tokens' && !this.#omit.has('max_tokens')
+        && (t.includes('max_tokens') || t.includes('max_completion_tokens'))) {
+      this.#maxTokensField = 'max_completion_tokens';
+      return true;
+    }
+    for (const param of ['temperature', 'response_format', 'max_tokens'] as const) {
+      const mentioned = param === 'max_tokens'
+        ? t.includes('max_tokens') || t.includes('max_completion_tokens')
+        : t.includes(param);
+      if (mentioned && !this.#omit.has(param)) {
+        this.#omit.add(param);
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -213,7 +295,7 @@ function stringifyTarget(target: unknown): string {
   }
 }
 
-function parseGeneric(raw: string): Record<string, unknown> | null {
+export function parseGeneric(raw: string): Record<string, unknown> | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   // Strip code fences if the model wrapped the JSON.

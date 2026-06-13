@@ -20,7 +20,7 @@ import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { WorkspaceStoreService } from '../../src/services/workspaceStore.js';
 import { AuditTrailService } from '../../src/services/auditTrail.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -40,7 +40,7 @@ beforeEach(async () => {
     scratchpad: new ScratchpadService(ctx.bus, ctx.logger),
     activity: new ActivityFeedService(ctx.db, ctx.bus),
     approvals: new ApprovalInboxService(ctx.db, ctx.bus),
-    skills: {} as unknown as SkillRuntime,
+    skills: {} as unknown as ExtensionRuntime,
     adapters: new AdapterManager(ctx.logger),
     workspaceStore,
     audit,

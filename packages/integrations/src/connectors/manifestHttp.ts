@@ -1,6 +1,7 @@
 import { AgentisError } from '@agentis/core';
 import type {
   ConnectorModule,
+  ConnectorOperationContract,
   IntegrationAuthConfig,
   IntegrationManifest,
   IntegrationOperationSpec,
@@ -19,6 +20,7 @@ export function manifestHttpConnector(manifest: IntegrationManifest): ConnectorM
   return {
     service: manifest.service,
     operations,
+    operationContracts: operationContractsFromManifest(manifest),
     async execute(opts) {
       const spec = (manifest.operationSpecs ?? []).find((candidate) => candidate.name === opts.operation);
       if (!spec) return generic.execute(opts);
@@ -32,6 +34,89 @@ export function manifestHttpConnector(manifest: IntegrationManifest): ConnectorM
       });
     },
   };
+}
+
+function operationContractsFromManifest(
+  manifest: IntegrationManifest,
+): Record<string, ConnectorOperationContract> | undefined {
+  const specs = manifest.operationSpecs ?? [];
+  if (specs.length === 0) return undefined;
+  return Object.fromEntries(
+    specs.map((spec) => [spec.name, operationContractFromSpec(spec)]),
+  );
+}
+
+function operationContractFromSpec(spec: IntegrationOperationSpec): ConnectorOperationContract {
+  const required = new Set<string>();
+  collectTemplateParamRequirements(spec.urlTemplate, required);
+  for (const value of Object.values(spec.headers ?? {})) collectTemplateParamRequirements(value, required);
+  for (const value of Object.values(spec.query ?? {})) collectTemplateParamRequirements(value, required);
+  collectTemplateValueRequirements(spec.bodyTemplate, required);
+  for (const field of schemaRequiredFields(spec.paramSchema)) required.add(field);
+  return {
+    ...(required.size > 0 ? { required: [...required] } : {}),
+    aliases: inferredAliases([...required]),
+  };
+}
+
+function collectTemplateValueRequirements(value: unknown, required: Set<string>): void {
+  if (typeof value === 'string') {
+    collectTemplateParamRequirements(value, required);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectTemplateValueRequirements(item, required);
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      collectTemplateValueRequirements(item, required);
+    }
+  }
+}
+
+function collectTemplateParamRequirements(template: string | undefined, required: Set<string>): void {
+  if (!template) return;
+  for (const match of template.matchAll(TEMPLATE_TOKEN)) {
+    const path = match[1] ?? match[2] ?? '';
+    const param = paramRequirementFromTemplatePath(path);
+    if (param) required.add(param);
+  }
+}
+
+function paramRequirementFromTemplatePath(path: string): string | null {
+  const parts = path.split('.').filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts[0] === 'credential' || parts[0] === 'input') return null;
+  if (parts[0] === 'params') return parts[1] ?? null;
+  return parts[0] ?? null;
+}
+
+function schemaRequiredFields(schema: Record<string, unknown> | undefined): string[] {
+  const required = schema?.required;
+  return Array.isArray(required)
+    ? required.filter((field): field is string => typeof field === 'string' && field.trim().length > 0)
+    : [];
+}
+
+function inferredAliases(fields: readonly string[]): Record<string, readonly string[]> {
+  const aliases: Record<string, readonly string[]> = {};
+  for (const field of fields) {
+    const normalized = field.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normalized === 'url') aliases[field] = ['href', 'endpoint'];
+    if (normalized.includes('title') || normalized.includes('subject')) aliases[field] = ['title', 'subject'];
+    if (
+      normalized.includes('body')
+      || normalized.includes('text')
+      || normalized.includes('content')
+      || normalized.includes('message')
+      || normalized.includes('markdown')
+      || normalized.includes('description')
+    ) {
+      aliases[field] = ['body', 'text', 'content', 'message', 'markdown', 'markdownBody', 'description', 'digest'];
+    }
+  }
+  return aliases;
 }
 
 export async function executeManifestOperation(args: {

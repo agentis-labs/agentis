@@ -22,6 +22,22 @@ function cellText(v: unknown): string {
   try { return JSON.stringify(v); } catch { return String(v); }
 }
 
+export function safeExternalUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function safeResourceUrl(value: string, dataPrefixes: readonly string[] = []): string | null {
+  const trimmed = value.trim();
+  const lower = trimmed.toLowerCase();
+  if (dataPrefixes.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return trimmed;
+  return safeExternalUrl(trimmed);
+}
+
 function downloadBlob(content: string, name: string, mime: string) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -195,13 +211,15 @@ export function ImageViewer({ src, alt }: { src: string; alt?: string }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
+  const safeSrc = safeResourceUrl(src, ['data:image/']);
+  if (!safeSrc) return <div className="text-[12px] text-danger">Blocked unsafe image URL.</div>;
   return (
     <>
       <button type="button" onClick={() => { setOpen(true); setZoom(1); }} className="block overflow-hidden rounded-input border border-line bg-surface-2 p-1">
-        <img src={src} alt={alt ?? 'image'} className="max-h-72 w-full cursor-zoom-in rounded object-contain" />
+        <img src={safeSrc} alt={alt ?? 'image'} className="max-h-72 w-full cursor-zoom-in rounded object-contain" />
       </button>
       {open && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-black/80" onClick={() => setOpen(false)}>
+        <div className="fixed inset-0 z-50 flex flex-col bg-overlay-strong" onClick={() => setOpen(false)}>
           <div className="flex items-center justify-end gap-1 p-2" onClick={(e) => e.stopPropagation()}>
             <button type="button" onClick={() => setZoom((z) => Math.max(0.25, z - 0.25))} className="rounded p-2 text-white hover:bg-white/10"><ZoomOut size={16} /></button>
             <span className="px-1 text-[12px] text-white">{Math.round(zoom * 100)}%</span>
@@ -209,7 +227,7 @@ export function ImageViewer({ src, alt }: { src: string; alt?: string }) {
             <button type="button" onClick={() => setOpen(false)} className="rounded p-2 text-white hover:bg-white/10"><X size={16} /></button>
           </div>
           <div className="flex flex-1 items-center justify-center overflow-auto p-4" onClick={(e) => e.stopPropagation()}>
-            <img src={src} alt={alt ?? 'image'} style={{ transform: `scale(${zoom})` }} className="max-h-full max-w-full origin-center object-contain transition-transform" />
+            <img src={safeSrc} alt={alt ?? 'image'} style={{ transform: `scale(${zoom})` }} className="max-h-full max-w-full origin-center object-contain transition-transform" />
           </div>
         </div>
       )}
@@ -220,15 +238,17 @@ export function ImageViewer({ src, alt }: { src: string; alt?: string }) {
 // ─── PdfViewer ───────────────────────────────────────────────────────────────
 
 export function PdfViewer({ src, name }: { src: string; name?: string }) {
+  const safeSrc = safeResourceUrl(src, ['data:application/pdf']);
+  if (!safeSrc) return <div className="text-[12px] text-danger">Blocked unsafe PDF URL.</div>;
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="flex items-center gap-2 border-b border-line bg-surface px-2 py-1.5">
         <span className="text-[10px] uppercase tracking-wider text-text-muted">PDF</span>
-        <a href={src} download={name ?? 'document.pdf'} className="ml-auto inline-flex h-7 items-center gap-1 rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:bg-surface-2">
+        <a href={safeSrc} download={name ?? 'document.pdf'} className="ml-auto inline-flex h-7 items-center gap-1 rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:bg-surface-2">
           <Download size={11} /> Download
         </a>
       </div>
-      <iframe title={name ?? 'PDF'} src={src} className="h-[480px] w-full bg-white" />
+      <iframe title={name ?? 'PDF'} src={safeSrc} className="h-[480px] w-full bg-white" />
     </div>
   );
 }
@@ -239,6 +259,8 @@ const PLAYBACK_RATES = [0.5, 1, 1.5, 2] as const;
 
 export function VideoPlayer({ src, name }: { src: string; name?: string }) {
   const [rate, setRate] = useState(1);
+  const safeSrc = safeResourceUrl(src, ['data:video/']);
+  if (!safeSrc) return <div className="text-[12px] text-danger">Blocked unsafe video URL.</div>;
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="flex items-center gap-2 border-b border-line bg-surface px-2 py-1.5">
@@ -254,12 +276,12 @@ export function VideoPlayer({ src, name }: { src: string; name?: string }) {
               {r}×
             </button>
           ))}
-          <a href={src} download={name ?? 'video'} className="inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
+          <a href={safeSrc} download={name ?? 'video'} className="inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
             <Download size={10} /> Download
           </a>
         </div>
       </div>
-      <video id={`vid-${name ?? 'v'}`} src={src} controls className="max-h-[480px] w-full bg-black" />
+      <video id={`vid-${name ?? 'v'}`} src={safeSrc} controls className="max-h-[480px] w-full bg-black" />
     </div>
   );
 }
@@ -267,17 +289,19 @@ export function VideoPlayer({ src, name }: { src: string; name?: string }) {
 // ─── AudioPlayer ─────────────────────────────────────────────────────────────
 
 export function AudioPlayer({ src, name }: { src: string; name?: string }) {
+  const safeSrc = safeResourceUrl(src, ['data:audio/']);
+  if (!safeSrc) return <div className="text-[12px] text-danger">Blocked unsafe audio URL.</div>;
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="flex items-center gap-2 border-b border-line bg-surface px-2 py-1.5">
         <span className="text-[10px] uppercase tracking-wider text-text-muted">Audio</span>
         <span className="truncate text-[11px] text-text-secondary">{name}</span>
-        <a href={src} download={name ?? 'audio'} className="ml-auto inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
+        <a href={safeSrc} download={name ?? 'audio'} className="ml-auto inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
           <Download size={10} /> Download
         </a>
       </div>
       <div className="p-3">
-        <audio src={src} controls className="w-full" />
+        <audio src={safeSrc} controls className="w-full" />
       </div>
     </div>
   );
@@ -287,16 +311,18 @@ export function AudioPlayer({ src, name }: { src: string; name?: string }) {
 
 /** In-panel browser for a hosted site: read-only address bar + iframe + open. */
 export function WebsitePreview({ url }: { url: string }) {
+  const safeUrl = safeExternalUrl(url);
+  if (!safeUrl) return <div className="text-[12px] text-danger">Blocked unsafe website URL.</div>;
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="flex items-center gap-2 border-b border-line bg-surface px-2 py-1.5">
         <span className="text-[10px] uppercase tracking-wider text-text-muted">Website</span>
-        <span className="flex-1 truncate rounded bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-text-secondary">{url}</span>
-        <a href={url} target="_blank" rel="noreferrer" className="inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
+        <span className="flex-1 truncate rounded bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-text-secondary">{safeUrl}</span>
+        <a href={safeUrl} target="_blank" rel="noreferrer" className="inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
           Open
         </a>
       </div>
-      <iframe title="Website preview" src={url} className="h-[480px] w-full bg-white" sandbox="allow-scripts allow-same-origin allow-forms" />
+      <iframe title="Website preview" src={safeUrl} className="h-[480px] w-full bg-white" sandbox="" />
     </div>
   );
 }
@@ -400,6 +426,8 @@ interface DeploymentSpec { url: string; status?: string; version?: string; envir
 
 /** Live deployment surface: URL + health badge + inline preview. */
 export function DeploymentCard({ spec }: { spec: DeploymentSpec }) {
+  const safeUrl = safeExternalUrl(spec.url);
+  if (!safeUrl) return <div className="text-[12px] text-danger">Blocked unsafe deployment URL.</div>;
   const healthy = !spec.status || /ok|healthy|live|200|success/i.test(spec.status);
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
@@ -411,9 +439,9 @@ export function DeploymentCard({ spec }: { spec: DeploymentSpec }) {
         </span>
         {spec.environment && <span className="text-[10px] text-text-muted">{spec.environment}</span>}
         {spec.version && <span className="text-[10px] text-text-muted">v{spec.version}</span>}
-        <a href={spec.url} target="_blank" rel="noreferrer" className="ml-auto inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">Open</a>
+        <a href={safeUrl} target="_blank" rel="noreferrer" className="ml-auto inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">Open</a>
       </div>
-      <iframe title="Deployment preview" src={spec.url} className="h-[420px] w-full bg-white" sandbox="allow-scripts allow-same-origin" />
+      <iframe title="Deployment preview" src={safeUrl} className="h-[420px] w-full bg-white" sandbox="" />
     </div>
   );
 }
@@ -422,7 +450,7 @@ export function deploymentSpecFrom(value: unknown): DeploymentSpec | null {
   if (!isRecord(value)) return null;
   const root = isRecord(value.deployment) ? value.deployment : value;
   const url = (root as { url?: unknown }).url;
-  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) return null;
+  if (typeof url !== 'string' || !safeExternalUrl(url)) return null;
   return {
     url,
     status: typeof (root as { status?: unknown }).status === 'string' ? (root as { status: string }).status : undefined,

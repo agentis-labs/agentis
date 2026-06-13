@@ -34,51 +34,25 @@ describe('<AgentConfigPanel /> runtime connection', () => {
     localStorage.setItem('agentis.workspace', 'ws-1');
   });
 
-  it('connects a detected OpenClaw gateway without starting an install', async () => {
+  it('does not re-probe or rewrite an existing runtime when the panel opens', async () => {
     const onSaved = vi.fn();
-    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(input);
-      if (path === '/v1/harness/detect') {
-        return jsonResponse({
-          harnesses: [
-            {
-              adapterType: 'openclaw',
-              harness: 'OpenClaw',
-              status: 'found',
-              detail: 'Gateway URL configured: wss://localhost:3738',
-              config: { gatewayUrl: 'wss://localhost:3738' },
-            },
-          ],
-        });
-      }
-      if (path === '/v1/agents/agent-1' && init?.method === 'PATCH') return jsonResponse({ ok: true });
-      return jsonResponse({});
-    });
+    const fetchSpy = vi.fn(async () => jsonResponse({}));
     vi.stubGlobal('fetch', fetchSpy);
 
     render(
       <AgentConfigPanel
-        agent={{ ...baseAgent, adapterType: 'openclaw' }}
+        agent={{ ...baseAgent, adapterType: 'openclaw', status: 'online' }}
         allAgents={[]}
         onSaved={onSaved}
       />,
     );
 
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledWith(
-        '/v1/agents/agent-1',
-        expect.objectContaining({ method: 'PATCH' }),
-      );
-    });
-
-    const installCalls = fetchSpy.mock.calls.filter(([input]) => String(input) === '/v1/harness/install');
-    expect(installCalls).toHaveLength(0);
-    const patchCall = fetchSpy.mock.calls.find(([input, init]) => String(input) === '/v1/agents/agent-1' && init?.method === 'PATCH');
-    expect(JSON.parse(String(patchCall?.[1]?.body))).toMatchObject({
-      config: { gatewayUrl: 'wss://localhost:3738/' },
-      status: 'online',
-    });
-    expect(onSaved).toHaveBeenCalled();
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    expect(fetchSpy.mock.calls.some(([input]) => String(input) === '/v1/harness/detect')).toBe(false);
+    expect(fetchSpy.mock.calls.some(([input, init]) => (
+      String(input) === '/v1/agents/agent-1' && init?.method === 'PATCH'
+    ))).toBe(false);
+    expect(onSaved).not.toHaveBeenCalled();
   });
 
   it('does not install a missing CLI runtime when the panel opens', async () => {
@@ -102,13 +76,13 @@ describe('<AgentConfigPanel /> runtime connection', () => {
 
     render(<AgentConfigPanel agent={baseAgent} allAgents={[]} onSaved={vi.fn()} />);
 
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledWith('/v1/harness/detect', expect.any(Object));
-    });
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
 
     const installCalls = fetchSpy.mock.calls.filter(([input]) => String(input) === '/v1/harness/install');
+    const detectionCalls = fetchSpy.mock.calls.filter(([input]) => String(input) === '/v1/harness/detect');
     const agentPatchCalls = fetchSpy.mock.calls.filter(([input, init]) => String(input) === '/v1/agents/agent-1' && init?.method === 'PATCH');
     expect(installCalls).toHaveLength(0);
+    expect(detectionCalls).toHaveLength(0);
     expect(agentPatchCalls).toHaveLength(0);
   });
 

@@ -48,6 +48,7 @@ function seedTrigger(opts: {
   config?: Record<string, unknown>;
   webhookSecret?: string;
   status?: string;
+  graph?: WorkflowGraph;
 }) {
   const wfId = randomUUID();
   const triggerId = randomUUID();
@@ -59,7 +60,7 @@ function seedTrigger(opts: {
       ambientId: ctx.ambient.id,
       userId: ctx.user.id,
       title: 'trigger-wf',
-      graph: trivialGraph,
+      graph: opts.graph ?? trivialGraph,
       settings: {},
     })
     .run();
@@ -101,6 +102,41 @@ describe('TriggerRuntime — fire()', () => {
     // lastFiredAt updated.
     const trigRow = ctx.db.select().from(schema.triggers).where(eq(schema.triggers.id, triggerId)).get();
     expect(trigRow?.lastFiredAt).toBeTruthy();
+  });
+
+  it('normalizes the graph before dispatch and heals the stored row (parity with API run path)', async () => {
+    // A graph synthesized with an operationId the connector does not support.
+    // The manual `/run` path heals the stored row via loadWorkflow; the trigger
+    // path must converge it too, so the canvas/exports don't keep showing a stale
+    // draft that differs from what every scheduled/webhook run executes.
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'T', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'send', type: 'integration', title: 'Send', position: { x: 200, y: 0 }, config: { kind: 'integration', integrationId: 'agentmail', operationId: 'send_email', inputs: {} } as never },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'send' }],
+    };
+    const { wfId, triggerId } = seedTrigger({ type: 'cron', graph });
+    const t: ActiveTrigger = {
+      triggerId,
+      workflowId: wfId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      triggerType: 'cron',
+      config: {},
+    };
+    await runtime.fire({ trigger: t, payload: {} });
+    // Dispatched graph was normalized.
+    const dispatched = engine.startRun.mock.calls[0]?.[0] as { graph: WorkflowGraph } | undefined;
+    const sentOp = (dispatched?.graph.nodes.find((n) => n.id === 'send')?.config as { operationId?: string } | undefined)?.operationId;
+    expect(sentOp).toBe('send_message');
+    // Stored row healed too — the next fire is a no-op normalization.
+    const persisted = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, wfId)).get();
+    const storedOp = ((persisted?.graph as WorkflowGraph).nodes.find((n) => n.id === 'send')?.config as { operationId?: string } | undefined)?.operationId;
+    expect(storedOp).toBe('send_message');
   });
 
   it('throws RESOURCE_NOT_FOUND when workflow is missing', async () => {
@@ -212,6 +248,18 @@ describe('TriggerRuntime — fireWebhook()', () => {
     expect(second.runId).toBe(first.runId);
     // engine called only once across both attempts.
     expect(engine.startRun).toHaveBeenCalledOnce();
+  });
+
+  it('scopes the same deliveryId independently per webhook trigger', async () => {
+    const firstTrigger = seedTrigger({ type: 'webhook', webhookSecret: SECRET, status: 'active' }).triggerId;
+    const secondTrigger = seedTrigger({ type: 'webhook', webhookSecret: SECRET, status: 'active' }).triggerId;
+    const body = '{"x":42}';
+    const { ts, sig } = signedHeaders(body);
+    const first = await runtime.fireWebhook({ triggerId: firstTrigger, rawBody: body, signature: sig, timestampHeader: ts, deliveryId: 'shared-id' });
+    const second = await runtime.fireWebhook({ triggerId: secondTrigger, rawBody: body, signature: sig, timestampHeader: ts, deliveryId: 'shared-id' });
+    expect(first.idempotent).toBe(false);
+    expect(second.idempotent).toBe(false);
+    expect(engine.startRun).toHaveBeenCalledTimes(2);
   });
 });
 

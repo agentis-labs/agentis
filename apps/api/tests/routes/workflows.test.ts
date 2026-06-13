@@ -7,11 +7,13 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import type { WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildWorkflowRoutes } from '../../src/routes/workflows.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import type { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
+import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 
 let ctx: TestContext;
 let engine: { startRun: ReturnType<typeof vi.fn>; cancelRun: ReturnType<typeof vi.fn> };
@@ -21,7 +23,7 @@ beforeEach(async () => {
   engine = { startRun: vi.fn().mockResolvedValue(undefined), cancelRun: vi.fn().mockResolvedValue(undefined) };
 });
 
-function app() {
+function app(triggerRuntime?: TriggerRuntime) {
   return ctx.buildApp([
     {
       path: '/v1/workflows',
@@ -30,6 +32,7 @@ function app() {
         auth: ctx.auth,
         engine: engine as unknown as WorkflowEngine,
         bus: ctx.bus,
+        triggerRuntime,
       }),
     },
   ]);
@@ -76,6 +79,65 @@ describe('GET /v1/workflows', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { workflows: Array<{ id: string }> };
     expect(body.workflows).toHaveLength(1);
+  });
+
+  it('enriches workflow cards with the latest active run state', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        { id: 'start', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'draft', type: 'agent_task', title: 'Draft', position: { x: 100, y: 0 }, config: { kind: 'agent_task', prompt: 'Draft', capabilityTags: [], inputKeys: [], outputKeys: [] } },
+      ],
+      edges: [{ id: 'e1', source: 'start', target: 'draft' }],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const id = seedWorkflow(graph);
+    seedRun(id, {
+      status: 'RUNNING',
+      completedAt: null,
+      completedNodeIds: ['start'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED' },
+        draft: { nodeId: 'draft', status: 'RUNNING' },
+      },
+    });
+
+    const res = await app().request('/v1/workflows', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      workflows: Array<{ id: string; status?: string; triggerType?: string; activeRunStep?: { current: number; total: number }; lastRun?: { status: string } }>;
+    };
+    expect(body.workflows[0]).toMatchObject({
+      id,
+      status: 'running',
+      triggerType: 'manual',
+      activeRunStep: { current: 2, total: 2 },
+      lastRun: { status: 'running' },
+    });
+  });
+
+  it('reports recoverable blocked runs as paused on workflow cards', async () => {
+    const id = seedWorkflow();
+    seedRun(id, {
+      status: 'WAITING',
+      completedAt: null,
+      nodeStates: {
+        start: {
+          nodeId: 'start',
+          status: 'WAITING',
+          blockedReason: 'The model account is out of credits. Add credits or switch the agent model, then resume the run.',
+        },
+      },
+    });
+
+    const res = await app().request('/v1/workflows', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workflows: Array<{ id: string; status?: string; lastRun?: { status: string } }> };
+    expect(body.workflows[0]).toMatchObject({
+      id,
+      status: 'paused',
+      lastRun: { status: 'paused' },
+    });
   });
 
   it('rejects without bearer token (401)', async () => {
@@ -140,11 +202,92 @@ describe('PATCH /v1/workflows/:id', () => {
   });
 });
 
+describe('workflow deployment', () => {
+  it('publishes a cron workflow through TriggerRuntime and exposes its deployment', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        {
+          id: 'schedule',
+          type: 'trigger',
+          title: 'Every five minutes',
+          position: { x: 0, y: 0 },
+          config: {
+            kind: 'trigger',
+            triggerType: 'cron',
+            schedule: '*/5 * * * *',
+            timezone: 'UTC',
+          },
+        },
+      ],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const id = seedWorkflow(graph);
+    const activate = vi.fn(async (trigger: { triggerId: string }) => {
+      ctx.db
+        .update(schema.triggers)
+        .set({ status: 'active' })
+        .where(eq(schema.triggers.id, trigger.triggerId))
+        .run();
+    });
+    const runtime = {
+      activate,
+      deactivate: vi.fn(async (triggerId: string) => {
+        ctx.db
+          .update(schema.triggers)
+          .set({ status: 'paused' })
+          .where(eq(schema.triggers.id, triggerId))
+          .run();
+      }),
+      listeners: undefined,
+    } as unknown as TriggerRuntime;
+
+    const publish = await app(runtime).request(`/v1/workflows/${id}/publish`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+    });
+
+    expect(publish.status).toBe(200);
+    expect(await publish.json()).toMatchObject({
+      deployment: {
+        triggerType: 'cron',
+        status: 'active',
+        config: { expression: '*/5 * * * *', timezone: 'UTC' },
+      },
+    });
+    expect(activate).toHaveBeenCalledOnce();
+
+    const row = ctx.db
+      .select()
+      .from(schema.triggers)
+      .where(eq(schema.triggers.workflowId, id))
+      .get();
+    expect(row).toMatchObject({
+      triggerType: 'cron',
+      status: 'active',
+      config: { expression: '*/5 * * * *', timezone: 'UTC' },
+    });
+
+    const deployment = await app(runtime).request(`/v1/workflows/${id}/deployment`, {
+      headers: ctx.authHeaders,
+    });
+    expect(deployment.status).toBe(200);
+    expect(await deployment.json()).toMatchObject({
+      deployment: {
+        triggerId: row?.id,
+        triggerType: 'cron',
+        status: 'active',
+      },
+    });
+  });
+});
+
 /** Insert a workflow_run row directly so the Runs/Output tabs have data. */
 function seedRun(
   workflowId: string,
   opts: {
-    status?: 'CREATED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    status?: 'CREATED' | 'PLANNING' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'COMPLETED_WITH_CONTRACT_VIOLATION' | 'COMPLETED_WITH_ERRORS' | 'FAILED' | 'CANCELLED';
     startedAt?: string;
     completedAt?: string | null;
     completedNodeIds?: string[];
@@ -199,6 +342,15 @@ describe('GET /v1/workflows/:id/runs', () => {
     expect(['completed', 'failed']).toContain(body.runs[0]!.status);
   });
 
+  it('surfaces COMPLETED_WITH_ERRORS as failed instead of pending', async () => {
+    const id = seedWorkflow();
+    seedRun(id, { status: 'COMPLETED_WITH_ERRORS' });
+    const res = await app().request(`/v1/workflows/${id}/runs`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runs: Array<{ status: string }> };
+    expect(body.runs[0]?.status).toBe('failed');
+  });
+
   it('returns 404 for an unknown workflow', async () => {
     const res = await app().request(`/v1/workflows/${randomUUID()}/runs`, { headers: ctx.authHeaders });
     expect(res.status).toBe(404);
@@ -239,6 +391,132 @@ describe('GET /v1/workflows/:id/output', () => {
     expect(body.outputs).toHaveLength(1);
     expect(body.outputs[0]!.nodeId).toBe('start');
     expect(body.outputs[0]!.value.text).toBe('hello world');
+  });
+
+  it('returns immutable output history newest-first', async () => {
+    const id = seedWorkflow();
+    const olderId = seedRun(id, {
+      status: 'COMPLETED',
+      startedAt: '2026-06-07T10:00:00.000Z',
+      completedAt: '2026-06-07T10:01:00.000Z',
+      completedNodeIds: ['start'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED', outputData: { text: 'older output' } },
+      },
+    });
+    const newerId = seedRun(id, {
+      status: 'COMPLETED',
+      startedAt: '2026-06-08T10:00:00.000Z',
+      completedAt: '2026-06-08T10:01:00.000Z',
+      completedNodeIds: ['start'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED', outputData: { text: 'newer output' } },
+      },
+    });
+
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      lastRun: { id: string };
+      outputs: Array<{ value: { text: string } }>;
+      runs: Array<{ run: { id: string }; outputs: Array<{ value: { text: string } }> }>;
+    };
+    expect(body.lastRun.id).toBe(newerId);
+    expect(body.outputs[0]!.value.text).toBe('newer output');
+    expect(body.runs.map((entry) => entry.run.id)).toEqual([newerId, olderId]);
+    expect(body.runs[1]!.outputs[0]!.value.text).toBe('older output');
+  });
+
+  it('reconstructs the exact rendered email as a delivery output for historical runs', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        { id: 'start', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'draft', type: 'transform', title: 'Digest draft', position: { x: 100, y: 0 }, config: { kind: 'transform', expression: '({})' } },
+        {
+          id: 'send',
+          type: 'integration',
+          title: 'Send digest',
+          position: { x: 200, y: 0 },
+          config: {
+            kind: 'integration',
+            integrationId: 'agentmail',
+            operationId: 'send_message',
+            inputs: {
+              to: 'operator@example.com',
+              subject: '{{nodes.draft.subject}}',
+              body: '{{nodes.draft.markdownBody}}',
+              format: 'markdown',
+            },
+          } as never,
+        },
+        {
+          id: 'summary',
+          type: 'return_output',
+          title: 'Delivery summary',
+          position: { x: 300, y: 0 },
+          config: { kind: 'return_output', renderAs: 'json' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'start', target: 'draft' },
+        { id: 'e2', source: 'draft', target: 'send' },
+        { id: 'e3', source: 'send', target: 'summary' },
+      ],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const id = seedWorkflow(graph);
+    seedRun(id, {
+      status: 'COMPLETED',
+      completedNodeIds: ['start', 'draft', 'send', 'summary'],
+      nodeStates: {
+        start: { nodeId: 'start', status: 'COMPLETED', inputData: {} },
+        draft: {
+          nodeId: 'draft',
+          status: 'COMPLETED',
+          outputData: {
+            subject: 'Daily digest',
+            markdownBody: '# Top story\n\n[Read it](https://example.com)',
+          },
+        },
+        send: {
+          nodeId: 'send',
+          status: 'COMPLETED',
+          outputData: { ok: true, status: 200 },
+        },
+        summary: {
+          nodeId: 'summary',
+          status: 'COMPLETED',
+          outputData: { renderAs: 'json', value: { sent: true } },
+        },
+      },
+    });
+
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      outputs: Array<{
+        nodeId: string;
+        role?: string;
+        renderAs?: string;
+        value: unknown;
+        delivery?: { recipient?: string; subject?: string; contentType?: string };
+      }>;
+    };
+    expect(body.outputs).toHaveLength(2);
+    expect(body.outputs[0]).toMatchObject({
+      nodeId: 'send',
+      role: 'delivery',
+      renderAs: 'html',
+      delivery: {
+        recipient: 'operator@example.com',
+        subject: 'Daily digest',
+        contentType: 'html',
+      },
+    });
+    expect(String(body.outputs[0]!.value)).toContain('<h1>Top story</h1>');
+    expect(String(body.outputs[0]!.value)).toContain('href="https://example.com"');
+    expect(body.outputs[1]).toMatchObject({ nodeId: 'summary', role: 'declared', renderAs: 'json' });
   });
 
   it('returns all completed sink outputs newest-first when no nodes are declared outputs', async () => {
@@ -333,6 +611,66 @@ describe('GET /v1/workflows/:id/output', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { outputs: Array<{ nodeId: string }> };
     expect(body.outputs).toEqual([]);
+  });
+
+  it('uses the latest terminal output even when the run finished with handled errors', async () => {
+    const id = seedWorkflow();
+    seedRun(id, {
+      status: 'COMPLETED_WITH_ERRORS',
+      completedNodeIds: ['start'],
+      nodeStates: {
+        start: {
+          nodeId: 'start',
+          status: 'COMPLETED',
+          outputData: { text: 'caught and returned' },
+          error: 'upstream failed but was handled',
+        },
+      },
+    });
+    const res = await app().request(`/v1/workflows/${id}/output`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { lastRun: { status: string } | null; outputs: Array<{ value: { text?: string } }> };
+    expect(body.lastRun?.status).toBe('failed');
+    expect(body.outputs[0]?.value.text).toBe('caught and returned');
+  });
+});
+
+describe('POST /v1/workflows/:id/run', () => {
+  it('repairs integration operations generically before dispatching the run', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        {
+          id: 'start',
+          type: 'trigger',
+          title: 'Manual',
+          position: { x: 0, y: 0 },
+          config: { kind: 'trigger', triggerType: 'manual' },
+        },
+        {
+          id: 'send',
+          type: 'integration',
+          title: 'Send',
+          position: { x: 200, y: 0 },
+          config: { kind: 'integration', integrationId: 'agentmail', operationId: 'send_email', inputs: {} } as never,
+        },
+      ],
+      edges: [{ id: 'e1', source: 'start', target: 'send' }],
+    };
+    const id = seedWorkflow(graph);
+    const res = await app().request(`/v1/workflows/${id}/run`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ inputs: {} }),
+    });
+    expect(res.status).toBe(202);
+    expect(engine.startRun).toHaveBeenCalledTimes(1);
+    const call = engine.startRun.mock.calls[0]?.[0] as { graph: WorkflowGraph } | undefined;
+    expect((call?.graph.nodes.find((node) => node.id === 'send')?.config as { operationId?: string } | undefined)?.operationId).toBe('send_message');
+    const persisted = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, id)).get();
+    const send = ((persisted?.graph as WorkflowGraph).nodes.find((node) => node.id === 'send')?.config as { operationId?: string } | undefined);
+    expect(send?.operationId).toBe('send_message');
   });
 });
 

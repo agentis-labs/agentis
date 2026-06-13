@@ -13,16 +13,19 @@ import type {
   AgentAdapter,
   AdapterCapabilities,
   AdapterHealthStatus,
-  ChatDelta,
+  AdapterType,
   ChatMessage,
+  ChatDelta,
+  ToolDefinition,
   NormalizedAgentEvent,
   NormalizedTask,
-  ToolDefinition,
+  RuntimeContext,
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
+import { linkAbortSignal } from './abort.js';
 
 export interface HttpAdapterOptions {
   agentId: string;
@@ -65,7 +68,7 @@ export class HttpAdapter implements AgentAdapter {
     if (!this.opts.healthUrl) return { isHealthy: true, checkedAt: new Date().toISOString() };
     try {
       const safe = await assertSafeUrl(this.opts.healthUrl, {
-        allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+        allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
       });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.opts.dispatchTimeoutMs ?? 30_000).unref?.();
@@ -86,11 +89,30 @@ export class HttpAdapter implements AgentAdapter {
       interactiveChat,
       toolCalling: interactiveChat && this.opts.supportsTools === true,
       toolForwarding: interactiveChat && this.opts.supportsTools === true ? 'http_contract' : 'none',
+      execution: {
+        longRunning: true,
+        pausable: false,
+        sandbox: 'none',
+      },
+      affordances: {},
+      memory: {
+        injectable: true,
+      },
       ...(!interactiveChat
-        ? { limitations: ['HTTP adapter has no chatUrl/chatPath configured, so it can only run workflow tasks.'] }
+        ? { limitations: ['Interactive chat is off because this HTTP agent has no chat endpoint. Set `chatUrl` (or `baseUrl` + `chatPath`) in its adapter config to enable it; until then it can only run workflow tasks.'] }
         : this.opts.supportsTools !== true
-          ? { limitations: ['HTTP chat endpoint is configured, but supportsTools is not enabled.'] }
+          ? { limitations: ['HTTP chat endpoint is configured, but `supportsTools` is off, so Agentis tools are not offered to this agent. Enable `supportsTools` to let it build/run workflows from chat.'] }
           : {}),
+    };
+  }
+
+  async getRuntimeContext(): Promise<RuntimeContext> {
+    const currentModel = this.opts.model ?? 'http-default';
+    return {
+      provider: 'http',
+      models: [{ id: currentModel, label: currentModel }],
+      currentModel,
+      fastModeSupported: false,
     };
   }
 
@@ -100,7 +122,7 @@ export class HttpAdapter implements AgentAdapter {
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
     const safe = await assertSafeUrl(this.opts.dispatchUrl, {
-      allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+      allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
     });
     await this.#breaker.exec(async () => {
       const method = this.opts.method ?? 'POST';
@@ -109,6 +131,7 @@ export class HttpAdapter implements AgentAdapter {
       const ts = Math.floor(Date.now() / 1000);
       const sig = this.opts.sharedSecret ? createHmac('sha256', this.opts.sharedSecret).update(`${ts}.${body}`).digest('hex') : null;
       const controller = new AbortController();
+      const unlinkAbort = linkAbortSignal(task.signal, controller);
       const t = setTimeout(() => controller.abort(), this.opts.dispatchTimeoutMs ?? CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS).unref?.();
       try {
         const dispatchUrl = method === 'GET' ? appendQuery(safe, 'task', body) : safe.toString();
@@ -122,6 +145,7 @@ export class HttpAdapter implements AgentAdapter {
           throw new Error(`http_adapter_dispatch_failed status=${res.status}`);
         }
       } finally {
+        unlinkAbort();
         if (t) clearTimeout(t);
       }
     });
@@ -132,7 +156,7 @@ export class HttpAdapter implements AgentAdapter {
     try {
       await this.#breaker.exec(async () => {
         const safe = await assertSafeUrl(this.opts.cancelUrl ?? this.opts.dispatchUrl, {
-          allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+          allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
         });
         const url = this.opts.cancelUrl ? safe.toString() : `${safe.toString().replace(/\/$/, '')}/cancel/${encodeURIComponent(taskId)}`;
         await fetch(url, { method: 'POST', headers: this.#headers() });
@@ -149,7 +173,7 @@ export class HttpAdapter implements AgentAdapter {
       return;
     }
     const safe = await assertSafeUrl(this.opts.chatUrl, {
-      allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+      allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
     });
     const controller = new AbortController();
     const timeout = setTimeout(

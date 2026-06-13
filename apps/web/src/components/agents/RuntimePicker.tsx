@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import type { ComponentType } from 'react';
-import { Check, Download, ExternalLink, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Check, ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../../lib/api';
 import { ClaudeIcon, CodexIcon, CursorIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
-import { HarnessInstallSlideOver } from './HarnessInstallSlideOver';
 import { ModelChooser } from './ModelChooser';
 
 export type AdapterType = 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'http';
@@ -39,6 +38,7 @@ export interface RuntimeConfig {
   claudeModel: string;
   claudeMaxTurns: string;
   claudeAllowedTools: string;
+  claudeSkipPermissions: string;
   claudeExtraArgs: string;
   claudeEnv: string;
   claudeTimeoutSec: string;
@@ -48,6 +48,7 @@ export interface RuntimeConfig {
   codexMaxTurns: string;
   codexReasoningEffort: string;
   codexFastMode: string;
+  codexBrowser: string;
   codexBypassApprovalsAndSandbox: string;
   codexExtraArgs: string;
   codexEnv: string;
@@ -94,6 +95,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   claudeModel: '',
   claudeMaxTurns: '24',
   claudeAllowedTools: '',
+  claudeSkipPermissions: 'false',
   claudeExtraArgs: '',
   claudeEnv: '',
   claudeTimeoutSec: '',
@@ -103,6 +105,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   codexMaxTurns: '24',
   codexReasoningEffort: '',
   codexFastMode: 'false',
+  codexBrowser: 'false',
   codexBypassApprovalsAndSandbox: 'true',
   codexExtraArgs: '',
   codexEnv: '',
@@ -140,32 +143,22 @@ export interface HarnessDetectionResult {
   installCommand?: string;
 }
 
-interface HarnessInstallOption {
-  adapterType: AdapterType;
-  canAutoInstall: boolean;
-  installCommand?: string;
-  manualUrl?: string;
-  manualInstructions?: string;
-}
-
 const ADAPTERS: Array<{
   id: AdapterType;
   title: string;
   icon: ComponentType<{ className?: string }>;
   recommended?: boolean;
-  installCommand?: string;
 }> = [
   { id: 'openclaw', title: 'OpenClaw', icon: OpenClawIcon },
-  { id: 'hermes_agent', title: 'Hermes', icon: HermesIcon, installCommand: 'Install the Hermes Agent CLI' },
-  { id: 'claude_code', title: 'Claude', icon: ClaudeIcon, recommended: true, installCommand: 'npm install -g @anthropic-ai/claude-code' },
-  { id: 'codex', title: 'Codex', icon: CodexIcon, recommended: true, installCommand: 'npm install -g @openai/codex' },
-  { id: 'cursor', title: 'Cursor', icon: CursorIcon, installCommand: 'Install Cursor and enable the Cursor Agent CLI' },
+  { id: 'hermes_agent', title: 'Hermes', icon: HermesIcon },
+  { id: 'claude_code', title: 'Claude', icon: ClaudeIcon, recommended: true },
+  { id: 'codex', title: 'Codex', icon: CodexIcon, recommended: true },
+  { id: 'cursor', title: 'Cursor', icon: CursorIcon },
   { id: 'http', title: 'HTTP', icon: HttpIcon },
 ];
 
-
-
 export function RuntimePicker({
+  agentId,
   adapterType,
   runtimeConfig,
   onAdapterChange,
@@ -175,6 +168,7 @@ export function RuntimePicker({
   detecting: controlledDetecting,
   onRefreshDetections,
 }: {
+  agentId?: string | null;
   adapterType: AdapterType;
   runtimeConfig: RuntimeConfig;
   onAdapterChange: (value: AdapterType) => void;
@@ -187,12 +181,6 @@ export function RuntimePicker({
   const [internalDetections, setInternalDetections] = useState<HarnessDetectionResult[]>([]);
   const [internalDetecting, setInternalDetecting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showGatewayForm, setShowGatewayForm] = useState(false);
-  const [gatewayUrlDraft, setGatewayUrlDraft] = useState('');
-  const [gatewayConnecting, setGatewayConnecting] = useState(false);
-  const [gatewayError, setGatewayError] = useState('');
-  const [installOptions, setInstallOptions] = useState<HarnessInstallOption[]>([]);
-  const [installingAdapter, setInstallingAdapter] = useState<AdapterType | null>(null);
   const userPickedRef = useRef(false);
 
   const detections = controlledDetections ?? internalDetections;
@@ -215,29 +203,13 @@ export function RuntimePicker({
   }
 
   useEffect(() => {
-    if (controlledDetections !== undefined) return;
+    if (controlledDetections !== undefined || editing) return;
     void refreshDetections();
-  }, [controlledDetections]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void api<{ adapters: HarnessInstallOption[] }>('/v1/harness/install-options')
-      .then((result) => {
-        if (!cancelled) setInstallOptions(result.adapters ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setInstallOptions([]);
-      });
-    return () => { cancelled = true; };
-  }, []);
+  }, [controlledDetections, editing]);
 
   const detectionByType = useMemo(
     () => new Map(detections.map((detection) => [detection.adapterType, detection])),
     [detections],
-  );
-  const installOptionByType = useMemo(
-    () => new Map(installOptions.map((option) => [option.adapterType, option])),
-    [installOptions],
   );
   const foundDetections = useMemo(
     () => detections.filter((detection) => detection.status === 'found'),
@@ -245,7 +217,6 @@ export function RuntimePicker({
   );
   const activeAdapter = ADAPTERS.find((adapter) => adapter.id === adapterType) ?? ADAPTERS[0]!;
   const activeDetection = detectionByType.get(adapterType);
-  const openClawReady = activeDetection?.status === 'found' || Boolean(runtimeConfig.openclawGatewayUrl || runtimeConfig.openclawGatewayId);
 
   useEffect(() => {
     if (editing || userPickedRef.current) return;
@@ -269,27 +240,6 @@ export function RuntimePicker({
     onConfigChange({ ...runtimeConfig, [key]: value });
   };
 
-  async function connectGateway() {
-    const url = normalizeGatewayUrl(gatewayUrlDraft.trim());
-    if (!url) { setGatewayError('Enter a gateway URL.'); return; }
-    const parsed = parseUrl(url);
-    if (!parsed) { setGatewayError('Invalid URL.'); return; }
-    if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') { setGatewayError('Use ws:// or wss://.'); return; }
-    setGatewayConnecting(true);
-    setGatewayError('');
-    try {
-      const healthUrl = gatewayHealthUrl(url);
-      const response = await fetch(healthUrl, { method: 'GET', signal: AbortSignal.timeout(5000) });
-      if (!response.ok) throw new Error(`Status ${response.status}`);
-      onConfigChange({ ...runtimeConfig, openclawGatewayUrl: url });
-      setShowGatewayForm(false);
-    } catch (err) {
-      setGatewayError(`Could not reach gateway: ${(err as Error).message}`);
-    } finally {
-      setGatewayConnecting(false);
-    }
-  }
-
   return (
     <div className="space-y-4">
       {editing ? (
@@ -304,6 +254,7 @@ export function RuntimePicker({
             </div>
           </div>
           <HarnessModelPassthrough
+            agentId={agentId}
             adapterType={adapterType}
             config={runtimeConfig}
             onConfigChange={onConfigChange}
@@ -321,79 +272,44 @@ export function RuntimePicker({
             adapters={ADAPTERS}
             adapterType={adapterType}
             detectionByType={detectionByType}
-            installOptionByType={installOptionByType}
             detecting={detecting}
             onAdapterChange={chooseAdapter}
-            onInstallRequest={(nextAdapter) => {
-              setInstallingAdapter(nextAdapter);
-            }}
-            editing={editing}
           />
-          {adapterType === 'openclaw' && !openClawReady ? (
-            <div className="rounded-lg border border-line bg-surface-2 p-4 space-y-3">
-              <div className="flex items-start gap-3">
-                <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-canvas text-text-primary">
-                  <OpenClawIcon className="h-5 w-5" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-text-primary">OpenClaw needs a gateway to connect.</div>
-                  <div className="mt-1 text-xs text-text-muted leading-relaxed">
-                    A gateway is an OpenClaw server that owns your agent sessions, channels, and connectivity.
-                  </div>
+
+          {/* Missing Harness Warning Banner */}
+          {!editing && activeDetection?.status !== 'found' && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-text-secondary flex items-start gap-2">
+              <span className="mt-0.5 shrink-0 text-amber-500">⚠️</span>
+              <span>
+                <strong>{activeAdapter.title} harness is not detected on your system.</strong> Make sure it is installed locally to execute tasks using this runtime.
+              </span>
+            </div>
+          )}
+
+          {/* Nous Hermes Agent Informational Banner */}
+          {adapterType === 'hermes_agent' && (
+            <div className="rounded-lg border border-line bg-surface-2 p-3 text-xs text-text-secondary flex items-start gap-3">
+              <span className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded bg-canvas overflow-hidden">
+                <activeAdapter.icon className="h-full w-full object-cover" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div>
+                  <strong>Hermes Agent</strong> is an open-source agent framework developed by Nous Research.
                 </div>
-              </div>
-              {!showGatewayForm ? (
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowGatewayForm(true)}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-[11px] font-semibold text-canvas hover:bg-accent-hover"
-                  >
-                    Connect a gateway →
-                  </button>
+                <div className="mt-1">
                   <a
-                    href="https://openclaw.dev/docs/gateway"
+                    href="https://github.com/nousresearch/hermes-agent"
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line px-3 text-[11px] text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                    className="inline-flex items-center gap-1 text-accent hover:underline"
                   >
-                    What is OpenClaw? <ExternalLink size={10} />
+                    View on GitHub <ExternalLink size={10} />
                   </a>
                 </div>
-              ) : (
-                <div className="space-y-2 border-t border-line pt-3">
-                  <div className="text-xs font-medium text-text-secondary">Gateway URL</div>
-                  <input
-                    type="url"
-                    value={gatewayUrlDraft}
-                    onChange={(event) => { setGatewayUrlDraft(event.target.value); setGatewayError(''); }}
-                    placeholder="wss://gateway.example.com"
-                    className={inputCls}
-                    autoFocus
-                  />
-                  {gatewayError && <div className="text-[11px] text-danger">{gatewayError}</div>}
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      disabled={gatewayConnecting}
-                      onClick={() => void connectGateway()}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-[11px] font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      {gatewayConnecting ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                      {gatewayConnecting ? 'Connecting…' : 'Connect'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { setShowGatewayForm(false); setGatewayError(''); }}
-                      className="inline-flex h-8 items-center rounded-btn border border-line px-3 text-[11px] text-text-secondary hover:bg-surface-3"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
+              </div>
             </div>
-          ) : null}
+          )}
+
           {!editing && (
             <div className="flex items-center justify-end gap-2">
               <button
@@ -405,20 +321,25 @@ export function RuntimePicker({
               </button>
             </div>
           )}
+
+          {/* Model Chooser first */}
+          <HarnessModelPassthrough
+            agentId={agentId}
+            adapterType={adapterType}
+            config={runtimeConfig}
+            onConfigChange={onConfigChange}
+          />
+
+          {/* Connection settings accordion last */}
           <ConnectionDetailsAccordion
             adapterType={adapterType}
             config={runtimeConfig}
             setConfig={setConfig}
             defaultOpen={activeDetection?.status !== 'found' && adapterType !== 'claude_code' && adapterType !== 'codex'}
           />
-          <HarnessModelPassthrough
-            adapterType={adapterType}
-            config={runtimeConfig}
-            onConfigChange={onConfigChange}
-          />
         </div>
       )}
-      {editing ? (
+      {editing && (
         <div className="rounded-lg border border-line bg-surface-2">
           <button
             type="button"
@@ -430,24 +351,7 @@ export function RuntimePicker({
           </button>
           {showAdvanced && <div className="border-t border-line p-3"><AdapterConfigFields adapterType={adapterType} config={runtimeConfig} setConfig={setConfig} /></div>}
         </div>
-      ) : (
-        <div className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-text-muted">
-          Additional options are available after commissioning.
-        </div>
       )}
-      {installingAdapter ? (
-        <HarnessInstallSlideOver
-          adapterType={installingAdapter}
-          onClose={() => setInstallingAdapter(null)}
-          onInstalled={(result) => {
-            const nextConfig = prefillConfigFromInstall(runtimeConfig, installingAdapter, result);
-            if (nextConfig !== runtimeConfig) onConfigChange(nextConfig);
-            onAdapterChange(installingAdapter);
-            setInstallingAdapter(null);
-            void refreshDetections();
-          }}
-        />
-      ) : null}
     </div>
   );
 }
@@ -468,10 +372,12 @@ function runtimeDetectionDetail(detection: HarnessDetectionResult): string {
 }
 
 function HarnessModelPassthrough({
+  agentId,
   adapterType,
   config,
   onConfigChange,
 }: {
+  agentId?: string | null;
   adapterType: AdapterType;
   config: RuntimeConfig;
   onConfigChange: (value: RuntimeConfig) => void;
@@ -487,6 +393,7 @@ function HarnessModelPassthrough({
   return (
     <ModelChooser
       adapterType={adapterType}
+      agentId={agentId}
       value={value}
       onChange={(next) => onConfigChange({ ...config, [modelKey]: next })}
     />
@@ -510,7 +417,7 @@ function ConnectionDetailsAccordion({
     setOpen(defaultOpen ?? false);
   }, [adapterType, defaultOpen]);
 
-  if (adapterType === 'openclaw') return null;
+  if (adapterType === 'openclaw' || adapterType === 'cursor') return null;
 
   return (
     <div className="rounded-lg border border-line bg-surface-2">
@@ -528,7 +435,8 @@ function ConnectionDetailsAccordion({
             <div className="grid gap-3 md:grid-cols-2">
               <Field label="Base URL"><input value={config.httpBaseUrl} onChange={(event) => setConfig('httpBaseUrl', event.target.value)} placeholder="https://agent.example.com" className={inputCls} /></Field>
               <Field label="Dispatch Path"><input value={config.httpDispatchPath} onChange={(event) => setConfig('httpDispatchPath', event.target.value)} placeholder="/task" className={inputCls} /></Field>
-              <Field label="Auth credential ID"><input value={config.httpAuthCredentialId} onChange={(event) => setConfig('httpAuthCredentialId', event.target.value)} placeholder="Credential vault ID" className={inputCls} /></Field>
+              <Field label="Health Path"><input value={config.httpHealthPath} onChange={(event) => setConfig('httpHealthPath', event.target.value)} placeholder="/health" className={inputCls} /></Field>
+              <Field label="Model"><input value={config.httpModel} onChange={(event) => setConfig('httpModel', event.target.value)} placeholder="provider-default" className={inputCls} /></Field>
             </div>
           ) : adapterType === 'hermes_agent' ? (
             <div className="grid gap-3 md:grid-cols-3">
@@ -548,12 +456,6 @@ function ConnectionDetailsAccordion({
               <Field label="Working directory"><input value={config.codexCwd} onChange={(event) => setConfig('codexCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
               <Field label="Timeout (s)"><input value={config.codexTimeoutSec} onChange={(event) => setConfig('codexTimeoutSec', event.target.value)} inputMode="numeric" placeholder="120" className={inputCls} /></Field>
             </div>
-          ) : adapterType === 'cursor' ? (
-            <div className="grid gap-3 md:grid-cols-3">
-              <Field label="Binary path"><input value={config.cursorBinaryPath} onChange={(event) => setConfig('cursorBinaryPath', event.target.value)} placeholder="agent" className={inputCls} /></Field>
-              <Field label="Working directory"><input value={config.cursorCwd} onChange={(event) => setConfig('cursorCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
-              <Field label="Timeout (s)"><input value={config.cursorTimeoutSec} onChange={(event) => setConfig('cursorTimeoutSec', event.target.value)} inputMode="numeric" placeholder="120" className={inputCls} /></Field>
-            </div>
           ) : null}
         </div>
       )}
@@ -565,20 +467,14 @@ function HarnessGrid({
   adapters,
   adapterType,
   detectionByType,
-  installOptionByType,
   detecting,
   onAdapterChange,
-  onInstallRequest,
-  editing,
 }: {
   adapters: typeof ADAPTERS;
   adapterType: AdapterType;
   detectionByType: Map<AdapterType, HarnessDetectionResult>;
-  installOptionByType: Map<AdapterType, HarnessInstallOption>;
   detecting: boolean;
   onAdapterChange: (value: AdapterType) => void;
-  onInstallRequest: (value: AdapterType) => void;
-  editing?: boolean;
 }) {
   return (
     <div className="grid grid-cols-3 gap-2 xl:grid-cols-6">
@@ -586,88 +482,49 @@ function HarnessGrid({
         const Icon = adapter.icon;
         const selected = adapterType === adapter.id;
         const detection = detectionByType.get(adapter.id);
-        const installOption = installOptionByType.get(adapter.id);
-        const showInstallAction = !editing
-          && adapter.id !== 'http'
-          && detection?.status !== 'found'
-          && Boolean(installOption);
+        const isOnline = detection?.status === 'found';
+        const isChecking = detecting && !detection;
+
+        const statusText = isOnline
+          ? `${adapter.title} harness is detected and ready to use.`
+          : `${adapter.title} harness is not detected on this machine.`;
+
         return (
-          <div
+          <button
             key={adapter.id}
+            type="button"
+            onClick={() => onAdapterChange(adapter.id)}
+            title={statusText}
             className={clsx(
-              'relative flex min-w-0 flex-col gap-2 rounded-lg border p-2 text-center transition',
+              'relative flex min-w-0 flex-col items-center justify-center gap-2 rounded-lg border p-3 h-20 text-center transition',
               selected ? 'border-accent bg-accent/10 text-accent' : 'border-line bg-surface-2 text-text-primary hover:border-accent/40 hover:bg-surface-3',
             )}
           >
-            <button
-              type="button"
-              onClick={() => onAdapterChange(adapter.id)}
-              className="flex h-20 flex-col items-center justify-center gap-2 rounded-md"
-            >
-              {adapter.recommended && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-accent" />}
-              {detecting && !detection ? <Loader2 className="h-5 w-5 animate-spin text-text-muted" /> : <Icon className="h-6 w-6" />}
-              <span className="max-w-full truncate text-[12px] font-semibold">{adapter.title}</span>
-              <span className={clsx(
-                'rounded-full px-2 py-0.5 text-[10px]',
-                detection?.status === 'found' ? 'bg-accent/10 text-accent' : 'bg-surface-3 text-text-muted',
-              )}>
-                {detecting && !detection ? 'Checking...' : detection?.status === 'found' ? (detection.authStatus === 'authenticated' ? 'Ready' : 'Installed') : detection?.status === 'error' ? 'Error' : 'Not installed'}
-              </span>
-            </button>
-            {showInstallAction ? (
-              <button
-                type="button"
-                onClick={() => onInstallRequest(adapter.id)}
-                className="inline-flex h-7 items-center justify-center gap-1 rounded-btn border border-line bg-canvas px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-              >
-                {installOption?.canAutoInstall ? <Download size={11} /> : <ExternalLink size={11} />}
-                {installOption?.canAutoInstall ? 'Install' : 'Setup'}
-              </button>
-            ) : null}
-          </div>
+            <div className="relative">
+              {isChecking ? (
+                <Loader2 className="h-6 w-6 animate-spin text-text-muted" />
+              ) : (
+                <Icon className="h-6 w-6" />
+              )}
+              {!isChecking && (
+                <span
+                  role="status"
+                  aria-label={isOnline ? 'Online' : 'Offline'}
+                  title={statusText}
+                  className={clsx(
+                    'absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full border border-canvas',
+                    isOnline ? 'bg-success' : 'bg-text-muted'
+                  )}
+                />
+              )}
+            </div>
+
+            <span className="max-w-full truncate text-[12px] font-semibold">{adapter.title}</span>
+          </button>
         );
       })}
     </div>
   );
-}
-
-function prefillConfigFromInstall(
-  config: RuntimeConfig,
-  adapterType: AdapterType,
-  result: { binaryPath?: string; detectedModel?: string },
-): RuntimeConfig {
-  const binaryPath = stringOf(result.binaryPath);
-  const detectedModel = stringOf(result.detectedModel);
-  if (!binaryPath && !detectedModel) return config;
-  if (adapterType === 'claude_code') {
-    return {
-      ...config,
-      claudeBinaryPath: config.claudeBinaryPath || binaryPath,
-      claudeModel: config.claudeModel || detectedModel || '',
-    };
-  }
-  if (adapterType === 'codex') {
-    return {
-      ...config,
-      codexBinaryPath: config.codexBinaryPath || binaryPath,
-      codexModel: config.codexModel || detectedModel || '',
-    };
-  }
-  if (adapterType === 'cursor') {
-    return {
-      ...config,
-      cursorBinaryPath: config.cursorBinaryPath || binaryPath,
-      cursorModel: config.cursorModel || detectedModel || '',
-    };
-  }
-  if (adapterType === 'hermes_agent') {
-    return {
-      ...config,
-      hermesBinaryPath: config.hermesBinaryPath || binaryPath,
-      hermesModel: config.hermesModel || detectedModel || '',
-    };
-  }
-  return config;
 }
 
 function prefillConfigFromDetection(config: RuntimeConfig, adapterType: AdapterType, detection: HarnessDetectionResult): RuntimeConfig {
@@ -722,13 +579,11 @@ function prefillConfigFromDetection(config: RuntimeConfig, adapterType: AdapterT
   if (adapterType === 'http') {
     const baseUrl = stringOf(detection.config?.baseUrl);
     const dispatchPath = stringOf(detection.config?.dispatchPath);
-    const healthPath = stringOf(detection.config?.healthPath);
-    if (!baseUrl && !dispatchPath && !healthPath) return config;
+    if (!baseUrl && !dispatchPath) return config;
     return {
       ...config,
       httpBaseUrl: config.httpBaseUrl || baseUrl,
-      httpDispatchPath: config.httpDispatchPath || dispatchPath || DEFAULT_RUNTIME_CONFIG.httpDispatchPath,
-      httpHealthPath: config.httpHealthPath || healthPath || DEFAULT_RUNTIME_CONFIG.httpHealthPath,
+      httpDispatchPath: config.httpDispatchPath || dispatchPath,
     };
   }
   return config;
@@ -777,6 +632,7 @@ function AdapterConfigFields({
         <Field label="Working directory"><input value={config.claudeCwd} onChange={(event) => setConfig('claudeCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
         <Field label="Max turns"><input value={config.claudeMaxTurns} onChange={(event) => setConfig('claudeMaxTurns', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
         <Field label="Allowed tools"><input value={config.claudeAllowedTools} onChange={(event) => setConfig('claudeAllowedTools', event.target.value)} placeholder="FileRead, FileWrite" className={inputCls} /></Field>
+        <Field label="Skip permissions"><select value={config.claudeSkipPermissions} onChange={(event) => setConfig('claudeSkipPermissions', event.target.value)} className={inputCls}><option value="false">Off</option><option value="true">On</option></select></Field>
         <Field label="Extra args"><input value={config.claudeExtraArgs} onChange={(event) => setConfig('claudeExtraArgs', event.target.value)} placeholder="--flag value" className={inputCls} /></Field>
         <Field label="Env"><textarea value={config.claudeEnv} onChange={(event) => setConfig('claudeEnv', event.target.value)} placeholder="{}" className={textareaCls} /></Field>
         <Field label="Timeout"><input value={config.claudeTimeoutSec} onChange={(event) => setConfig('claudeTimeoutSec', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
@@ -791,7 +647,9 @@ function AdapterConfigFields({
         <Field label="Max turns"><input value={config.codexMaxTurns} onChange={(event) => setConfig('codexMaxTurns', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
         <Field label="Reasoning effort"><select value={config.codexReasoningEffort} onChange={(event) => setConfig('codexReasoningEffort', event.target.value)} className={inputCls}><option value="">Default</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Xhigh</option></select></Field>
         <Field label="Fast mode"><select value={config.codexFastMode} onChange={(event) => setConfig('codexFastMode', event.target.value)} className={inputCls}><option value="false">Off</option><option value="true">On</option></select></Field>
-        <Field label="Bypass approvals"><select value={config.codexBypassApprovalsAndSandbox} onChange={(event) => setConfig('codexBypassApprovalsAndSandbox', event.target.value)} className={inputCls}><option value="true">On</option><option value="false">Off</option></select></Field>
+        <Field label="Native browser" hint="Loads the runtime's browser/computer-use config. Heavier cold start; real web browsing.">
+          <select value={config.codexBrowser} onChange={(event) => setConfig('codexBrowser', event.target.value)} className={inputCls}><option value="false">Off</option><option value="true">On</option></select>
+        </Field>
         <Field label="Extra args"><input value={config.codexExtraArgs} onChange={(event) => setConfig('codexExtraArgs', event.target.value)} placeholder="--flag value" className={inputCls} /></Field>
         <Field label="Env"><textarea value={config.codexEnv} onChange={(event) => setConfig('codexEnv', event.target.value)} placeholder="{}" className={textareaCls} /></Field>
         <Field label="Timeout"><input value={config.codexTimeoutSec} onChange={(event) => setConfig('codexTimeoutSec', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
@@ -825,16 +683,16 @@ function AdapterConfigFields({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <label className="block"><span className="mb-1 block text-xs font-medium uppercase tracking-wider text-text-muted">{label}</span>{children}</label>;
+function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
+  return <label className="block"><span className="mb-1 block text-xs font-medium uppercase tracking-wider text-text-muted">{label}</span>{children}{hint ? <span className="mt-1 block text-[11px] leading-snug text-text-muted/80">{hint}</span> : null}</label>;
 }
 
 export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<string, unknown>): RuntimeConfig {
   const base = { ...DEFAULT_RUNTIME_CONFIG };
   if (adapterType === 'openclaw') return { ...base, openclawGatewayId: stringOf(stored.gatewayId), openclawGatewayUrl: stringOf(stored.gatewayUrl), openclawModel: stringOf(stored.model), openclawDeviceTokenCredentialId: stringOf(stored.deviceTokenCredentialId), openclawAgentName: stringOf(stored.agentName), openclawSessionKeyStrategy: stringOf(stored.sessionKeyStrategy, DEFAULT_RUNTIME_CONFIG.openclawSessionKeyStrategy), openclawSessionKey: stringOf(stored.sessionKey), openclawTimeoutSec: stringOf(stored.timeoutSec, DEFAULT_RUNTIME_CONFIG.openclawTimeoutSec), openclawPayloadTemplate: jsonText(stored.payloadTemplate) };
   if (adapterType === 'hermes_agent') return { ...base, hermesBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), hermesCwd: stringOf(stored.cwd), hermesModel: stringOf(stored.model), hermesMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.hermesMaxTurns), hermesExtraArgs: arrayText(stored.extraArgs), hermesEnv: jsonText(stored.env), hermesTimeoutSec: stringOf(stored.timeoutSec), hermesGraceSec: stringOf(stored.graceSec) };
-  if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
-  if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBypassApprovalsAndSandbox: boolText(stored.dangerouslyBypassApprovalsAndSandbox, DEFAULT_RUNTIME_CONFIG.codexBypassApprovalsAndSandbox), codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
+  if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeSkipPermissions: boolText(stored.dangerouslySkipPermissions, DEFAULT_RUNTIME_CONFIG.claudeSkipPermissions), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
+  if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBrowser: boolText(stored.browser, DEFAULT_RUNTIME_CONFIG.codexBrowser), codexBypassApprovalsAndSandbox: 'true', codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'cursor') return { ...base, cursorBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), cursorCwd: stringOf(stored.cwd), cursorModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.cursorModel), cursorExtraArgs: arrayText(stored.extraArgs), cursorEnv: jsonText(stored.env), cursorTimeoutSec: stringOf(stored.timeoutSec) };
   return { ...base, httpBaseUrl: stringOf(stored.baseUrl), httpAuthCredentialId: stringOf(stored.authCredentialId), httpSharedSecretCredentialId: stringOf(stored.sharedSecretCredentialId), httpDispatchPath: stringOf(stored.dispatchPath, DEFAULT_RUNTIME_CONFIG.httpDispatchPath), httpCancelPath: stringOf(stored.cancelPath), httpHealthPath: stringOf(stored.healthPath, DEFAULT_RUNTIME_CONFIG.httpHealthPath), httpMethod: stringOf(stored.method, DEFAULT_RUNTIME_CONFIG.httpMethod).toUpperCase(), httpHeaders: jsonText(stored.headers), httpPayloadTemplate: jsonText(stored.payloadTemplate), httpDispatchTimeoutMs: stringOf(stored.dispatchTimeoutMs, DEFAULT_RUNTIME_CONFIG.httpDispatchTimeoutMs), httpModel: stringOf(stored.model) };
 }
@@ -842,8 +700,8 @@ export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<s
 export function runtimeConfigToAdapterConfig(adapterType: AdapterType, config: RuntimeConfig): Record<string, unknown> {
   if (adapterType === 'openclaw') return compact({ gatewayId: config.openclawGatewayId, gatewayUrl: normalizeGatewayUrl(config.openclawGatewayUrl), model: config.openclawModel, agentName: config.openclawAgentName, deviceTokenCredentialId: config.openclawDeviceTokenCredentialId, sessionKeyStrategy: config.openclawSessionKeyStrategy, sessionKey: config.openclawSessionKey, timeoutSec: positiveNumber(config.openclawTimeoutSec), payloadTemplate: jsonObject(config.openclawPayloadTemplate) });
   if (adapterType === 'hermes_agent') return compact({ binaryPath: config.hermesBinaryPath, command: config.hermesBinaryPath, cwd: config.hermesCwd, model: config.hermesModel, maxTurns: positiveNumber(config.hermesMaxTurns), extraArgs: splitArgs(config.hermesExtraArgs), env: jsonStringRecord(config.hermesEnv), timeoutSec: positiveNumber(config.hermesTimeoutSec), graceSec: positiveNumber(config.hermesGraceSec) });
-  if (adapterType === 'claude_code') return compact({ binaryPath: config.claudeBinaryPath, command: config.claudeBinaryPath, cwd: config.claudeCwd, model: config.claudeModel, maxTurns: positiveNumber(config.claudeMaxTurns), allowedTools: splitCsv(config.claudeAllowedTools), extraArgs: splitArgs(config.claudeExtraArgs), env: jsonStringRecord(config.claudeEnv), timeoutSec: positiveNumber(config.claudeTimeoutSec) });
-  if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), dangerouslyBypassApprovalsAndSandbox: boolValue(config.codexBypassApprovalsAndSandbox), extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
+  if (adapterType === 'claude_code') return compact({ binaryPath: config.claudeBinaryPath, command: config.claudeBinaryPath, cwd: config.claudeCwd, model: config.claudeModel, maxTurns: positiveNumber(config.claudeMaxTurns), allowedTools: splitCsv(config.claudeAllowedTools), dangerouslySkipPermissions: boolValue(config.claudeSkipPermissions), extraArgs: splitArgs(config.claudeExtraArgs), env: jsonStringRecord(config.claudeEnv), timeoutSec: positiveNumber(config.claudeTimeoutSec) });
+  if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), browser: boolValue(config.codexBrowser), dangerouslyBypassApprovalsAndSandbox: true, extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
   if (adapterType === 'cursor') return compact({ binaryPath: config.cursorBinaryPath, command: config.cursorBinaryPath, cwd: config.cursorCwd, model: config.cursorModel, extraArgs: splitArgs(config.cursorExtraArgs), env: jsonStringRecord(config.cursorEnv), timeoutSec: positiveNumber(config.cursorTimeoutSec) });
   return compact({ baseUrl: config.httpBaseUrl, authCredentialId: config.httpAuthCredentialId, sharedSecretCredentialId: config.httpSharedSecretCredentialId, dispatchPath: config.httpDispatchPath, cancelPath: config.httpCancelPath, healthPath: config.httpHealthPath, method: config.httpMethod, headers: jsonStringRecord(config.httpHeaders), payloadTemplate: jsonObject(config.httpPayloadTemplate), dispatchTimeoutMs: positiveNumber(config.httpDispatchTimeoutMs), model: config.httpModel });
 }
@@ -854,6 +712,7 @@ export function runtimeModelFor(adapterType: AdapterType, config: RuntimeConfig)
   if (adapterType === 'hermes_agent') return config.hermesModel || null;
   if (adapterType === 'claude_code') return config.claudeModel || null;
   if (adapterType === 'codex') return config.codexModel || DEFAULT_RUNTIME_CONFIG.codexModel;
+  if (adapterType === 'cursor') return config.cursorModel || DEFAULT_RUNTIME_CONFIG.cursorModel;
   return config.cursorModel || DEFAULT_RUNTIME_CONFIG.cursorModel;
 }
 
@@ -960,4 +819,3 @@ function positiveNumber(value: string): number | undefined {
 
 const inputCls = 'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
 const textareaCls = `${inputCls} min-h-20 resize-y font-mono text-xs`;
-

@@ -19,6 +19,9 @@ const PRIVATE_V4_RANGES: ReadonlyArray<readonly [number, number]> = [
 export const httpRequestConnector: ConnectorModule = {
   service: 'http_request',
   operations: ['request'],
+  operationContracts: {
+    request: { required: ['url'] },
+  },
   async execute(opts) {
     return executeHttpRequest(opts.params, opts.credential, opts.timeoutMs);
   },
@@ -27,6 +30,9 @@ export const httpRequestConnector: ConnectorModule = {
 export const webhookSendConnector: ConnectorModule = {
   service: 'webhook_send',
   operations: ['send'],
+  operationContracts: {
+    send: { required: ['url'] },
+  },
   async execute(opts) {
     const headers = recordOf(opts.params.headers);
     const secret = stringValue(opts.params.secret ?? opts.credential?.webhookSecret ?? opts.credential?.secret);
@@ -147,7 +153,7 @@ async function assertSafeHttpUrl(url: URL): Promise<void> {
       addresses = records.map((record) => record.address);
     } catch (err) {
       throw new AgentisError(
-        'SKILL_SSRF_BLOCKED',
+        'EXTENSION_SSRF_BLOCKED',
         `DNS resolution failed for ${host}: ${(err as Error).message}`,
       );
     }
@@ -155,10 +161,10 @@ async function assertSafeHttpUrl(url: URL): Promise<void> {
   for (const address of addresses) {
     const family = net.isIP(address);
     if (family === 4 && isPrivateIPv4(address)) {
-      throw new AgentisError('SKILL_SSRF_BLOCKED', `Refusing to reach private/loopback IPv4 ${address}`);
+      throw new AgentisError('EXTENSION_SSRF_BLOCKED', `Refusing to reach private/loopback IPv4 ${address}`);
     }
     if (family === 6 && isPrivateIPv6(address)) {
-      throw new AgentisError('SKILL_SSRF_BLOCKED', `Refusing to reach private/loopback IPv6 ${address}`);
+      throw new AgentisError('EXTENSION_SSRF_BLOCKED', `Refusing to reach private/loopback IPv6 ${address}`);
     }
   }
 }
@@ -166,7 +172,7 @@ async function assertSafeHttpUrl(url: URL): Promise<void> {
 function integrationPrivateNetworkAllowed(): boolean {
   return String(
     process.env.AGENTIS_INTEGRATION_HTTP_ALLOW_PRIVATE
-      ?? process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE
+      ?? process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE
       ?? '',
   ).toLowerCase() === 'true';
 }

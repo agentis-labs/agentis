@@ -16,9 +16,18 @@ import { CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
 
+/** A single message on a run-scoped agent channel (the swarm "bus"). */
+export interface ChannelMessage {
+  from: string;
+  message: string;
+  at: string;
+}
+
 export class ScratchpadService {
   readonly #pads = new Map<string, Map<string, unknown>>();
   readonly #sizeBytes = new Map<string, number>();
+  /** Run-scoped pub/sub channels — backs session `broadcast`/`read_channel` tools. */
+  readonly #channels = new Map<string, Map<string, ChannelMessage[]>>();
 
   constructor(
     private readonly bus: EventBus,
@@ -69,7 +78,35 @@ export class ScratchpadService {
     return Object.fromEntries(pad.entries());
   }
 
+  // ──────────────────────────────────────────────────────────
+  // Channels — run-scoped agent broadcast bus (SMARTER-AGENTS-10X §VIII).
+  // Sessions in the same run gossip findings here without polluting the
+  // scratchpad KV. Append-only, capped, and cleared with the run.
+  // ──────────────────────────────────────────────────────────
+
+  broadcast(runId: string, channel: string, from: string, message: string): void {
+    let run = this.#channels.get(runId);
+    if (!run) {
+      run = new Map();
+      this.#channels.set(runId, run);
+    }
+    let log = run.get(channel);
+    if (!log) {
+      log = [];
+      run.set(channel, log);
+    }
+    log.push({ from, message, at: new Date().toISOString() });
+    if (log.length > CONSTANTS.CHANNEL_MAX_MESSAGES) log.splice(0, log.length - CONSTANTS.CHANNEL_MAX_MESSAGES);
+  }
+
+  /** Read the last `limit` messages on a channel, oldest first. */
+  readChannel(runId: string, channel: string, limit = 50): ChannelMessage[] {
+    const log = this.#channels.get(runId)?.get(channel) ?? [];
+    return limit >= log.length ? [...log] : log.slice(log.length - limit);
+  }
+
   dispose(runId: string): void {
     this.#pads.delete(runId);
+    this.#channels.delete(runId);
   }
 }

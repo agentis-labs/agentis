@@ -62,6 +62,10 @@ interface ChatPanelStore {
   activeTask: ActiveTaskState | null;
   setActiveTask: (task: ActiveTaskState | null) => void;
   updateActiveTask: (patch: Partial<ActiveTaskState>) => void;
+  /** Per-scope (agent id) unread message counts. */
+  unreadByScope: Record<string, number>;
+  incrementUnread: (scopeId: string) => void;
+  clearUnread: (scopeId: string) => void;
   resetForWorkspace: () => void;
 }
 
@@ -78,11 +82,8 @@ export interface ChatPanelLaunchContext {
   initialDraft?: string;
   initialViewportOverride?: ViewportContext | null;
   autoSendInitialDraft?: boolean;
-  buildSession?: {
-    appId?: string;
-    slug?: string;
-    name?: string;
-  };
+  /** When set, the panel opens in app-building mode (orchestrator designs the app). */
+  buildSession?: boolean;
 }
 
 export const useChatPanelStore = create<ChatPanelStore>((set) => ({
@@ -113,7 +114,16 @@ export const useChatPanelStore = create<ChatPanelStore>((set) => ({
   activeTask: null,
   setActiveTask: (task) => set({ activeTask: task }),
   updateActiveTask: (patch) => set((state) => (state.activeTask ? { activeTask: { ...state.activeTask, ...patch } } : {})),
-  resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, launchContext: null, openRequestId: 0, activeTask: null }),
+  unreadByScope: {},
+  incrementUnread: (scopeId) => set((state) => ({
+    unreadByScope: { ...state.unreadByScope, [scopeId]: (state.unreadByScope[scopeId] ?? 0) + 1 },
+  })),
+  clearUnread: (scopeId) => set((state) => {
+    const next = { ...state.unreadByScope };
+    delete next[scopeId];
+    return { unreadByScope: next };
+  }),
+  resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, unreadByScope: {}, launchContext: null, openRequestId: 0, activeTask: null }),
 }));
 
 // Global keyboard shortcut: ⌘/ toggles chat

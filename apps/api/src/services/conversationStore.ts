@@ -171,6 +171,7 @@ export class ConversationStore {
     conversationId: string;
     operatorId: string;
     body: string;
+    metadata?: Record<string, unknown>;
     deliveryStatus?: 'sent' | 'delivered' | 'failed';
   }) {
     return this.#append({
@@ -180,6 +181,7 @@ export class ConversationStore {
       authorId: args.operatorId,
       sessionMessageId: null,
       body: args.body,
+      metadata: args.metadata,
       deliveryStatus: args.deliveryStatus ?? 'sent',
       eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_SENT,
     });
@@ -193,6 +195,7 @@ export class ConversationStore {
     body: string;
     authorType: 'agent' | 'system';
     metadata?: Record<string, unknown>;
+    deliveryStatus?: 'delivered' | 'failed' | 'mirrored';
   }) {
     return this.#append({
       conversationId: args.conversationId,
@@ -202,7 +205,7 @@ export class ConversationStore {
       sessionMessageId: args.sessionMessageId,
       body: args.body,
       metadata: args.metadata,
-      deliveryStatus: 'mirrored',
+      deliveryStatus: args.deliveryStatus ?? 'mirrored',
       eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
     });
   }

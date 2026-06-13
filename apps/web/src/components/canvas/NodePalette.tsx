@@ -53,8 +53,9 @@ const SECTIONS: PaletteSection[] = [
       { type: 'filter',         label: 'Filter',         glyph: '◓', description: 'Gate on a boolean expression', defaults: { condition: 'true' } },
       { type: 'integration',    label: 'Integration',    glyph: '⚙', description: 'Call a built-in connector (Slack, Gmail, …)', defaults: { inputs: {} } },
       { type: 'http_request',   label: 'HTTP Request',   glyph: '↗', description: 'Raw outbound HTTP call', defaults: { method: 'GET', url: '', headers: {} } },
-      { type: 'workflow_store', label: 'Workflow Store', glyph: '◧', description: 'Read/write workflow-scoped persistent KV', defaults: { operations: [] } },
-      { type: 'scratchpad',     label: 'Scratchpad',     glyph: '◈', description: 'Run-scoped ephemeral state', defaults: { operation: 'write', key: 'note' } },
+      { type: 'workflow_store',  label: 'Workflow Store',  glyph: '◧', description: 'Read/write workflow-scoped persistent KV', defaults: { operations: [] } },
+      { type: 'workspace_store', label: 'Workspace Store', glyph: '▤', description: 'Read/write workspace-wide KV (shared across all workflows)', defaults: { operations: [] } },
+      { type: 'scratchpad',      label: 'Scratchpad',      glyph: '◈', description: 'Run-scoped ephemeral state', defaults: { operation: 'write', key: 'note' } },
     ],
   },
   {
@@ -62,8 +63,11 @@ const SECTIONS: PaletteSection[] = [
     title: 'Intelligence',
     nodes: [
       { type: 'agent_task',  label: 'Agent',       glyph: '◎', description: 'Dispatch a task to a routed agent', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
-      { type: 'skill_task',  label: 'Skill',       glyph: '✦', description: 'Run a typed deterministic skill', defaults: { inputMapping: {}, outputMapping: {} } },
+      { type: 'agent_session', label: 'Agent Session', glyph: '◉', description: 'Persistent agent that thinks, uses tools, and can pause for events/approvals', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
+      { type: 'extension_task',  label: 'Extension',       glyph: '⬡', description: 'Run a typed deterministic extension operation', defaults: { operationName: 'execute', inputMapping: {}, outputMapping: {} } },
       { type: 'agent_swarm', label: 'Agent Swarm', glyph: '⨳', description: 'Parallel agent fan-out over an array', defaults: { capabilityTags: [], maxParallel: 3, mergeStrategy: 'collect_all', inputArrayPath: '', prompt: '', outputKey: 'results' } },
+      { type: 'dynamic_swarm', label: 'Dynamic Swarm', glyph: '⧉', description: 'A planner decomposes a goal into tasks, then workers run them in parallel', defaults: { goal: '', maxTasks: 5, maxParallel: 3, mergeStrategy: 'collect_all', outputKey: 'results', capabilityTags: [] } },
+      { type: 'planner',     label: 'Planner',     glyph: '⊞', description: 'Decompose a goal into sequential agent steps and run them in order', defaults: { goal: '', maxNodes: 8, inputKeys: [], outputKeys: [] } },
       { type: 'evaluator',   label: 'Evaluator',   glyph: '⚖', description: 'LLM-as-judge — score & route pass/fail', defaults: { targetPath: '', criteria: '', passThreshold: 7, maxRetries: 3 } },
       { type: 'guardrails',  label: 'Guardrails',  glyph: '⛨', description: 'Deterministic policy enforcement', defaults: { rules: [], onViolation: 'block' } },
     ],
@@ -116,9 +120,9 @@ export function NodePalette({
     control: false,
     data: false,
     intel: false,
-    knowledge: true,
+    knowledge: false,
     output: false,
-    human: true,
+    human: false,
   });
 
   useEffect(() => {

@@ -45,6 +45,108 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     createAgentTool('agentis.agent.spawn'),
     {
       definition: {
+        id: 'agentis.specialist.create',
+        family: 'build' as const,
+        description:
+          'Author a NEW specialist (custom functional role) and materialize it so you can delegate to it immediately. ' +
+          'Use this when a task needs an expert role that does not exist yet — never delegate to a role that has not been created. ' +
+          'Provide a role slug or name (e.g. "frontend_architect"), a focused instructions/system prompt, and optional model/tools/tags. ' +
+          'Returns the materialized agentId and role; on the next step you can call delegate_task or agentis.agent.dispatch with that role.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            role: { type: 'string', description: 'Stable role slug, e.g. frontend_architect. Derived from name when omitted.' },
+            name: { type: 'string', description: 'Display name, e.g. "Frontend Architect".' },
+            description: { type: 'string', description: 'One-line description of what this specialist is trusted to do.' },
+            instructions: { type: 'string', description: 'System prompt defining the specialist identity, responsibilities, and boundaries.' },
+            model: { type: 'string', description: 'Optional model hint, e.g. gpt-4o or claude-sonnet.' },
+            tools: { type: 'array', items: { type: 'string' }, description: 'Optional role-scoped tool names.' },
+            capabilityTags: { type: 'array', items: { type: 'string' }, description: 'Capability tags for routing.' },
+          },
+          required: [],
+        },
+        mutating: true,
+      },
+      handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
+        if (!deps.specialists) {
+          return { ok: false, error: 'specialist library not available in this deployment' };
+        }
+        const result = await deps.specialists.authorSpecialist(ctx.workspaceId, ctx.userId, {
+          role: args.role ? String(args.role) : undefined,
+          name: args.name ? String(args.name) : undefined,
+          description: args.description ? String(args.description) : undefined,
+          instructions: args.instructions ? String(args.instructions) : undefined,
+          model: args.model ? String(args.model) : undefined,
+          tools: parseStringArray(args.tools),
+          capabilityTags: parseStringArray(args.capabilityTags),
+          source: 'generated',
+        });
+        // CONVERSATION THEATER: the orchestrator commissioning a specialist (and the
+        // instructions it gave) is a first-class collaboration moment — record it as
+        // an agent-actor activity so the interaction feed shows it live.
+        try {
+          deps.activity.record({
+            workspaceId: ctx.workspaceId,
+            ambientId: ctx.ambientId ?? null,
+            userId: ctx.userId,
+            eventType: result.created ? 'agent.commissioned' : 'agent.recommissioned',
+            actorType: 'agent',
+            actorId: ctx.agentId ?? null,
+            entityType: 'agent',
+            entityId: result.agentId,
+            summary: `Commissioned ${result.def.name} as “${result.role}”${args.instructions ? ' with instructions' : ''}`,
+            metadata: {
+              role: result.role,
+              created: result.created,
+              ...(args.instructions ? { instructions: String(args.instructions).slice(0, 400) } : {}),
+            },
+          });
+        } catch { /* theater event is best-effort */ }
+        return {
+          ok: true,
+          agentId: result.agentId,
+          role: result.role,
+          created: result.created,
+          name: result.def.name,
+          delegateHint: `You can now delegate to this specialist by role "${result.role}".`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.specialist.request',
+        family: 'run' as const,
+        description:
+          'Request the best existing or materialized specialist for a concrete task. ' +
+          'Use this before delegating when the needed role is unclear. Returns selected role, agentId, topology, explanation, and a planned specialistRun trace.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task: { type: 'string', description: 'Concrete task or mission brief.' },
+            modality: { type: 'string', description: 'Primary input modality: text, file, image, audio, structured_data.' },
+            desiredTopology: { type: 'string', enum: ['direct', 'supervisor', 'sequential', 'swarm', 'hierarchical', 'shadow'] },
+            materialize: { type: 'boolean', description: 'Whether to create/reuse the durable agent instance. Default true.' },
+          },
+          required: ['task'],
+        },
+        mutating: true,
+      },
+      handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
+        if (!deps.specialistRouter) {
+          return { ok: false, error: 'specialist demand router not available in this deployment' };
+        }
+        const route = await deps.specialistRouter.request(ctx.workspaceId, ctx.userId, {
+          task: String(args.task ?? ''),
+          modality: args.modality ? String(args.modality) : undefined,
+          desiredTopology: typeof args.desiredTopology === 'string' ? args.desiredTopology as never : undefined,
+          materialize: typeof args.materialize === 'boolean' ? args.materialize : undefined,
+          callerAgentId: ctx.agentId ?? null,
+        });
+        return { ok: true, ...route, delegateHint: route.selectedAgentId ? `Delegate to agentId "${route.selectedAgentId}" or role "${route.selectedRole}".` : `Delegate by role "${route.selectedRole}".` };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.agent.dispatch',
         family: 'run',
         description: 'Dispatch a task to an existing agent. Uses chat when the adapter supports it, otherwise dispatches a normalized task.',
@@ -207,7 +309,7 @@ function normalizeAdapterType(value: unknown): AdapterType {
 
 function defaultConfig(adapterType: AdapterType): Record<string, unknown> {
   if (adapterType === 'http') {
-    return { adapterType, baseUrl: '', dispatchPath: '/dispatch', dispatchTimeoutMs: 30_000 };
+    return { adapterType, baseUrl: '', dispatchPath: '/task' };
   }
   return { adapterType };
 }

@@ -22,7 +22,6 @@ const bootstrapAgentSchema = z.object({
   adapterType: adapterTypeSchema,
   ambientId: z.string().nullish(),
   gatewayId: z.string().nullish(),
-  spaceId: z.string().nullish(),
   capabilityTags: z.array(z.string()).default([]),
   config: z.record(z.unknown()).default({}),
   instructions: z.string().nullish(),
@@ -62,7 +61,6 @@ const importAgentSchema = z.object({
   avatarGlyph: z.string().max(8).nullish(),
   avatarUrl: z.string().max(2_000_000).nullish(),
   config: z.record(z.unknown()).default({}),
-  spaceId: z.string().nullish(),
 });
 
 const importChannelSchema = z.object({

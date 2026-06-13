@@ -55,10 +55,13 @@ export class WorkspaceVolumeService {
   }
 
   async exists(workspaceId: string, relPath: string): Promise<boolean> {
+    const abs = this.resolve(workspaceId, relPath);
     try {
-      await fs.access(this.resolve(workspaceId, relPath));
+      await this.#assertNoSymlinkTraversal(workspaceId, abs);
+      await fs.access(abs);
       return true;
-    } catch {
+    } catch (err) {
+      if (err instanceof AgentisError) throw err;
       return false;
     }
   }
@@ -67,6 +70,7 @@ export class WorkspaceVolumeService {
   async read(workspaceId: string, relPath: string): Promise<string | null> {
     const abs = this.resolve(workspaceId, relPath);
     try {
+      await this.#assertNoSymlinkTraversal(workspaceId, abs);
       return await fs.readFile(abs, 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -77,7 +81,9 @@ export class WorkspaceVolumeService {
   /** Write a UTF-8 file, creating parent directories as needed. */
   async write(workspaceId: string, relPath: string, content: string): Promise<VolumeEntry> {
     const abs = this.resolve(workspaceId, relPath);
+    await this.#assertNoSymlinkTraversal(workspaceId, abs);
     await fs.mkdir(path.dirname(abs), { recursive: true });
+    await this.#assertNoSymlinkTraversal(workspaceId, abs);
     await fs.writeFile(abs, content, 'utf8');
     const stat = await fs.stat(abs);
     return {
@@ -92,7 +98,9 @@ export class WorkspaceVolumeService {
   /** Append to a UTF-8 file, creating it (and parents) if absent. */
   async append(workspaceId: string, relPath: string, content: string): Promise<void> {
     const abs = this.resolve(workspaceId, relPath);
+    await this.#assertNoSymlinkTraversal(workspaceId, abs);
     await fs.mkdir(path.dirname(abs), { recursive: true });
+    await this.#assertNoSymlinkTraversal(workspaceId, abs);
     await fs.appendFile(abs, content, 'utf8');
   }
 
@@ -101,6 +109,7 @@ export class WorkspaceVolumeService {
     const abs = this.resolve(workspaceId, relDir);
     let dirents;
     try {
+      await this.#assertNoSymlinkTraversal(workspaceId, abs);
       dirents = await fs.readdir(abs, { withFileTypes: true });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
@@ -110,7 +119,10 @@ export class WorkspaceVolumeService {
     const out: VolumeEntry[] = [];
     for (const d of dirents) {
       const childAbs = path.join(abs, d.name);
-      const stat = await fs.stat(childAbs).catch(() => null);
+      const stat = await fs.lstat(childAbs).catch(() => null);
+      if (stat?.isSymbolicLink()) {
+        throw new AgentisError('WORKSPACE_VOLUME_PATH_ESCAPE', 'Symbolic links are not allowed in workspace volume paths');
+      }
       out.push({
         name: d.name,
         path: toPosix(path.relative(root, childAbs)),
@@ -125,9 +137,37 @@ export class WorkspaceVolumeService {
   /** Ensure the workspace root + conventional directories exist. */
   async ensureScaffold(workspaceId: string): Promise<void> {
     const root = this.rootFor(workspaceId);
+    await this.#assertNoSymlinkTraversal(workspaceId, root);
     await fs.mkdir(root, { recursive: true });
+    await this.#assertNoSymlinkTraversal(workspaceId, root);
     for (const dir of VOLUME_DIRS) {
-      await fs.mkdir(path.join(root, dir), { recursive: true });
+      const target = path.join(root, dir);
+      await this.#assertNoSymlinkTraversal(workspaceId, target);
+      await fs.mkdir(target, { recursive: true });
+      await this.#assertNoSymlinkTraversal(workspaceId, target);
+    }
+  }
+
+  async #assertNoSymlinkTraversal(workspaceId: string, abs: string): Promise<void> {
+    const volumeBase = path.join(path.resolve(this.dataDir), 'workspace');
+    const root = this.rootFor(workspaceId);
+    const rel = path.relative(root, abs);
+    const paths = [volumeBase, root];
+    let current = root;
+    for (const part of rel.split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      paths.push(current);
+    }
+    for (const target of paths) {
+      try {
+        const stat = await fs.lstat(target);
+        if (stat.isSymbolicLink()) {
+          throw new AgentisError('WORKSPACE_VOLUME_PATH_ESCAPE', 'Symbolic links are not allowed in workspace volume paths');
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw err;
+      }
     }
   }
 }

@@ -18,8 +18,8 @@ vi.mock('../../src/lib/workspaceData', async () => {
 });
 
 vi.mock('../../src/components/agents/AgentCreateWizard', () => ({
-  AgentCreateWizard: ({ open, initialRole, initialSpaceId, heading }: { open: boolean; initialRole?: string; initialSpaceId?: string; heading?: string }) => (
-    open ? <div data-testid="agent-create-wizard">{heading ?? initialRole}:{initialRole}:{initialSpaceId ?? 'none'}</div> : null
+  AgentCreateWizard: ({ open, initialRole, heading }: { open: boolean; initialRole?: string; heading?: string }) => (
+    open ? <div data-testid="agent-create-wizard">{heading ?? initialRole}:{initialRole}</div> : null
   ),
 }));
 
@@ -31,20 +31,19 @@ function snapshot(overrides: Partial<ReturnType<typeof baseSnapshot>> = {}) {
 }
 
 function baseSnapshot() {
-  return {
-    workspaceId: 'ws-1',
-    loading: false,
-    me: { name: 'Operator' },
-    agents: [],
-    approvals: [],
-    activeRuns: [],
-    failedRuns: [],
-    artifacts: [],
-    spaces: [],
-    fleet: { runs: { active: 0 }, gateways: { total: 1, connected: 1 }, approvals: { pending: 0 } },
-    latestActivity: null,
-    notifications: [],
-    counts: { liveAgents: 0, activeRuns: 0 },
+    return {
+      workspaceId: 'ws-1',
+      loading: false,
+      me: { name: 'Operator' },
+      agents: [],
+      approvals: [],
+      activeRuns: [],
+      failedRuns: [],
+      artifacts: [],
+      fleet: { runs: { active: 0 }, gateways: { total: 1, connected: 1 }, approvals: { pending: 0 } },
+      latestActivity: null,
+      notifications: [],
+      counts: { liveAgents: 0, activeRuns: 0 },
     updatedAt: Date.now(),
   };
 }
@@ -68,9 +67,7 @@ describe('<OnboardingStrip />', () => {
   });
 
   it('opens the orchestrator wizard on agentis:commission-orchestrator', async () => {
-    mocks.useWorkspaceData.mockReturnValue(snapshot({
-      spaces: [{ id: 'space-1', name: 'Marketing', slug: 'marketing' }],
-    }));
+    mocks.useWorkspaceData.mockReturnValue(snapshot());
 
     render(
       <MemoryRouter>
@@ -83,14 +80,13 @@ describe('<OnboardingStrip />', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('agent-create-wizard')).toHaveTextContent('Commission your orchestrator:orchestrator:none');
+      expect(screen.getByTestId('agent-create-wizard')).toHaveTextContent('Commission your orchestrator:orchestrator');
     });
   });
 
-  it('opens the manager wizard with the space preset on agentis:commission-manager', async () => {
+  it('opens the manager wizard on agentis:commission-manager', async () => {
     mocks.useWorkspaceData.mockReturnValue(snapshot({
       agents: [{ id: 'orch-1', name: 'Brain', role: 'orchestrator', status: 'online' }],
-      spaces: [{ id: 'space-1', name: 'Marketing', slug: 'marketing' }],
     }));
 
     render(
@@ -100,11 +96,11 @@ describe('<OnboardingStrip />', () => {
     );
 
     act(() => {
-      window.dispatchEvent(new CustomEvent('agentis:commission-manager', { detail: { spaceId: 'space-1' } }));
+      window.dispatchEvent(new CustomEvent('agentis:commission-manager'));
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('agent-create-wizard')).toHaveTextContent('Assign a manager for Marketing:manager:space-1');
+      expect(screen.getByTestId('agent-create-wizard')).toHaveTextContent('Commission a manager:manager');
     });
   });
 });

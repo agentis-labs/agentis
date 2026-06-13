@@ -74,4 +74,40 @@ describe('/v1/workspaces', () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it('PATCH /:id updates the workspace name, description, and image URL', async () => {
+    const res = await app().request(`/v1/workspaces/${ctx.workspace.id}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        name: 'New Name',
+        description: 'New Description',
+        imageDataUrl: 'data:image/png;base64,1234',
+      }),
+    });
+    expect(res.status).toBe(200);
+    
+    // Verify changes by calling GET
+    const getRes = await app().request(`/v1/workspaces/${ctx.workspace.id}`, {
+      headers: ctx.authHeaders,
+    });
+    const body = (await getRes.json()) as { workspace: { name: string; description: string; imageUrl: string } };
+    expect(body.workspace.name).toBe('New Name');
+    expect(body.workspace.description).toBe('New Description');
+    expect(body.workspace.imageUrl).toBe('data:image/png;base64,1234');
+  });
+
+  it('DELETE /:id deletes the workspace', async () => {
+    const res = await app().request(`/v1/workspaces/${ctx.workspace.id}`, {
+      method: 'DELETE',
+      headers: ctx.authHeaders,
+    });
+    expect(res.status).toBe(200);
+
+    // Verify deletion by calling GET
+    const getRes = await app().request(`/v1/workspaces/${ctx.workspace.id}`, {
+      headers: ctx.authHeaders,
+    });
+    expect(getRes.status).toBe(404);
+  });
 });

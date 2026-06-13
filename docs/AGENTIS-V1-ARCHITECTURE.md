@@ -252,7 +252,7 @@ to `notifyTaskCompleted()` / `notifyTaskFailed()`.
 | `CodexAdapter` | OpenAI Codex/GPT-4o via the Responses API with tool-use loop |
 | `HermesAdapter` | Agentis-native Hermes agents (runs locally with the Hermes runtime) |
 | `HermesAgentAdapter` | Hermes multi-agent variant with team coordination |
-| `LocalLlmAdapter` | Ollama or any OpenAI-compatible local endpoint |
+| `LocalLlmAdapter` | OpenAI-compatible local endpoint |
 | `CursorAdapter` | Cursor AI IDE integration |
 
 ### 4.3 Adapter registration

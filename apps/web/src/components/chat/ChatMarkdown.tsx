@@ -1,4 +1,5 @@
 import { Fragment, useState, type ReactNode } from 'react';
+import { Check, ChevronDown, ChevronUp, Copy } from 'lucide-react';
 
 /**
  * ChatMarkdown — a tiny, dependency-free Markdown renderer for assistant
@@ -15,6 +16,7 @@ import { Fragment, useState, type ReactNode } from 'react';
  */
 function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) {
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const parts = lang.split(':');
   const rawLang = parts[0]?.trim() || '';
   const filePath = parts[1]?.trim() || '';
@@ -22,6 +24,10 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
   const displayLang = rawLang || 'code';
   const isShell = ['bash', 'sh', 'shell', 'zsh', 'powershell', 'cmd'].includes(rawLang.toLowerCase());
   const isDiff = rawLang.toLowerCase().startsWith('diff');
+  const lines = content.split('\n');
+  const isLong = lines.length > 28 || content.length > 2600;
+  const visibleLines = isLong && !expanded ? lines.slice(0, 28) : lines;
+  const visibleContent = isLong && !expanded ? visibleLines.join('\n') : content;
 
   function handleCopy() {
     navigator.clipboard.writeText(content).then(() => {
@@ -31,7 +37,6 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
   }
 
   if (isDiff) {
-    const lines = content.split('\n');
     return (
       <div className="my-3 overflow-hidden rounded-xl border border-line bg-surface shadow-[0_4px_24px_rgba(0,0,0,0.12)]">
         <div className="flex items-center justify-between border-b border-line bg-surface-2 px-3 py-1.5 font-mono text-[11px] text-text-muted">
@@ -47,23 +52,19 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
           >
             {copied ? (
               <>
-                <svg className="h-3 w-3 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
+                <Check size={12} className="text-success" />
                 <span className="text-success font-semibold">Copied!</span>
               </>
             ) : (
               <>
-                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                </svg>
+                <Copy size={12} />
                 <span>Copy</span>
               </>
             )}
           </button>
         </div>
         <div className="overflow-x-auto bg-canvas/40 p-2 font-mono text-[11px] leading-5">
-          {lines.map((line, idx) => {
+          {visibleLines.map((line, idx) => {
             let lineCls = 'text-text-secondary px-2';
             if (line.startsWith('+')) {
               lineCls = 'bg-[rgba(34,197,94,0.12)] text-[rgb(34,197,94)] border-l-2 border-green-500 px-2 font-semibold';
@@ -79,6 +80,7 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
             );
           })}
         </div>
+        {isLong && <CodeBlockExpander expanded={expanded} lineCount={lines.length} onToggle={() => setExpanded((value) => !value)} />}
       </div>
     );
   }
@@ -86,7 +88,7 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
   return (
     <div className="my-3 overflow-hidden rounded-xl border border-line bg-surface shadow-[0_4px_24px_rgba(0,0,0,0.12)]">
       <div className={`flex items-center justify-between border-b border-line bg-surface-2 px-3 py-1.5 font-mono text-[11px] text-text-muted ${
-        isShell ? 'bg-black/95 border-b border-white/10' : ''
+        isShell ? 'bg-[color:var(--color-terminal-header)] border-b-[color:var(--color-terminal-header-border)]' : ''
       }`}>
         <div className="flex items-center gap-1.5">
           {isShell ? (
@@ -96,7 +98,7 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
                 <span className="h-2.5 w-2.5 rounded-full bg-[#ffbd2e]" />
                 <span className="h-2.5 w-2.5 rounded-full bg-[#27c93f]" />
               </div>
-              <span className="font-semibold text-white/80 uppercase ml-1 tracking-wider">Terminal</span>
+              <span className="ml-1 font-semibold uppercase tracking-wider text-[color:var(--color-terminal-label)]">Terminal</span>
             </>
           ) : (
             <>
@@ -109,32 +111,52 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
           type="button"
           onClick={handleCopy}
           className={`flex items-center gap-1 rounded bg-canvas px-2 py-0.5 transition hover:bg-surface-3 hover:text-text-primary ${
-            isShell ? 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white' : ''
+            isShell
+              ? 'bg-[color:var(--color-terminal-button)] text-[color:var(--color-terminal-button-text)] hover:bg-[color:var(--color-terminal-button-hover)] hover:text-[color:var(--color-terminal-button-hover-text)]'
+              : ''
           }`}
         >
           {copied ? (
             <>
-              <svg className="h-3 w-3 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-              </svg>
+              <Check size={12} className="text-success" />
               <span className="text-success font-semibold">Copied!</span>
             </>
           ) : (
             <>
-              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-              </svg>
+              <Copy size={12} />
               <span>Copy</span>
             </>
           )}
         </button>
       </div>
       <pre className={`overflow-x-auto p-3 text-[11.5px] leading-relaxed ${
-        isShell ? 'bg-black/90 font-mono text-green-400' : 'bg-canvas/40'
+        isShell ? 'bg-[color:var(--color-terminal-body)] font-mono text-[color:var(--color-terminal-text)]' : 'bg-canvas/40'
       }`}>
-        <code className={`font-mono ${isShell ? 'text-green-400' : 'text-text-secondary'}`}>{content}</code>
+        <code className={`font-mono ${isShell ? 'text-[color:var(--color-terminal-text)]' : 'text-text-secondary'}`}>{visibleContent}</code>
       </pre>
+      {isLong && <CodeBlockExpander expanded={expanded} lineCount={lines.length} onToggle={() => setExpanded((value) => !value)} />}
     </div>
+  );
+}
+
+function CodeBlockExpander({
+  expanded,
+  lineCount,
+  onToggle,
+}: {
+  expanded: boolean;
+  lineCount: number;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex w-full items-center justify-center gap-1.5 border-t border-line bg-surface-2 px-3 py-2 text-[11px] font-medium text-text-secondary transition hover:bg-surface-3 hover:text-text-primary"
+    >
+      {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+      {expanded ? 'Show less' : `Show all ${lineCount} lines`}
+    </button>
   );
 }
 
@@ -149,6 +171,9 @@ type Block =
   | { kind: 'ul'; items: string[] }
   | { kind: 'ol'; items: string[] }
   | { kind: 'quote'; lines: string[] }
+  | { kind: 'table'; headers: string[]; alignments: ('left' | 'center' | 'right' | null)[]; rows: string[][] }
+  | { kind: 'task-list'; items: { checked: boolean; text: string }[] }
+  | { kind: 'hr' }
   | { kind: 'p'; lines: string[] };
 
 function parseBlocks(input: string): Block[] {
@@ -174,9 +199,35 @@ function parseBlocks(input: string): Block[] {
       continue;
     }
 
+    // Horizontal rule (---, ***, ___ with 3+ chars)
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      blocks.push({ kind: 'hr' });
+      i += 1;
+      continue;
+    }
+
     // Blank line — block separator
     if (line.trim() === '') {
       i += 1;
+      continue;
+    }
+
+    // GFM Table
+    if (
+      /^\s*\|/.test(line) &&
+      i + 1 < lines.length &&
+      /^\s*\|[\s:]*-+[\s:]*/.test(lines[i + 1]!)
+    ) {
+      const headerCells = parseTableRow(line);
+      const sepLine = lines[i + 1]!;
+      const alignments = parseTableAlignments(sepLine);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && /^\s*\|/.test(lines[i]!)) {
+        rows.push(parseTableRow(lines[i]!));
+        i += 1;
+      }
+      blocks.push({ kind: 'table', headers: headerCells, alignments, rows });
       continue;
     }
 
@@ -185,6 +236,20 @@ function parseBlocks(input: string): Block[] {
     if (heading) {
       blocks.push({ kind: 'heading', level: heading[1]!.length, text: heading[2]!.trim() });
       i += 1;
+      continue;
+    }
+
+    // Task list (must check before generic unordered list)
+    if (/^\s*[-*+]\s+\[[ xX]\]\s+/.test(line)) {
+      const taskItems: { checked: boolean; text: string }[] = [];
+      while (i < lines.length && /^\s*[-*+]\s+\[[ xX]\]\s+/.test(lines[i]!)) {
+        const tm = lines[i]!.match(/^\s*[-*+]\s+\[([xX ])\]\s+(.*)$/);
+        if (tm) {
+          taskItems.push({ checked: tm[1] !== ' ', text: tm[2]! });
+        }
+        i += 1;
+      }
+      blocks.push({ kind: 'task-list', items: taskItems });
       continue;
     }
 
@@ -230,7 +295,9 @@ function parseBlocks(input: string): Block[] {
       !/^(#{1,6})\s+/.test(lines[i]!) &&
       !/^\s*[-*+]\s+/.test(lines[i]!) &&
       !/^\s*\d+[.)]\s+/.test(lines[i]!) &&
-      !/^\s*>\s?/.test(lines[i]!)
+      !/^\s*>\s?/.test(lines[i]!) &&
+      !/^\s*\|/.test(lines[i]!) &&
+      !/^\s*([-*_])\1{2,}\s*$/.test(lines[i]!)
     ) {
       para.push(lines[i]!);
       i += 1;
@@ -279,6 +346,65 @@ function renderBlock(block: Block, key: number): ReactNode {
           {renderInline(block.lines.join('\n'), `q${key}`)}
         </blockquote>
       );
+    case 'table':
+      return (
+        <div key={key} className="my-3 overflow-x-auto rounded-xl border border-line shadow-[0_2px_12px_rgba(0,0,0,0.08)]">
+          <table className="w-full border-collapse text-[11.5px] font-mono">
+            <thead>
+              <tr className="bg-surface-2">
+                {block.headers.map((h, idx) => (
+                  <th
+                    key={idx}
+                    className="whitespace-nowrap border-b border-line px-3 py-1.5 text-left font-bold uppercase tracking-wider text-text-primary text-[10.5px]"
+                    style={{ textAlign: block.alignments[idx] ?? 'left' }}
+                  >
+                    {renderInline(h.trim(), `th${key}-${idx}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, rIdx) => (
+                <tr key={rIdx} className="even:bg-surface/40">
+                  {row.map((cell, cIdx) => (
+                    <td
+                      key={cIdx}
+                      className="border-b border-line/50 px-3 py-1.5 text-text-secondary"
+                      style={{ textAlign: block.alignments[cIdx] ?? 'left' }}
+                    >
+                      {renderInline(cell.trim(), `td${key}-${rIdx}-${cIdx}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    case 'task-list':
+      return (
+        <ul key={key} className="space-y-1 pl-1">
+          {block.items.map((item, idx) => (
+            <li key={idx} className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                checked={item.checked}
+                disabled
+                className="mt-1 h-3.5 w-3.5 rounded border-line accent-accent cursor-default"
+              />
+              <span className={item.checked ? 'text-text-muted line-through' : ''}>
+                {renderInline(item.text, `tl${key}-${idx}`)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      );
+    case 'hr':
+      return (
+        <div key={key} className="py-2">
+          <div className="h-px bg-gradient-to-r from-transparent via-line to-transparent" />
+        </div>
+      );
     case 'p':
     default:
       return (
@@ -314,14 +440,21 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 
 function renderEmphasis(text: string, keyPrefix: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|(?<![A-Za-z0-9])_([^_]+)_(?![A-Za-z0-9])/g;
+  const re = /~~([^~]+)~~|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|(?<![A-Za-z0-9])_([^_]+)_(?![A-Za-z0-9])/g;
   let last = 0;
   let match: RegExpExecArray | null;
   let n = 0;
   while ((match = re.exec(text))) {
     if (match.index > last) out.push(<Fragment key={`${keyPrefix}-f${n}`}>{text.slice(last, match.index)}</Fragment>);
-    if (match[1] !== undefined && match[2] !== undefined) {
-      const href = sanitizeHref(match[2]);
+    if (match[1] !== undefined) {
+      // Strikethrough ~~text~~
+      out.push(
+        <del key={`${keyPrefix}-s${n}`} className="text-text-muted line-through">
+          {renderEmphasis(match[1], `${keyPrefix}-s${n}i`)}
+        </del>,
+      );
+    } else if (match[2] !== undefined && match[3] !== undefined) {
+      const href = sanitizeHref(match[3]);
       out.push(
         href ? (
           <a
@@ -331,21 +464,21 @@ function renderEmphasis(text: string, keyPrefix: string): ReactNode[] {
             rel="noreferrer"
             className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
           >
-            {match[1]}
+            {match[2]}
           </a>
         ) : (
           <Fragment key={`${keyPrefix}-a${n}`}>{match[0]}</Fragment>
         ),
       );
-    } else if (match[3] !== undefined || match[4] !== undefined) {
-      const inner = match[3] ?? match[4]!;
+    } else if (match[4] !== undefined || match[5] !== undefined) {
+      const inner = match[4] ?? match[5]!;
       out.push(
         <strong key={`${keyPrefix}-b${n}`} className="font-semibold text-text-primary">
           {renderEmphasis(inner, `${keyPrefix}-b${n}i`)}
         </strong>,
       );
     } else {
-      const inner = match[5] ?? match[6]!;
+      const inner = match[6] ?? match[7]!;
       out.push(
         <em key={`${keyPrefix}-i${n}`}>{renderEmphasis(inner, `${keyPrefix}-i${n}i`)}</em>,
       );
@@ -355,6 +488,28 @@ function renderEmphasis(text: string, keyPrefix: string): ReactNode[] {
   }
   if (last < text.length) out.push(<Fragment key={`${keyPrefix}-f${n}`}>{text.slice(last)}</Fragment>);
   return out;
+}
+
+/** Parse a GFM table row into an array of cell strings. */
+function parseTableRow(line: string): string[] {
+  return line
+    .replace(/^\s*\|/, '')
+    .replace(/\|\s*$/, '')
+    .split('|')
+    .map((c) => c.trim());
+}
+
+/** Parse the separator line to extract column alignments. */
+function parseTableAlignments(line: string): ('left' | 'center' | 'right' | null)[] {
+  return parseTableRow(line).map((cell) => {
+    const trimmed = cell.trim().replace(/\s/g, '');
+    const left = trimmed.startsWith(':');
+    const right = trimmed.endsWith(':');
+    if (left && right) return 'center';
+    if (right) return 'right';
+    if (left) return 'left';
+    return null;
+  });
 }
 
 function sanitizeHref(href: string): string | null {

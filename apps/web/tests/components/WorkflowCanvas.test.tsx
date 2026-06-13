@@ -7,7 +7,7 @@
  * the draggable NodePalette which is the canvas' primary input surface.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   WorkflowNode,
@@ -29,10 +29,11 @@ describe('canvas barrel re-exports', () => {
 });
 
 describe('<NodePalette />', () => {
-  it('renders one button per spec-required node type', () => {
+  it('renders one button per spec-required node type', async () => {
     render(<NodePalette />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/v1/workflows?isReusable=true', expect.any(Object)));
     for (const n of PALETTE_NODES) {
-      expect(screen.getByText(n.label)).toBeInTheDocument();
+      expect(screen.getAllByText(n.label).length).toBeGreaterThan(0);
     }
   });
 
@@ -40,16 +41,17 @@ describe('<NodePalette />', () => {
     const onPick = vi.fn();
     render(<NodePalette onPick={onPick} />);
     await userEvent.click(screen.getByText('Trigger'));
-    expect(onPick).toHaveBeenCalledWith('trigger');
+    expect(onPick).toHaveBeenCalledWith('trigger', { triggerType: 'manual' });
   });
 
-  it('sets the agentis dataTransfer payload on dragstart', () => {
+  it('sets the agentis dataTransfer payload on dragstart', async () => {
     render(<NodePalette />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/v1/workflows?isReusable=true', expect.any(Object)));
     const triggerBtn = screen.getByText('Trigger').closest('button')!;
     const setData = vi.fn();
     fireEvent.dragStart(triggerBtn, {
       dataTransfer: { setData, effectAllowed: 'none', types: [] },
     });
-    expect(setData).toHaveBeenCalledWith('application/x-agentis-node', 'trigger');
+    expect(setData).toHaveBeenCalledWith('application/x-agentis-node', '{"type":"trigger","triggerType":"manual"}');
   });
 });

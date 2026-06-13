@@ -4,6 +4,7 @@ export type GatewayStatus = 'connected' | 'degraded' | 'disconnected' | 'error';
 
 export type ApprovalSource =
   | 'checkpoint'
+  | 'phase_gate'
   | 'openclaw_exec'
   | 'package_install'
   | 'credential_access';

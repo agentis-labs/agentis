@@ -23,6 +23,16 @@ interface LedgerEntry {
   createdAt: string;
 }
 
+interface RawLedgerEntry {
+  id?: string;
+  type?: string;
+  eventType?: string;
+  summary?: string;
+  payload?: Record<string, unknown>;
+  nodeId?: string | null;
+  createdAt?: string;
+}
+
 interface ScratchpadEntry {
   key: string;
   value: unknown;
@@ -44,11 +54,11 @@ export function RunDrawer({
 
   useEffect(() => {
     if (!open || !runId) return;
-    void api<{ entries: LedgerEntry[] }>(`/v1/runs/${runId}/ledger`)
-      .then((d) => setLedger(d.entries))
+    void api<{ entries?: RawLedgerEntry[]; events?: RawLedgerEntry[] }>(`/v1/runs/${runId}/ledger`)
+      .then((d) => setLedger(normalizeLedgerEntries(d)))
       .catch(() => setLedger([]));
-    void api<{ entries: ScratchpadEntry[] }>(`/v1/runs/${runId}/scratchpad`)
-      .then((d) => setScratch(d.entries))
+    void api<{ entries?: ScratchpadEntry[]; scratchpad?: Record<string, unknown> }>(`/v1/runs/${runId}/scratchpad`)
+      .then((d) => setScratch(normalizeScratchpadEntries(d)))
       .catch(() => setScratch([]));
   }, [runId, open, tab]);
 
@@ -119,4 +129,41 @@ export function RunDrawer({
       </div>
     </div>
   );
+}
+
+function normalizeLedgerEntries(payload: { entries?: RawLedgerEntry[]; events?: RawLedgerEntry[] }): LedgerEntry[] {
+  const rows = Array.isArray(payload.entries) ? payload.entries : Array.isArray(payload.events) ? payload.events : [];
+  return rows.map((entry, index) => ({
+    id: entry.id ?? `${entry.eventType ?? entry.type ?? 'event'}-${index}`,
+    type: entry.type ?? entry.eventType ?? 'event',
+    summary: entry.summary ?? ledgerSummary(entry),
+    createdAt: entry.createdAt ?? new Date().toISOString(),
+  }));
+}
+
+function ledgerSummary(entry: RawLedgerEntry): string {
+  const payload = entry.payload ?? {};
+  const title = typeof payload.title === 'string' ? payload.title : undefined;
+  const node = entry.nodeId ? `node ${entry.nodeId}` : undefined;
+  const output = payload.output && typeof payload.output === 'object'
+    ? compactJson(payload.output)
+    : undefined;
+  return title ?? output ?? node ?? entry.eventType ?? entry.type ?? 'Run event';
+}
+
+function normalizeScratchpadEntries(payload: { entries?: ScratchpadEntry[]; scratchpad?: Record<string, unknown> }): ScratchpadEntry[] {
+  if (Array.isArray(payload.entries)) return payload.entries;
+  const scratchpad = payload.scratchpad;
+  if (!scratchpad || typeof scratchpad !== 'object') return [];
+  const now = new Date().toISOString();
+  return Object.entries(scratchpad).map(([key, value]) => ({ key, value, updatedAt: now }));
+}
+
+function compactJson(value: unknown): string {
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+  } catch {
+    return String(value);
+  }
 }

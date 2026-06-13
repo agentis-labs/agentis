@@ -7,17 +7,16 @@
  * integration input values, evaluator criteria, workflow_store keys, etc.
  *
  * Resolution is intentionally narrow:
- *   - Pure string interpolation. No code evaluation, no function calls.
+ *   - `{{path.to.value}}` stays pure path lookup.
+ *   - `{{= expression }}` runs through `safeExpression.ts`, which exposes only the
+ *     JSON-cloned template context and blocks Node globals.
  *   - Missing paths resolve to `''` and emit a structured warning. The engine
  *     surfaces these on the run's blockData so users can see what didn't resolve.
- *   - JSON literals (numbers, booleans, objects) inside `{{...}}` are stringified
- *     with `JSON.stringify` when the resolved value is non-string. This keeps the
- *     resolver useful for "give me the agent's whole output object as text."
- *
- * Forward compatibility note: brain-apps will add an `{{app.<tableName>.<field>}}`
- * namespace for app-scoped data lookups. The `TemplateContext` has a reserved
- * `apps` slot that the resolver already understands. On main it stays empty.
+ *   - Non-string values inside mixed text templates are stringified with
+ *     `JSON.stringify`; exact expression fields keep their typed value.
  */
+
+import { evaluateExpression } from './safeExpression.js';
 
 export interface TemplateWarning {
   path: string;
@@ -25,6 +24,8 @@ export interface TemplateWarning {
 }
 
 export interface TemplateContext {
+  /** Current node input (`$json` / `$input` in inline expressions). */
+  input?: Record<string, unknown>;
   /** Trigger payload — the inputs that started this run. */
   trigger: Record<string, unknown>;
   /** Per-node outputs, keyed by node id. */
@@ -39,27 +40,23 @@ export interface TemplateContext {
   run?: { id?: string; startedAt?: string; triggeredBy?: string };
   /** Loop-body context — only present inside a loop's child run. */
   loop?: { item: unknown; index: number };
-  /** Brain-apps placeholder — left empty on main. */
-  apps?: Record<string, Record<string, unknown>>;
   /** Out-param: warnings collected during resolution. */
   warnings?: TemplateWarning[];
 }
 
-const TEMPLATE_RE = /\{\{\s*([^{}\s][^{}]*?)\s*\}\}/g;
+const TEMPLATE_RE = /\{\{\s*([\s\S]*?)\s*\}\}/g;
+const EXACT_EXPRESSION_RE = /^\{\{\s*=([\s\S]*?)\s*\}\}$/;
 
 /** Resolve a single string. Returns the string with `{{...}}` placeholders replaced. */
 export function resolveTemplate(text: string, ctx: TemplateContext): string {
   if (typeof text !== 'string' || text.indexOf('{{') === -1) return text;
-  return text.replace(TEMPLATE_RE, (match, expression: string) => {
-    const value = readPath(ctx, expression.trim());
+  return text.replace(TEMPLATE_RE, (_match, expression: string) => {
+    const trimmed = expression.trim();
+    const value = trimmed.startsWith('=')
+      ? evaluateTemplateExpression(ctx, trimmed.slice(1).trim())
+      : readPath(ctx, trimmed);
     if (value === undefined) return '';
-    if (typeof value === 'string') return value;
-    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return '';
-    }
+    return stringifyTemplateValue(value);
   });
 }
 
@@ -71,6 +68,10 @@ export function resolveTemplate(text: string, ctx: TemplateContext): string {
 export function resolveTemplateDeep<T>(value: T, ctx: TemplateContext): T {
   if (value == null) return value;
   if (typeof value === 'string') {
+    const exact = value.match(EXACT_EXPRESSION_RE);
+    if (exact) {
+      return evaluateTemplateExpression(ctx, exact[1]!.trim()) as unknown as T;
+    }
     return resolveTemplate(value, ctx) as unknown as T;
   }
   if (Array.isArray(value)) {
@@ -94,7 +95,54 @@ export function resolveTemplateDeep<T>(value: T, ctx: TemplateContext): T {
  * Returns `undefined` if any segment in the path is missing.
  */
 export function readTemplatePath(ctx: TemplateContext, expression: string): unknown {
-  return readPath(ctx, expression.trim());
+  const trimmed = expression.trim();
+  if (trimmed.startsWith('=')) return evaluateTemplateExpression(ctx, trimmed.slice(1).trim());
+  return readPath(ctx, trimmed);
+}
+
+export interface TemplateReference {
+  /** Raw expression inside `{{ }}`, trimmed. */
+  raw: string;
+  /** First path segment — a namespace (`trigger`, `nodes`, …) or a bare node id. */
+  head: string;
+  /** Remaining path segments after the head. */
+  rest: string[];
+}
+
+/**
+ * Extract every `{{...}}` reference from a string, parsed into head + path.
+ * Shares the exact tokenizer the resolver uses at runtime, so static analysis
+ * sees references the same way execution does. Returns [] for plain strings.
+ */
+export function extractTemplateReferences(text: string): TemplateReference[] {
+  if (typeof text !== 'string' || text.indexOf('{{') === -1) return [];
+  const refs: TemplateReference[] = [];
+  // `matchAll` over a fresh regex so the shared global `TEMPLATE_RE` lastIndex
+  // is never carried between calls.
+  for (const m of text.matchAll(/\{\{\s*([\s\S]*?)\s*\}\}/g)) {
+    const raw = m[1]!.trim();
+    if (raw.startsWith('=')) {
+      refs.push(...extractExpressionNodeReferences(raw.slice(1).trim()));
+      continue;
+    }
+    const segments = tokenizePath(raw);
+    if (segments.length === 0) continue;
+    refs.push({ raw, head: segments[0]!, rest: segments.slice(1) });
+  }
+  return refs;
+}
+
+function extractExpressionNodeReferences(expression: string): TemplateReference[] {
+  const refs: TemplateReference[] = [];
+  const seen = new Set<string>();
+  for (const match of expression.matchAll(/\$nodes\.([A-Za-z0-9_-]+)/g)) {
+    const nodeId = match[1]!;
+    const raw = `$nodes.${nodeId}`;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    refs.push({ raw, head: 'nodes', rest: [nodeId] });
+  }
+  return refs;
 }
 
 function readPath(ctx: TemplateContext, expression: string): unknown {
@@ -128,9 +176,6 @@ function readPath(ctx: TemplateContext, expression: string): unknown {
       break;
     case 'loop':
       root = ctx.loop;
-      break;
-    case 'apps':
-      root = ctx.apps;
       break;
     default:
       // Permissive fallback: allow callers to address `nodes.X.Y` without the
@@ -213,6 +258,31 @@ function pushWarning(ctx: TemplateContext, path: string, reason: TemplateWarning
   ctx.warnings.push({ path, reason });
 }
 
+function evaluateTemplateExpression(ctx: TemplateContext, expression: string): unknown {
+  return evaluateExpression(expression, {
+    input: ctx.input ?? ctx.trigger,
+    ctx: {
+      trigger: ctx.trigger,
+      nodes: ctx.nodes,
+      scratchpad: ctx.scratchpad,
+      store: ctx.store,
+      workspace: ctx.workspace,
+      run: ctx.run,
+      loop: ctx.loop,
+    },
+  });
+}
+
+function stringifyTemplateValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Build a `TemplateContext` snapshot from a running engine context.
  *
@@ -220,6 +290,7 @@ function pushWarning(ctx: TemplateContext, path: string, reason: TemplateWarning
  * resolver doesn't see the live RunningContext, only this immutable snapshot.
  */
 export function buildTemplateContext(args: {
+  inputData?: Record<string, unknown>;
   /** Trigger inputs — first ready-queue item's inputData. */
   triggerInputs: Record<string, unknown>;
   /** Map of nodeId → completed-node outputData. */
@@ -236,6 +307,7 @@ export function buildTemplateContext(args: {
   loop?: { item: unknown; index: number };
 }): TemplateContext {
   return {
+    input: args.inputData ?? args.triggerInputs,
     trigger: args.triggerInputs,
     nodes: args.nodeOutputs,
     scratchpad: args.scratchpad,
@@ -243,7 +315,6 @@ export function buildTemplateContext(args: {
     workspace: args.workspace,
     run: args.run,
     loop: args.loop,
-    apps: {},
     warnings: [],
   };
 }

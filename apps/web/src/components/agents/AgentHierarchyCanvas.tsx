@@ -35,6 +35,7 @@ export interface AgentHierarchyAgent {
   adapterType?: string | null;
   runtimeModel?: string | null;
   avatarGlyph?: string | null;
+  avatarUrl?: string | null;
   colorHex?: string | null;
   role?: string | null;
   reportsTo?: string | null;
@@ -42,6 +43,10 @@ export interface AgentHierarchyAgent {
   currentTaskId?: string | null;
   currentTask?: string | null;
   capabilityTags?: string[] | null;
+  spaceId?: string | null;
+  spaceName?: string | null;
+  spaceColorHex?: string | null;
+  spaceTag?: string | null;
   lastActiveAt?: string | null;
   lastHeartbeatAt?: string | null;
   currentMonthSpendCents?: number | null;
@@ -102,7 +107,7 @@ export function AgentHierarchyCanvas({
     [],
   );
   const visibleAgents = useMemo(
-    () => agents.filter((agent) => matchesFleetFilter(agent, filter) && matchesFleetSearch(agent, search)),
+    () => agents.filter((agent) => normalizeRole(agent) !== 'worker' && matchesFleetFilter(agent, filter) && matchesFleetSearch(agent, search)),
     [agents, filter, search],
   );
   const graph = useMemo(
@@ -432,15 +437,15 @@ interface NodeVisualSpec {
 function nodeVisualSpec(role: 'orchestrator' | 'manager' | 'worker' | 'unassigned', tierCount: number): NodeVisualSpec {
   if (role === 'orchestrator') {
     return {
-      width: 304,
-      padding: 16,
-      glyph: 44,
-      icon: 19,
-      handle: 11,
-      gap: 12,
-      titleSize: 15,
-      subtitleSize: 11,
-      activitySize: 12,
+      width: 268,
+      padding: 14,
+      glyph: 38,
+      icon: 17,
+      handle: 10,
+      gap: 11,
+      titleSize: 14,
+      subtitleSize: 10.5,
+      activitySize: 11,
       showSubtitle: true,
       showActivity: true,
       showProgress: true,
@@ -450,9 +455,9 @@ function nodeVisualSpec(role: 'orchestrator' | 'manager' | 'worker' | 'unassigne
 
   if (role === 'manager') {
     return {
-      width: 252,
-      padding: 14,
-      glyph: 36,
+      width: 232,
+      padding: 13,
+      glyph: 34,
       icon: 16,
       handle: 10,
       gap: 10,
@@ -577,7 +582,13 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   const activity = isSettingUp ? installActivity(installSession) : liveActivity(agent, readiness);
   const running = readiness === 'running';
   const settingUp = readiness === 'setting_up';
-  const subtitle = settingUp ? 'setting up runtime' : role === 'worker' ? harnessLabel(agent.adapterType) : `${role} - ${harnessLabel(agent.adapterType)}`;
+  const domainName = agent.spaceName ?? agent.spaceTag ?? null;
+  const domainColor = agent.spaceColorHex ?? null;
+  const subtitle = settingUp 
+    ? 'setting up runtime' 
+    : role === 'worker' 
+        ? harnessLabel(agent.adapterType) 
+        : `${role} - ${harnessLabel(agent.adapterType)}`;
 
   return (
     <div
@@ -599,18 +610,32 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
       <div className="flex items-center" style={{ gap: visual.gap }}>
         <span
           className={clsx(
-            'flex shrink-0 items-center justify-center rounded-md bg-canvas',
+            'flex shrink-0 items-center justify-center rounded-md bg-canvas overflow-hidden',
             settingUp && 'animate-pulse',
           )}
           style={{ width: visual.glyph, height: visual.glyph, color: settingUp ? '#06b6d4' : TIER_BORDER[role] }}
         >
-          {settingUp ? <Loader2 size={visual.icon} className="animate-spin" /> : (agent.avatarGlyph || <GlyphIcon size={visual.icon} />)}
+          {settingUp
+            ? <Loader2 size={visual.icon} className="animate-spin" />
+            : agent.avatarUrl
+              ? <img src={agent.avatarUrl} alt={agent.name} className="h-full w-full object-cover" />
+              : (agent.avatarGlyph || <GlyphIcon size={visual.icon} />)
+          }
         </span>
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium text-text-primary" style={{ fontSize: visual.titleSize }}>{agent.name}</div>
           {visual.showSubtitle && (
-            <div className="mt-0.5 truncate capitalize text-text-muted" style={{ fontSize: visual.subtitleSize }}>
+            <div className="mt-1 truncate capitalize text-text-muted" style={{ fontSize: visual.subtitleSize }}>
               {subtitle}
+            </div>
+          )}
+          {domainName && role !== 'orchestrator' && (
+            <div
+              className="mt-1.5 inline-flex max-w-full items-center gap-1 rounded-full border border-line bg-canvas/55 px-1.5 py-0.5 text-[9.5px] font-medium text-text-secondary"
+              style={domainColor ? { borderColor: `${domainColor}55`, color: domainColor } : undefined}
+            >
+              {domainColor && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: domainColor }} />}
+              <span className="truncate">{domainName}</span>
             </div>
           )}
         </div>
@@ -823,4 +848,11 @@ function harnessLabel(adapterType?: string | null) {
     case 'http': return 'HTTP';
     default: return 'runtime';
   }
+}
+
+function labelize(value: string | null | undefined): string {
+  if (!value) return '';
+  return value
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }

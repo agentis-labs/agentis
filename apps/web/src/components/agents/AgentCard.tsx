@@ -19,7 +19,6 @@ export interface CommandAgent {
   isPaused?: boolean | null;
   monthlyBudgetCents?: number | null;
   currentMonthSpendCents?: number | null;
-  spaceId?: string | null;
 }
 
 export type Readiness = 'live' | 'running' | 'standby' | 'unreachable' | 'failed';
@@ -136,7 +135,7 @@ function harnessLabel(adapterType: string) {
     case 'claude_code': return 'Claude Code';
     case 'codex': return 'Codex';
     case 'cursor': return 'Cursor';
-    case 'http': return 'HTTP / Webhook';
+    case 'http': return 'HTTP';
     default: return 'Harness';
   }
 }

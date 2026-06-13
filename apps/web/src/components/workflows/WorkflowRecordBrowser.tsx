@@ -9,7 +9,7 @@
 
 import { useState } from 'react';
 import { Download, Trash2 } from 'lucide-react';
-import { api } from '../../lib/api';
+import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { relativeTime } from './runFormat';
@@ -21,7 +21,6 @@ interface TableSchema {
 
 export interface RecordTable {
   table: string;
-  appId?: string;
   total: number;
   records: Array<Record<string, unknown>>;
   schema: TableSchema | null;
@@ -84,7 +83,7 @@ export function WorkflowRecordBrowser({
       setRecords(d.records);
       setTotal(d.total);
     } catch (e) {
-      toast.error('Failed to load records', String(e));
+      toast.error('Failed to load records', apiErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -103,7 +102,7 @@ export function WorkflowRecordBrowser({
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      toast.error('Export failed', String(e));
+      toast.error('Export failed', apiErrorMessage(e));
     }
   }
 
@@ -124,7 +123,7 @@ export function WorkflowRecordBrowser({
       toast.success('Records cleared');
       onCleared();
     } catch (e) {
-      toast.error('Clear failed', String(e));
+      toast.error('Clear failed', apiErrorMessage(e));
     }
   }
 

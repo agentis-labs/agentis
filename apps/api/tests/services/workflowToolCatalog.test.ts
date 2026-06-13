@@ -9,9 +9,15 @@ import { describe, it, expect } from 'vitest';
 import { buildWorkspaceToolCatalog, CHAT_TOOL_CATALOG } from '../../src/services/chatToolCatalog.js';
 
 describe('buildWorkspaceToolCatalog', () => {
+  it('exposes capability authoring tools to the orchestrator', () => {
+    const names = CHAT_TOOL_CATALOG.map((tool) => tool.name);
+    expect(names).toContain('agentis.ability.create');
+    expect(names).toContain('agentis.extension.create');
+  });
+
   it('includes the static catalog plus one tool per workflow', () => {
     const catalog = buildWorkspaceToolCatalog([
-      { id: 'wf-1', title: 'Daily Digest', summary: 'Summarize the inbox' },
+      { id: 'wf-1', title: 'Daily Digest', description: 'Summarize the inbox' },
       { id: 'wf-2', title: 'Lead Scorer' },
     ]);
     expect(catalog.length).toBe(CHAT_TOOL_CATALOG.length + 2);
@@ -53,9 +59,9 @@ describe('buildWorkspaceToolCatalog', () => {
     expect(tool.parameters.required).toBeUndefined();
   });
 
-  it('embeds the workflow title and summary in the description', () => {
+  it('embeds the workflow title and description in the tool description', () => {
     const catalog = buildWorkspaceToolCatalog([
-      { id: 'wf-desc', title: 'Weekly Report', summary: 'Compiles metrics' },
+      { id: 'wf-desc', title: 'Weekly Report', description: 'Compiles metrics' },
     ]);
     const tool = catalog.find((t) => t.name === 'workflow.wf-desc')!;
     expect(tool.description).toContain('Weekly Report');

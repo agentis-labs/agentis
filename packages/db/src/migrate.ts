@@ -80,9 +80,148 @@ function backfillIfPreExisting(sqlite: Database.Database): void {
     .run(1, 'init');
 }
 
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let quote: "'" | '"' | '`' | null = null;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const char = sql[i] ?? '';
+    const next = sql[i + 1] ?? '';
+
+    if (inLineComment) {
+      current += char;
+      if (char === '\n') inLineComment = false;
+      continue;
+    }
+
+    if (inBlockComment) {
+      current += char;
+      if (char === '*' && next === '/') {
+        current += next;
+        i += 1;
+        inBlockComment = false;
+      }
+      continue;
+    }
+
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        if (next === quote) {
+          current += next;
+          i += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+
+    if (char === '-' && next === '-') {
+      current += char + next;
+      i += 1;
+      inLineComment = true;
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      current += char + next;
+      i += 1;
+      inBlockComment = true;
+      continue;
+    }
+
+    if (char === '\'' || char === '"' || char === '`') {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    if (char === ';') {
+      if (current.trim()) statements.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.trim()) statements.push(current.trim());
+  return statements;
+}
+
+function stripSqlComments(sql: string): string {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n')
+    .map((line) => line.replace(/--.*$/, ''))
+    .join('\n')
+    .trim();
+}
+
+function unquoteIdentifier(identifier: string): string {
+  const trimmed = identifier.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    || (trimmed.startsWith('`') && trimmed.endsWith('`'))
+    || (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  ) {
+    return trimmed.slice(1, -1).replace(/""/g, '"').replace(/``/g, '`');
+  }
+  return trimmed;
+}
+
+function parseAddColumnStatement(statement: string): { table: string; column: string } | null {
+  const normalized = stripSqlComments(statement);
+  const match = normalized.match(
+    /^ALTER\s+TABLE\s+(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w]*)\s+ADD\s+(?:COLUMN\s+)?(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w]*)\b/i,
+  );
+  if (!match) return null;
+
+  const parts = normalized.match(
+    /^ALTER\s+TABLE\s+((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w]*))\s+ADD\s+(?:COLUMN\s+)?((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w]*))\b/i,
+  );
+  if (!parts) return null;
+  return {
+    table: unquoteIdentifier(parts[1] ?? ''),
+    column: unquoteIdentifier(parts[2] ?? ''),
+  };
+}
+
+function columnExists(sqlite: Database.Database, table: string, column: string): boolean {
+  const rows = sqlite
+    .prepare('SELECT name FROM pragma_table_info(?)')
+    .all(table) as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  return (
+    error instanceof Error
+    && /duplicate column name:/i.test(error.message)
+  );
+}
+
+function execMigrationSql(sqlite: Database.Database, sql: string): void {
+  for (const statement of splitSqlStatements(sql)) {
+    try {
+      sqlite.exec(statement);
+    } catch (error) {
+      const addColumn = parseAddColumnStatement(statement);
+      if (addColumn && isDuplicateColumnError(error) && columnExists(sqlite, addColumn.table, addColumn.column)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
 function applyMigration(sqlite: Database.Database, migration: Migration): void {
   const tx = sqlite.transaction(() => {
-    sqlite.exec(migration.sql);
+    execMigrationSql(sqlite, migration.sql);
     sqlite
       .prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
       .run(migration.version, migration.name);

@@ -1,17 +1,14 @@
 import { useEffect, useMemo } from 'react';
-import { useLocation, useSearchParams } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import type { AgentisSurface, ViewportContext } from '@agentis/core';
 import { emitRealtime } from './realtime';
-import { useSpaces } from '../hooks/useSpaces';
 import { useAgentisStore } from '../store/agentisStore';
 
 export function useViewportAwareness(): { context: ViewportContext; label: string } {
   const location = useLocation();
-  const [searchParams] = useSearchParams();
   const workspaceId = useAgentisStore((s) => s.workspaceId);
   const ambientId = useAgentisStore((s) => s.ambientId);
   const activeRuns = useAgentisStore((s) => s.activeRuns);
-  const { spaces } = useSpaces();
 
   const context = useMemo(() => {
     const route = `${location.pathname}${location.search}${location.hash}`;
@@ -19,8 +16,6 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
     const activeRun = derived.resourceKind === 'workflow'
       ? Object.values(activeRuns).find((run) => run.workflowId === derived.resourceId && ['queued', 'running', 'paused'].includes(run.status))
       : null;
-    const spaceId = searchParams.get('space');
-    const activeSpace = spaceId ? spaces.find((space) => space.id === spaceId) ?? null : null;
     return {
       surface: derived.surface,
       route,
@@ -30,10 +25,8 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
       resourceId: derived.resourceId,
       resourceKind: derived.resourceKind,
       activeRunId: activeRun?.runId ?? null,
-      spaceId: spaceId ?? null,
-      spaceName: activeSpace?.name ?? null,
     } satisfies ViewportContext;
-  }, [activeRuns, ambientId, location.hash, location.pathname, location.search, searchParams, spaces, workspaceId]);
+  }, [activeRuns, ambientId, location.hash, location.pathname, location.search, workspaceId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => emitRealtime('viewport_context', context), 100);
@@ -58,7 +51,7 @@ function deriveSurface(pathname: string): Pick<ViewportContext, 'surface' | 'res
   if (root === 'artifacts' && id) return { surface: 'artifact_detail', resourceKind: 'artifact', resourceId: id, title: 'Artifact detail' };
   if (root === 'artifacts') return { surface: 'artifacts', title: 'Artifacts' };
   if (root === 'packages') return { surface: 'packages', title: 'Packages' };
-  if (root === 'skills') return { surface: 'skills', title: 'Skills' };
+  if (root === 'extensions') return { surface: 'extensions', title: 'extensions' };
   if (root === 'data') return { surface: 'ledger', title: 'Data' };
   if (root === 'settings') return { surface: 'settings', title: 'Settings' };
   if (root === 'chat') return { surface: 'chat', title: 'Chat' };
@@ -68,7 +61,6 @@ function deriveSurface(pathname: string): Pick<ViewportContext, 'surface' | 'res
 function formatViewportLabel(context: ViewportContext): string {
   const base = context.title ?? context.surface;
   const id = context.resourceId ? ` ${context.resourceId.slice(0, 8)}` : '';
-  const space = context.spaceName ? ` - ${context.spaceName}` : '';
   const run = context.activeRunId ? ` · ${context.activeRunId.slice(0, 8)} running` : '';
-  return `${base}${id}${space}${run}`;
+  return `${base}${id}${run}`;
 }

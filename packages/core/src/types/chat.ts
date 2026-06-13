@@ -52,18 +52,49 @@ export interface ChatConfirmationRequest {
   expiresAt: string;
 }
 
+export type ChatFinishReason = 'stop' | 'tool_calls' | 'max_turns' | 'error' | 'length';
+
+export interface ChatTurnTrace {
+  clientTurnId?: string;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  finishReason?: ChatFinishReason;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+}
+
 /**
  * Discriminated union streamed by `AgentAdapter.chat()`.
  * Consumers accumulate `text` deltas, act on `tool_call` events,
  * and terminate on `done`.
  */
 export type ChatDelta =
+  | {
+      type: 'activity';
+      id: string;
+      label: string;
+      detail?: string;
+      phase: 'received' | 'context' | 'runtime' | 'tool' | 'workflow' | 'waiting' | 'complete' | 'error';
+      status: 'running' | 'success' | 'error';
+      startedAt?: string;
+      completedAt?: string;
+      durationMs?: number;
+      workflowId?: string;
+      runId?: string;
+      nodeId?: string;
+      agentId?: string;
+      clientTurnId?: string;
+    }
   | { type: 'thinking'; delta: string }
   | { type: 'text'; delta: string }
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | ({ type: 'confirmation_required' } & ChatConfirmationRequest)
   | { type: 'tool_result'; id: string; name: string; result: unknown; error?: string }
-  | { type: 'done'; finishReason: 'stop' | 'tool_calls' | 'max_turns' | 'error' };
+  // `length` = the model hit its output-token ceiling (typically a reasoning
+  // model that spent the budget thinking and never emitted a final answer). It
+  // is surfaced distinctly so the turn loop can recover (retry with more room)
+  // instead of treating a truncated turn as a clean, empty stop.
+  | { type: 'done'; finishReason: ChatFinishReason };
 
 export type JsonSchemaObject = {
   type?: string;
@@ -98,9 +129,19 @@ export interface ChatTurnContext {
   agentId: string;
   userId: string;
   conversationId: string;
+  clientTurnId?: string;
+  /** Optional operation/run correlation id for direct tool turns. */
+  runId?: string;
   ambientId?: string | null;
   maxTurns?: number;
   viewport?: ViewportContext | null;
+  /**
+   * Cancellation signal for the whole turn, wired from the HTTP request. When the
+   * operator disconnects (closes the SSE stream / navigates away) it aborts, and
+   * the chat loop + any model-backed tool work (notably workflow synthesis) stops
+   * instead of spending model credits on a turn nobody is listening to.
+   */
+  signal?: AbortSignal;
 }
 
 /** Viewport metadata attached to each chat session for context-aware tool filtering. */
@@ -112,10 +153,7 @@ export interface ViewportContext {
   ambientId?: string | null;
   /** Active resource id on the current surface (e.g. workflowId, agentId, runId). */
   resourceId?: string;
-  resourceKind?: 'workflow' | 'run' | 'agent' | 'team' | 'artifact' | 'skill' | 'package' | 'ledger' | 'room' | 'space' | 'unknown';
-  /** Optional active space id (UIUX §23) for any space-scoped view. */
-  spaceId?: string | null;
-  spaceName?: string | null;
+  resourceKind?: 'workflow' | 'run' | 'agent' | 'team' | 'artifact' | 'extension' | 'package' | 'ledger' | 'room' | 'unknown';
   selection?: {
     ids?: string[];
     label?: string;
@@ -139,7 +177,7 @@ export type AgentisSurface =
   | 'artifacts'
   | 'artifact_detail'
   | 'packages'
-  | 'skills'
+  | 'extensions'
   | 'ledger'
   | 'history'
   | 'settings'
@@ -198,6 +236,12 @@ export interface AgentisToolContext {
   conversationId?: string;
   viewport?: ViewportContext | null;
   caller: 'chat' | 'workflow' | 'mcp' | 'system';
+  /**
+   * Cancellation signal propagated from the calling turn. A long, model-backed
+   * tool (e.g. `agentis.build_workflow`) should honor it so an aborted turn stops
+   * spending instead of running to completion in the background.
+   */
+  signal?: AbortSignal;
 }
 
 export interface AgentisToolCatalog {

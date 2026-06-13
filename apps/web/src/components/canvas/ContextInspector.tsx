@@ -1,28 +1,78 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Code2, LayoutTemplate, Search } from 'lucide-react';
+import { Check, Code2, LayoutTemplate, Search } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
-import { SkillCombobox } from './SkillCombobox';
+import { ExtensionCombobox } from './ExtensionCombobox';
 import { ModelChooser } from '../agents/ModelChooser';
-import type { InstalledSkillOption } from './SkillCombobox';
+import type { InstalledExtensionOption } from './ExtensionCombobox';
 import { describeCron, nextFires, CRON_PRESETS } from '../../lib/cronPreview';
 import { NodeTestRunner } from './NodeTestRunner';
+import { NodeRuntimePanel } from './NodeRuntimePanel';
+import { explainNode } from './nodeExplainer';
+import { ListenerHealthPanel } from './ListenerHealthPanel';
+import { ListenerInspector } from './ListenerInspector';
+import { connectorLogoUrl, connectorAccent } from './connectorLogo';
+import { CustomIntegrationDialog } from '../integrations/CustomIntegrationDialog';
 import { TemplatedTextField } from './TemplatedTextField';
 import type { UpstreamNode } from './VariablePicker';
+import type { AdapterType } from '../agents/RuntimePicker';
+import {
+  AGENT_AFFORDANCES,
+  connectedAgentMatches,
+  hasAgentRequirements,
+  normalizeAgentRequirements,
+  withRequirement,
+  type AdapterCapabilitiesLite,
+} from '../../lib/agentCapabilities';
+import {
+  evaluateNodeReadiness,
+  humanizeIdentifier,
+  integrationNeedsCredential,
+  nodeConfigMeta,
+  type IntegrationManifestLite,
+} from './nodeConfigRegistry';
+
+/** A brand logo for a connector slug, falling back to a colored initial chip. */
+function ConnectorLogo({ slug, name, size = 22 }: { slug: string; name: string; size?: number }) {
+  const url = connectorLogoUrl(slug);
+  const [failed, setFailed] = useState(false);
+  if (url && !failed) {
+    return (
+      <img
+        src={url}
+        alt=""
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="shrink-0 rounded-[4px] object-contain"
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  return (
+    <span
+      className="flex shrink-0 items-center justify-center rounded-[4px] text-[10px] font-bold text-white"
+      style={{ width: size, height: size, backgroundColor: connectorAccent(slug) }}
+    >
+      {name.charAt(0).toUpperCase()}
+    </span>
+  );
+}
 
 export interface InspectorSelection {
   kind: 'node' | 'edge' | null;
   nodeType?: string;
   nodeId?: string;
   data?: Record<string, unknown>;
+  /** The node's display title (the canvas label) — edited separately from config. */
+  title?: string;
 }
 
-interface AgentRow { id: string; name: string; adapterType?: string; status?: string; role?: string | null; }
+interface AgentRow { id: string; name: string; adapterType?: string; status?: string; role?: string | null; adapterCapabilities?: AdapterCapabilitiesLite | null; }
 interface SkillRow { id: string; slug: string; name: string; runtime?: string; }
 interface WorkflowRow { id: string; title?: string; name?: string; isReusable?: boolean; }
 interface KnowledgeBaseRow { id: string; name: string; description?: string | null; }
 interface CredentialRow { id: string; name: string; credentialType: string; }
-interface OAuthProvider { id: string; label: string; slugs: string[]; }
+interface OAuthProvider { id: string; label: string; slugs: string[]; configured?: boolean; mode?: string; }
 
 const KIND_LABEL: Record<string, string> = {
   trigger: 'Trigger',
@@ -76,6 +126,9 @@ export function ContextInspector({
   upstream,
   onClose,
   onSave,
+  onTitleChange,
+  activeRunId,
+  onOpenRun,
   className,
 }: {
   selection: InspectorSelection;
@@ -85,9 +138,17 @@ export function ContextInspector({
   upstream?: UpstreamNode[];
   onClose: () => void;
   onSave?: (data: Record<string, unknown>) => void;
+  /** Rename the node (its canvas label). Separate from config save. */
+  onTitleChange?: (title: string) => void;
+  /** The run currently watched on the canvas — powers the node's live runtime card. */
+  activeRunId?: string | null;
+  /** Open a run in the canvas run drawer (stays on the canvas). */
+  onOpenRun?: (runId: string) => void;
   className?: string;
 }) {
   const [pane, setPane] = useState<'form' | 'json' | 'test'>('form');
+  const [titleDraft, setTitleDraft] = useState(selection.title ?? '');
+  useEffect(() => { setTitleDraft(selection.title ?? ''); }, [selection.nodeId, selection.title]);
   const [editData, setEditData] = useState<Record<string, unknown>>(selection.data ?? {});
   const [jsonText, setJsonText] = useState(JSON.stringify(selection.data ?? {}, null, 2));
   const [jsonError, setJsonError] = useState<string | null>(null);
@@ -102,11 +163,12 @@ export function ContextInspector({
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRow[]>([]);
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationManifestLite[]>([]);
 
   const kind = ((editData.kind as string | undefined) ?? selection.nodeType ?? '').toLowerCase();
-  const needsAgents = kind === 'agent_task' || kind === 'agenttask';
-  const needsSkills = kind === 'skill_task' || kind === 'skill';
-  const needsWorkflows = kind === 'subflow';
+  const needsAgents = kind === 'agent_task' || kind === 'agent_session' || kind === 'agenttask';
+  const needsSkills = kind === 'skill_task' || kind === 'skill' || kind === 'extension_task';
+  const needsWorkflows = kind === 'subflow' || kind === 'loop';
   const needsKnowledge = kind === 'knowledge';
   const needsCredentials = kind === 'integration';
 
@@ -138,7 +200,14 @@ export function ContextInspector({
     if (needsCredentials && oauthProviders.length === 0) {
       void api<{ providers: OAuthProvider[] }>('/v1/oauth/providers').then((d) => setOauthProviders(d.providers ?? [])).catch(() => {});
     }
-  }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length]);
+    if (needsCredentials && integrations.length === 0) {
+      void api<{ integrations: IntegrationManifestLite[] }>('/v1/integrations').then((d) => setIntegrations(d.integrations ?? [])).catch(() => {});
+    }
+  }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length, integrations.length]);
+
+  const refreshIntegrations = () => {
+    void api<{ integrations: IntegrationManifestLite[] }>('/v1/integrations').then((d) => setIntegrations(d.integrations ?? [])).catch(() => {});
+  };
 
   // Refresh credentials after an inline OAuth connect so the new credential is selectable/bound.
   function refreshCredentials() {
@@ -171,19 +240,22 @@ export function ContextInspector({
   }
 
   const hasChanges = JSON.stringify(editData) !== JSON.stringify(selection.data ?? {});
-  const headingLabel = KIND_LABEL[kind] ?? selection.nodeType ?? 'Node';
-  // ORCHESTRATOR-CREATION §9 — "why this node?" rationale shown under the heading.
-  const nodeReason = selection.kind === 'node' ? (NODE_REASON[kind] ?? null) : null;
+  const meta = nodeConfigMeta(kind);
+  const headingLabel = meta.label ?? selection.nodeType ?? 'Node';
+  // Prefer a config-specific explanation ("Emails the digest to you, 0 9 * * *")
+  // over the generic per-kind blurb so the node explains itself in context.
+  const nodeReason = selection.kind === 'node' ? (explainNode(kind, editData) || meta.reason) : null;
+  const readiness = selection.kind === 'node' ? evaluateNodeReadiness(editData, { integrations }) : null;
 
   return (
-    <aside className={clsx('flex w-80 shrink-0 flex-col border-l border-line bg-surface text-xs', className)}>
+    <aside className={clsx('flex w-[360px] shrink-0 flex-col border-l border-line bg-surface text-xs', className)}>
       <header className="flex items-center justify-between border-b border-line px-3 py-2.5">
         <div className="min-w-0">
           <span className="text-[10px] uppercase tracking-wider text-text-muted">
             {selection.kind === 'node' ? 'Node' : 'Edge'}
           </span>
           <div className="text-subheading text-text-primary">{headingLabel}</div>
-          {nodeReason && <div className="mt-0.5 text-[10px] italic text-text-muted" title="Why this node?">{nodeReason}</div>}
+          {nodeReason && <div className="mt-0.5 text-[11px] leading-snug text-text-secondary" title="What this node does in your workflow">{nodeReason}</div>}
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -224,6 +296,42 @@ export function ContextInspector({
       </header>
 
       <div className="flex-1 overflow-auto px-3 py-3">
+        {pane === 'form' && selection.kind === 'node' && workflowId && selection.nodeId && (
+          <NodeRuntimePanel
+            workflowId={workflowId}
+            nodeId={selection.nodeId}
+            activeRunId={activeRunId}
+            onOpenRun={onOpenRun}
+          />
+        )}
+        {pane === 'form' && selection.kind === 'node' && onTitleChange && (
+          <Field label="Node name" hint="Shown as the node's label on the canvas.">
+            <input
+              type="text"
+              className={inputCls}
+              value={titleDraft}
+              maxLength={255}
+              placeholder={headingLabel}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => {
+                const next = titleDraft.trim();
+                if (next !== (selection.title ?? '')) onTitleChange(next);
+              }}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            />
+          </Field>
+        )}
+        {pane === 'form' && readiness && (
+          <div className={clsx(
+            'mb-3 rounded-input border px-2.5 py-2 text-[11px]',
+            readiness.ready
+              ? 'border-success/35 bg-success-soft text-success'
+              : 'border-warn/50 bg-warn/10 text-warn',
+          )}>
+            <div className="font-semibold">{readiness.ready ? 'Ready to run' : 'Setup required'}</div>
+            {!readiness.ready && <div className="mt-0.5 text-[10px] text-text-secondary">{readiness.message}</div>}
+          </div>
+        )}
         {pane === 'test' && workflowId && selection.nodeId ? (
           <NodeTestRunner
             workflowId={workflowId}
@@ -256,7 +364,9 @@ export function ContextInspector({
               knowledgeBases={knowledgeBases}
               credentials={credentials}
               oauthProviders={oauthProviders}
+              integrations={integrations}
               refreshCredentials={refreshCredentials}
+              refreshIntegrations={refreshIntegrations}
               upstream={upstream}
               onSkillsChange={() => {
                 void api<{ skills: SkillRow[] }>('/v1/skills')
@@ -323,29 +433,37 @@ interface NodeFormProps {
   knowledgeBases: KnowledgeBaseRow[];
   credentials: CredentialRow[];
   oauthProviders: OAuthProvider[];
+  integrations: IntegrationManifestLite[];
   refreshCredentials: () => void;
+  refreshIntegrations: () => void;
   /** Other nodes in the same workflow — populates the variable picker. */
   upstream?: UpstreamNode[];
   onSkillsChange?: () => void;
 }
 
-function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, refreshCredentials, upstream, onSkillsChange }: NodeFormProps) {
+function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, integrations, refreshCredentials, refreshIntegrations, upstream, onSkillsChange }: NodeFormProps) {
   switch (kind) {
     case 'trigger':
       return <TriggerForm data={data} update={update} />;
     case 'agent_task':
       return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} />;
+    case 'agent_session':
+      return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} session />;
     case 'agent_swarm':
       return <AgentSwarmForm data={data} update={update} />;
     case 'skill':
     case 'skill_task':
       return <SkillForm data={data} update={update} skills={skills} onSkillsChange={onSkillsChange} />;
+    case 'extension_task':
+      return <ExtensionTaskForm data={data} update={update} skills={skills} onSkillsChange={onSkillsChange} />;
     case 'approval':
     case 'checkpoint':
       return <ApprovalForm data={data} update={update} />;
     case 'router':
     case 'branch':
       return <BranchForm data={data} update={update} />;
+    case 'merge':
+      return <MergeForm data={data} update={update} />;
     case 'subflow':
       return <SubflowForm data={data} update={update} workflows={workflows} />;
     case 'knowledge':
@@ -362,11 +480,13 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
     case 'filter':
       return <FilterForm data={data} update={update} upstream={upstream} />;
     case 'integration':
-      return <IntegrationForm data={data} update={update} upstream={upstream} credentials={credentials} oauthProviders={oauthProviders} refreshCredentials={refreshCredentials} />;
+      return <IntegrationForm data={data} update={update} upstream={upstream} credentials={credentials} oauthProviders={oauthProviders} integrations={integrations} refreshCredentials={refreshCredentials} refreshIntegrations={refreshIntegrations} />;
     case 'http_request':
       return <HttpRequestForm data={data} update={update} upstream={upstream} />;
     case 'workflow_store':
       return <WorkflowStoreForm data={data} update={update} />;
+    case 'workspace_store':
+      return <WorkflowStoreForm data={data} update={update} workspace />;
     case 'evaluator':
       return <EvaluatorForm data={data} update={update} />;
     case 'guardrails':
@@ -375,6 +495,10 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <LoopForm data={data} update={update} workflows={workflows} />;
     case 'parallel':
       return <ParallelForm data={data} update={update} />;
+    case 'dynamic_swarm':
+      return <DynamicSwarmForm data={data} update={update} />;
+    case 'planner':
+      return <PlannerForm data={data} update={update} />;
     case 'artifact_collect':
       return <ArtifactCollectForm data={data} update={update} />;
     case 'return_output':
@@ -409,6 +533,23 @@ function Field({
   );
 }
 
+function Accordion({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  return (
+    <div className="mb-3 rounded-md border border-line bg-surface-2">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-medium text-text-secondary hover:text-text-primary"
+      >
+        <span>{title}</span>
+        <span className="text-text-muted">{isOpen ? '−' : '+'}</span>
+      </button>
+      {isOpen && <div className="border-t border-line/60 px-3 pb-3 pt-2">{children}</div>}
+    </div>
+  );
+}
+
 const inputCls =
   'h-8 w-full rounded-input border border-line bg-surface-2 px-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none';
 const selectCls = inputCls;
@@ -419,11 +560,29 @@ function asStr(v: unknown): string {
   return typeof v === 'string' ? v : v == null ? '' : String(v);
 }
 
+function hasAnySecretValue(values: Record<string, string>): boolean {
+  return Object.values(values).some((value) => value.trim().length > 0);
+}
+
+function isSecretField(field: string): boolean {
+  return /token|secret|password|key|credential/i.test(field);
+}
+
+function credentialFieldPlaceholder(serviceName: string, field: string): string {
+  const label = field
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/[_-]+/g, ' ')
+    .replace(/^./, (char) => char.toUpperCase());
+  return `${serviceName ? `${serviceName} ` : ''}${label}`.trim();
+}
+
 // ─── Per-kind forms ────────────────────────────────────────────────────────
 
 function TriggerForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const triggerType = asStr(data.triggerType) || 'manual';
   const schedule = asStr(data.schedule);
+  const timezone = asStr(data.timezone) || 'UTC';
+  const triggerId = asStr(data.triggerId);
   const cronDescription = useMemo(() => triggerType === 'cron' && schedule ? describeCron(schedule) : null, [triggerType, schedule]);
   const cronNextFires = useMemo(() => triggerType === 'cron' && schedule ? nextFires(schedule, 5) : [], [triggerType, schedule]);
   return (
@@ -442,13 +601,22 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
       </Field>
       {triggerType === 'cron' && (
         <>
-          <Field label="Schedule (UTC cron)" hint="Five fields: minute hour day-of-month month day-of-week.">
+          <Field label="Cron expression" hint="Five fields: minute hour day-of-month month day-of-week.">
             <input
               type="text"
               className={inputCls + ' font-mono'}
               placeholder="0 9 * * 1"
               value={schedule}
               onChange={(e) => update({ schedule: e.target.value })}
+            />
+          </Field>
+          <Field label="Timezone" hint="IANA timezone used to interpret the cron expression.">
+            <input
+              type="text"
+              className={inputCls}
+              placeholder="UTC"
+              value={timezone}
+              onChange={(e) => update({ timezone: e.target.value })}
             />
           </Field>
           <Field label="Presets">
@@ -489,9 +657,13 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
         </div>
       )}
       {triggerType === 'persistent_listener' && (
-        <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] text-text-secondary">
-          Persistent listeners stay connected to a source (e.g. a chat channel) and fire the workflow each time a relevant event arrives.
-        </div>
+        <>
+          <div className="mb-3 rounded-md border border-accent/25 bg-accent-soft px-2.5 py-2 text-[11px] leading-4 text-text-secondary">
+            Persistent listeners run 24/7 while Agentis is online. Choose a source, decide which events matter, then control how matching events become workflow runs.
+          </div>
+          <ListenerInspector data={data} update={update} />
+          {triggerId && <ListenerHealthPanel triggerId={triggerId} />}
+        </>
       )}
     </>
   );
@@ -499,7 +671,7 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
 
 const SPECIALIST_ROLES = ['planner', 'researcher', 'coder', 'reviewer', 'analyst', 'writer', 'monitor', 'architect', 'debugger', 'deployer'] as const;
 
-function AgentTaskForm({ data, update, agents, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[] }) {
+function AgentTaskForm({ data, update, agents, upstream, session = false }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[]; session?: boolean }) {
   const agentId = asStr(data.agentId);
   const agentRole = asStr(data.agentRole);
   const boundAgent = agents.find((a) => a.id === agentId);
@@ -554,15 +726,18 @@ function AgentTaskForm({ data, update, agents, upstream }: { data: Record<string
           </p>
         )}
       </Field>
-      {agentId && adapterType && (
-        <Field label="Model override" hint="Tune the model for this node without changing the agent globally.">
-          <ModelChooser
-            adapterType={adapterType as never}
-            agentId={agentId}
-            value={asStr(data.modelOverride)}
-            onChange={(m) => update({ modelOverride: m || undefined })}
-            variant="compact"
-          />
+      <CapabilityRequirements data={data} update={update} agents={agents} />
+      <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
+      {session && (
+        <Field label="Session behavior" hint="Persistent sessions can pause for input and resume without losing context.">
+          <label className="flex items-center gap-2 text-[11px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={data.allowPause !== false}
+              onChange={(e) => update({ allowPause: e.target.checked })}
+            />
+            Allow pause and resume
+          </label>
         </Field>
       )}
       <Field label="Prompt" hint="Type `{{` to insert a variable from the trigger or any upstream node.">
@@ -579,21 +754,113 @@ function AgentTaskForm({ data, update, agents, upstream }: { data: Record<string
   );
 }
 
+function CapabilityRequirements({ data, update, agents }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[] }) {
+  const requirements = normalizeAgentRequirements(data.requires);
+  const matches = connectedAgentMatches(agents, requirements);
+  return (
+    <Accordion title="Required capabilities" defaultOpen>
+      <p className="mb-2 text-[10px] leading-relaxed text-text-muted">
+        Route this task only to connected agents that expose the tools it needs.
+      </p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {AGENT_AFFORDANCES.map((affordance) => (
+          <label key={affordance.key} className="flex items-center gap-1.5 rounded-md border border-line bg-canvas px-2 py-1.5 text-[11px] text-text-secondary">
+            <input
+              type="checkbox"
+              aria-label={affordance.label}
+              checked={requirements[affordance.key] === true}
+              onChange={(event) => update({ requires: withRequirement(requirements, affordance.key, event.target.checked) })}
+            />
+            {affordance.label}
+          </label>
+        ))}
+      </div>
+      {hasAgentRequirements(requirements) && (
+        <div className="mt-2 space-y-1 border-t border-line/70 pt-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Connected agent match</div>
+          {matches.length === 0 && <p className="text-[10px] text-warn">No connected agents are available.</p>}
+          {matches.map((match) => (
+            <div key={match.id} className="flex items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2 py-1.5 text-[10px]">
+              <span className="truncate text-text-primary">{match.name}</span>
+              <span className={match.satisfied ? 'text-success' : 'text-warn'}>
+                {match.satisfied ? 'ready' : `missing ${match.missing.join(', ')}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Accordion>
+  );
+}
+
+function ModelPolicyField({ data, update, adapterType, agentId }: { data: Record<string, unknown>; update: NodeFormProps['update']; adapterType?: string; agentId?: string }) {
+  const [catalogAdapter, setCatalogAdapter] = useState<AdapterType>((adapterType as AdapterType | undefined) ?? 'http');
+  useEffect(() => {
+    if (adapterType) setCatalogAdapter(adapterType as AdapterType);
+  }, [adapterType]);
+  return (
+    <Accordion title="LLM model policy" defaultOpen>
+      {!adapterType && (
+        <Field label="Model catalog" hint="Used to browse compatible models before a runtime agent is bound.">
+          <select className={selectCls} value={catalogAdapter} onChange={(event) => setCatalogAdapter(event.target.value as AdapterType)}>
+            <option value="http">Provider catalog</option>
+            <option value="openclaw">OpenClaw</option>
+            <option value="claude_code">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="cursor">Cursor</option>
+            <option value="hermes_agent">Hermes</option>
+          </select>
+        </Field>
+      )}
+      <Field label="Model override" hint="Keep runtime default for automatic routing, or pin a model for this node.">
+        <ModelChooser
+          adapterType={catalogAdapter}
+          agentId={agentId || undefined}
+          value={asStr(data.modelOverride)}
+          onChange={(model) => update({ modelOverride: model || undefined })}
+        />
+      </Field>
+    </Accordion>
+  );
+}
+
 function SkillForm({ data, update, skills, onSkillsChange }: { data: Record<string, unknown>; update: NodeFormProps['update']; skills: SkillRow[]; onSkillsChange?: () => void }) {
-  const installed: InstalledSkillOption[] = skills.map((s) => ({
+  const installed: InstalledExtensionOption[] = skills.map((s) => ({
     id: s.id,
     name: s.name,
     runtime: s.runtime,
   }));
   return (
-    <Field label="Skill" hint="Pick a typed deterministic skill.">
-      <SkillCombobox
-        value={asStr(data.skillId)}
+    <Field label="Skill / Extension" hint="Pick a typed deterministic skill/extension.">
+      <ExtensionCombobox
+        value={asStr(data.extensionId) || asStr(data.skillId) || ''}
         installed={installed}
-        onChange={(skillId) => update({ skillId })}
+        onChange={(id: string) => update({ extensionId: id, skillId: id })}
         onInstalledChange={onSkillsChange}
       />
     </Field>
+  );
+}
+
+function ExtensionTaskForm({ data, update, skills, onSkillsChange }: { data: Record<string, unknown>; update: NodeFormProps['update']; skills: SkillRow[]; onSkillsChange?: () => void }) {
+  return (
+    <>
+      <SkillForm data={data} update={update} skills={skills} onSkillsChange={onSkillsChange} />
+      <Field label="Operation" hint="Typed operation exported by the extension manifest.">
+        <input
+          className={inputCls + ' font-mono'}
+          value={asStr(data.operationName) || 'execute'}
+          onChange={(event) => update({ operationName: event.target.value })}
+          placeholder="execute"
+        />
+      </Field>
+      <Field label="Input mapping" hint="Map operation inputs to trigger or upstream values.">
+        <RawMappingEditor
+          mapping={(data.inputMapping as Record<string, string>) || {}}
+          onChange={(inputMapping) => update({ inputMapping })}
+        />
+      </Field>
+    </>
   );
 }
 
@@ -627,6 +894,9 @@ function ApprovalForm({ data, update }: { data: Record<string, unknown>; update:
 
 function BranchForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const mode = asStr(data.routingMode) || 'first_match';
+  const branches = Array.isArray(data.branches)
+    ? data.branches as Array<{ label?: string; condition?: string }>
+    : [];
   return (
     <>
       <Field label="Routing" hint="Choose how branches are picked.">
@@ -636,14 +906,50 @@ function BranchForm({ data, update }: { data: Record<string, unknown>; update: N
           <option value="llm_route">Let an LLM decide</option>
         </select>
       </Field>
-      <Field label="Condition" hint="Expression evaluated against the node's input. (Edit branches list in JSON view for advanced setups.)">
-        <input
-          type="text"
-          className={inputCls}
-          placeholder='e.g., output.score > 0.8'
-          value={asStr(data.condition)}
-          onChange={(e) => update({ condition: e.target.value })}
-        />
+      <Field label="Branches" hint="Branches are evaluated from top to bottom.">
+        <div className="space-y-1.5">
+          {branches.map((branch, index) => (
+            <div key={index} className="rounded-md border border-line bg-surface-2 p-2">
+              <div className="flex gap-1.5">
+                <input className={inputCls} value={branch.label ?? ''} placeholder="Label" onChange={(event) => {
+                  const next = [...branches];
+                  next[index] = { ...branch, label: event.target.value };
+                  update({ branches: next });
+                }} />
+                <button type="button" aria-label="Remove branch" className="px-1.5 text-text-muted hover:text-danger" onClick={() => update({ branches: branches.filter((_, branchIndex) => branchIndex !== index) })}>×</button>
+              </div>
+              <input className={inputCls + ' mt-1.5 font-mono'} value={branch.condition ?? ''} placeholder="input.score > 0.8" onChange={(event) => {
+                const next = [...branches];
+                next[index] = { ...branch, condition: event.target.value };
+                update({ branches: next });
+              }} />
+            </div>
+          ))}
+          <button type="button" className="inline-flex h-7 items-center rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:border-accent/60 hover:text-text-primary" onClick={() => update({ branches: [...branches, { label: `Branch ${branches.length + 1}`, condition: '' }] })}>
+            + Add branch
+          </button>
+        </div>
+      </Field>
+      {mode === 'llm_route' && <ModelPolicyField data={data} update={update} />}
+    </>
+  );
+}
+
+function MergeForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Wait for" hint="Choose whether all incoming branches or the first available result should continue.">
+        <select className={selectCls} value={asStr(data.requiredInputs) || 'all'} onChange={(event) => update({ requiredInputs: event.target.value })}>
+          <option value="all">All incoming branches</option>
+          <option value="first">First completed branch</option>
+        </select>
+      </Field>
+      <Field label="Merge strategy">
+        <select className={selectCls} value={asStr(data.mergeStrategy) || 'merge_keys'} onChange={(event) => update({ mergeStrategy: event.target.value })}>
+          <option value="merge_keys">Merge object keys</option>
+          <option value="collect_all">Collect into an array</option>
+          <option value="first_non_null">Use first non-null result</option>
+        </select>
       </Field>
     </>
   );
@@ -805,7 +1111,7 @@ function TransformForm({ data, update, upstream }: { data: Record<string, unknow
     <>
       <Field
         label="Expression"
-        hint="A JS expression. `input` is the merged inputs map. Type `{{` to reference upstream values."
+        hint="A JS expression. Use `input`, `ctx`, or aliases like `nodes` and `trigger`. Type `{{` to insert template references."
       >
         <TemplatedTextField
           multiline
@@ -826,6 +1132,17 @@ function TransformForm({ data, update, upstream }: { data: Record<string, unknow
           onChange={(e) => update({ outputKey: e.target.value || undefined })}
         />
       </Field>
+      <Field label="Timeout (ms, optional)" hint="Leave blank for the engine's workload-aware deadline. Maximum 30000 ms.">
+        <input
+          type="number"
+          min={1}
+          max={30000}
+          className={inputCls}
+          placeholder="Automatic"
+          value={typeof data.timeoutMs === 'number' ? data.timeoutMs : ''}
+          onChange={(e) => update({ timeoutMs: e.target.value === '' ? undefined : Number(e.target.value) })}
+        />
+      </Field>
     </>
   );
 }
@@ -844,149 +1161,322 @@ function FilterForm({ data, update, upstream }: { data: Record<string, unknown>;
           upstream={upstream}
         />
       </Field>
+      <Field label="Timeout (ms, optional)" hint="Leave blank for the engine's workload-aware deadline. Maximum 30000 ms.">
+        <input
+          type="number"
+          min={1}
+          max={30000}
+          className={inputCls}
+          placeholder="Automatic"
+          value={typeof data.timeoutMs === 'number' ? data.timeoutMs : ''}
+          onChange={(e) => update({ timeoutMs: e.target.value === '' ? undefined : Number(e.target.value) })}
+        />
+      </Field>
     </>
   );
 }
 
 // ─── Integration & HTTP ─────────────────────────────────────────────────────
 
-function IntegrationForm({ data, update, upstream, credentials, oauthProviders, refreshCredentials }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[]; credentials: CredentialRow[]; oauthProviders: OAuthProvider[]; refreshCredentials: () => void }) {
+function schemaProps(schema: unknown): Array<{ key: string; type: string; description?: string; required: boolean }> {
+  if (!schema || typeof schema !== 'object') return [];
+  const s = schema as { properties?: Record<string, unknown>; required?: string[] };
+  if (!s.properties || typeof s.properties !== 'object') return [];
+  const required = new Set(Array.isArray(s.required) ? s.required : []);
+  return Object.entries(s.properties).map(([key, raw]) => {
+    const spec = (raw && typeof raw === 'object' ? raw : {}) as { type?: string; description?: string };
+    return { key, type: typeof spec.type === 'string' ? spec.type : 'any', description: spec.description, required: required.has(key) };
+  });
+}
+
+function RawMappingEditor({ mapping, onChange }: { mapping: Record<string, string>; onChange: (m: Record<string, string>) => void }) {
+  const entries = Object.entries(mapping);
+  const [newKey, setNewKey] = useState('');
+  return (
+    <div className="mb-3 space-y-1.5">
+      {entries.map(([key, value]) => (
+        <div key={key} className="flex items-center gap-1.5">
+          <input className={inputCls + ' font-mono'} value={key} readOnly />
+          <input
+            className={inputCls}
+            value={value}
+            placeholder="{{ ... }}"
+            onChange={(e) => onChange({ ...mapping, [key]: e.target.value })}
+          />
+          <button
+            type="button"
+            className="shrink-0 rounded-md px-1.5 text-text-muted hover:text-danger"
+            onClick={() => { const next = { ...mapping }; delete next[key]; onChange(next); }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <div className="flex items-center gap-1.5">
+        <input
+          className={inputCls + ' font-mono'}
+          value={newKey}
+          placeholder="input key"
+          onChange={(e) => setNewKey(e.target.value)}
+        />
+        <button
+          type="button"
+          className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-text-secondary hover:border-accent/50 hover:text-text-primary"
+          onClick={() => { if (newKey.trim()) { onChange({ ...mapping, [newKey.trim()]: '' }); setNewKey(''); } }}
+        >
+          + Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function IntegrationForm({ data, update, upstream: _upstream, credentials, oauthProviders, integrations, refreshCredentials, refreshIntegrations }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[]; credentials: CredentialRow[]; oauthProviders: OAuthProvider[]; integrations: IntegrationManifestLite[]; refreshCredentials: () => void; refreshIntegrations: () => void }) {
   const slug = asStr(data.integrationId);
   const credentialId = asStr(data.credentialId);
-  // Match credentials to this integration by slug appearing in the type or name.
+  const manifest = integrations.find((item) => item.service === slug || item.id === slug);
+  const operationId = asStr(data.operationId) || manifest?.operations[0] || '';
   const matching = slug
-    ? credentials.filter((c) => `${c.credentialType} ${c.name}`.toLowerCase().includes(slug.toLowerCase()))
-    : credentials;
-  const bound = credentials.find((c) => c.id === credentialId);
-  // The OAuth provider that can authenticate this integration slug, if configured.
-  const provider = slug ? oauthProviders.find((p) => p.slugs.includes(slug.toLowerCase())) : undefined;
+    ? credentials.filter((credential) => `${credential.credentialType} ${credential.name}`.toLowerCase().includes(slug.toLowerCase()))
+    : [];
+  const bound = credentials.find((credential) => credential.id === credentialId);
+  const provider = slug ? oauthProviders.find((item) => item.slugs.includes(slug.toLowerCase())) : undefined;
+  const needsCredential = integrationNeedsCredential(manifest);
+  // OAuth-only services (e.g. Gmail) must show a "Sign in with X" button — never
+  // an API-key field, which can't authenticate them.
+  const isOAuth = (manifest?.auth?.type ?? manifest?.credentialSchema?.type) === 'oauth2';
+  const credentialFields = useMemo(
+    () => {
+      const fields = manifest?.credentialSchema?.fields;
+      return Array.isArray(fields) && fields.length > 0
+        ? fields.map((field) => String(field))
+        : ['token'];
+    },
+    [manifest],
+  );
+  const [secretValues, setSecretValues] = useState<Record<string, string>>({});
   const [connecting, setConnecting] = useState(false);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+  const [savingCredential, setSavingCredential] = useState(false);
+  const [integrationQuery, setIntegrationQuery] = useState('');
+  const [showCreateIntegration, setShowCreateIntegration] = useState(false);
+  const visibleIntegrations = useMemo(() => {
+    const query = integrationQuery.trim().toLowerCase();
+    return integrations
+      .filter((item) => !query || `${item.name} ${item.service} ${item.category ?? ''}`.toLowerCase().includes(query))
+      .sort((left, right) => Number(right.service === slug) - Number(left.service === slug) || left.name.localeCompare(right.name));
+  }, [integrationQuery, integrations, slug]);
 
-  // ORCH §7 — inline OAuth: pop the provider's consent flow, receive the minted
-  // credential id via postMessage, bind it to the node (amber → green). No nav away.
+  function chooseIntegration(next: IntegrationManifestLite) {
+    update({
+      integrationId: next.service,
+      operationId: next.operations[0] ?? undefined,
+      credentialId: undefined,
+    });
+    setSecretValues({});
+  }
+
   function connectOAuth() {
     if (!provider) return;
+    setOauthError(null);
+    if (provider.configured === false) {
+      setOauthError(`${provider.label} sign-in isn't enabled on this server yet. Enable AGENTIS_OAUTH_PROXY_URL or set OAUTH_${provider.id.toUpperCase()}_CLIENT_ID and OAUTH_${provider.id.toUpperCase()}_CLIENT_SECRET, then restart.`);
+      return;
+    }
     setConnecting(true);
     void api<{ url: string }>(`/v1/oauth/${provider.id}/authorize`, {
       method: 'POST',
       body: JSON.stringify({ integrationSlug: slug, origin: window.location.origin }),
     }).then(({ url }) => {
       const popup = window.open(url, 'agentis-oauth', 'popup,width=520,height=680');
-      const onMessage = (e: MessageEvent) => {
-        const d = e.data as { type?: string; ok?: boolean; credentialId?: string };
-        if (d?.type !== 'agentis-oauth') return;
+      const onMessage = (event: MessageEvent) => {
+        const message = event.data as { type?: string; ok?: boolean; credentialId?: string };
+        if (message?.type !== 'agentis-oauth') return;
         window.removeEventListener('message', onMessage);
         setConnecting(false);
-        if (d.ok && d.credentialId) {
-          update({ credentialId: d.credentialId });
+        if (message.ok && message.credentialId) {
+          update({ credentialId: message.credentialId });
           refreshCredentials();
         }
       };
       window.addEventListener('message', onMessage);
-      // Safety: stop the spinner if the popup is closed without finishing.
       const poll = setInterval(() => {
-        if (popup?.closed) { clearInterval(poll); window.removeEventListener('message', onMessage); setConnecting(false); }
+        if (popup?.closed) {
+          clearInterval(poll);
+          window.removeEventListener('message', onMessage);
+          setConnecting(false);
+        }
       }, 800);
     }).catch(() => setConnecting(false));
   }
 
+  async function saveCredential() {
+    if (!manifest) return;
+    const value = Object.fromEntries(
+      credentialFields
+        .map((field) => [field, (secretValues[field] ?? '').trim()] as const)
+        .filter(([, fieldValue]) => fieldValue),
+    );
+    if (Object.keys(value).length === 0) return;
+    setSavingCredential(true);
+    try {
+      const credential = await api<CredentialRow>('/v1/credentials', {
+        method: 'POST',
+        body: JSON.stringify({
+          credentialType: `integration_${manifest.service}`,
+          name: `${manifest.name} (${manifest.service})`,
+          value: JSON.stringify(value),
+        }),
+      });
+      update({ credentialId: credential.id });
+      setSecretValues({});
+      refreshCredentials();
+    } finally {
+      setSavingCredential(false);
+    }
+  }
+
   return (
     <>
-      <Field label="Integration" hint="Slug of a registered connector (slack, gmail, github, sheets, …).">
-        <input
-          type="text"
-          className={inputCls}
-          placeholder="slack"
-          value={slug}
-          onChange={(e) => update({ integrationId: e.target.value })}
-        />
-      </Field>
-      <Field label="Operation" hint="Operation slug from the connector's manifest.">
-        <input
-          type="text"
-          className={inputCls}
-          placeholder="send_message"
-          value={asStr(data.operationId)}
-          onChange={(e) => update({ operationId: e.target.value })}
-        />
-      </Field>
-
-      {/* ORCHESTRATOR-CREATION §7 — the living integration node. No credential =
-          pending-config (amber); bound = configured (green). Wire in place. */}
-      {credentialId ? (
-        <div className="rounded-md border border-emerald-500/40 bg-emerald-500/5 p-2.5">
-          <div className="flex items-center gap-2 text-[11px] text-text-primary">
-            <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
-            <span className="font-medium">Connected{slug ? ` — ${slug}` : ''}</span>
+      {manifest && (
+        <div className="mb-3 rounded-input border border-line bg-surface-2 p-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <ConnectorLogo slug={manifest.service} name={manifest.name} size={26} />
+              <div className="truncate text-[12px] font-semibold text-text-primary">{manifest.name}</div>
+            </div>
+            <span className="shrink-0 rounded-pill border border-line bg-canvas px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-text-muted">{manifest.category ?? 'Connector'}</span>
           </div>
-          {bound && <p className="mt-1 text-[10px] text-text-muted">{bound.name}</p>}
-          <button
-            type="button"
-            className="mt-2 text-[10px] text-accent hover:underline"
-            onClick={() => update({ credentialId: undefined })}
-          >
-            Change credential
-          </button>
+          {manifest.description && <p className="mt-1 text-[10px] leading-relaxed text-text-muted">{manifest.description}</p>}
+        </div>
+      )}
+      <Field label="Operation" hint="Choose an operation exposed by this connector.">
+        <select className={selectCls} value={operationId} onChange={(event) => update({ operationId: event.target.value })}>
+          {(manifest?.operations ?? []).map((operation) => <option key={operation} value={operation}>{humanizeIdentifier(operation)}</option>)}
+        </select>
+      </Field>
+      {manifest && !needsCredential && (
+        <div className="mb-3 flex items-center gap-2 rounded-input border border-success/35 bg-success-soft px-2.5 py-2 text-[11px] text-success">
+          <Check size={12} /> No credential required
+        </div>
+      )}
+      {manifest && needsCredential && (credentialId ? (
+        <div className="mb-3 rounded-input border border-success/35 bg-success-soft p-2.5">
+          <div className="flex items-center gap-2 text-[11px] font-semibold text-success"><Check size={12} /> Credential bound</div>
+          <p className="mt-1 text-[10px] text-text-muted">{bound?.name ?? credentialId}</p>
+          <button type="button" className="mt-2 text-[10px] text-accent hover:underline" onClick={() => update({ credentialId: undefined })}>Change credential</button>
         </div>
       ) : (
-        <div className="rounded-md border-2 border-warn/60 bg-warn/5 p-2.5 shadow-[0_0_12px_rgba(245,158,11,0.25)]">
-          <div className="flex items-center gap-2 text-[11px] text-text-primary">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-warn" />
-            <span className="font-medium">Connect {slug || 'integration'}</span>
-          </div>
-          <p className="mt-1 text-[10px] text-text-muted">
-            This node is built but needs a credential before it can run.
-          </p>
-          {provider && (
-            <button
-              type="button"
-              onClick={connectOAuth}
-              disabled={connecting}
-              className="mt-2 inline-flex h-8 w-full items-center justify-center gap-2 rounded-btn bg-surface px-2 text-[11px] font-medium text-text-primary ring-1 ring-line hover:ring-accent disabled:opacity-50"
-            >
-              {connecting ? 'Connecting…' : `Sign in with ${provider.label}`}
-            </button>
+        <div className="mb-3 rounded-input border border-warn/50 bg-warn/10 p-2.5">
+          <div className="text-[11px] font-semibold text-warn">Connect {manifest?.name ?? 'this service'}</div>
+          {isOAuth ? (
+            // OAuth-only service: always offer the sign-in button (never an API key).
+            <>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
+                {provider?.configured === false
+                  ? `Sign-in for ${provider.label} isn't enabled on this server yet.`
+                  : `Sign in to connect your account — Agentis handles the rest. Nothing is stored on the node.`}
+              </p>
+              <button type="button" onClick={connectOAuth} disabled={connecting} className="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-btn border border-accent/40 bg-accent-soft text-[12px] font-semibold text-accent hover:bg-accent/20 disabled:opacity-50">
+                {connecting ? 'Connecting…' : `Sign in with ${provider?.label ?? manifest?.name ?? 'OAuth'}`}
+              </button>
+              {oauthError && <p className="mt-2 text-[10px] leading-relaxed text-danger">{oauthError}</p>}
+            </>
+          ) : (
+            <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
+              Connect this service with an API key from its dashboard. It's encrypted in your workspace vault, never stored on the node.
+            </p>
           )}
-          {matching.length > 0 ? (
+          {matching.length > 0 && (
             <div className="mt-2 space-y-1">
-              {provider && <div className="text-[9px] uppercase tracking-wider text-text-muted">or use an existing credential</div>}
-              {matching.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  className="flex w-full items-center justify-between rounded border border-line bg-surface px-2 py-1 text-left text-[10px] hover:border-accent"
-                  onClick={() => update({ credentialId: c.id })}
-                >
-                  <span className="truncate text-text-primary">{c.name}</span>
-                  <span className="ml-2 shrink-0 text-text-muted">{c.credentialType}</span>
+              <div className="text-[9px] uppercase tracking-wider text-text-muted">Use an existing connection</div>
+              {matching.map((credential) => (
+                <button key={credential.id} type="button" className="flex w-full items-center justify-between rounded border border-line bg-surface px-2 py-1.5 text-left text-[10px] hover:border-accent" onClick={() => update({ credentialId: credential.id })}>
+                  <span className="truncate text-text-primary">{credential.name}</span>
+                  <span className="ml-2 shrink-0 text-text-muted">{credential.credentialType}</span>
                 </button>
               ))}
             </div>
-          ) : (
-            !provider && (
-              <p className="mt-2 text-[10px] italic text-text-muted">
-                No matching credentials. Create one in Settings → Credentials, then return here.
-              </p>
-            )
+          )}
+          {!isOAuth && (
+            <div className="mt-2 border-t border-line/70 pt-2">
+              <div className="text-[9px] uppercase tracking-wider text-text-muted">Credential fields</div>
+              <div className="mt-1.5 space-y-1.5">
+                {credentialFields.map((field) => (
+                  <input
+                    key={field}
+                    type={isSecretField(field) ? 'password' : 'text'}
+                    className={inputCls}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    placeholder={credentialFieldPlaceholder(manifest?.name ?? '', field)}
+                    value={secretValues[field] ?? ''}
+                    onChange={(event) => setSecretValues((prev) => ({ ...prev, [field]: event.target.value }))}
+                  />
+                ))}
+              </div>
+              <button type="button" onClick={() => void saveCredential()} disabled={!hasAnySecretValue(secretValues) || savingCredential} className="mt-1.5 inline-flex h-8 w-full items-center justify-center rounded-btn bg-accent px-2 text-[11px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-50">
+                {savingCredential ? 'Saving…' : 'Save and connect'}
+              </button>
+            </div>
           )}
         </div>
-      )}
-
-      <Field
-        label="Inputs (JSON)"
-        hint="Object of input fields. Values support `{{variable}}` templates."
-      >
-        <textarea
-          rows={6}
-          spellCheck={false}
-          className={textareaCls + ' font-mono text-[11px]'}
-          value={JSON.stringify(typeof data.inputs === 'object' && data.inputs ? data.inputs : {}, null, 2)}
-          onChange={(e) => {
-            try { update({ inputs: JSON.parse(e.target.value) as unknown }); }
-            catch { /* keep prior */ }
-          }}
-        />
-      </Field>
+      ))}
+      <div className="mb-3">
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+            {integrations.length > 0 ? 'Integration library' : 'Loading integration library...'}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowCreateIntegration(true)}
+            className="rounded-md border border-line px-2 py-0.5 text-[10px] font-medium text-text-secondary hover:border-accent/50 hover:text-text-primary"
+          >
+            + New integration
+          </button>
+        </div>
+        {integrations.length > 0 && (
+          <input
+            className={inputCls + ' mb-1.5'}
+            placeholder="Search connectors"
+            value={integrationQuery}
+            onChange={(event) => setIntegrationQuery(event.target.value)}
+          />
+        )}
+        <div className="grid max-h-48 grid-cols-2 gap-1.5 overflow-y-auto pr-1">
+          {visibleIntegrations.map((item) => {
+            const selected = item.service === slug;
+            return (
+              <button
+                key={item.service}
+                type="button"
+                onClick={() => chooseIntegration(item)}
+                className={clsx(
+                  'flex items-center gap-2 rounded-input border px-2 py-2 text-left transition-colors',
+                  selected ? 'border-accent bg-accent-soft' : 'border-line bg-surface-2 hover:border-line-strong',
+                )}
+              >
+                <ConnectorLogo slug={item.icon || item.service} name={item.name} />
+                <span className="min-w-0">
+                  <span className="block truncate text-[11px] font-semibold text-text-primary">{item.name}</span>
+                  <span className="block truncate text-[10px] text-text-muted">{item.builtin === false ? 'Custom' : item.category ?? 'Connector'}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <CustomIntegrationDialog
+        open={showCreateIntegration}
+        onClose={() => setShowCreateIntegration(false)}
+        onCreated={(createdService) => {
+          refreshIntegrations();
+          update({ integrationId: createdService, operationId: undefined, credentialId: undefined });
+        }}
+      />
+      <div className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Inputs</div>
+      <RawMappingEditor mapping={(data.inputs as Record<string, string>) || {}} onChange={(inputs) => update({ inputs })} />
     </>
   );
 }
@@ -1037,52 +1527,90 @@ function HttpRequestForm({ data, update, upstream }: { data: Record<string, unkn
           />
         </Field>
       )}
-      <Field label="Timeout (ms)" hint="Max 120000 (2 minutes).">
-        <input
-          type="number"
-          className={inputCls}
-          min={1}
-          max={120000}
-          value={typeof data.timeoutMs === 'number' ? data.timeoutMs : ''}
-          placeholder="30000"
-          onChange={(e) => update({ timeoutMs: e.target.value === '' ? undefined : Number(e.target.value) })}
-        />
-      </Field>
-      <Field label="Retry on status codes" hint="Comma-separated list, e.g. 429, 503.">
-        <input
-          type="text"
-          className={inputCls}
-          value={Array.isArray(data.retryOn) ? (data.retryOn as number[]).join(', ') : ''}
-          placeholder="429, 503"
-          onChange={(e) => {
-            const parsed = e.target.value
-              .split(/[,\s]+/)
-              .map((s) => Number(s.trim()))
-              .filter((n) => Number.isInteger(n) && n > 0);
-            update({ retryOn: parsed.length > 0 ? parsed : undefined });
-          }}
-        />
-      </Field>
+      <Accordion title="Advanced Settings">
+        <Field label="Timeout (ms)" hint="Max 120000 (2 minutes).">
+          <input
+            type="number"
+            className={inputCls}
+            min={1}
+            max={120000}
+            value={typeof data.timeoutMs === 'number' ? data.timeoutMs : ''}
+            placeholder="30000"
+            onChange={(e) => update({ timeoutMs: e.target.value === '' ? undefined : Number(e.target.value) })}
+          />
+        </Field>
+        <Field label="Retry on status codes" hint="Comma-separated list, e.g. 429, 503.">
+          <input
+            type="text"
+            className={inputCls}
+            value={Array.isArray(data.retryOn) ? (data.retryOn as number[]).join(', ') : ''}
+            placeholder="429, 503"
+            onChange={(e) => {
+              const parsed = e.target.value
+                .split(/[,\s]+/)
+                .map((s) => Number(s.trim()))
+                .filter((n) => Number.isInteger(n) && n > 0);
+              update({ retryOn: parsed.length > 0 ? parsed : undefined });
+            }}
+          />
+        </Field>
+      </Accordion>
     </>
   );
 }
 
 // ─── Workflow Store ─────────────────────────────────────────────────────────
 
-function WorkflowStoreForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+function WorkflowStoreForm({ data, update, workspace = false }: { data: Record<string, unknown>; update: NodeFormProps['update']; workspace?: boolean }) {
+  const operations = Array.isArray(data.operations)
+    ? data.operations as Array<{ op?: string; key?: string; value?: string; outputKey?: string; incrementBy?: number }>
+    : [];
   return (
-    <Field label="Operations (JSON)" hint="Array of operations: { op, key, value, outputKey, incrementBy }.">
-      <textarea
-        rows={8}
-        spellCheck={false}
-        className={textareaCls + ' font-mono text-[11px]'}
-        placeholder='[\n  { "op": "set", "key": "lastRunAt", "value": "{{trigger.now}}" }\n]'
-        value={JSON.stringify(Array.isArray(data.operations) ? data.operations : [], null, 2)}
-        onChange={(e) => {
-          try { update({ operations: JSON.parse(e.target.value) as unknown }); }
-          catch { /* keep prior */ }
-        }}
-      />
+    <Field label={`${workspace ? 'Workspace' : 'Workflow'} store operations`} hint={`These values persist ${workspace ? 'across workflows in this workspace' : 'across runs of this workflow'}.`}>
+      <div className="space-y-1.5">
+        {operations.map((operation, index) => (
+          <div key={index} className="rounded-input border border-line bg-surface-2 p-2">
+            <div className="flex gap-1.5">
+              <select className={selectCls} value={operation.op ?? 'set'} onChange={(event) => {
+                const next = [...operations];
+                next[index] = { ...operation, op: event.target.value };
+                update({ operations: next });
+              }}>
+                <option value="set">Set value</option>
+                <option value="get">Read value</option>
+                <option value="delete">Delete value</option>
+                <option value="increment">Increment number</option>
+                <option value="append">Append value</option>
+              </select>
+              <button type="button" aria-label="Remove store operation" className="px-1.5 text-text-muted hover:text-danger" onClick={() => update({ operations: operations.filter((_, operationIndex) => operationIndex !== index) })}>x</button>
+            </div>
+            <input className={inputCls + ' mt-1.5 font-mono'} value={operation.key ?? ''} placeholder="key" onChange={(event) => {
+              const next = [...operations];
+              next[index] = { ...operation, key: event.target.value };
+              update({ operations: next });
+            }} />
+            {operation.op !== 'get' && operation.op !== 'delete' && (
+              <input className={inputCls + ' mt-1.5'} value={operation.op === 'increment' ? operation.incrementBy ?? '' : operation.value ?? ''} placeholder={operation.op === 'increment' ? 'Increment by, e.g. 1' : 'Value or {{variable}}'} onChange={(event) => {
+                const next = [...operations];
+                next[index] = operation.op === 'increment'
+                  ? { ...operation, incrementBy: Number(event.target.value || 0), value: undefined }
+                  : { ...operation, value: event.target.value };
+                update({ operations: next });
+              }} />
+            )}
+            {(operation.op === 'get' || operation.op === 'increment') && (
+              <input className={inputCls + ' mt-1.5 font-mono'} value={operation.outputKey ?? ''} placeholder="Output key" onChange={(event) => {
+                const next = [...operations];
+                next[index] = { ...operation, outputKey: event.target.value };
+                update({ operations: next });
+              }} />
+            )}
+          </div>
+        ))}
+        <button type="button" className="inline-flex h-7 items-center rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:border-accent/60 hover:text-text-primary" onClick={() => update({ operations: [...operations, { op: 'set', key: '', value: '' }] })}>
+          + Add operation
+        </button>
+      </div>
     </Field>
   );
 }
@@ -1131,11 +1659,15 @@ function EvaluatorForm({ data, update }: { data: Record<string, unknown>; update
           onChange={(e) => update({ maxRetries: e.target.value === '' ? undefined : Number(e.target.value) })}
         />
       </Field>
+      <ModelPolicyField data={data} update={update} />
     </>
   );
 }
 
 function GuardrailsForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  const rules = Array.isArray(data.rules)
+    ? data.rules as Array<{ type?: string; target?: string; value?: string; limit?: number; message?: string }>
+    : [];
   return (
     <>
       <Field label="Violation policy">
@@ -1148,18 +1680,53 @@ function GuardrailsForm({ data, update }: { data: Record<string, unknown>; updat
           <option value="flag">Flag — annotate output and continue</option>
         </select>
       </Field>
-      <Field label="Rules (JSON)" hint="Array of { type, target, value?, limit?, message? }.">
-        <textarea
-          rows={8}
-          spellCheck={false}
-          className={textareaCls + ' font-mono text-[11px]'}
-          placeholder='[\n  { "type": "not_empty", "target": "nodes.draft.text", "message": "Draft is empty" }\n]'
-          value={JSON.stringify(Array.isArray(data.rules) ? data.rules : [], null, 2)}
-          onChange={(e) => {
-            try { update({ rules: JSON.parse(e.target.value) as unknown }); }
-            catch { /* keep prior */ }
-          }}
-        />
+      <Field label="Rules" hint="Add deterministic checks in the order they should run.">
+        <div className="space-y-1.5">
+          {rules.map((rule, index) => (
+            <div key={index} className="rounded-input border border-line bg-surface-2 p-2">
+              <div className="flex gap-1.5">
+                <select className={selectCls} value={rule.type ?? 'not_empty'} onChange={(event) => {
+                  const next = [...rules];
+                  next[index] = { ...rule, type: event.target.value };
+                  update({ rules: next });
+                }}>
+                  <option value="not_empty">Not empty</option>
+                  <option value="max_length">Maximum length</option>
+                  <option value="min_length">Minimum length</option>
+                  <option value="contains">Contains value</option>
+                  <option value="regex">Matches pattern</option>
+                </select>
+                <button type="button" aria-label="Remove guardrail rule" className="px-1.5 text-text-muted hover:text-danger" onClick={() => update({ rules: rules.filter((_, ruleIndex) => ruleIndex !== index) })}>x</button>
+              </div>
+              <input className={inputCls + ' mt-1.5 font-mono'} value={rule.target ?? ''} placeholder="nodes.draft.text" onChange={(event) => {
+                const next = [...rules];
+                next[index] = { ...rule, target: event.target.value };
+                update({ rules: next });
+              }} />
+              {(rule.type === 'max_length' || rule.type === 'min_length') ? (
+                <input className={inputCls + ' mt-1.5'} type="number" min={0} value={rule.limit ?? ''} placeholder="Limit" onChange={(event) => {
+                  const next = [...rules];
+                  next[index] = { ...rule, limit: Number(event.target.value || 0) };
+                  update({ rules: next });
+                }} />
+              ) : rule.type !== 'not_empty' ? (
+                <input className={inputCls + ' mt-1.5'} value={rule.value ?? ''} placeholder={rule.type === 'regex' ? 'Pattern' : 'Required value'} onChange={(event) => {
+                  const next = [...rules];
+                  next[index] = { ...rule, value: event.target.value };
+                  update({ rules: next });
+                }} />
+              ) : null}
+              <input className={inputCls + ' mt-1.5'} value={rule.message ?? ''} placeholder="Operator-facing violation message" onChange={(event) => {
+                const next = [...rules];
+                next[index] = { ...rule, message: event.target.value };
+                update({ rules: next });
+              }} />
+            </div>
+          ))}
+          <button type="button" className="inline-flex h-7 items-center rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:border-accent/60 hover:text-text-primary" onClick={() => update({ rules: [...rules, { type: 'not_empty', target: '', message: '' }] })}>
+            + Add rule
+          </button>
+        </div>
       </Field>
     </>
   );
@@ -1326,6 +1893,42 @@ function AgentSwarmForm({ data, update }: { data: Record<string, unknown>; updat
           onChange={(e) => update({ outputKey: e.target.value })}
         />
       </Field>
+    </>
+  );
+}
+
+function DynamicSwarmForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Goal" hint="Describe the outcome. The planner decomposes this into bounded worker tasks.">
+        <textarea className={textareaCls} rows={5} value={asStr(data.goal)} onChange={(event) => update({ goal: event.target.value })} placeholder="Research the market and produce a concise opportunity brief." />
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Max tasks">
+          <input className={inputCls} type="number" min={1} max={32} value={typeof data.maxTasks === 'number' ? data.maxTasks : 5} onChange={(event) => update({ maxTasks: Math.max(1, Number(event.target.value || 1)) })} />
+        </Field>
+        <Field label="Max parallel">
+          <input className={inputCls} type="number" min={1} max={16} value={typeof data.maxParallel === 'number' ? data.maxParallel : 3} onChange={(event) => update({ maxParallel: Math.max(1, Number(event.target.value || 1)) })} />
+        </Field>
+      </div>
+      <Field label="Output key">
+        <input className={inputCls} value={asStr(data.outputKey)} placeholder="results" onChange={(event) => update({ outputKey: event.target.value })} />
+      </Field>
+      <ModelPolicyField data={data} update={update} />
+    </>
+  );
+}
+
+function PlannerForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Goal" hint="The planner turns this objective into an ordered execution plan.">
+        <textarea className={textareaCls} rows={5} value={asStr(data.goal)} onChange={(event) => update({ goal: event.target.value })} placeholder="Prepare, review, and publish the weekly product update." />
+      </Field>
+      <Field label="Maximum steps">
+        <input className={inputCls} type="number" min={1} max={24} value={typeof data.maxNodes === 'number' ? data.maxNodes : 8} onChange={(event) => update({ maxNodes: Math.max(1, Number(event.target.value || 1)) })} />
+      </Field>
+      <ModelPolicyField data={data} update={update} />
     </>
   );
 }

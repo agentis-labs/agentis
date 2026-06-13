@@ -528,7 +528,7 @@ missing, and both are now fixed:
 | What was actually wrong | Fix |
 |---|---|
 | `RuntimePicker` / `HarnessInstallSlideOver` called `GET /v1/harness/install-options` and `POST /v1/harness/install` — **neither route existed**. The `harnessInstall.ts` *service* was complete but unwired, so the entire "no runtime? install it here" flow failed at runtime. | Added both endpoints to `apps/api/src/routes/harness.ts`: `install-options` (returns `listHarnessInstallOptions()`) and `install` (SSE — streams `step`/`log`/`complete`/`error` from `installHarness()`). Whitelist-guarded (`isAutoInstallableAdapter`), fixed install commands, `execFile` (no shell), and rate-limited to 2 attempts/workspace/minute. |
-| Ghost-node entry pre-set the role but never **locked** it — `lockInitialRole` was supported by the wizard but never passed. | `AgentsPage` now passes `lockInitialRole` + `initialSpaceId` whenever the wizard opens from a ghost-node preset. |
+| Ghost-node entry pre-set the role but never **locked** it — `lockInitialRole` was supported by the wizard but never passed. | `AgentsPage` now passes `lockInitialRole` whenever the wizard opens from a ghost-node preset. |
 
 **Beautiful easiness — `RuntimeReadinessBanner` (new, in `RuntimePicker.tsx`).**
 The runtime step now opens with a single at-a-glance card that does the operator's

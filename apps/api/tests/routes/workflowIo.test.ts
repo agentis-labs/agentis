@@ -29,7 +29,7 @@ function seed(): string {
   };
   ctx.db.insert(schema.workflows).values({
     id, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
-    title: 'Round Trip', summary: 'rt', graph, settings: {},
+    title: 'Round Trip', description: 'rt', graph, settings: {},
   }).run();
   return id;
 }

@@ -1953,3 +1953,490 @@ Full detail in `ORCHESTRATOR-CREATION-10X.md` (batch 4); summary here for the ma
 
 **Verified.** Typecheck clean (db/core/api/web). New suites green: `oauth`, plan-driven `workflowBuild`;
 full api regression green (a later dot-reporter re-run hit a Node OOM — tooling, not a test failure).
+
+---
+
+### 2026-05-25 (batch 5) — Palette/engine reconciliation + toolbar split
+
+**Context.** Audited the palette ↔ engine `#dispatchNode()` switch for drift and cleaned up the
+workflow canvas toolbar that had become a single overcrowded row.
+
+**Shipped.**
+- **`workspace_store` palette entry.** The engine handler (`#executeWorkspaceStore`), the
+  `WorkspaceStoreService` wiring (`bootstrap.ts` construct + inject into engine deps),
+  `validateGraph` coverage, and `workspaceStoreConfigSchema` all already existed — only the palette
+  entry was missing, so the workspace-wide KV node was unreachable from the UI. Added it to the
+  **Data & logic** tier (mirrors `workflow_store`; identical op shape) and wired the
+  `ContextInspector` editor (`workspace_store` reuses `WorkflowStoreForm`) + node description.
+- **Toolbar split (UI/UX).** `WorkflowCanvasPage` toolbar was one `flex-wrap` row mixing the
+  Canvas/Runs/Output view switcher with ~10 tool buttons. Split into two rows: a **header row**
+  (breadcrumb · title · save state · **view switcher pinned top-right**) and a **tool row**
+  (undo/redo · minimap · inputs · intent · plan · analytics · integration chip · contracts · chains ·
+  test run · publish). Restores the prior top-right toggle placement.
+
+**Deliberately NOT done — `brain_lookup`.** A stale audit note asked to "restore the engine case +
+add a palette entry." `brain_lookup` is absent from all source (engine/schema/types), its
+`collectiveBrain` dependency is **banned by the CI contract grep** (`.github/workflows/ci.yml`), and
+Wiring it would fail CI. It remains outside the workflow canvas work tracked here.
+
+**Known intentional gap (unchanged).** `workflowNodeConfigSchema` still routes `workflow_store`,
+`loop`, `parallel`, `transform`, `filter`, `integration`, `http_request`, `agent_swarm`,
+`artifact_collect`, `evaluator`, `guardrails` through `fallbackConfigSchema` (no edit-time Zod
+validation; runtime-validated only). Documented as intentional in the schema comment.
+
+**Files touched.** `apps/web/src/components/canvas/NodePalette.tsx`,
+`apps/web/src/components/canvas/ContextInspector.tsx`,
+`apps/web/src/pages/WorkflowCanvasPage.tsx`.
+
+**Verified.** `pnpm --filter @agentis/web typecheck` clean.
+
+---
+
+### 2026-06-02 — Synthesis falls back to the building agent's own model + model-agnostic param negotiation
+
+**Context.** Operator reported "can't create workflows, wrong error" with `gpt-5.4-mini`
+selected — yet chat worked. Root cause: two independent model configs. The chat composer's
+`AgentModelSelector` writes the model to the **agent** (`config.model`/`runtimeModel`), but
+synthesis resolved its model only via `orchestratorModelRouter` (workspace `OrchestratorModelsPanel`
++ env), both empty → `WORKFLOW_SYNTHESIS_UNAVAILABLE` "no model configured" despite a working agent
+model. Compounded by `EvaluatorRuntime` hard-sending `temperature:0`/`max_tokens`/`response_format`
+(which several model families reject with a 400) and `completeStructured` swallowing that 400 into a
+generic message.
+
+**Built (per user directive: make tools reachable for MANY models, not per-family compat).**
+- `apps/api/src/services/structuredCompleter.ts` (new) — `StructuredCompleter` interface +
+  `completeStructuredViaAdapter` + `AdapterStructuredCompleter`: drives any chat-capable agent
+  adapter via the universal `chat()` contract (no temperature/response_format/max_tokens to reject).
+- `build.ts` — `resolveSynthesisCompleter`/`resolveReviewerCompleter` now chain to the **building
+  agent's own model** (`buildingAgentCompleter`) when no runtime is configured; `synthesizeWithLlm`
+  returns an inspectable `SynthesisOutcome`; the `blocked` phase + thrown error now carry the REAL
+  backend error. `reviewWorkflowGraph` generalized to `StructuredCompleter`.
+- `evaluatorRuntime.ts` — generic 4xx capability negotiation (drop temperature/response_format,
+  rename `max_tokens`→`max_completion_tokens`, learned on `#omit`/`#maxTokensField`); added
+  `get lastError()`; exported `parseGeneric`. No model-family branches.
+
+**Files touched.** `apps/api/src/services/structuredCompleter.ts` (new),
+`apps/api/src/services/evaluatorRuntime.ts`, `apps/api/src/services/agentisToolHandlers/build.ts`.
+
+**Verified.** `createWorkflowDelivery.test.ts` (+2: agent-own-model fallback, real-error surfacing),
+new `evaluatorRuntimeNegotiation.test.ts` (2), `agentToolLoop` + `workspaceEvaluatorRuntimeFactory`
+green. `apps/api` tsc clean except pre-existing `bootstrap.ts:836` `memoryCapture` drift.
+
+---
+
+### 2026-06-02 — Structural self-repair (cycles/dangling edges) + self-correcting synthesis + build-UI cleanup
+
+**Context.** After synthesis began using the building agent's own model, a weak model
+(`gpt-5.4-mini`) emitted a graph with a **cycle** → "contains a cycle". The cycle failed inside
+`synthesizeWithLlm`'s validation *before* `repairGraph` could fix it; the build was slow, the agent
+re-called `build_workflow` (duplicate "Agent is working" rows), and the inline canvas was stuck on
+"Preparing the live workflow canvas…" forever.
+
+**Built.**
+- `repairGraph` (build.ts) is now structural-integrity-first: `pruneDanglingEdges` (drop edges to
+  non-existent nodes) and `breakCycles` (DFS back-edge removal) run before delivery/state repairs.
+  New `RepairAction` kinds `dangling_edge_removed` / `cycle_broken`.
+- `synthesizeWithLlm` is a bounded self-correcting loop: synthesize → repair-as-validity-probe →
+  validate; on failure, re-prompt the model with the EXACT validation error (model-agnostic, no
+  per-family tuning). Inner JSON-parse retries lowered to 2 to bound latency.
+- Build UI: `chat/ThreadView` tracks a `blocked` build and hides the inline canvas on a refused
+  build (the timeline carries the error); `ChatPanel/CanvasEmbed` defensively resolves on
+  `WORKFLOW_BUILD_PHASE: blocked` instead of spinning forever.
+
+**Files touched.** `apps/api/src/services/agentisToolHandlers/build.ts`,
+`apps/web/src/components/chat/ThreadView.tsx`, `apps/web/src/components/ChatPanel/CanvasEmbed.tsx`.
+
+**Verified.** `workflowRepair.test.ts` (+2: cycle break, dangling prune), `createWorkflowDelivery`
+(7) and `evaluatorRuntimeNegotiation` (2) green — 15 api tests. `WorkflowBuildTimeline` web test (2)
+green; web tsc clean for touched files. `apps/api` tsc clean except pre-existing `bootstrap.ts:836`.
+
+---
+
+### 2026-06-02 — Canvas experience 10x, first wave (F1/F2/F3/F5/F6)
+
+**Context.** With gpt-5.5 the build engine produces good graphs, but the canvas/creation
+*experience* leaked trust: unframable zoom, unlabeled nodes, jargon forms, a confusing Gmail/"Vault
+secret" connect flow, and duplicate workflows on revision. Plan: `WORKFLOW-CANVAS-EXPERIENCE-10X.md`.
+
+**Shipped.**
+- **F1 — legibility.** New shared `@agentis/core` `graphLayout` (`computeLayeredLayout` /
+  `layoutWorkflowGraph`) — dependency-free left-to-right Sugiyama layout. Applied in the build
+  pipeline (persisted graphs land tidy) and via a canvas **Tidy** button (`apps/web` `autoLayout`).
+  Zoom floor lowered (`fitViewOptions.minZoom` 0.62→0.2, engine `minZoom` 0.12) so wide graphs frame.
+- **F2 — node identity.** `nodeKindMeta.ts` — one source of truth (glyph + human label + category +
+  color) covering the full `WorkflowNodeType` union; `AgentisNode` now renders the kind label (not
+  raw `data.type`), a complete glyph, a category color rail, and the minimap is colored by category.
+- **F3 — comprehension.** `nodeExplainer.ts` — config-specific plain-language node descriptions in
+  the inspector. IntegrationForm is OAuth-first ("Sign in with X"); the raw secret box is demoted to
+  an "Advanced: connect with an API key" disclosure (no more "Vault secret").
+- **F5 — zero-config delivery.** `fillSelfDeliveryRecipient` — a self-directed "email me" request
+  auto-fills the operator's own verified email; an explicitly named external address is never
+  hijacked.
+- **F6 — one living workflow.** `build_workflow` latches the built workflow id per conversation and
+  reuses it on revision (server-side, with a `newWorkflow` override) — no more duplicate twins.
+
+**Files.** `packages/core/src/graphLayout.ts` (+index), `apps/web/src/components/canvas/{nodeKindMeta,nodeExplainer,autoLayout}.ts`,
+`apps/web/src/pages/WorkflowCanvasPage.tsx`, `apps/web/src/components/canvas/ContextInspector.tsx`,
+`apps/api/src/services/agentisToolHandlers/build.ts`.
+
+**Verified.** New `graphLayout.test.ts` (4) + `createWorkflowDelivery` F5 cases (2) + repair (6) —
+backend green; web suite 97/97 (updated the de-jargoned IntegrationForm test). core/web/api tsc clean
+(except pre-existing `bootstrap.ts:836`). **Deferred (documented):** F4 managed connector broker +
+logos, F7 real cast materialization/swarms, F8 dry-run + estimates.
+
+---
+
+### 2026-06-02 — Canvas experience 10x, second wave (F4/F7/F8)
+
+**Context.** Finishing the remaining `WORKFLOW-CANVAS-EXPERIENCE-10X.md` fronts after the first wave.
+
+**Shipped.**
+- **F4 — connectors.** `apps/web/.../connectorLogo.ts` resolves brand logos (Simple Icons CDN) for
+  the ~50 categorized built-in connectors; the catalog grid + selected-connector header now show
+  logos with a colored-initial fallback. Combined with the wave-1 OAuth-first form, the connector
+  flow reads like Composio/Zapier. (External managed-auth broker = adopt-vs-build decision; the
+  catalog + `/v1/oauth` seam is broker-ready.)
+- **F7 — real cast.** `build.ts` `materializeCast` commissions a real specialist agent per distinct
+  `agentRole` via the existing `SpecialistAgentService.ensureRole` (idempotent, shared across
+  workflows) and **pins** the agentId onto the node — so the team is real and visible in the
+  workspace the moment a workflow is built, not lazily at first run. Wired `specialists` into
+  `ToolHandlerDeps` + bootstrap. Swarm kinds (`agent_swarm`/`dynamic_swarm`/`planner`) are cast too.
+- **F8 — estimates + delivery preview.** `estimateDurationMs` (per-kind heuristic) + existing
+  `estimatedCostCents` + `buildDeliveryPreview` (what each delivery node sends, to whom) are returned
+  and folded into the build message ("Est. ~30s/run · ~$0.04/run. Cast: researcher, analyst.
+  Delivers to: Gmail → you@acme.com"). Full side-effect-free engine dry-run mode deferred; per-node
+  Test already gives isolated dry-runs.
+
+**Files.** `apps/web/src/components/canvas/{connectorLogo.ts,ContextInspector.tsx}`,
+`apps/api/src/services/agentisToolHandlers/{build.ts,deps.ts}`, `apps/api/src/bootstrap.ts`.
+
+**Verified.** `createWorkflowDelivery` +1 (F7 cast) = 10 backend tests green; web suite green;
+core/web/api tsc clean (except pre-existing `bootstrap.ts:837`). **ALL 8 canvas-experience fronts now
+shipped** (with two documented deferred tails: external connector broker, engine dry-run mode).
+
+---
+
+### 2026-06-03 — Production bug batch (autosave, peer_profiles, node rename) + AgentMail
+
+**Context.** Live-use bug report: every canvas autosave failed `VALIDATION_FAILED`; chat logs spammed
+`no such table: peer_profiles`; no UI to rename a node; orchestrator slow on the Codex CLI adapter.
+
+**Fixed.**
+- **Autosave `VALIDATION_FAILED` (root cause + fix).** The build persists graphs via direct DB insert
+  (engine-validated), but `PATCH /v1/workflows/:id` validates with the zod `workflowNodeSchema`, which
+  required `title.min(1)` and `type.min(1)` — fields the engine never enforces. A built node missing a
+  title therefore saved fine at build time but made *every* subsequent autosave fail. Relaxed the
+  edit-time schema (`title`/`type`/`position` now optional — it's explicitly the "permissive at
+  edit-time" schema) AND added `ensureNodeDisplayFields` in build.ts to backfill a non-empty
+  title/type/numeric-position from the node kind before persist. Canvas hydration also falls back to
+  the kind label so no node renders blank. Regression test: build output must pass
+  `schemas.workflowGraphSchema`.
+- **`no such table: peer_profiles`.** The peer-profile tables were added to the already-shipped v40
+  migration body, so DBs that recorded v40 before that edit never got them. Added **migration v53**
+  `peer_profiles_backfill` — idempotent `CREATE TABLE IF NOT EXISTS` for `peer_profiles` +
+  `peer_profile_conclusions` at full current shape.
+- **Node rename.** Added a "Node name" editor to the inspector (`onTitleChange` → updates `node.title`
+  + the canvas label + autosaves). Previously only output-config titles were editable, not the node's
+  own label.
+
+**Note (not a code bug): orchestrator latency.** Orchy runs on the Codex CLI adapter (marker protocol
+— re-spawns per tool round; the repeated `codex.chat.stderr "Reading prompt from stdin"` is Codex
+waiting). Fix = give the orchestrator a native conversation model (Settings → Runtimes → Orchestrator
+models → Conversation, or `AGENTIS_ORCHESTRATOR_MODEL`) so chat uses the fast-path runtime. The chat
+composer's model picker sets the AGENT's model, not the workspace conversation override — the same
+two-pickers disconnect noted earlier.
+
+**Also shipped (prior turn, same session):** AgentMail connector as the default agent-native email
+provider (see project memory).
+
+**Files.** `packages/core/src/schemas/workflow.ts`, `packages/db/src/sqlite/migrations.ts`,
+`apps/api/src/services/agentisToolHandlers/build.ts`, `apps/web/src/components/canvas/ContextInspector.tsx`,
+`apps/web/src/pages/WorkflowCanvasPage.tsx`. **Verified:** core/db/api/web tsc clean (minus pre-existing
+bootstrap drift); createWorkflowDelivery 13 + agentMail 4 + inspector/canvas web tests green.
+
+---
+
+### 2026-06-03 — Orchestrator latency: O(history) per-turn context scans → O(few)
+
+**Symptom (user).** "At first it was extremely fast; over time a single task takes minutes." Degrading
+latency = something grows per turn (not the constant-cost Codex marker protocol).
+
+**Root cause.** Per-chat-turn context assembly read entire tables with `.all()` then filtered/sorted/
+sliced in JS. The killer: `workflow_runs` carries a full `run_state` JSON blob + `graph_snapshot` JSON
+per row, so `db.select().from(workflowRuns).all()` **deserialized every run's full state on every
+turn** (and `#extractInlineContext` did the same per `#reference`; `workflows.all()` loaded every
+`graph` blob). Cost = O(total_runs × blob_size) per turn → compounds forever as runs accumulate. Two
+hot paths affected: `ChatSessionExecutor.#loadPromptContext` (web chat) and
+`WorkspaceAwarenessService.#assemble` (channel turns).
+
+**Fix.** Push **column projection + filter + order + limit into SQL** so context assembly is O(few),
+not O(history):
+- Select only rendered columns (never `run_state`/`graph_snapshot`/`config` blobs).
+- `WHERE status='RUNNING'/'pending'` + `ORDER BY created_at DESC LIMIT 10` instead of JS filter/sort/slice.
+- `@mention`/`#reference` resolved via indexed SQL (`lower(name)=`, `id=`/`LIKE id%`) instead of
+  `.all().find()`.
+- **Migration v54** adds covering indexes `(workspace_id, status, created_at)` on `workflow_runs` and
+  `approval_requests`.
+
+**Files.** `apps/api/src/services/chatSessionExecutor.ts`, `apps/api/src/services/workspaceAwarenessService.ts`,
+`packages/db/src/sqlite/migrations.ts`. **Verified:** api tsc clean; chatSessionExecutor (8),
+workspaceAwarenessService (4), chatMemoryCapture (2) green; v53/v54 apply on a fresh DB.
+
+**Remaining follow-ups (lower impact):** bound the injected memory/brain context to a fixed top-K so
+system-prompt token size stays constant; the real orchestrator fast-path is still to give Orchy a
+native conversation model (Codex re-spawns per tool round regardless of context size).
+
+---
+
+### 2026-06-03 — Constant per-turn prompt size + fast-path observability
+
+**Part 1 — constant prompt size.** Per-turn injected context (agent memory, personal brain, workspace
+knowledge, situational model, brain-discourse injection) grows as a workspace accumulates data; even
+with top-K retrievers the system prompt could creep up over a workspace's lifetime. Added a single
+centralized `CONTEXT_BUDGET` + `clampBlock(text, max)` in `ChatSessionExecutor` so every growable
+block is truncated to a fixed char budget (~12.5KB ≈ ~3K tokens total) at assembly. Token cost per
+turn is now flat regardless of accumulated state. (Agent instructions are user-authored/fixed-size,
+left intact.) Test: huge 50KB retriever blocks → prompt clamped < 20KB with a truncation marker.
+
+**Part 2 — fast-path friction, made honest + visible.** The conversation fast-path is already
+well-designed: `#resolveChatAdapter` transparently swaps a slow marker-protocol CLI runtime (Codex /
+Claude Code — re-spawns per tool round) for a native streaming runtime *whenever one is resolvable*
+(per-workspace Conversation model, or `AGENTIS_ORCHESTRATOR_MODEL`). A native agent (http/hermes with
+an endpoint) is already fast with zero config. The only irreducible friction: a CLI agent runs via
+the tool's own auth (e.g. ChatGPT) with **no API endpoint**, so a native conversation model genuinely
+must be supplied. That was previously SILENT — the agent was just slow. Now `chat.fast_path.unavailable`
+warns once per conversation with the exact one-step remedy. Combined with the earlier DB-scan fix +
+Part 1, each CLI tool round is now cheap and constant-size even when the fast-path isn't engaged.
+
+**Next (separate, larger):** unify the two model-config surfaces (chat-composer agent model vs
+Settings→Runtimes Orchestrator models) so one setting drives agent execution AND the conversation
+fast-path AND synthesis.
+
+**Files.** `apps/api/src/services/chatSessionExecutor.ts`. **Verified:** api tsc clean;
+chatSessionExecutor (9, +clamp test) + workspaceAwarenessService (4) green.
+
+---
+
+### 2026-06-03 — Harness-first model UX (Settings → Runtimes is an OPTIONAL override)
+
+**Product stance (user).** "Users already set up their harness; the platform was made that way. Asking
+them to double-configure a model is bad. Settings → Runtimes should be a PLUS for heavy users who want
+a different LLM than their harness — not a required step."
+
+**The backend already matches this** (made so in earlier turns): conversation runs on the agent's own
+adapter by default; synthesis falls back to the agent's own model; per-role overrides are pure
+fallbacks. So the harness IS the default brain everywhere — only the UI framed Settings → Runtimes as
+required.
+
+**Rebuilt the framing.**
+- `OrchestratorModelsPanel`: retitled **"Model overrides · Optional"**; copy now leads with "every
+  cognition role runs on your agent's harness, the model you already set up — nothing to configure
+  here; override only for a different/stronger model per role." A role with no override now reads
+  **"Uses your harness"** (not "not configured", which implied something was missing).
+- The chat fast-path log was demoted from a `warn` that read like a required remedy to an `info`
+  (`chat.harness.marker_protocol`) framing the streaming Conversation model as an OPTIONAL speed-up.
+
+**Honest remaining work (the real perf rebuild).** A CLI harness (Codex / Claude Code) authenticates
+through the tool itself (no API endpoint) and runs via the marker protocol, re-spawning per tool round
+— so multi-step tasks pay a per-round cold start even though per-turn context is now small + constant
+(earlier DB-scan + clamp fixes). The proper fix that keeps the harness as the single brain AND makes
+it fast: expose Agentis platform tools to the harness via the existing MCP boundary so the harness
+runs its OWN agentic loop calling Agentis tools natively (no platform-driven re-spawn), or hold a
+persistent harness session across rounds. Larger, test-gated (needs the CLI installed) — proposed, not
+yet built.
+
+**Files.** `apps/web/src/components/settings/OrchestratorModelsPanel.tsx`,
+`apps/api/src/services/chatSessionExecutor.ts`. **Verified:** web tsc clean; OrchestratorModelsPanel (2) green.
+
+---
+
+### 2026-06-03 — Harness-native MCP (the harness IS the brain, fast — no second model)
+
+Implements `docs/HARNESS-NATIVE-MCP.md`. A CLI harness (Codex/Claude Code) has no streaming
+function-calling API, so the marker protocol re-spawns it per tool round (N cold starts for an N-step
+task — the residual latency). Fix: point the harness at Agentis's existing protocol-compliant MCP
+server (`/v1/mcp/rpc`, same `AgentisToolRegistry`) so it runs its OWN agentic loop calling Agentis
+tools natively in ONE invocation. N re-spawns → 1, with NO second model to configure (keeps the
+harness-first principle).
+
+**Shipped (feature-flagged `AGENTIS_HARNESS_MCP`, off by default, platform seam complete + tested):**
+- `McpHarnessSessionService` (`apps/api/src/services/mcpHarnessSession.ts`) — per-workspace Agentis MCP
+  descriptor (`/v1/mcp/rpc` + bearer + `x-agentis-workspace` headers); `harnessMcpArgs()` maps it to
+  each CLI's transport (Claude Code native streamable-HTTP `--mcp-config`; Codex via the `mcp-remote`
+  stdio bridge + `-c mcp_servers.*` TOML).
+- `toolForwarding: 'mcp_native'` (core capability) — Codex/Claude adapters report it when `mcpServers`
+  are set and drop the marker prompt in that mode.
+- `ChatSessionExecutor.#executeLoop` single-shot branch — one chat pass, stream output, do NOT drive
+  the marker round-trip or re-execute the harness's tools.
+- Wiring: `agentCommission.registerAdapter` + `agentRuntimeHydrator` + bootstrap (re-registers CLI
+  harnesses with the MCP server on boot when enabled).
+
+**Files.** `packages/core/src/types/adapter.ts`, `apps/api/src/services/{mcpHarnessSession.ts,chatSessionExecutor.ts,agentCommission.ts,agentRuntimeHydrator.ts}`,
+`apps/api/src/adapters/{CodexAdapter.ts,ClaudeCodeAdapter.ts}`, `apps/api/src/bootstrap.ts`.
+**Verified:** `mcpHarnessSession`(6) + `chatSessionExecutor`(10, incl. single-shot proof) green;
+core/api tsc clean. Pre-existing (NOT mine): 2 ClaudeCodeAdapter.test failures (Windows spawn-wrap +
+test expects affordances/memory the adapter never returned) — confirmed failing on baseline via stash.
+**Remaining:** live CLI handshake (mcp-remote / Claude HTTP) — ships dark until validated with binaries.
+
+---
+
+### 2026-06-03 — Harness-native MCP is now ZERO-CONFIG and on by default
+
+Per the product rule ("users only add their agent + harness; we handle the rest"), the env-flag design
+was replaced with auto-everything: `McpHarnessSessionService` now auto-derives the loopback URL
+(`http://127.0.0.1:<port>`, since the harness is a local subprocess) and **auto-mints a workspace-scoped
+`agt_` API key** on demand (hash persisted in `api_keys`, plaintext held in memory + rotated each boot,
+never written to disk). ON by default; opt out with `AGENTIS_HARNESS_MCP=false`; `AGENTIS_HARNESS_MCP_URL`
+overrides the URL only for unusual remote-harness setups. `mcpServersFor` looks up the agent's `userId`
+for the key. Tests updated to a real test DB; 7 mcpHarnessSession + 10 chatSessionExecutor green; api
+tsc clean. The CLI-side MCP handshake (standard transports) remains the one live-binary validation step;
+the opt-out is the safety valve.
+
+### 2026-06-10 — Merge join policies are real (`'any'` / subset), AND-join hang fixed, build-time guard
+
+`MergeNodeConfig.requiredInputs` is typed `'all' | 'any' | string[]` and the zod schema accepts all three,
+but only `'all'` (AND-join) was ever honored at run time — `'any'` (OR-join / first-wins race) and the
+subset form silently degraded to `'all'`. That's a missing **core workflow shape**: "proceed when *any*
+branch finishes" had no working implementation despite being a first-class config option. Root cause: the
+join gate (`#dispatchReadiness`) and every buffer-drain site promoted a waiting node only on
+`requiredInputs.length === 0`, never reading the node's declared policy.
+
+Fix (`apps/api/src/engine/WorkflowEngine.ts`):
+- New `#joinSatisfied(node, buf)` encodes the policy — `'any'` fires on the first received input, `string[]`
+  fires once the listed sources arrive (or once no further input can arrive, so a skipped listed source can't
+  hang the run), default AND-join otherwise.
+- New `#promoteOrSkipTarget(ctx, target, reason)` centralizes the "an edge resolved → promote or
+  skip-cascade" decision and now drives **all** drain paths (success deliver, branch-not-taken, catch-only
+  error edge, error-edge deliver, dropped success edges after a handled failure, and the skip cascade),
+  replacing five duplicated `if (requiredInputs.length === 0)` blocks.
+- `#dispatchReadiness` consults the policy so an `'any'` merge whose first input already landed goes straight
+  to `ready` instead of parking in `waitingInputs`.
+- **Latent AND-join hang fixed**: a merge fed by both a success edge and a (dropped) error/untaken edge could
+  end up with `requiredInputs` empty yet non-empty `receivedInputs` and never get promoted — it sat in
+  `WAITING` forever. The unified promote path now fires it.
+- Corrected the misleading `parallel`-node comment that claimed `waitFor`/`onBranchError`/`mergeStrategy`
+  were "honored at the downstream merge node" — they are builder-UI hints; the merge node's `requiredInputs`
+  is the authoritative join control.
+
+Boundary guard (`validateGraph.ts`): a subset `requiredInputs` that names a non-incoming source (or is empty)
+is now rejected at CREATE/UPDATE instead of silently degrading.
+
+Coverage: new `WorkflowEngine.mergeJoinPolicy.test.ts` (4 tests — `'all'` merges both payloads, `'any'`
+fires on the fast branch and ignores the slow one, subset waits for the *specific* listed source, mixed
+success+error-edge merge no longer hangs; timing made deterministic with a `wait` node) + 3 validateGraph
+cases. Full engine suite (179) + api tsc green.
+
+Two pre-existing suite failures (surfaced by running the full vitest run, unrelated to merge) fixed in the
+same pass:
+
+1. **Cron triggers built without a schedule can never run.** Strict `validateGraph` now requires a cron
+   `schedule`, but `repairGraph` (`agentisToolHandlers/build.ts`) never supplied one — a weak-model graph
+   emitting `triggerType: 'cron'` with no expression failed strict validation and could not be saved/run.
+   Added **Rule 14** (`ensureCronSchedule`): inject a sensible default daily schedule (`0 9 * * *`, 09:00
+   UTC) when a cron trigger has none, recorded as a `cron_schedule_defaulted` repair (never silent, one
+   click to edit). Restores `workflowRepair.test.ts` Rule 13 (6/6).
+
+2. **Stored workflow graphs drifted permanently from what runs.** `loadWorkflow` normalized the graph
+   in-memory but *discarded the repairs* and never persisted, so the run handler's "persist the healed
+   graph" block was dead: it re-normalized an already-clean graph, saw zero repairs, and never wrote back.
+   Result — every run silently repaired (e.g. AgentMail `send_email` → `send_message`) in memory while the
+   database kept the broken draft forever. Fix: `loadWorkflow` now returns `{ graph, graphRepairs }`; the run
+   handler heals the stored row when `graphRepairs` is non-empty (and the wasteful second normalization is
+   gone). Restores `workflows.test.ts` "repairs integration operations … before dispatching the run".
+
+Net: full `apps/api` vitest suite green.
+
+### 2026-06-10 (cont.) — Audit sweep across triggers / deployment paths; stored-graph convergence on fire
+
+Broadened the audit to the trigger and deployment/runtime paths. **Positive finding:** runtime correctness is
+sound — `WorkflowEngine.startRun` is the single dispatch chokepoint and it already normalizes + strict-validates
+the graph it runs (every path — TriggerRuntime, scheduler, the run-workflow tool, subflowExecutor, ephemeral,
+replay — converges there), so no trigger ever executes an un-normalized graph. That's good architecture; left
+as-is.
+
+**One real gap fixed — stored-graph drift on the trigger path.** `startRun` normalizes for the *run* and writes a
+per-run `graphSnapshot`, but never heals the canonical `workflows.graph`. The API `/run` path converges the stored
+row (via `loadWorkflow`, fixed above); `TriggerRuntime.startWorkflowRun` did not — so a cron/webhook/listener
+workflow kept its stale draft in the DB forever (canvas + `.agentiswf` exports showing config that differs from
+what each scheduled run actually executes). Fixed: `startWorkflowRun` now normalizes to detect repairs and
+persists the healed graph (best-effort; the run uses the normalized graph regardless). New `triggerRuntime.test.ts`
+case proves an AgentMail `send_email`→`send_message` graph is both dispatched and persisted normalized. Full
+`apps/api` suite green.
+
+### 2026-06-10 (cont.) — Whole-monorepo verification + integrations connector test coverage
+
+Widened verification beyond `apps/api` to every workspace package. Result: `core` / `db` / `integrations` /
+`sdk` / `web` / `api` all typecheck clean; the full production build (`pnpm build` — package builds + web vite
++ api tsc emit) is green; `web` (119) and `db` (9) suites pass.
+
+**Real gap found + fixed: `packages/integrations` shipped with zero tests** — ~2000 lines of connector runtime
+including the **SSRF guard** every integration / `http_request` node relies on (the code that refuses to reach
+`169.254.169.254` cloud-metadata, loopback, RFC-1918, CGNAT 100.64/10, IPv6 ULA, and IPv4-mapped-IPv6
+loopback). A regression there is a security hole, not a test failure. Added `packages/integrations/tests/
+connectors.test.ts` (23 tests): SSRF block/allow matrix + the private-network escape hatch, `executeHttpRequest`
+method/query/header/body forwarding and HTTP-error surfacing, `executeManifestOperation` template rendering
+across params/credential/input scopes, auth injection for all four types (bearer/oauth2 → `Authorization`,
+api_key → header *or* query, basic → base64), and `operationContract` required-param derivation. Wired up vitest
+(config + devDep) so `pnpm -r test` actually runs them — and confirmed `packages/db`'s existing 9 tests are wired
+too. `sdk`/`cli` remain test-stubs (thin generated client / CLI shell).
+
+**Follow-up: `packages/core` now has dedicated unit tests.** Added `packages/core/tests/graphCore.test.ts`
+(16 tests) for the pure, browser-safe graph primitives shared by both apps: `canonicalizeGraph` (dedup /
+divergence fingerprint — stable across viewport/position/array-order, sensitive to behavior-significant
+config/edge changes, normalizes optional edge fields), `computeLayeredLayout` / `layoutWorkflowGraph` (the
+deterministic Sugiyama layout — linear chains, diamond fan-out/rejoin, self-loop & unknown-edge pruning,
+non-mutation), and `workflowGraphSchema` (the edit-time validation boundary — accepts valid graphs and all
+three merge `requiredInputs` forms, rejects bad version / missing viewport / unknown edge type / empty node id,
+and documents the deliberate permissive fallback for unknown node kinds). vitest wired (config + devDep).
+
+Recursive package suite (`pnpm -r --filter "./packages/*" test`) green: core 16 · db 9 · integrations 23.
+
+### 2026-06-11 — `parallel` node settings are now real (mergeStrategy / waitFor / onBranchError)
+
+The `parallel` node exposed `waitFor` / `onBranchError` / `mergeStrategy` on the canvas (NodePalette defaults
++ ContextInspector editors) but the engine ignored all three — it was a pure passthrough, so the settings were
+inert decoration that lied to the user. Made them functional WITHOUT a fragile parallel→merge runtime coupling
+or a schema change: a `merge` (the join primitive) now INHERITS its nearest upstream `parallel`'s policy via a
+pure backward graph lookup.
+
+Engine (`WorkflowEngine.ts`):
+- `#resolveJoinPolicy(ctx, node)` + `#nearestUpstreamParallel(ctx, id)` — for a `merge`, resolve
+  `{ requiredInputs, mergeStrategy, onError }` from the merge's own config, falling back to the governing
+  parallel. The merge's explicit `requiredInputs` (anything but the default `'all'`) wins the join COUNT;
+  `parallel.waitFor: 'first'` maps an otherwise-default merge to an OR-join.
+- `mergeBufferedInputs(buf, strategy)` now implements `collect_all` (each branch kept as a distinct array
+  entry under `results`) and `first_non_null` (first branch with a meaningful payload) alongside the default
+  `merge_keys`.
+- `onBranchError: 'continue_with_results'` — a failed branch feeding a continue-merge is ABSORBED by reusing
+  the existing handled-failure machinery (treated like an implicit error edge): the merge proceeds on the
+  survivors and produces output. Honestly settles `COMPLETED_WITH_ERRORS` (a node did error), in contrast to
+  `fail_all` which skips the merge and fails the run.
+- `#joinSatisfied` is now ctx-aware so it can consult the resolved policy.
+
+Coverage: new `WorkflowEngine.parallelNode.test.ts` (5 — collect_all, first_non_null, waitFor→OR-join,
+continue-absorbs-and-merge-still-produces-output, fail_all-skips-merge). Merge/fanout/replay regression green;
+api tsc clean. This closes the last "declared-but-inert" core fan-out/join shape.
+
+### 2026-06-10 (cont.) — Whole-monorepo verification + CI test-wiring gaps closed
+
+Widened from `apps/api` to the entire workspace. **Every package typechecks clean** (`core`, `db`, `integrations`,
+`sdk`, `web`, `api`) and the **full production build is green** (`pnpm build`: packages → web vite bundle →
+api `tsc` emit). Web suite green (119).
+
+Two real CI gaps found and fixed:
+- **`packages/db` had tests that CI never ran.** `migrate.test.ts` (9 tests, with a `vitest.config.ts` present)
+  was shadowed by a stub `"test": "echo 'no tests yet'"` script, so `pnpm -r test` skipped it. Wired the script
+  to `vitest run` — the 9 migration/reconciliation tests now run in CI.
+- **`packages/integrations` shipped with ZERO tests** despite owning the runtime path for every integration /
+  http_request node — including the **SSRF guard** (the control that stops a workflow reaching cloud-metadata /
+  private / loopback addresses) and the manifest request builder (URL/header/query/body templating +
+  bearer/oauth2/api_key/basic auth injection). Added a vitest config + `connectors.test.ts` (23 tests): SSRF
+  blocks loopback, 10/8, 172.16/12, 192.168/16, link-local `169.254.169.254`, CGNAT 100.64/10, `0.0.0.0/8`,
+  IPv6 `::1`/ULA, and IPv4-mapped-IPv6 loopback — and never calls `fetch` for any of them; honors the explicit
+  private-network escape hatch; rejects non-http(s) schemes; forwards method/query/headers/body for a public
+  target; surfaces non-2xx per `throwOnHttpError`; renders manifest templates across params/credential/input
+  scopes; injects each auth type; and derives operation `required` params (skipping credential/input refs).
+  Added `vitest` as an explicit devDep so the script resolves.
+
+`core`/`sdk` legitimately have no tests (left as harmless stubs). Net: monorepo typecheck + build green; db (9)
+and integrations (23) now part of the run.

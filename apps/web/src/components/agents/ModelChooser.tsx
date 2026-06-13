@@ -45,6 +45,7 @@ export function ModelChooser({
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [manualModel, setManualModel] = useState('');
   const [catalog, setCatalog] = useState<RuntimeModelCatalog | null>(null);
 
   useEffect(() => {
@@ -112,18 +113,24 @@ export function ModelChooser({
     return Array.from(ordered.entries());
   }, [filtered]);
 
-  const manualQuery = query.trim();
+  const manualValue = manualModel.trim();
   const canUseManual = Boolean(
     catalog?.supportsManual
-    && manualQuery
-    && !models.some((model) => model.id.toLowerCase() === manualQuery.toLowerCase()),
+    && manualValue
+    && !models.some((model) => model.id.toLowerCase() === manualValue.toLowerCase()),
   );
 
   function choose(next: string) {
     onChange(next);
     setOpen(false);
     setQuery('');
+    setManualModel('');
   }
+
+  useEffect(() => {
+    const selectedIsListed = Boolean(value) && models.some((model) => model.id === value);
+    setManualModel(selectedIsListed ? '' : value);
+  }, [models, value]);
 
   const button = (
     <button
@@ -197,15 +204,33 @@ export function ModelChooser({
                 ))}
               </div>
             ))}
-            {canUseManual && (
-              <div className="mt-1 border-t border-line pt-1">
-                <ModelRow
-                  selected={value === manualQuery}
-                  label={`Use "${manualQuery}"`}
-                  detail="Manual model id"
-                  badge="Manual"
-                  onClick={() => choose(manualQuery)}
-                />
+            {catalog?.supportsManual && (
+              <div className="mt-2 border-t border-line px-2 pt-2">
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Custom</div>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={manualModel}
+                    onChange={(event) => setManualModel(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && canUseManual) choose(manualValue);
+                    }}
+                    placeholder="Custom model id"
+                    className="min-w-0 flex-1 rounded-md border border-line bg-canvas px-2 py-1.5 text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+                  />
+                  <button
+                    type="button"
+                    disabled={!canUseManual}
+                    onClick={() => choose(manualValue)}
+                    className="rounded-md border border-line bg-canvas px-2 py-1.5 text-[11px] font-medium text-text-secondary transition hover:border-line-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Use
+                  </button>
+                </div>
+                {canUseManual ? (
+                  <div className="mt-1 text-[11px] text-text-muted">Save any runtime-supported model ID, even if it is not listed above.</div>
+                ) : (
+                  <div className="mt-1 text-[11px] text-text-muted">Enter a model ID that is not in the catalog to pin a custom runtime model.</div>
+                )}
               </div>
             )}
           </div>

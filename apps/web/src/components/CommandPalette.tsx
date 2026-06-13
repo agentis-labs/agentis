@@ -3,7 +3,7 @@
  *
  * Opens on ⌘K / Ctrl+K. Queries /v1/command/search and navigates to the
  * selected result's href. Backed by CommandIndex (workflows, agents,
- * gateways, runs, approvals, skills, conversations).
+ * gateways, runs, approvals, extensions, conversations).
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -11,7 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 
 interface Hit {
-  type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'skill' | 'conversation';
+  type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'extension' | 'conversation';
   id: string;
   title: string;
   subtitle?: string;
@@ -79,7 +79,7 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-24"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-overlay pt-24"
       onClick={() => setOpen(false)}
     >
       <div

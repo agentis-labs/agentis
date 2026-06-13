@@ -180,6 +180,67 @@ export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     return c.json({ ambient: { id: amb.id, name: amb.name, kind: amb.kind } });
   });
 
+  app.patch('/:id', async (c) => {
+    const user = getUser(c);
+    const id = c.req.param('id');
+    const ws = deps.db
+      .select()
+      .from(schema.workspaces)
+      .where(and(eq(schema.workspaces.id, id), eq(schema.workspaces.userId, user.id)))
+      .get();
+    if (!ws) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workspace not found');
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      name?: string;
+      slug?: string;
+      description?: string;
+      imageDataUrl?: string;
+    };
+
+    const updates: Partial<typeof schema.workspaces.$inferSelect> = {
+      updatedAt: new Date().toISOString(),
+    };
+    if (typeof body.name === 'string' && body.name.trim()) {
+      updates.name = body.name.trim();
+    }
+    if (typeof body.slug === 'string' && body.slug.trim()) {
+      const cleanSlug = body.slug.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      if (cleanSlug) updates.slug = cleanSlug;
+    }
+    if (typeof body.description === 'string') {
+      updates.description = body.description.trim() || null;
+    }
+    if (typeof body.imageDataUrl === 'string') {
+      updates.imageUrl = body.imageDataUrl || null;
+    }
+
+    deps.db
+      .update(schema.workspaces)
+      .set(updates)
+      .where(eq(schema.workspaces.id, id))
+      .run();
+
+    return c.json({ ok: true });
+  });
+
+  app.delete('/:id', async (c) => {
+    const user = getUser(c);
+    const id = c.req.param('id');
+    const ws = deps.db
+      .select()
+      .from(schema.workspaces)
+      .where(and(eq(schema.workspaces.id, id), eq(schema.workspaces.userId, user.id)))
+      .get();
+    if (!ws) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workspace not found');
+
+    deps.db
+      .delete(schema.workspaces)
+      .where(eq(schema.workspaces.id, id))
+      .run();
+
+    return c.json({ ok: true });
+  });
+
   return app;
 }
 
@@ -334,6 +395,17 @@ function mapCanvasBusMessage(message: BusMessage): Array<{ event: string; data: 
           },
         },
       ];
+    case REALTIME_EVENTS.CANVAS_BUILD_COMPLETE:
+      return [{
+        event: 'workflow_progress',
+        data: {
+          ...payload,
+          type: 'BUILD_COMPLETE',
+          workflowId: stringField(payload, 'workflowId'),
+          runId: stringField(payload, 'runId'),
+          at: emittedAt,
+        },
+      }];
     case REALTIME_EVENTS.ARTIFACT_CREATED:
       return [{
         event: 'artifact_event',

@@ -27,11 +27,11 @@ const task: NormalizedTask = {
 
 describe('HermesAdapter', () => {
   beforeEach(() => {
-    process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE = 'true';
+    process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE = 'true';
   });
 
   afterEach(() => {
-    delete process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE;
+    delete process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE;
   });
 
   it('normalizes OpenAI-compatible SSE deltas into progress, tool, and completion events', async () => {
@@ -73,7 +73,7 @@ describe('HermesAdapter', () => {
   });
 
   it('emits task.failed when SSRF guard blocks a private endpoint', async () => {
-    delete process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE;
+    delete process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE;
     const fetchImpl = vi.fn(async () => new Response('should not run'));
     const adapter = new HermesAdapter({ agentId: 'agent-1', baseUrl: 'http://127.0.0.1:11434', model: 'hermes-3', logger, fetchImpl });
     const { events, completed } = captureUntil(adapter, 'task.failed');
@@ -84,15 +84,49 @@ describe('HermesAdapter', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.failed' }));
   });
+
+  it('aborts a stalled chat() request via the idle watchdog instead of hanging forever', async () => {
+    // A fetch that never resolves on its own — only the abort signal ends it.
+    const fetchImpl = vi.fn((_url: string, init: { signal?: AbortSignal }) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    })) as unknown as typeof fetch;
+    const adapter = new HermesAdapter({ agentId: 'agent-1', baseUrl: 'http://localhost:11434', model: 'hermes-3', logger, fetchImpl, chatTimeoutMs: 50 });
+
+    const deltas: unknown[] = [];
+    let threw = false;
+    try {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'hi' }], [])) deltas.push(delta);
+    } catch (err) {
+      threw = true;
+      expect((err as Error).message).toContain('did not respond within 50ms');
+    }
+
+    expect(threw).toBe(true);
+    expect(deltas).toContainEqual({ type: 'done', finishReason: 'error' });
+  });
+
+  it('streams chat() deltas to completion when data flows (watchdog never trips)', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      'data: {"choices":[{"delta":{"content":"Hi there"}}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'content-type': 'text/event-stream' } },
+    )) as unknown as typeof fetch;
+    const adapter = new HermesAdapter({ agentId: 'agent-1', baseUrl: 'http://localhost:11434', model: 'hermes-3', logger, fetchImpl, chatTimeoutMs: 5000 });
+
+    const deltas: unknown[] = [];
+    for await (const delta of adapter.chat([{ role: 'user', content: 'hi' }], [])) deltas.push(delta);
+
+    expect(deltas).toContainEqual({ type: 'text', delta: 'Hi there' });
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
 });
 
 describe('LocalLlmAdapter', () => {
   afterEach(() => {
-    delete process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE;
+    delete process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE;
   });
 
   it('allows localhost OpenAI-compatible endpoints without the private-network env flag', async () => {
-    delete process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE;
+    delete process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE;
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
       model: 'llama3.1',
       choices: [{ message: { content: 'Local answer' } }],

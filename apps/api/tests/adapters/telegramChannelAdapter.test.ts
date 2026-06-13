@@ -87,5 +87,17 @@ describe('TelegramChannelAdapter', () => {
         code: 'CHANNEL_SEND_FAILED',
       });
     });
+
+    it('turns Telegram "chat not found" into an actionable message', async () => {
+      const a = new TelegramChannelAdapter();
+      a.fetchImpl = (async () =>
+        new Response('{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}', {
+          status: 400,
+        })) as typeof fetch;
+      await expect(a.send({ token: 'x', chatId: '7905735992', body: 'h' })).rejects.toMatchObject({
+        code: 'CHANNEL_SEND_FAILED',
+        message: expect.stringMatching(/chat not found[\s\S]*7905735992[\s\S]*bot first/i),
+      });
+    });
   });
 });

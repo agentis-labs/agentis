@@ -34,6 +34,7 @@ export function createRealtimeServer(deps: {
   db: AgentisSqliteDb;
   logger: Logger;
   viewportStore?: ViewportStore;
+  allowedOrigins: readonly string[];
   options?: Partial<ServerOptions>;
 }): RealtimeServer {
   let io: IOServer | null = null;
@@ -41,8 +42,8 @@ export function createRealtimeServer(deps: {
   return {
     attach(server) {
       io = new IOServer(server, {
-        cors: { origin: true, credentials: true },
         ...deps.options,
+        cors: { origin: [...deps.allowedOrigins], credentials: true },
       });
 
       io.use(async (socket, next) => {

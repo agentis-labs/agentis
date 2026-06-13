@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { HomePage } from '../../src/pages/HomePage';
-import { WorkspaceEcosystemCanvas } from '../../src/components/home/WorkspaceEcosystemCanvas';
+import { WorkspaceEcosystemCanvas, buildCanvasModel } from '../../src/components/home/WorkspaceEcosystemCanvas';
 import { useChatPanelStore } from '../../src/components/chat/ChatPanelStore';
 
 const mocks = vi.hoisted(() => ({
@@ -45,7 +45,7 @@ function homeSnapshot() {
     workspaceId: 'ws-1',
     loading: false,
     me: { name: 'Operator' },
-    agents: [{ id: 'a1', name: 'Thomas', status: 'online' }],
+    agents: [{ id: 'a1', name: 'Thomas', role: 'manager', status: 'online' }],
     approvals: [],
     activeRuns: [],
     failedRuns: [],
@@ -68,7 +68,6 @@ function stubHomeFetch() {
     if (path === '/v1/agents?role=manager') {
       return jsonResponse({ agents: [] });
     }
-    if (path === '/v1/apps') return jsonResponse({ apps: [] });
     if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
     if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
     if (path.startsWith('/v1/memory/episodes')) return jsonResponse({ episodes: [] });
@@ -117,7 +116,7 @@ describe('<HomePage />', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(screen.getByLabelText(/workspace authority canvas/i)).toBeInTheDocument();
-    expect(await screen.findByText('Thomas')).toBeInTheDocument();
+    expect((await screen.findAllByText('Thomas')).length).toBeGreaterThan(0);
     expect(screen.getByLabelText(/message/i)).toBeInTheDocument();
   });
 });
@@ -138,16 +137,40 @@ describe('<WorkspaceEcosystemCanvas />', () => {
     document.body.classList.remove('agentis-canvas-fullscreen');
   });
 
+  it('keeps the empty workspace scaffold visible and routes resources through space managers', () => {
+    const model = buildCanvasModel(
+      {
+        loading: false,
+        workflows: [],
+        knowledgeBases: [],
+        spaces: [{ id: 'space-1', name: 'Marketing' }],
+      },
+      [],
+      [],
+      [],
+      [],
+      [],
+      { width: 1200, height: 760 },
+    );
+
+    const orchestrator = model.nodes.find((node) => node.id === 'ghost-orchestrator');
+    const manager = model.nodes.find((node) => node.id === 'ghost-manager-0');
+    const resource = model.nodes.find((node) => node.id === 'ghost-resource-0');
+    const resourceEdge = model.edges.find((edge) => edge.to === resource?.id);
+
+    expect(orchestrator).toBeDefined();
+    expect(manager?.title).toBe('Marketing manager');
+    expect(resource).toBeDefined();
+    expect(resourceEdge?.from).toBe(manager?.id);
+  });
+
   it('maps the hierarchy directly and reveals contextual output on selection', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
-        if (path === '/v1/apps') {
-          return jsonResponse({ apps: [{ id: 'app-1', slug: 'newsletter', name: 'Newsletter App', status: 'active', category: 'Marketing' }] });
-        }
         if (path === '/v1/workflows') {
-          return jsonResponse({ workflows: [{ id: 'wf-1', title: 'Weekly newsletter', status: 'active', spaceId: 'space-content' }] });
+          return jsonResponse({ workflows: [{ id: 'wf-1', title: 'Weekly newsletter', status: 'active' }] });
         }
         if (path === '/v1/knowledge-bases') {
           return jsonResponse({ knowledgeBases: [{ id: 'kb-1', name: 'Content Brain' }] });
@@ -161,8 +184,21 @@ describe('<WorkspaceEcosystemCanvas />', () => {
         <WorkspaceEcosystemCanvas
           agents={[
             { id: 'orch-1', name: 'Orchestrator Prime', role: 'orchestrator', status: 'online' },
-            { id: 'mgr-1', name: 'Content Lead', role: 'manager', status: 'online', spaceId: 'space-content' },
-            { id: 'a1', name: 'Thomas', role: 'worker', status: 'online', spaceId: 'space-content' },
+            {
+              id: 'mgr-1',
+              name: 'Content Lead',
+              role: 'manager',
+              status: 'online',
+              abilities: [{ id: 'ab-1', name: 'Marketing Expert', slug: 'marketing-expert', domainTag: 'marketing' }],
+            },
+            {
+              id: 'a1',
+              name: 'Thomas',
+              role: 'worker',
+              reportsTo: 'mgr-1',
+              status: 'online',
+              abilities: [{ id: 'ab-2', name: 'Copywriter', slug: 'copywriter', domainTag: 'marketing' }],
+            },
           ]}
           activeRuns={[{ id: 'run-1', workflowId: 'wf-1', workflowName: 'Weekly newsletter', status: 'RUNNING', startedAt: new Date().toISOString() }]}
           artifacts={[{ id: 'art-1', title: 'Newsletter draft', createdAt: new Date().toISOString(), agent: 'Thomas', workflowId: 'wf-1' }]}
@@ -171,15 +207,23 @@ describe('<WorkspaceEcosystemCanvas />', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Content Lead')).toBeInTheDocument();
-    expect(screen.getByText('Thomas')).toBeInTheDocument();
+    expect((await screen.findAllByText('Content Lead')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Thomas')).not.toBeInTheDocument();
     expect(screen.getAllByText('Weekly newsletter').length).toBeGreaterThan(0);
     expect(screen.getByLabelText(/Orchestrator Prime online/i)).toBeInTheDocument();
     expect(screen.queryByText('Content Brain')).not.toBeInTheDocument();
     expect(screen.queryByText('Newsletter draft')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-node-id="knowledge-kb-1"]')).toBeNull();
 
     fireEvent.click(screen.getByText('Orchestrator Prime'));
     expect(await screen.findByText('Content Brain')).toBeInTheDocument();
+    expect(document.querySelector('[data-node-id="knowledge-kb-1"]')).not.toBeNull();
+
+    const managerNode = document.querySelector('[data-node-id="agent-mgr-1"]') as HTMLElement | null;
+    expect(managerNode).not.toBeNull();
+    fireEvent.click(managerNode!);
+    expect(await screen.findByText('Thomas')).toBeInTheDocument();
+    expect(document.querySelector('[data-node-id="knowledge-kb-1"]')).not.toBeNull();
 
     const focusedWorkflowLabels = await screen.findAllByText('Weekly newsletter');
     fireEvent.click(focusedWorkflowLabels[0]!);
@@ -191,8 +235,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
-        if (path === '/v1/apps') return jsonResponse({ apps: [] });
-        if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
+        if (path === '/v1/workflows') return jsonResponse({ workflows: [{ id: 'wf-1', title: 'Old failed workflow', status: 'active' }] });
         if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
         return jsonResponse({});
       }),
@@ -201,7 +244,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
     render(
       <MemoryRouter>
         <WorkspaceEcosystemCanvas
-          agents={[{ id: 'a1', name: 'Thomas', status: 'online' }]}
+          agents={[{ id: 'a1', name: 'Thomas', role: 'manager', status: 'online' }]}
           activeRuns={[]}
           failedRuns={[{ id: 'failed-1', workflowName: 'Old failed workflow' }]}
           artifacts={[]}
@@ -210,7 +253,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText('Thomas');
+    expect((await screen.findAllByText('Thomas')).length).toBeGreaterThan(0);
     expect(screen.getByText('running').parentElement).toHaveTextContent('0running');
     expect(screen.getByText('idle').parentElement).toHaveTextContent('1idle');
     expect(screen.queryByText('attention')).not.toBeInTheDocument();
@@ -219,7 +262,34 @@ describe('<WorkspaceEcosystemCanvas />', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /triage/i }));
     expect(screen.getByRole('dialog', { name: /workspace triage/i })).toBeInTheDocument();
-    expect(screen.getByText(/nothing needs live triage/i)).toBeInTheDocument();
+    expect(screen.getAllByText('Old failed workflow').length).toBeGreaterThan(0);
+  });
+
+  it('hides the canvas toolbar when no workflow canvas is configured', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
+      if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <MemoryRouter>
+        <WorkspaceEcosystemCanvas
+          agents={[]}
+          activeRuns={[]}
+          artifacts={[]}
+          snapshotLoading={false}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Your AI organization will appear here/i)).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/workflows', expect.anything()));
+    expect(screen.queryByRole('button', { name: /triage/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reset view/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /full screen/i })).not.toBeInTheDocument();
   });
 
   it('keeps panning when pointer movement is delivered outside the canvas element', async () => {
@@ -227,7 +297,6 @@ describe('<WorkspaceEcosystemCanvas />', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
-        if (path === '/v1/apps') return jsonResponse({ apps: [] });
         if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
         if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
         return jsonResponse({});
@@ -267,8 +336,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
-        if (path === '/v1/apps') return jsonResponse({ apps: [] });
-        if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
+        if (path === '/v1/workflows') return jsonResponse({ workflows: [{ id: 'wf-1', title: 'Social Digest', status: 'active' }] });
         if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
         return jsonResponse({});
       }),
@@ -305,7 +373,6 @@ describe('<WorkspaceEcosystemCanvas />', () => {
   it('hides the canvas composer while the docked chat is open', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
-        if (path === '/v1/apps') return jsonResponse({ apps: [] });
         if (path === '/v1/workflows') return jsonResponse({ workflows: [] });
         if (path === '/v1/knowledge-bases') return jsonResponse({ knowledgeBases: [] });
         return jsonResponse({});

@@ -24,6 +24,7 @@ export interface ApprovalCreateArgs {
   userId: string;
   runId: string | null;
   taskId: string | null;
+  targetId?: string | null;
   gatewayId: string | null;
   source: 'checkpoint' | 'phase_gate' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
   title: string;
@@ -67,6 +68,7 @@ export class ApprovalInboxService {
         userId: args.userId,
         runId: args.runId,
         taskId: args.taskId,
+        targetId: args.targetId ?? null,
         gatewayId: args.gatewayId,
         source: args.source,
         title: args.title,
@@ -139,7 +141,7 @@ export class ApprovalInboxService {
         runId: row.runId,
         approvalId: row.id,
         source: row.source,
-        targetId: row.taskId ?? null,
+        targetId: row.targetId ?? row.taskId ?? null,
         decision: args.decision,
       });
     }

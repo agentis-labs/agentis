@@ -90,6 +90,9 @@ describe('SchedulerService', () => {
       const queueItem = ctx.db.select().from(schema.workflowRunQueue).where(eq(schema.workflowRunQueue.workflowId, workflow.id)).get();
       expect(queueItem?.reason).toBe('schedule_due');
       expect(queueItem?.triggerId).toBe(triggerId);
+      const runId = (queueItem?.initialState as { runId?: string } | null)?.runId;
+      expect(runId).toBeTruthy();
+      expect(ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId!)).get()?.status).toBe('CREATED');
       expect(captured.events.some((event) => event.envelope.event === REALTIME_EVENTS.SCHEDULE_FIRED)).toBe(true);
     } finally {
       captured.stop();
@@ -139,6 +142,8 @@ describe('EventChainService', () => {
       const queueItem = ctx.db.select().from(schema.workflowRunQueue).where(eq(schema.workflowRunQueue.workflowId, target.id)).get();
       expect(queueItem?.parentRunId).toBe(runId);
       expect(queueItem?.inputs).toEqual({ value: 42, sourceRunId: runId });
+      const targetRunId = (queueItem?.initialState as { runId?: string } | null)?.runId;
+      expect(ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, targetRunId!)).get()?.parentRunId).toBe(runId);
       expect(captured.events.some((event) => event.envelope.event === REALTIME_EVENTS.EVENT_CHAIN_FIRED)).toBe(true);
     } finally {
       captured.stop();

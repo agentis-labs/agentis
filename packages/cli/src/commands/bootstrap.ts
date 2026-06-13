@@ -55,7 +55,6 @@ interface ImportConfigAgent {
   colorHex?: string | null;
   avatarGlyph?: string | null;
   config?: Record<string, unknown>;
-  spaceId?: string | null;
 }
 
 interface ImportConfigChannel {
@@ -163,7 +162,6 @@ export async function runBootstrapCmd(argv: string[]): Promise<number> {
         monthlyBudgetCents: budgetToCents(flagString(flags, 'monthly-budget')),
         colorHex: flagString(flags, 'color') ?? ROLE_COLOR[role],
         avatarGlyph: initials(name),
-        spaceId: flagString(flags, 'space-id') ?? null,
         config: buildRuntimeConfig(adapterType, flags),
       },
       channels,
@@ -480,7 +478,6 @@ function normalizeImportAgent(raw: unknown, index: number): ImportConfigAgent {
     colorHex: optionalStringField(record, 'colorHex'),
     avatarGlyph: optionalStringField(record, 'avatarGlyph'),
     config: typeof record.config === 'object' && record.config !== null ? record.config as Record<string, unknown> : {},
-    spaceId: optionalStringField(record, 'spaceId'),
   };
 }
 

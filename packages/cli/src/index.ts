@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { bootstrap } from '@agentis/api/bootstrap';
 import { createBackup, restoreBackup } from '@agentis/api/backup';
+import { resolveDefaultDataDir } from '@agentis/api/defaultDataDir';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
 
 // When the CLI is published to npm and run via `npx`, the bundled web SPA
@@ -70,7 +71,7 @@ Run \`agentis up\` and open http://127.0.0.1:3737 in your browser.
 `;
 
 function dataDir(): string {
-  return process.env.AGENTIS_DATA_DIR ?? '.agentis';
+  return process.env.AGENTIS_DATA_DIR ?? resolveDefaultDataDir();
 }
 
 function timestampSlug(): string {

@@ -21,7 +21,7 @@
  *
  * Opt-out:
  *   Routes that already publish a richer entry to ActivityFeedService
- *   (today: skill registry install) sit under SKIP_PATHS so we don't
+ *   (today: extension registry install) sit under SKIP_PATHS so we don't
  *   double-record. A handler can also set `c.set('audit.skip', true)` to
  *   suppress for one request.
  */
@@ -41,24 +41,43 @@ interface ResourceMatcher {
 const RESOURCES: ResourceMatcher[] = [
   { pattern: /^\/v1\/workflows(?:\/|$)/, entityType: 'workflow' },
   { pattern: /^\/v1\/runs(?:\/|$)/, entityType: 'run' },
-  { pattern: /^\/v1\/skills(?:\/|$)/, entityType: 'skill' },
+  { pattern: /^\/v1\/extensions(?:\/|$)/, entityType: 'extension' },
+  { pattern: /^\/v1\/auth\/api-keys(?:\/|$)/, entityType: 'api_key' },
+  { pattern: /^\/v1\/bootstrap(?:\/|$)/, entityType: 'bootstrap' },
   { pattern: /^\/v1\/packages(?:\/|$)/, entityType: 'package' },
+  { pattern: /^\/v1\/artifacts(?:\/|$)/, entityType: 'artifact' },
+  { pattern: /^\/v1\/workspace-context(?:\/|$)/, entityType: 'workspace_context' },
+  { pattern: /^\/v1\/brain(?:\/|$)/, entityType: 'brain' },
+  { pattern: /^\/v1\/issues(?:\/|$)/, entityType: 'issue' },
+  { pattern: /^\/v1\/knowledge-bases(?:\/|$)/, entityType: 'knowledge_base' },
+  { pattern: /^\/v1\/tools(?:\/|$)/, entityType: 'tool' },
   { pattern: /^\/v1\/agents(?:\/|$)/, entityType: 'agent' },
+  { pattern: /^\/v1\/harness(?:\/|$)/, entityType: 'harness' },
+  { pattern: /^\/v1\/adapters(?:\/|$)/, entityType: 'adapter' },
   { pattern: /^\/v1\/gateways(?:\/|$)/, entityType: 'gateway' },
+  { pattern: /^\/v1\/scheduler(?:\/|$)/, entityType: 'scheduler' },
   { pattern: /^\/v1\/triggers(?:\/|$)/, entityType: 'trigger' },
   { pattern: /^\/v1\/credentials(?:\/|$)/, entityType: 'credential' },
+  { pattern: /^\/v1\/oauth(?:\/|$)/, entityType: 'oauth' },
+  { pattern: /^\/v1\/integrations(?:\/|$)/, entityType: 'integration' },
   { pattern: /^\/v1\/conversations(?:\/|$)/, entityType: 'conversation' },
+  { pattern: /^\/v1\/rooms(?:\/|$)/, entityType: 'room' },
   { pattern: /^\/v1\/channels(?:\/|$)/, entityType: 'channel' },
+  { pattern: /^\/v1\/command(?:\/|$)/, entityType: 'command' },
   { pattern: /^\/v1\/approvals(?:\/|$)/, entityType: 'approval' },
   { pattern: /^\/v1\/workspaces(?:\/|$)/, entityType: 'workspace' },
   { pattern: /^\/v1\/ambients(?:\/|$)/, entityType: 'ambient' },
   { pattern: /^\/v1\/tasks(?:\/|$)/, entityType: 'task' },
+  { pattern: /^\/v1\/teams(?:\/|$)/, entityType: 'team' },
+  { pattern: /^\/v1\/budgets(?:\/|$)/, entityType: 'budget' },
+  { pattern: /^\/v1\/ephemeral(?:\/|$)/, entityType: 'ephemeral_run' },
+  { pattern: /^\/v1\/mcp(?:\/|$)/, entityType: 'mcp' },
 ];
 
 /** Routes that already publish their own activity rows or have no workspace context. */
 const SKIP_PATHS: RegExp[] = [
-  /^\/v1\/skills\/registry(?:\/|$)/, // skillRegistry.ts records its own install events
-  /^\/v1\/auth(?:\/|$)/, // login/refresh — auth-event audit is its own concern
+  /^\/v1\/extensions\/registry(?:\/|$)/, // skillRegistry.ts records its own install events
+  /^\/v1\/auth\/(?:login|refresh|launch)(?:\/|$)/, // session exchange audit is its own concern
   /^\/v1\/_test(?:\/|$)/, // test harness reset is not a real operator action
   /^\/v1\/webhooks(?:\/|$)/, // unauthenticated ingress; no workspace/user context
 ];

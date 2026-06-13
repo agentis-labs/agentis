@@ -4,15 +4,15 @@
  * - Spawns the full stack (`pnpm dev:full`) with `AGENTIS_TEST_MODE=1` and
  *   a deterministic seed so specs can sign in with known credentials and
  *   wipe state via `POST /v1/_test/reset`.
- * - Targets the Vite dev server on :5173 (which proxies /v1/* + /socket.io
- *   to the API on :3737).
- * - In CI we always start a fresh server; locally we re-use one if it's
- *   already running.
+ * - Targets dedicated test ports by default, with Vite proxying /v1/* and
+ *   /socket.io to the isolated API server.
+ * - Always starts fresh servers so a normal local development process cannot
+ *   be mistaken for a test-mode API with reset endpoints enabled.
  */
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = Number(process.env.PLAYWRIGHT_BASE_PORT ?? 5173);
-const API_PORT = Number(process.env.PLAYWRIGHT_API_PORT ?? 3737);
+const PORT = Number(process.env.PLAYWRIGHT_BASE_PORT ?? 5174);
+const API_PORT = Number(process.env.PLAYWRIGHT_API_PORT ?? 3738);
 const baseURL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
@@ -45,7 +45,7 @@ export default defineConfig({
     {
       command: 'pnpm --filter @agentis/api dev:once',
       url: `http://127.0.0.1:${API_PORT}/healthz`,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -60,10 +60,14 @@ export default defineConfig({
     {
       command: 'pnpm --filter @agentis/web dev',
       url: baseURL,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
       stdout: 'pipe',
       stderr: 'pipe',
+      env: {
+        AGENTIS_WEB_PORT: String(PORT),
+        AGENTIS_API_PROXY_TARGET: `http://127.0.0.1:${API_PORT}`,
+      },
     },
   ],
 });

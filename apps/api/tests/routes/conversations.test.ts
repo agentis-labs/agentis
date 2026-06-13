@@ -29,6 +29,7 @@ function app() {
         conversations,
         adapters,
         logger: ctx.logger,
+        bus: ctx.bus,
       }),
     },
   ]);

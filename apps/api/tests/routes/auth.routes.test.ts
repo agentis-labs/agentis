@@ -15,6 +15,11 @@ function app() {
   return ctx.buildApp([{ path: '/v1/auth', app: buildAuthRoutes({ db: ctx.db, auth: ctx.auth, secrets: ctx.secrets }) }]);
 }
 
+function enableLaunchToken(token = 'local-launch-token') {
+  ctx.secrets.launchToken = token;
+  ctx.secrets.consumeLaunchToken = (candidate) => candidate === token;
+}
+
 describe('POST /v1/auth/login', () => {
   it('returns tokens on valid credentials', async () => {
     const res = await app().request('/v1/auth/login', {
@@ -105,21 +110,71 @@ describe('GET /v1/auth/me', () => {
     });
     expect(res.status).toBe(401);
   });
+
+  it('PATCH /me updates the operator display name and email address', async () => {
+    const res = await app().request('/v1/auth/me', {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${ctx.accessToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'New Operator Name',
+        email: 'operator@example.com',
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    // Verify changes by calling GET /me
+    const getRes = await app().request('/v1/auth/me', {
+      headers: { Authorization: `Bearer ${ctx.accessToken}` },
+    });
+    const body = (await getRes.json()) as { user: { displayName: string; email: string } };
+    expect(body.user.displayName).toBe('New Operator Name');
+    expect(body.user.email).toBe('operator@example.com');
+  });
+});
+
+describe('/v1/auth/api-keys', () => {
+  it('creates a key, authenticates with it, and revokes it', async () => {
+    const mounted = app();
+    const create = await mounted.request('/v1/auth/api-keys', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'CLI bootstrap' }),
+    });
+    expect(create.status).toBe(201);
+    const created = (await create.json()) as { key: { id: string; secret: string; preview: string } };
+    expect(created.key.secret).toMatch(/^agt_/);
+
+    const list = await mounted.request('/v1/auth/api-keys', { headers: ctx.authHeaders });
+    expect((await list.json() as { keys: Array<{ id: string }> }).keys).toEqual([
+      expect.objectContaining({ id: created.key.id }),
+    ]);
+
+    const apiKeyHeaders = {
+      authorization: `Bearer ${created.key.secret}`,
+      'x-agentis-workspace': ctx.workspace.id,
+    };
+    expect((await mounted.request('/v1/auth/me', { headers: apiKeyHeaders })).status).toBe(200);
+
+    expect((await mounted.request(`/v1/auth/api-keys/${created.key.id}`, {
+      method: 'DELETE',
+      headers: ctx.authHeaders,
+    })).status).toBe(200);
+    expect((await mounted.request('/v1/auth/me', { headers: apiKeyHeaders })).status).toBe(401);
+  });
 });
 
 describe('/v1/auth/launch', () => {
-  it('returns tokens on bare GET for local installs', async () => {
-    ctx.secrets.launchToken = 'local-launch-token';
+  it('does not authenticate a bare GET request', async () => {
+    enableLaunchToken();
     const res = await app().request('/v1/auth/launch', { method: 'GET' });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { accessToken: string; refreshToken: string; user: { id: string } };
-    expect(body.accessToken).toBeTruthy();
-    expect(body.refreshToken).toBeTruthy();
-    expect(body.user.id).toBe(ctx.user.id);
+    expect(res.status).toBe(404);
   });
 
   it('exchanges a valid POST token for a session', async () => {
-    ctx.secrets.launchToken = 'local-launch-token';
+    enableLaunchToken();
     const res = await app().request('/v1/auth/launch', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -132,8 +187,45 @@ describe('/v1/auth/launch', () => {
     expect(body.user.id).toBe(ctx.user.id);
   });
 
+  it('exchanges the local loopback bypass token for a session', async () => {
+    enableLaunchToken();
+    const previousTrustProxy = process.env.AGENTIS_TRUST_PROXY;
+    process.env.AGENTIS_TRUST_PROXY = 'true';
+    try {
+      const res = await app().request('/v1/auth/launch', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          host: '127.0.0.1:5173',
+          'x-forwarded-for': '127.0.0.1',
+        },
+        body: JSON.stringify({ token: 'local-bypass' }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { accessToken: string; refreshToken: string; user: { id: string } };
+      expect(body.accessToken).toBeTruthy();
+      expect(body.refreshToken).toBeTruthy();
+      expect(body.user.id).toBe(ctx.user.id);
+    } finally {
+      if (previousTrustProxy === undefined) delete process.env.AGENTIS_TRUST_PROXY;
+      else process.env.AGENTIS_TRUST_PROXY = previousTrustProxy;
+    }
+  });
+
+  it('accepts replay of a valid launch token', async () => {
+    enableLaunchToken();
+    const mounted = app();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'local-launch-token' }),
+    };
+    expect((await mounted.request('/v1/auth/launch', request)).status).toBe(200);
+    expect((await mounted.request('/v1/auth/launch', request)).status).toBe(200);
+  });
+
   it('rejects an invalid POST token', async () => {
-    ctx.secrets.launchToken = 'local-launch-token';
+    enableLaunchToken();
     const res = await app().request('/v1/auth/launch', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

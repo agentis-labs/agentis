@@ -14,7 +14,7 @@ export interface DrawerProps {
   onClose: () => void;
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
-  width?: 'sm' | 'md' | 'lg' | 'xl';
+  width?: 'sm' | 'md' | 'lg' | 'xl' | 'brain';
   side?: 'right' | 'left';
   footer?: React.ReactNode;
   children: React.ReactNode;
@@ -25,6 +25,7 @@ const WIDTHS: Record<NonNullable<DrawerProps['width']>, string> = {
   md: 'w-[28rem]',
   lg: 'w-[36rem]',
   xl: 'w-[44rem]',
+  brain: 'w-[min(30rem,100vw)]',
 };
 
 export function Drawer({
@@ -44,9 +45,9 @@ export function Drawer({
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[40] flex" aria-modal role="dialog">
+    <div className="fixed inset-0 z-[50] flex" aria-modal role="dialog">
       <div
-        className="animate-fade-in absolute inset-0 bg-black/60"
+        className="animate-fade-in absolute inset-0 bg-overlay"
         onClick={onClose}
       />
       <aside

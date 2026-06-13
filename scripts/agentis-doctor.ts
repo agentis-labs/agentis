@@ -21,6 +21,7 @@ import { existsSync, statSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
+import { resolveDefaultDataDir } from '../apps/api/src/defaultDataDir.ts';
 
 // Resolve better-sqlite3 from the db package, not the root — that is the
 // only workspace member that depends on it.
@@ -30,7 +31,7 @@ const requireFromDb = createRequire(
 
 type CheckResult = { name: string; ok: boolean; detail: string };
 
-const DATA_DIR = resolve(process.env.AGENTIS_DATA_DIR ?? '.agentis');
+const DATA_DIR = resolve(process.env.AGENTIS_DATA_DIR ?? resolveDefaultDataDir());
 const DB_FILE = join(DATA_DIR, 'agentis.db');
 const SECRETS_FILE = join(DATA_DIR, 'secrets.json');
 

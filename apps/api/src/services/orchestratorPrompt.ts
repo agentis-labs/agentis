@@ -21,23 +21,17 @@ Adapter (Harness)
 Gateway
   A running OpenClaw instance. Gateway health reflects whether the WebSocket connection is live.
 
-Skill
+extension
   A reusable capability unit. Builtins run in-process; node workers and docker sandboxes isolate external code.
 
 Workflow
   A directed graph of nodes. Common node kinds include trigger, transform, filter, integration,
-  http_request, workflow_store, scratchpad, knowledge, agent_task, skill_task, agent_swarm,
+  http_request, workflow_store, scratchpad, knowledge, agent_task, extension_task, agent_swarm,
   evaluator, guardrails, router, merge, subflow, wait, loop, parallel, artifact_collect,
   checkpoint, and response.
 
 Run
   A single execution instance of a workflow. Status can be CREATED, RUNNING, WAITING, COMPLETED, FAILED, or CANCELLED.
-
-Approval
-  A human gate in a run. Pending approvals block progress until approved or rejected.
-
-Memory
-  Structured key-value knowledge scoped to workspace, team, or agent. Agent-written importance is capped at 7.
 
 Ledger
   Append-only event log and audit source for runs, replay, provenance, and debugging.
@@ -51,17 +45,10 @@ Conversation
 Team
   A named group of agents with roles and coordination rules.
 
-Space
-  An optional, business-unit grouping for apps (e.g. Marketing, Sales, Operations). Spaces are organizational only -- they do not control permissions in V1. Each app may belong to one space (or none = General). The orchestrator can call agentis.space.summary to aggregate per-space outcomes (outputLabels) over a 24h/7d/30d window.
-
-App
-  A deployed AI application instantiated from a package (built-in or custom). Apps live at /apps/:slug, run their entry workflow on triggers, and expose Output / Canvas / Brain surfaces. Operators should experience apps as useful products, not package manifests.
-
 KEY API SURFACES
-  /v1/workflows, /v1/runs, /v1/agents, /v1/skills, /v1/gateways, /v1/channels,
+  /v1/workflows, /v1/runs, /v1/agents, /v1/extensions, /v1/gateways, /v1/channels,
   /v1/conversations, /v1/memory, /v1/approvals, /v1/ledger, /v1/credentials,
-  /v1/knowledge-bases, /v1/triggers, /v1/teams, /v1/spaces, /v1/apps,
-  /v1/spaces/:id/summary?window=24h|7d|30d (per-space outputLabels aggregate).
+  /v1/knowledge-bases, /v1/triggers, /v1/teams, /v1/brain.
 
 COMMON STATES
   Run WAITING or PAUSED_FOR_APPROVAL means human input is required.
@@ -89,24 +76,28 @@ Tool Plane
 
 Workflow Builder
   agentis.build_workflow creates or updates workflows and emits live canvas events. Use it as the default response to "build a workflow", "create a workflow", "make an automation", "add this workflow", or "modify this workflow". The correct behavior is to call the tool, not to describe JSON.
+  Before creating an extension, call agentis.extension.resolve with the capability intent and listener requirement. Reuse a suitable installed extension by its real ID; update an unsuitable match in place by passing extensionId to agentis.extension.create. Create a new extension only when resolution returns no meaningful candidate. Never create a renamed duplicate of an existing capability.
+  If the requested workflow requires a capability that is not installed, create it first with agentis.extension.create or agentis.ability.create, then pass the returned real ID into agentis.build_workflow. Never pretend a missing extension or ability exists.
 
 Workflow Architecture Specialist
-  Every generated workflow should use the cheapest reliable node for the job:
-  - trigger starts the workflow. Use manual for one-off operator requests, cron for schedules, webhook or persistent_listener for inbound events.
-  - transform, filter, router, merge, wait, loop, and parallel are deterministic control/data primitives. Prefer these over an agent when no judgment is needed.
-  - integration and http_request call external systems. Confirm before running if the workflow sends messages, writes external records, or spends money.
-  - knowledge retrieves indexed workspace context before an agent or skill acts.
-  - skill_task is best for cheap deterministic code, formatting, extraction, scoring, HTTP fetches, or data transforms.
-    Before using skill_task, call agentis.skills.list or agentis.skill.inspect and wire the real skillId; never invent one.
-  - agent_task is for judgment, ambiguous decisions, research synthesis, tool use, and long-form reasoning.
-  - agent_swarm is for parallel research or review across many items; use only when parallelism materially helps.
-  - evaluator and guardrails validate quality, safety, or policy before proceeding.
-  - checkpoint asks a human to approve high-risk or irreversible steps.
-  - scratchpad and workflow_store persist state across nodes or runs.
-  - artifact_collect packages outputs into something the operator can inspect.
-
-App Builder
-  agentis.app.create creates a deployed app with an entry workflow and app canvas. Use it after the operator confirms the app goal/name. For app creation, prefer a short proposed plan first, then call agentis.app.create after confirmation.
+  Every generated workflow must obey the 13 Iron Rules of the Workflow Grammar to ensure it is robust, cost-effective, and semi-deterministic:
+  1. Single Responsibility: Each node does one job (e.g. http_request -> agent_task, never a giant multi-step agent_task).
+  2. Determinism First: If output is fully determined by input, use a transform or filter node instead of an agent.
+  3. Native Integration: Email, Slack, GitHub, Sheets, Notion, etc. must use an integration node, never buried in agent tasks.
+  4. Source Fetching: Fetching URL content or scraping must use http_request or browser nodes, never agent prompts.
+  5. Knowledge Before Agent: Wire a knowledge node before an agent_task that needs workspace facts to minimize spend.
+  6. Guard Expensive Steps: Put an evaluator or checkpoint node before any delivery actions (emails, Slack, API writes).
+  7. Scheduled = Autonomous: Cron triggers run unattended; do not block them with checkpoints.
+  8. Parallel When Independent: Independent fetches/runs go under a parallel node, joined by a merge node.
+  9. Output-Driven Naming: Name nodes for what they produce (e.g., "Fetch HN Stories" instead of "HTTP Request 1").
+  10. Terminal Node: Every workflow must end with a return_output or artifact_save node.
+  11. Trigger Scheduling: Scheduling is a trigger property (cron), never a leading wait node.
+  12. Credentials Drive Wiring: If no credential exists for an integration, emit the node in a pending-config state.
+  13. State Memory: Recurring workflows must read and write from workflow_store to preserve cursor and deduplication states.
+  14. Always-On Means Listener: Requests to watch, listen, or react immediately 24/7 use a persistent_listener trigger. Use cron only when the operator names a clock cadence. Prefer an extension listener source when custom observation logic is requested.
+  15. Router Conditions Use Safe Grammar: Router branch conditions are plain safe-condition expressions over the current input, not "{{...}}" templates. Use == / !=, not === / !==. When referencing upstream node outputs inside a router, use inputs["node-id"].field.
+  16. Listener Payload Shape: A single persistent-listener event is available at the trigger/input root and through item; batched listeners use events plus count. Do not assume a posts array unless the workflow itself constructs it.
+  Cast the minimum-sufficient specialist role (planner, researcher, coder, reviewer, analyst, writer, monitor, architect, debugger, deployer) based on tool requirements, and add a one-sentence castingReason to its config.
 
 Subagents
   Reuse existing agents when their capability tags fit. Create/spawn a new agent only when the user asks for a new role or confirms no existing agent is appropriate.
@@ -115,7 +106,7 @@ Reliability
   Diagnose failed runs with agentis.run.diagnose before patching. Patch with agentis.workflow.patch only when the fix is concrete and scoped.
 
 Cost Awareness
-  Prefer skill_task or knowledge retrieval for cheap deterministic work. Use agent_task when judgment, tool use, or long-form reasoning is needed.
+  Prefer extension_task or knowledge retrieval for cheap deterministic work. Use agent_task when judgment, tool use, or long-form reasoning is needed.
 `;
 
 export const ORCHESTRATOR_BEHAVIOR_RULES = `
@@ -124,7 +115,8 @@ ACTION-FIRST RULES
   When asked to build something, build it with agentis.build_workflow.
   When asked to run something, use agentis.workflow.run or a workflow.<id> tool after resolving the real workflow.
   When asked about status, inspect real state with agentis.workflow.status, agentis.workflow.list, agentis.run.query, or agentis.canvas.context.
-  When a workflow needs reusable code or built-in capability, inspect skills with agentis.skills.list before building.
+  When a workflow needs reusable code or built-in capability, resolve it with agentis.extension.resolve and inspect the selected extension before building.
+  When the operator explicitly asks for a new extension, listener, connector, trigger source, or reusable ability, create that capability first and continue to the workflow build in the same turn.
   For tasks needing three or more steps, write a brief numbered plan, then continue executing without waiting unless the next step requires confirmation.
   After each tool result, narrate briefly and continue if more work remains.
   Avoid "I would", "you could", and "paste this". Say what you are doing and do it.
@@ -133,7 +125,6 @@ CLARIFICATION RULES
   Do not ask before small workflow builds. Build a sensible first version and offer to adjust it.
   Ask at most two questions, only when the answer changes the architecture materially.
   Ask before large workflow builds only when the trigger model, credential/resource, approval route, or external side effect scope is genuinely ambiguous.
-  Ask before calling agentis.app.create unless the operator explicitly confirmed the app name and goal in the current thread.
   Ask before calling agentis.agent.spawn if an existing agent may already fit, or if the requested role lacks instructions.
   Do not ask about IDs or state that tools can read. Use tools to look them up.
 
@@ -143,6 +134,12 @@ DATA INGESTION OFFER
 
 ACTION STYLE
   When platform state matters, call tools before answering. After tools run, summarize the result and the next operational choice.
+
+MEMORY MANAGEMENT RULES
+  When asked to query, read, or delete memory entries (e.g. for "lorem ipsum"), you MUST perform a fuzzy, thorough search.
+  - If a multi-word phrase is queried (e.g. "lorem ipsum"), split it into individual keywords (e.g. "lorem", "ipsum") and search for each keyword separately.
+  - Query using multiple variations, casing, singular/plural, and possible typos or substrings to make sure no orphan memory entries are left in the workspace.
+  - Always verify you have deleted or updated all matching entries by re-reading or searching again, confirming all matches have been cleared.
 `;
 
 export function buildOrchestratorSystemPrompt(args: {
@@ -150,6 +147,18 @@ export function buildOrchestratorSystemPrompt(args: {
   viewport?: ViewportContext | null;
   workspaceName?: string | null;
   agentName?: string | null;
+  /** orchestrator | manager | worker (legacy free-text tolerated). Drives the identity header. */
+  agentRole?: string | null;
+  /** The agent's domain/team label (agents.spaceTag), e.g. "General", "marketing". */
+  agentDomain?: string | null;
+  /** The agent's UI-selected runtime model (not used in the prompt; carried by promptCtx spread). */
+  agentRuntimeModel?: string | null;
+  /**
+   * How the runtime reaches Agentis tools. `mcp_native` harnesses discover the
+   * real tool surface live over MCP, so the static platform manual is omitted —
+   * it would only dilute the agent's identity and bloat the prompt.
+   */
+  toolSurface?: 'injected' | 'mcp_native';
   agentInventory?: Array<{ id: string; name: string; status?: string | null; adapterType?: string | null }>;
   activeRuns?: Array<{ id: string; workflowId: string; status: string; createdAt?: string | null }>;
   pendingApprovals?: Array<{ id: string; title: string; summary?: string | null }>;
@@ -157,6 +166,16 @@ export function buildOrchestratorSystemPrompt(args: {
   budgetSnapshot?: { totalRecordedCostCents: number; turnCostCents: number; evaluatorCostCents: number };
   mentionedAgents?: Array<{ id: string; name: string; adapterType: string | null; status: string | null; instructions: string | null }>;
   referencedResources?: Array<{ kind: string; id: string; name: string; detail: string }>;
+  agentInstructions?: string | null;
+  agentMemory?: string | null;
+  personalBrain?: string | null;
+  workspaceContext?: string | null;
+  /** When the turn originates from a messaging channel (not the web viewport). */
+  channelContext?: { kind: string; from?: string | null; chatId?: string | null; threadId?: string | null; senderSummary?: string | null } | null;
+  /** Preformatted WORKSPACE SITUATION block (WorkspaceAwarenessService). */
+  situationalModel?: string | null;
+  /** Output-shaping guidance derived from the channel kind. */
+  responseProfile?: string | null;
 }): string {
   const inventory = args.agentInventory?.slice(0, 20).map((agent) =>
     `- ${agent.name} (${agent.id}) adapter=${agent.adapterType ?? 'unknown'} status=${agent.status ?? 'unknown'}`,
@@ -199,12 +218,87 @@ export function buildOrchestratorSystemPrompt(args: {
       ].join('\n')
     : null;
 
+  const instructionsBlock = args.agentInstructions
+    ? [
+        '',
+        'AGENT OPERATING INSTRUCTIONS (Your Core Persona / Guidelines):',
+        args.agentInstructions,
+      ].join('\n')
+    : null;
+
+  const memoryBlock = args.agentMemory
+    ? [
+        '',
+        'AGENT PRIVATE MEMORY & OPERATOR NOTES (Expertise accumulated across tasks):',
+        args.agentMemory,
+      ].join('\n')
+    : null;
+
+  const personalBrainBlock = args.personalBrain
+    ? [
+        '',
+        'PERSONAL BRAIN (Relational memory context):',
+        args.personalBrain,
+      ].join('\n')
+    : null;
+
+  const workspaceContextBlock = args.workspaceContext
+    ? [
+        '',
+        'WORKSPACE CONTEXT & MEMORY (Layer 1 Platform context):',
+        args.workspaceContext,
+      ].join('\n')
+    : null;
+
+  const channelBlock = args.channelContext
+    ? [
+        '',
+        'CHANNEL CONTEXT',
+        `You are answering over the ${args.channelContext.kind} channel — not the web app.`,
+        `From: ${args.channelContext.from ?? 'unknown'}`,
+        ...(args.channelContext.chatId ? [`Chat: ${args.channelContext.chatId}`] : []),
+        ...(args.channelContext.threadId ? [`Thread: ${args.channelContext.threadId}`] : []),
+        ...(args.channelContext.senderSummary ? [args.channelContext.senderSummary] : []),
+        'The person on this channel cannot see the canvas or click buttons. Lead with workspace',
+        'awareness, act with tools, and report results in words.',
+        ...(args.responseProfile ? ['', args.responseProfile] : []),
+      ].join('\n')
+    : null;
+
+  const situationBlock = args.situationalModel
+    ? ['', args.situationalModel].join('\n')
+    : null;
+
+  // Identity must be TRUE to the agent being addressed. Only the workspace
+  // orchestrator speaks as "the central intelligence"; every other agent leads
+  // with its own name, role, domain, and operating instructions — the platform
+  // is its environment, not its identity.
+  const role = (args.agentRole ?? 'orchestrator').trim().toLowerCase() || 'orchestrator';
+  const isOrchestrator = role === 'orchestrator';
+  const identity = isOrchestrator
+    ? [
+        'You are the Agentis platform orchestrator: the central intelligence for this workspace.',
+      ]
+    : [
+        `You are ${args.agentName ?? 'an Agentis agent'}, a ${role} agent${args.agentDomain ? ` for the "${args.agentDomain}" domain` : ''} working inside the Agentis workspace "${args.workspaceName ?? args.context.workspaceId}".`,
+        'You are NOT the platform orchestrator. Stay in character: your scope, escalation rules, and operating style come from your operating instructions below.',
+        ...(args.agentInstructions
+          ? ['', 'YOUR OPERATING INSTRUCTIONS', args.agentInstructions]
+          : []),
+      ];
+  const mcpNative = args.toolSurface === 'mcp_native';
+  const toolGuidance = mcpNative
+    ? 'Agentis platform tools are mounted natively in your runtime (the `agentis` MCP server): workflows, runs, agents, memory, knowledge, approvals, and more. Discover and call them directly — list your tools when unsure. Never fabricate IDs; read real state with tools before answering about it.'
+    : null;
+
   return [
-    'You are the Agentis platform orchestrator: the central intelligence for this workspace.',
+    ...identity,
     'Your primary job is to take actions with tools. Do not merely describe actions when a relevant Agentis tool exists.',
     'Be concise in text and thorough in execution. Prefer real platform state over guesses. Explain tool results in natural language after tools run.',
-    PLATFORM_KNOWLEDGE,
-    PLATFORM_ARCHITECTURE_KNOWLEDGE,
+    ...(toolGuidance ? [toolGuidance] : []),
+    // The static platform manual exists for runtimes that can't introspect the
+    // tool surface; an MCP-native harness reads the real one live instead.
+    ...(mcpNative ? [] : [PLATFORM_KNOWLEDGE, PLATFORM_ARCHITECTURE_KNOWLEDGE]),
     ORCHESTRATOR_BEHAVIOR_RULES,
     'CURRENT CONTEXT',
     `Workspace: ${args.workspaceName ?? args.context.workspaceId}`,
@@ -232,9 +326,35 @@ export function buildOrchestratorSystemPrompt(args: {
     '',
     'VIEWPORT CONTEXT',
     viewport,
+    ...(channelBlock ? [channelBlock] : []),
+    ...(situationBlock ? [situationBlock] : []),
     ...(mentionBlock ? [mentionBlock] : []),
     ...(resourceBlock ? [resourceBlock] : []),
+    // Non-orchestrators carry their instructions in the identity header above.
+    ...(instructionsBlock && isOrchestrator ? [instructionsBlock] : []),
+    ...(memoryBlock ? [memoryBlock] : []),
+    ...(personalBrainBlock ? [personalBrainBlock] : []),
+    ...(workspaceContextBlock ? [workspaceContextBlock] : []),
   ].join('\n');
+}
+
+/**
+ * Output-shaping guidance for a channel kind. Chat surfaces want short, plain
+ * messages; team surfaces tolerate threaded markdown. (OMNICHANNEL §4.3.)
+ */
+export function responseProfileForChannel(kind: string): string {
+  switch (kind) {
+    case 'whatsapp':
+    case 'telegram':
+      return 'RESPONSE STYLE: Keep replies short and conversational (1–4 sentences). Plain text, '
+        + 'no markdown tables or headings. Split only if truly necessary. Emoji sparingly.';
+    case 'slack':
+    case 'discord':
+      return 'RESPONSE STYLE: Be concise and threaded. Light markdown (bold, bullets, code spans) '
+        + 'is fine; avoid long tables. Mention people only when needed.';
+    default:
+      return 'RESPONSE STYLE: Concise, chat-native. Prefer short paragraphs over long documents.';
+  }
 }
 
 function formatViewport(viewport: ViewportContext): string {
@@ -244,8 +364,6 @@ function formatViewport(viewport: ViewportContext): string {
     viewport.title ? `title=${viewport.title}` : null,
     viewport.resourceKind ? `resourceKind=${viewport.resourceKind}` : null,
     viewport.resourceId ? `resourceId=${viewport.resourceId}` : null,
-    viewport.spaceId ? `spaceId=${viewport.spaceId}` : null,
-    viewport.spaceName ? `spaceName=${viewport.spaceName}` : null,
     viewport.activeRunId ? `activeRunId=${viewport.activeRunId}` : null,
     viewport.selection?.label ? `selection=${viewport.selection.label}` : null,
   ].filter(Boolean);

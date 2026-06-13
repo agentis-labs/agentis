@@ -1,7 +1,6 @@
 /**
- * Workspace context routes — view + edit the three persistent context files
- * (WORKSPACE.md / MEMORY.md / DECISIONS.md) that power Layer 1 Workspace
- * Intelligence. Surfaced in the UI as Settings > Workspace > Context.
+ * Workspace context routes - view + edit operator-authored workspace docs.
+ * Runtime memory is DB-backed and exposed through brain/memory routes.
  */
 
 import { Hono } from 'hono';
@@ -13,7 +12,7 @@ import type { WorkspaceIntelligenceService, ContextFileName } from '../services/
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 
-const FILES: ContextFileName[] = ['WORKSPACE.md', 'MEMORY.md', 'DECISIONS.md', 'WORKFLOW.md'];
+const FILES: ContextFileName[] = ['WORKSPACE.md', 'DECISIONS.md', 'WORKFLOW.md'];
 
 const putSchema = z.object({ content: z.string().max(200_000) });
 
@@ -29,17 +28,22 @@ export function buildWorkspaceContextRoutes(deps: {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
-  // All three files at once, plus the assembled block (what agents actually see).
   app.get('/', async (c) => {
     const ws = getWorkspace(c);
-    const [workspace, memory, decisions, workflow, block] = await Promise.all([
+    const [workspace, decisions, workflow, block] = await Promise.all([
       deps.intelligence.getContextFile(ws.workspaceId, 'WORKSPACE.md'),
-      deps.intelligence.getContextFile(ws.workspaceId, 'MEMORY.md'),
       deps.intelligence.getContextFile(ws.workspaceId, 'DECISIONS.md'),
       deps.intelligence.getContextFile(ws.workspaceId, 'WORKFLOW.md'),
       deps.intelligence.buildContextBlock(ws.workspaceId),
     ]);
-    return c.json({ files: { 'WORKSPACE.md': workspace, 'MEMORY.md': memory, 'DECISIONS.md': decisions, 'WORKFLOW.md': workflow }, contextBlock: block });
+    return c.json({
+      files: {
+        'WORKSPACE.md': workspace,
+        'DECISIONS.md': decisions,
+        'WORKFLOW.md': workflow,
+      },
+      contextBlock: block,
+    });
   });
 
   app.get('/:file', async (c) => {

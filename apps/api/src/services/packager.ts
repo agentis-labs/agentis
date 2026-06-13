@@ -7,7 +7,7 @@ import {
   REALTIME_ROOMS,
   type PackageContents,
   type PackageKind,
-  type SkillManifest,
+  type ExtensionManifest,
   type AgentisPackageContents,
   type PackageManifest,
   type PackageExportEnvelope,
@@ -42,6 +42,8 @@ export interface UsePackageResult {
 }
 
 import type { Logger } from '../logger.js';
+import type { AbilityService } from './abilityService.js';
+import type { AbilityPackage } from '@agentis/core';
 
 export class PackagerService {
   constructor(
@@ -49,6 +51,8 @@ export class PackagerService {
       db: AgentisSqliteDb;
       bus?: EventBus;
       logger?: Logger;
+      /** Optional — when wired, agentis-bundle installs deploy abilities + pins. */
+      abilities?: AbilityService;
     },
   ) {}
 
@@ -127,8 +131,7 @@ export class PackagerService {
       kind: 'workflow',
       workflow: {
         title: workflow.title,
-        summary: workflow.summary ?? null,
-        intendedBehavior: workflow.intendedBehavior ?? null,
+        description: workflow.description ?? null,
         graph: objectRecord(workflow.graph),
         settings: objectRecord(workflow.settings),
         maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
@@ -158,8 +161,7 @@ export class PackagerService {
       kind: 'workflow',
       workflow: {
         title: workflow.title,
-        summary: workflow.summary ?? null,
-        intendedBehavior: workflow.intendedBehavior ?? null,
+        description: workflow.description ?? null,
         graph: objectRecord(workflow.graph),
         settings: objectRecord(workflow.settings),
         maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
@@ -182,7 +184,7 @@ export class PackagerService {
         .update(schema.libraryPackages)
         .set({
           name: workflow.title,
-          description: workflow.summary ?? null,
+          description: workflow.description ?? null,
           contents,
           checksum,
           updatedAt: now,
@@ -191,7 +193,7 @@ export class PackagerService {
         .run();
       return this.get(existing.id, scope.workspaceId);
     }
-    return this.insertPacked(scope, { name: workflow.title, description: workflow.summary ?? null }, 'workflow', contents, workflow.id);
+    return this.insertPacked(scope, { name: workflow.title, description: workflow.description ?? null }, 'workflow', contents, workflow.id);
   }
 
   packFromAgent(scope: PackageScope, agentId: string, meta: Partial<PackageMeta> = {}) {
@@ -218,25 +220,25 @@ export class PackagerService {
     return this.insertPacked(scope, { ...meta, name }, 'agent', contents, agent.id);
   }
 
-  packFromSkill(scope: PackageScope, skillId: string, meta: Partial<PackageMeta> = {}) {
-    const skill = this.deps.db
+  packFromExtension(scope: PackageScope, extensionId: string, meta: Partial<PackageMeta> = {}) {
+    const extension = this.deps.db
       .select()
-      .from(schema.skills)
-      .where(and(eq(schema.skills.id, skillId), eq(schema.skills.workspaceId, scope.workspaceId)))
+      .from(schema.extensions)
+      .where(and(eq(schema.extensions.id, extensionId), eq(schema.extensions.workspaceId, scope.workspaceId)))
       .get();
-    if (!skill) throw new AgentisError('SKILL_NOT_FOUND', 'skill not found');
-    const name = meta.name ?? skill.name;
+    if (!extension) throw new AgentisError('EXTENSION_NOT_FOUND', 'extension not found');
+    const name = meta.name ?? extension.name;
     const contents: PackageContents = {
-      kind: 'skill',
-      skill: {
-        name: skill.name,
-        slug: skill.slug,
-        version: skill.version,
-        runtime: skill.runtime as 'builtin' | 'node_worker' | 'docker_sandbox',
-        manifest: objectRecord(skill.manifest) as unknown as SkillManifest,
+      kind: 'extension',
+      extension: {
+        name: extension.name,
+        slug: extension.slug,
+        version: extension.version,
+        runtime: extension.runtime as 'builtin' | 'node_worker' | 'docker_sandbox',
+        manifest: objectRecord(extension.manifest) as unknown as ExtensionManifest,
       },
     };
-    return this.insertPacked(scope, { ...meta, name }, 'skill', contents, skill.id);
+    return this.insertPacked(scope, { ...meta, name }, 'extension', contents, extension.id);
   }
 
   exportEnvelope(packageId: string, workspaceId: string): PackageExportEnvelope {
@@ -265,7 +267,8 @@ export class PackagerService {
       scope,
       {
         name: manifest.name,
-        slug: manifest.slug,
+        // Intentionally omit slug so the auto-increment path picks a unique one,
+        // avoiding PACKAGE_SLUG_CONFLICT when importing duplicates.
         version: manifest.version,
         description: manifest.description ?? null,
         tags: manifest.tags,
@@ -297,7 +300,7 @@ export class PackagerService {
           registryEntryId: null,
           registryVersion: null,
           title: contents.workflow.title,
-          summary: contents.workflow.summary ?? row.description ?? null,
+          description: contents.workflow.description ?? row.description ?? null,
           graph: contents.workflow.graph,
           settings: contents.workflow.settings,
           maxConcurrentRuns: contents.workflow.maxConcurrentRuns ?? null,
@@ -338,39 +341,14 @@ export class PackagerService {
         .run();
       return { kind: 'agent', resourceId: id, path: `/agents/${id}` };
     }
-    if (contents.kind === 'skill') {
-      if (contents.skill.runtime === 'builtin') {
-        throw new AgentisError('VALIDATION_FAILED', 'builtin skills cannot be reinstalled from Library packages');
-      }
-      const id = randomUUID();
-      this.deps.db
-        .insert(schema.skills)
-        .values({
-          id,
-          workspaceId: scope.workspaceId,
-          ambientId: scope.ambientId,
-          userId: scope.userId,
-          packageId: null,
-          name: contents.skill.name,
-          slug: contents.skill.slug,
-          version: contents.skill.version,
-          runtime: contents.skill.runtime,
-          manifest: contents.skill.manifest,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .run();
-      return { kind: 'skill', resourceId: id, path: '/packages?tab=skills' };
+    if (contents.kind === 'extension') {
+      throw new AgentisError('VALIDATION_FAILED', 'extension packages are no longer exposed');
     }
     if (contents.kind === 'integration') {
-      return {
-        kind: 'integration',
-        resourceId: contents.integration.service,
-        path: `/packages?tab=integration&service=${encodeURIComponent(contents.integration.service)}`,
-      };
+      throw new AgentisError('VALIDATION_FAILED', 'integration packages are no longer exposed');
     }
     if (contents.kind === 'agentis') {
-      return this.activateApp(scope, row, contents, now);
+      return this.activateAgentisPackage(scope, row, contents, now);
     }
     throw new AgentisError('VALIDATION_FAILED', 'package kind cannot be used yet');
   }
@@ -476,19 +454,77 @@ export class PackagerService {
     );
   }
 
-  private activateApp(
+  private activateAgentisPackage(
     scope: PackageScope,
     row: typeof schema.libraryPackages.$inferSelect,
     contents: AgentisPackageContents,
     now: string,
   ): UsePackageResult {
-    const appSlug = row.slug;
+    const packageSlug = row.slug;
     const workflowIds = new Map<string, string>();
     const agentIds = new Map<string, string>();
-    const skillIds = this.workspaceSkillIds(scope.workspaceId);
+    const extensionIds = this.workspaceextensionIds(scope.workspaceId);
     const seedKnowledgeBaseId = contents.knowledgeSeeds.length > 0
       ? this.createSeedKnowledgeBase(scope, row.name, contents.knowledgeSeeds, now)
       : null;
+
+    // Abilities install first so agent pin-slug lookups succeed.
+    const abilityIdBySlug = new Map<string, string>();
+    if (contents.abilities && contents.abilities.length > 0 && this.deps.abilities) {
+      for (const abilityContents of contents.abilities) {
+        try {
+          const pkg: AbilityPackage = {
+            format_version: '1.0',
+            manifest: {
+              name: abilityContents.name,
+              slug: abilityContents.slug,
+              version: abilityContents.version,
+              domain_tag: abilityContents.domain_tag,
+              icon_emoji: abilityContents.icon_emoji,
+              description: abilityContents.description,
+              compiled_prompt: abilityContents.compiled_prompt,
+              specs: abilityContents.specs,
+              rules_always: abilityContents.rules_always,
+              rules_never: abilityContents.rules_never,
+              tool_hints: abilityContents.tool_hints,
+              example_count: abilityContents.examples.length,
+            },
+            examples: abilityContents.examples.map((ex) => ({
+              input_text: ex.input_text,
+              output_text: ex.output_text,
+              input_media_url: ex.input_media_url ?? null,
+              media_description: ex.media_description ?? null,
+              quality_score: ex.quality_score,
+              source: ex.source,
+              embedding: ex.embedding ?? null,
+            })),
+            knowledge: abilityContents.knowledge.map((k) => ({
+              title: k.title ?? null,
+              content: k.content,
+              context_prefix: k.context_prefix ?? null,
+              embedding: k.embedding ?? null,
+              source_type: k.source_type,
+              source_url: k.source_url ?? null,
+              importance_score: k.importance_score,
+            })),
+          };
+          const imported = this.deps.abilities.importPackage({
+            workspaceId: scope.workspaceId,
+            pkg,
+            authorId: scope.userId,
+          });
+          abilityIdBySlug.set(abilityContents.slug, imported.id);
+          // Trigger background compile so the imported ability becomes available to dispatch.
+          try { this.deps.abilities.requestCompile(imported.id); } catch { /* best-effort */ }
+        } catch (err) {
+          this.deps.logger?.warn('packager.ability_import_failed', {
+            packageId: row.id,
+            abilitySlug: abilityContents.slug,
+            err: (err as Error).message,
+          });
+        }
+      }
+    }
 
     for (const agent of contents.agents) {
       const id = randomUUID();
@@ -518,6 +554,28 @@ export class PackagerService {
         .run();
       agentIds.set(agent.name, id);
       agentIds.set(this.slugFor(agent.name), id);
+      // Apply ability pins from the bundle. Skip unknown slugs gracefully.
+      if (this.deps.abilities && agent.pinnedAbilitySlugs && agent.pinnedAbilitySlugs.length > 0) {
+        for (const slug of agent.pinnedAbilitySlugs) {
+          const abilityId = abilityIdBySlug.get(slug);
+          if (!abilityId) {
+            this.deps.logger?.warn('packager.ability_pin_unresolved', {
+              packageId: row.id,
+              agentName: agent.name,
+              abilitySlug: slug,
+            });
+            continue;
+          }
+          try { this.deps.abilities.pinAbility(id, abilityId); }
+          catch (err) {
+            this.deps.logger?.warn('packager.ability_pin_failed', {
+              agentId: id,
+              abilityId,
+              err: (err as Error).message,
+            });
+          }
+        }
+      }
     }
 
     for (const workflow of contents.workflows) {
@@ -525,7 +583,7 @@ export class PackagerService {
       const slug = workflow.slug ?? this.slugFor(workflow.title);
       const graph = this.resolvePackageGraphRefs(workflow.graph, {
         agentIds,
-        skillIds,
+        extensionIds,
         seedKnowledgeBaseId,
       });
       this.deps.db
@@ -538,14 +596,13 @@ export class PackagerService {
           registryEntryId: null,
           registryVersion: null,
           title: workflow.title,
-          summary: workflow.summary ?? null,
-          intendedBehavior: workflow.intendedBehavior ?? null,
+          description: workflow.description ?? null,
           graph,
           settings: objectRecord(workflow.settings),
           maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
           concurrencyOverflow: workflow.concurrencyOverflow ?? 'queue',
           isFromRegistry: false,
-          tags: [appSlug],
+          tags: [packageSlug],
           createdAt: now,
           updatedAt: now,
         })
@@ -554,22 +611,22 @@ export class PackagerService {
       workflowIds.set(this.slugFor(workflow.title), id);
     }
 
-    for (const skill of contents.skills) {
-      if (skill.runtime === 'builtin') continue;
+    for (const extension of contents.extensions) {
+      if (extension.runtime === 'builtin') continue;
       const id = randomUUID();
       this.deps.db
-        .insert(schema.skills)
+        .insert(schema.extensions)
         .values({
           id,
           workspaceId: scope.workspaceId,
           ambientId: scope.ambientId,
           userId: scope.userId,
           packageId: null,
-          name: skill.name,
-          slug: skill.slug,
-          version: skill.version,
-          runtime: skill.runtime,
-          manifest: skill.manifest,
+          name: extension.name,
+          slug: extension.slug,
+          version: extension.version,
+          runtime: extension.runtime,
+          manifest: extension.manifest,
           createdAt: now,
           updatedAt: now,
         })
@@ -585,14 +642,14 @@ export class PackagerService {
 
   private createSeedKnowledgeBase(
     scope: PackageScope,
-    appName: string,
+    packageName: string,
     seeds: AgentisPackageContents['knowledgeSeeds'],
     now: string,
   ): string {
     return this.createKnowledgeBaseFromDocuments(
       scope,
-      `${appName} Seeds`,
-      `Seed knowledge activated with ${appName}`,
+      `${packageName} Seeds`,
+      `Seed knowledge activated with ${packageName}`,
       seeds.map((seed) => ({
         name: seed.title,
         mimeType: 'text/markdown',
@@ -666,11 +723,11 @@ export class PackagerService {
     return knowledgeBaseId;
   }
 
-  private workspaceSkillIds(workspaceId: string): Map<string, string> {
+  private workspaceextensionIds(workspaceId: string): Map<string, string> {
     const rows = this.deps.db
-      .select({ id: schema.skills.id, slug: schema.skills.slug, name: schema.skills.name })
-      .from(schema.skills)
-      .where(eq(schema.skills.workspaceId, workspaceId))
+      .select({ id: schema.extensions.id, slug: schema.extensions.slug, name: schema.extensions.name })
+      .from(schema.extensions)
+      .where(eq(schema.extensions.workspaceId, workspaceId))
       .all();
     const map = new Map<string, string>();
     for (const row of rows) {
@@ -683,7 +740,7 @@ export class PackagerService {
 
   private resolvePackageGraphRefs(
     graph: unknown,
-    refs: { agentIds: Map<string, string>; skillIds: Map<string, string>; seedKnowledgeBaseId: string | null },
+    refs: { agentIds: Map<string, string>; extensionIds: Map<string, string>; seedKnowledgeBaseId: string | null },
   ): Record<string, unknown> {
     const cloned = cloneJson(graph);
     const record = objectRecord(cloned);
@@ -699,8 +756,8 @@ export class PackagerService {
           if (resolved) config.agentId = resolved;
         }
       }
-      if (config.kind === 'skill_task' && typeof config.skillId === 'string') {
-        config.skillId = refs.skillIds.get(config.skillId) ?? config.skillId;
+      if (config.kind === 'extension_task' && typeof config.extensionId === 'string') {
+        config.extensionId = refs.extensionIds.get(config.extensionId) ?? config.extensionId;
       }
       if (config.kind === 'knowledge' && config.knowledgeBaseId === '__seeds' && refs.seedKnowledgeBaseId) {
         config.knowledgeBaseId = refs.seedKnowledgeBaseId;

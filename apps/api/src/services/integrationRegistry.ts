@@ -5,6 +5,7 @@ import { AgentisError } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import {
   builtinIntegrationManifests,
+  defaultConnectorRegistry,
   manifestHttpConnector,
   type IntegrationManifest,
 } from '@agentis/integrations';
@@ -85,12 +86,22 @@ export function listIntegrationManifests(
 ): StoredIntegrationManifest[] {
   return [
     ...builtinIntegrationManifests.map((manifest) => ({
-      ...manifest,
+      ...withOperationContracts(manifest),
       id: manifest.service,
       source: 'builtin' as const,
     })),
-    ...listCustomIntegrationManifests(db, workspaceId),
+    ...listCustomIntegrationManifests(db, workspaceId).map(withOperationContracts),
   ].sort((a, b) => Number(a.builtin) - Number(b.builtin) || a.name.localeCompare(b.name));
+}
+
+function withOperationContracts<T extends IntegrationManifest>(manifest: T): T {
+  const connector = defaultConnectorRegistry.has(manifest.service)
+    ? defaultConnectorRegistry.get(manifest.service)
+    : manifestHttpConnector(manifest);
+  return {
+    ...manifest,
+    ...(connector.operationContracts ? { operationContracts: connector.operationContracts } : {}),
+  };
 }
 
 export function listCustomIntegrationManifests(

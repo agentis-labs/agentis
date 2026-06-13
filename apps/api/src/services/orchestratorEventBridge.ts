@@ -5,6 +5,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus, BusMessage } from '../event-bus.js';
 import type { Logger } from '../logger.js';
+import { analyzeRunFailure, diagnosisToCardBody } from './runFailureAnalysis.js';
 
 export interface OrchestratorEventBridgeDeps {
   db: AgentisSqliteDb;
@@ -40,7 +41,7 @@ export class OrchestratorEventBridge {
     const workspaceId = workspaceFromRoom(message.room) ?? workspaceFromPayload(message.envelope.payload);
     if (!workspaceId) return;
     const agent = findOrchestratorAgent(this.deps.db, workspaceId);
-    const payload = buildProactivePayload(event, message.envelope.payload, agent?.id ?? null);
+    const payload = buildProactivePayload(event, message.envelope.payload, agent?.id ?? null, { db: this.deps.db, workspaceId });
     this.deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_PROACTIVE_PUSH, payload);
     if (agent) {
       this.deps.bus.publish(REALTIME_ROOMS.conversation(agent.id), REALTIME_EVENTS.AGENT_PROACTIVE_PUSH, payload);
@@ -66,11 +67,28 @@ function findOrchestratorAgent(db: AgentisSqliteDb, workspaceId: string) {
     .get() ?? null;
 }
 
-function buildProactivePayload(event: string, rawPayload: unknown, agentId: string | null) {
+function buildProactivePayload(
+  event: string,
+  rawPayload: unknown,
+  agentId: string | null,
+  deps?: { db: AgentisSqliteDb; workspaceId: string },
+) {
   const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload as Record<string, unknown> : {};
   const runId = typeof payload.runId === 'string' ? payload.runId : null;
   const workflowId = typeof payload.workflowId === 'string' ? payload.workflowId : null;
   if (event === REALTIME_EVENTS.RUN_FAILED) {
+    // Auto-diagnose by DEFAULT: explain what failed and how to fix it up front,
+    // grounded in the real error — instead of a "Diagnose" button the operator
+    // has to click. (Settings → a per-workspace `autoDiagnoseFailures` toggle can
+    // turn this back into a button; default on.)
+    let body = runId ? `I noticed run ${runId.slice(0, 8)} failed.` : 'A workflow run failed.';
+    let diagnosed = false;
+    if (deps && runId) {
+      try {
+        const d = analyzeRunFailure(deps.db, deps.workspaceId, runId);
+        if (d) { body = diagnosisToCardBody(d); diagnosed = true; }
+      } catch { /* fall back to the generic body */ }
+    }
     return {
       id: `proactive_${randomUUID()}`,
       agentId,
@@ -79,11 +97,11 @@ function buildProactivePayload(event: string, rawPayload: unknown, agentId: stri
       kind: 'run_failed',
       card: {
         title: 'Run failed',
-        body: runId ? `I noticed run ${runId.slice(0, 8)} failed. I can diagnose it and suggest a patch.` : 'I noticed a workflow run failed.',
+        body,
         tone: 'danger',
         actions: [
-          ...(runId ? [{ label: 'Diagnose', action: 'agentis.run.diagnose', params: { runId }, variant: 'primary' as const }] : []),
           ...(workflowId ? [{ label: 'Open workflow', action: `/workflows/${workflowId}`, params: { workflowId } }] : []),
+          ...(runId && !diagnosed ? [{ label: 'Diagnose', action: 'agentis.run.diagnose', params: { runId }, variant: 'primary' as const }] : []),
         ],
       },
     };

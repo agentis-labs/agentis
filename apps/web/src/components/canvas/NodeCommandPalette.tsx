@@ -8,7 +8,7 @@ import { PALETTE_NODES, type PaletteNodeType } from './NodePalette';
  * Surfaces:
  *   - every node kind from the palette (curated, validated)
  *   - reusable subflow workflows
- *   - installed skills
+ *   - installed Extensions
  *   - integration connectors (each operation listed individually)
  *
  * Picking a result fires `onPick(type, defaults)` which the canvas turns into
@@ -18,11 +18,11 @@ import { PALETTE_NODES, type PaletteNodeType } from './NodePalette';
 export interface CommandOption {
   /** Unique key for React. */
   key: string;
-  /** Engine node kind (`agent_task`, `skill_task`, `integration`, …). */
+  /** Engine node kind (`agent_task`, `extension_task`, `integration`, …). */
   type: string;
   label: string;
   description: string;
-  category: 'Nodes' | 'Skills' | 'Subflows' | 'Integrations';
+  category: 'Nodes' | 'Extensions' | 'Subflows' | 'Integrations';
   glyph?: string;
   defaults?: Record<string, unknown>;
 }
@@ -33,14 +33,14 @@ export interface NodeCommandPaletteProps {
   onPick: (type: string, defaults?: Record<string, unknown>) => void;
   /** Live subflows pulled from the API. */
   subflows?: Array<{ id: string; title: string }>;
-  /** Live skills pulled from the API. */
-  skills?: Array<{ id: string; name: string; description?: string }>;
+  /** Live Extensions pulled from the API. */
+  extensions?: Array<{ id: string; name: string; description?: string }>;
   /** Live integration operations from ConnectorRegistry. */
   integrations?: Array<{ service: string; name: string; operations: readonly string[]; icon?: string }>;
 }
 
 export function NodeCommandPalette(props: NodeCommandPaletteProps) {
-  const { open, onClose, onPick, subflows = [], skills = [], integrations = [] } = props;
+  const { open, onClose, onPick, subflows = [], extensions = [], integrations = [] } = props;
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -68,15 +68,15 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
         defaults: node.defaults,
       });
     }
-    for (const skill of skills) {
+    for (const extension of extensions) {
       out.push({
-        key: `skill:${skill.id}`,
-        type: 'skill_task',
-        label: skill.name,
-        description: skill.description ?? 'Run a typed deterministic skill',
-        category: 'Skills',
+        key: `extension:${extension.id}`,
+        type: 'extension_task',
+        label: extension.name,
+        description: extension.description ?? 'Run a typed deterministic extension',
+        category: 'Extensions',
         glyph: '✦',
-        defaults: { skillId: skill.id, inputMapping: {}, outputMapping: {} },
+        defaults: { extensionId: extension.id, inputMapping: {}, outputMapping: {} },
       });
     }
     for (const sub of subflows) {
@@ -104,7 +104,7 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
       }
     }
     return out;
-  }, [skills, subflows, integrations]);
+  }, [extensions, subflows, integrations]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -171,7 +171,7 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Search nodes, skills, integrations…"
+            placeholder="Search nodes, Extensions, integrations…"
             className="w-full bg-transparent text-[14px] text-text-primary placeholder:text-text-muted focus:outline-none"
           />
         </div>

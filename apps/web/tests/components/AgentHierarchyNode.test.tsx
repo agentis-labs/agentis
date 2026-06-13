@@ -23,9 +23,7 @@ const baseAgent: AgentHierarchyAgent = {
   role: 'worker',
   reportsTo: 'manager-1',
   connectionSummary: {
-    apps: [],
     workflows: [],
-    totalApps: 0,
     totalWorkflows: 0,
   },
 };
@@ -44,26 +42,20 @@ describe('<AgentHierarchyNode />', () => {
     expect(asFragment()).toMatchSnapshot();
   });
 
-  it('matches the manager card variant with space and resource chips', () => {
+  it('matches the manager card variant with resource chips', () => {
     const { asFragment } = renderNode({
       ...baseAgent,
       id: 'manager-1',
       name: 'Lead Manager',
       role: 'manager',
       reportsTo: null,
-      spaceName: 'Marketing Space',
-      spaceColorHex: '#06b6d4',
       connectionSummary: {
-        apps: [{ id: 'app-1', slug: 'crm-app', name: 'CRM App', category: 'Revenue' }],
         workflows: [{ id: 'wf-1', name: 'Lead Enrichment', lastRunStatus: 'COMPLETED', lastRunAt: '2026-05-14T12:00:00.000Z' }],
-        totalApps: 1,
         totalWorkflows: 1,
       },
     });
 
     expect(screen.getByText('MANAGER')).toBeInTheDocument();
-    expect(screen.getByText('Marketing Space')).toBeInTheDocument();
-    expect(screen.getByText('CRM App')).toBeInTheDocument();
     expect(screen.getByText('Lead Enrichment')).toBeInTheDocument();
     expect(asFragment()).toMatchSnapshot();
   });

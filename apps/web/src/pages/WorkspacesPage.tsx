@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Building2, Upload, X, ArrowRight, Settings as SettingsIcon } from 'lucide-react';
-import { api, workspace as wsStore } from '../lib/api';
+import { api, apiErrorMessage, workspace as wsStore } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { Button } from '../components/shared/Button';
 import { Skeleton } from '../components/shared/Skeleton';
@@ -20,7 +20,6 @@ interface Workspace {
   description?: string;
   agentCount?: number;
   workflowCount?: number;
-  appCount?: number;
   createdAt?: string;
 }
 
@@ -68,7 +67,7 @@ export function WorkspacesPage() {
         });
         toast.success('Image updated', w.name);
         void refresh();
-      } catch (e) { toast.error('Failed to upload image', String(e)); }
+      } catch (e) { toast.error('Failed to upload image', apiErrorMessage(e)); }
     };
     reader.readAsDataURL(file);
   }
@@ -98,7 +97,7 @@ export function WorkspacesPage() {
           <EmptyState
             icon={<Building2 size={48} />}
             title="No workspaces yet"
-            body="Create a workspace to organize your agents, workflows, and apps."
+            body="Create a workspace to organize your agents, workflows, and knowledge."
             primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreating(true)}>New workspace</Button>}
             variant="page"
           />
@@ -165,7 +164,7 @@ function WorkspaceRow({
               {w.name.charAt(0).toUpperCase()}
             </span>
           )}
-          <span className="absolute inset-0 hidden items-center justify-center bg-black/60 group-hover:flex">
+          <span className="absolute inset-0 hidden items-center justify-center bg-overlay group-hover:flex">
             <Upload size={16} className="text-white" />
           </span>
         </button>
@@ -188,7 +187,6 @@ function WorkspaceRow({
           <div className="mt-1 flex flex-wrap gap-3 text-[12px] text-text-muted">
             {w.agentCount != null && <span>{w.agentCount} agent{w.agentCount === 1 ? '' : 's'}</span>}
             {w.workflowCount != null && <span>{w.workflowCount} workflow{w.workflowCount === 1 ? '' : 's'}</span>}
-            {w.appCount != null && <span>{w.appCount} app{w.appCount === 1 ? '' : 's'}</span>}
             {w.createdAt && <span>Created {relativeTime(w.createdAt)}</span>}
           </div>
         </div>
@@ -248,7 +246,7 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
   }
 
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
       <form onSubmit={handleCreate} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <h3 className="text-heading text-text-primary">Create workspace</h3>

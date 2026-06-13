@@ -17,7 +17,8 @@ import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { WorkflowStoreService } from '../../src/services/workflowStore.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import { ConnectorRegistry } from '@agentis/integrations';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -25,7 +26,11 @@ let engine: WorkflowEngine;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  engine = new WorkflowEngine({
+  engine = createEngine();
+});
+
+function createEngine(connectors?: ConnectorRegistry) {
+  return new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
     logger: ctx.logger,
@@ -33,11 +38,12 @@ beforeEach(async () => {
     scratchpad: new ScratchpadService(ctx.bus, ctx.logger),
     activity: new ActivityFeedService(ctx.db, ctx.bus),
     approvals: new ApprovalInboxService(ctx.db, ctx.bus),
-    skills: {} as unknown as SkillRuntime,
+    skills: {} as unknown as ExtensionRuntime,
     adapters: new AdapterManager(ctx.logger),
     workflowStore: new WorkflowStoreService(ctx.db),
+    ...(connectors ? { connectors } : {}),
   });
-});
+}
 
 afterEach(() => ctx.close());
 
@@ -133,6 +139,75 @@ describe('WorkflowEngine — return_output node', () => {
     expect(out?.renderAs).toBe('html');
     expect(out?.title).toBe('Greeting');
     expect(out?.value?.content).toContain('Hello World');
+  });
+});
+
+describe('WorkflowEngine - integration delivery receipts', () => {
+  it('persists the resolved rendered payload alongside the connector response', async () => {
+    const connectors = new ConnectorRegistry([{
+      service: 'agentmail',
+      operations: ['send_message'],
+      async execute() {
+        return { ok: true, status: 200, messageId: 'message-1' };
+      },
+    }]);
+    engine = createEngine(connectors);
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'P',
+          type: 'transform',
+          title: 'Draft',
+          position: { x: 200, y: 0 },
+          config: { kind: 'transform', expression: '({ subject: "Digest", markdownBody: "# Hello\\n\\n**World**" })' },
+        },
+        {
+          id: 'S',
+          type: 'integration',
+          title: 'Send',
+          position: { x: 400, y: 0 },
+          config: {
+            kind: 'integration',
+            integrationId: 'agentmail',
+            operationId: 'send_message',
+            inputs: {
+              to: 'op@example.com',
+              subject: '{{nodes.P.subject}}',
+              body: '{{nodes.P.markdownBody}}',
+              format: 'markdown',
+            },
+          },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'T', target: 'P' },
+        { id: 'e2', source: 'P', target: 'S' },
+      ],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    const row = loadRun(runId);
+    const state = row.runState as {
+      nodeStates: Record<string, {
+        deliveryReceipt?: {
+          recipient?: string;
+          subject?: string;
+          contentType?: string;
+          content?: string;
+        };
+      }>;
+    };
+
+    expect(state.nodeStates.S?.deliveryReceipt).toMatchObject({
+      recipient: 'op@example.com',
+      subject: 'Digest',
+      contentType: 'html',
+    });
+    expect(state.nodeStates.S?.deliveryReceipt?.content).toContain('<h1>Hello</h1>');
+    expect(state.nodeStates.S?.deliveryReceipt?.content).toContain('<strong>World</strong>');
   });
 });
 

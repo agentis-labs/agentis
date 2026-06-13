@@ -1,6 +1,6 @@
 /**
  * RegistryClient — anonymous read-only client for a third-party
- * skill registry (V1-SPEC §8).
+ * extension registry (V1-SPEC §8).
  *
  * The client speaks a minimal HTTP contract that any registry provider can
  * implement:
@@ -8,7 +8,7 @@
  *   - `GET {base}/search?q=...`
  *       → `{ results: Array<{ slug, name, description, author, version, hash }> }`
  *
- *   - `GET {base}/skills/{slug}/content`
+ *   - `GET {base}/extensions/{slug}/content`
  *       → `{ content: string, hash?: string, sha256?: string }`
  *         (also accepted: raw text body when `content-type` is not JSON)
  *
@@ -16,7 +16,7 @@
  * application stays registry-source-agnostic.
  *
  * When `registryUrl` is unset or upstream is unreachable, every method
- * throws `SKILL_REGISTRY_UNAVAILABLE` so the dashboard can render an
+ * throws `EXTENSION_REGISTRY_UNAVAILABLE` so the dashboard can render an
  * "offline" state without surprising the operator. A `CircuitBreaker`
  * short-circuits repeated failures.
  */
@@ -81,10 +81,10 @@ export class RegistryClient {
     const qs = params.toString();
     const data = await this.#request<{
       results?: RawSearchHit[];
-      skills?: RawSearchHit[];
+      extensions?: RawSearchHit[];
       cursor?: string;
     }>('GET', `/search${qs ? `?${qs}` : ''}`);
-    const rows = data.results ?? data.skills ?? [];
+    const rows = data.results ?? data.extensions ?? [];
     const entries = rows.map((r) => this.#translateEntry(r));
     return { entries, ...(data.cursor ? { cursor: data.cursor } : {}) };
   }
@@ -108,7 +108,7 @@ export class RegistryClient {
    * install route can hash + scan it before persisting any local state.
    */
   async fetchArtifactBytes(args: { slug: string }): Promise<{ bytes: Buffer; declaredSha256?: string }> {
-    const path = `/skills/${encodeURIComponent(args.slug)}/content`;
+    const path = `/extensions/${encodeURIComponent(args.slug)}/content`;
     const url = this.#absoluteUrl(path);
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), this.opts.timeoutMs).unref?.();
@@ -124,7 +124,7 @@ export class RegistryClient {
             throw new AgentisError('RESOURCE_NOT_FOUND', `registry content ${args.slug} not found`);
           }
           throw new AgentisError(
-            'SKILL_REGISTRY_UNAVAILABLE',
+            'EXTENSION_REGISTRY_UNAVAILABLE',
             `registry returned ${res.status} for ${path}`,
           );
         }
@@ -141,7 +141,7 @@ export class RegistryClient {
     } catch (err) {
       if (err instanceof AgentisError) throw err;
       throw new AgentisError(
-        'SKILL_REGISTRY_UNAVAILABLE',
+        'EXTENSION_REGISTRY_UNAVAILABLE',
         `registry request failed: ${(err as Error).message}`,
       );
     } finally {
@@ -154,8 +154,8 @@ export class RegistryClient {
   #absoluteUrl(path: string): string {
     if (!this.opts.registryUrl) {
       throw new AgentisError(
-        'SKILL_REGISTRY_UNAVAILABLE',
-        'Registry URL not configured (set AGENTIS_SKILL_REGISTRY_URL).',
+        'EXTENSION_REGISTRY_UNAVAILABLE',
+        'Registry URL not configured (set AGENTIS_EXTENSION_REGISTRY_URL).',
       );
     }
     return `${this.opts.registryUrl.replace(/\/$/, '')}${path}`;
@@ -181,9 +181,9 @@ export class RegistryClient {
       author,
       artifacts: [
         {
-          artifactType: 'skill_bundle',
+          artifactType: 'extension_bundle',
           sha256,
-          downloadUrl: this.#absoluteUrl(`/skills/${encodeURIComponent(slug)}/content`),
+          downloadUrl: this.#absoluteUrl(`/extensions/${encodeURIComponent(slug)}/content`),
         },
       ],
     };
@@ -194,10 +194,10 @@ export class RegistryClient {
       case 'workflow':
       case 'workflow_template':
       case 'agent_package':
-      case 'skill':
+      case 'extension':
         return raw;
       default:
-        return 'skill';
+        return 'extension';
     }
   }
 
@@ -217,7 +217,7 @@ export class RegistryClient {
             throw new AgentisError('RESOURCE_NOT_FOUND', `registry: ${path}`);
           }
           throw new AgentisError(
-            'SKILL_REGISTRY_UNAVAILABLE',
+            'EXTENSION_REGISTRY_UNAVAILABLE',
             `registry returned ${res.status} for ${path}`,
           );
         }
@@ -227,7 +227,7 @@ export class RegistryClient {
     } catch (err) {
       if (err instanceof AgentisError) throw err;
       throw new AgentisError(
-        'SKILL_REGISTRY_UNAVAILABLE',
+        'EXTENSION_REGISTRY_UNAVAILABLE',
         `registry request failed: ${(err as Error).message}`,
       );
     } finally {

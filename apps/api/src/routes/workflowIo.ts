@@ -32,7 +32,7 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
     const wf = deps.db.select().from(schema.workflows)
       .where(and(eq(schema.workflows.id, c.req.param('id')), eq(schema.workflows.workspaceId, ws.workspaceId))).get();
     if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', 'workflow not found');
-    const doc: WorkflowDoc = { name: wf.title, description: wf.summary ?? null, graph: wf.graph as WorkflowGraph };
+    const doc: WorkflowDoc = { name: wf.title, description: wf.description ?? null, graph: wf.graph as WorkflowGraph };
     const yaml = stringify(doc, { lineWidth: 0 });
     return c.body(yaml, 200, { 'content-type': 'text/yaml; charset=utf-8', 'content-disposition': `attachment; filename="${slug(wf.title)}.workflow.yaml"` });
   });
@@ -77,7 +77,7 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
     const now = new Date().toISOString();
     deps.db.insert(schema.workflows).values({
       id, workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
-      title: doc.name || 'Imported workflow', summary: doc.description ?? null, graph,
+      title: doc.name || 'Imported workflow', description: doc.description?.trim() || null, graph,
       settings: {}, concurrencyOverflow: 'queue', createdAt: now, updatedAt: now,
     }).run();
     return c.json({ workflowId: id, title: doc.name || 'Imported workflow', nodeCount: graph.nodes.length }, 201);

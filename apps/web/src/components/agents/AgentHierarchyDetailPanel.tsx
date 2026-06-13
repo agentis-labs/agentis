@@ -41,7 +41,6 @@ interface AgentPanelDetail {
   monthlyBudgetCents?: number | null;
   currentMonthSpendCents?: number | null;
   isPaused?: boolean | null;
-  spaceId?: string | null;
   reportsTo?: string | null;
   adapter?: { type?: string; model?: string; config?: Record<string, unknown> };
 }
@@ -199,7 +198,6 @@ export function AgentHierarchyDetailPanel({
               currentMonthSpendCents: agent.currentMonthSpendCents ?? null,
               config: agent.config ?? agent.adapter?.config ?? null,
               reportsTo: agent.reportsTo ?? null,
-              spaceId: agent.spaceId ?? null,
             }}
             allAgents={allAgents}
             onSaved={() => {
@@ -279,7 +277,7 @@ function harnessLabel(adapterType?: string | null) {
     case 'claude_code': return 'Claude Code';
     case 'codex': return 'Codex';
     case 'cursor': return 'Cursor';
-    case 'http': return 'HTTP / Webhook';
+    case 'http': return 'HTTP';
     default: return 'Harness';
   }
 }

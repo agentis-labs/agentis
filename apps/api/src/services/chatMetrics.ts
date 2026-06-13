@@ -68,4 +68,90 @@ export function getToolMetrics(): ToolMetricRow[] {
 
 export function resetToolMetrics(): void {
   stats.clear();
+  turnSamples.length = 0;
+}
+
+// --- Per-turn stage timing (NATIVE-ADVANCEMENT Phase A / CLB instrumentation) --
+//
+// The diagnose-first layer: where does a chat turn actually spend its wall-clock?
+// Each completed turn contributes one sample with the stage breakdown so an
+// operator can SEE whether the cost is context build, the first model token, the
+// model stream, or tool execution — before anyone "optimizes" a guess.
+
+export interface TurnSample {
+  /** Whole turn, start → terminal. */
+  totalMs: number;
+  /** Time spent building context before the first model call. null on resume. */
+  contextMs: number | null;
+  /** Time to the first streamed token/tool-call (perceived latency). */
+  firstTokenMs: number | null;
+  /** Cumulative wall-clock inside model streaming across all rounds. */
+  modelMs: number;
+  /** Cumulative wall-clock executing tools across all rounds. */
+  toolMs: number;
+  toolCalls: number;
+  rounds: number;
+  finishReason: string;
+  /** True when the turn was answered through the orchestrator fast-path. */
+  fastPath: boolean;
+  adapterType: string;
+}
+
+const TURN_WINDOW = 500;
+const turnSamples: TurnSample[] = [];
+
+export function recordTurn(sample: TurnSample): void {
+  turnSamples.push(sample);
+  if (turnSamples.length > TURN_WINDOW) turnSamples.shift();
+}
+
+interface StageSummary {
+  avgMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  /** How many samples had a value (context/firstToken are absent on some turns). */
+  samples: number;
+}
+
+function summarize(values: number[]): StageSummary {
+  if (values.length === 0) return { avgMs: 0, p50Ms: 0, p95Ms: 0, samples: 0 };
+  const sorted = [...values].sort((a, b) => a - b);
+  const sum = sorted.reduce((acc, n) => acc + n, 0);
+  return {
+    avgMs: Math.round(sum / sorted.length),
+    p50Ms: percentile(sorted, 50),
+    p95Ms: percentile(sorted, 95),
+    samples: sorted.length,
+  };
+}
+
+export interface TurnMetrics {
+  turns: number;
+  fastPathRate: number;
+  total: StageSummary;
+  context: StageSummary;
+  firstToken: StageSummary;
+  model: StageSummary;
+  tools: StageSummary;
+  byFinishReason: Record<string, number>;
+}
+
+export function getTurnMetrics(): TurnMetrics {
+  const notNull = (n: number | null): n is number => n !== null;
+  const byFinishReason: Record<string, number> = {};
+  let fastPathCount = 0;
+  for (const s of turnSamples) {
+    byFinishReason[s.finishReason] = (byFinishReason[s.finishReason] ?? 0) + 1;
+    if (s.fastPath) fastPathCount += 1;
+  }
+  return {
+    turns: turnSamples.length,
+    fastPathRate: turnSamples.length > 0 ? fastPathCount / turnSamples.length : 0,
+    total: summarize(turnSamples.map((s) => s.totalMs)),
+    context: summarize(turnSamples.map((s) => s.contextMs).filter(notNull)),
+    firstToken: summarize(turnSamples.map((s) => s.firstTokenMs).filter(notNull)),
+    model: summarize(turnSamples.map((s) => s.modelMs)),
+    tools: summarize(turnSamples.map((s) => s.toolMs)),
+    byFinishReason,
+  };
 }

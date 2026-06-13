@@ -6,6 +6,7 @@ import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { CredentialVault } from './credentialVault.js';
 import { registerAdapter } from './agentCommission.js';
+import type { McpHarnessSessionService } from './mcpHarnessSession.js';
 import { cliCommandFromConfig, isCliHarnessAdapter, repairCliHarnessConfig } from './harnessConfigRepair.js';
 import { detectHarnesses, type HarnessDetectionResult, type V1HarnessAdapterType } from './harnessProbe.js';
 
@@ -17,6 +18,8 @@ export interface AgentRuntimeHydratorDeps {
   adapters: AdapterManager;
   logger: Logger;
   bus?: EventBus;
+  /** Optional — mounts the Agentis MCP server on CLI harnesses (UNIVERSAL-HARNESS §5). */
+  mcpHarness?: McpHarnessSessionService;
 }
 
 export async function hydrateAgentRuntimes(deps: AgentRuntimeHydratorDeps): Promise<void> {

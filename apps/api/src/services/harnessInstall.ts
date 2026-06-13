@@ -52,7 +52,7 @@ export const HARNESS_INSTALL_OPTIONS: HarnessInstallOption[] = [
   {
     adapterType: 'http',
     canAutoInstall: false,
-    manualInstructions: 'HTTP agents connect to your existing endpoint. No binary install is required.',
+    manualInstructions: 'Configure an HTTP agent endpoint with a base URL and dispatch path.',
   },
 ];
 

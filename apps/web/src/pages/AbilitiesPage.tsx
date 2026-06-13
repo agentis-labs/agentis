@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Zap, Upload, Download, MoreHorizontal, AlertTriangle, RefreshCw, Trash2, Cpu } from 'lucide-react';
+import { Plus, Zap, Upload, Download, MoreHorizontal, AlertTriangle, RefreshCw, Trash2, Cpu, Sparkles } from 'lucide-react';
 import { PageHeader } from '../components/shared/PageHeader';
 import { Button, IconButton } from '../components/shared/Button';
 import { EmptyState } from '../components/shared/EmptyState';
@@ -82,6 +82,29 @@ export function AbilitiesPage() {
     if (createPending) return;
     await createAbility();
   }, [createAbility, createPending]);
+
+  // ABILITIES-10X — the 10x creation engine: describe an outcome in one line and
+  // a finished, compiling specialist exists in seconds, at zero cost.
+  const draftWithAI = useCallback(async () => {
+    if (createPending) return;
+    const intent = window.prompt(
+      'Describe the specialist you want in one line.\n\nExample: "Draft SOC2-aware security review comments for pull requests"',
+    );
+    if (!intent || !intent.trim()) return;
+    setCreatePending(true);
+    try {
+      const res = await abilitiesApi.draft({ from: 'intent', intent: intent.trim() });
+      toast.success(
+        res.synthesized ? 'Specialist drafted' : 'Starter draft created',
+        res.notes[0] ?? res.ability.name,
+      );
+      nav(`/abilities/${res.ability.id}`);
+    } catch (err) {
+      toast.error('Could not draft ability', apiErrorMessage(err));
+    } finally {
+      setCreatePending(false);
+    }
+  }, [createPending, nav, toast]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -203,6 +226,15 @@ export function AbilitiesPage() {
               onClick={() => importInputRef.current?.click()}
             >
               Import
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              iconLeft={<Sparkles size={14} />}
+              onClick={draftWithAI}
+              disabled={createPending}
+            >
+              Create with AI
             </Button>
             <Button
               variant="primary"

@@ -16,17 +16,19 @@
  * #12): hard caps on steps and on the transcript size keep reasoning bounded.
  */
 
-import { ROLE_TOOLS, TOOL_DESCRIPTIONS, type AgentRole, type AgentTool } from '@agentis/core';
+import { roleTools, TOOL_DESCRIPTIONS, type AgentRole, type AgentTool } from '@agentis/core';
 import type { AgentToolRuntime } from './agentToolRuntime.js';
 import type { Logger } from '../logger.js';
 
 /** Minimal LLM surface — `EvaluatorRuntime` satisfies this. */
 export interface StructuredLlm {
+  readonly lastError?: string | null;
   completeStructured<T extends Record<string, unknown>>(args: {
     system: string;
     user: string;
     maxTokens?: number;
     maxAttempts?: number;
+    signal?: AbortSignal;
   }): Promise<T | null>;
 }
 
@@ -40,7 +42,7 @@ export interface AgentToolLoopArgs {
   workspaceId: string;
   role: AgentRole;
   task: string;
-  /** Role identity + workspace context + skills, prepended to the system prompt. */
+  /** Role identity + workspace context + extensions, prepended to the system prompt. */
   systemPreamble?: string;
   /** Max reasoning/tool steps before forcing a final answer. Default 6, capped at 12. */
   maxSteps?: number;
@@ -48,6 +50,16 @@ export interface AgentToolLoopArgs {
   workflowId?: string;
   /** The concrete agent — scopes the Brain's agent-memory tools. */
   agentId?: string;
+  /**
+   * Explicit tool manifest to grant the agent. Defaults to the role's static
+   * tools; pass the specialist's effective toolbox (incl. the universal default
+   * set for custom roles) to make any specialist tool-capable.
+   */
+  tools?: AgentTool[];
+  /** Per-step observer — streams the agent's live reasoning/tool-use to the run. */
+  onStep?: (step: AgentToolLoopStep & { index: number; phase: 'thinking' | 'tool_call' | 'tool_result' | 'final' }) => void;
+  /** Run-scoped cancellation signal; stops billable model calls when the run is stopped. */
+  signal?: AbortSignal;
 }
 
 export interface AgentToolLoopStep {
@@ -61,8 +73,9 @@ export interface AgentToolLoopStep {
 export interface AgentToolLoopResult {
   output: string;
   steps: AgentToolLoopStep[];
-  stoppedReason: 'final' | 'max_steps' | 'no_decision';
+  stoppedReason: 'final' | 'max_steps' | 'no_decision' | 'cancelled';
   toolCalls: number;
+  error?: string;
 }
 
 interface StepDecision extends Record<string, unknown> {
@@ -80,7 +93,7 @@ export class AgentToolLoop {
 
   async run(args: AgentToolLoopArgs): Promise<AgentToolLoopResult> {
     const maxSteps = Math.max(1, Math.min(args.maxSteps ?? 6, 12));
-    const tools = ROLE_TOOLS[args.role] ?? [];
+    const tools = args.tools && args.tools.length > 0 ? args.tools : roleTools(args.role);
     const steps: AgentToolLoopStep[] = [];
     const transcript: string[] = [];
     let toolCalls = 0;
@@ -88,20 +101,31 @@ export class AgentToolLoop {
     const system = this.#systemPrompt(args.role, tools, args.systemPreamble);
 
     for (let i = 0; i < maxSteps; i += 1) {
+      if (args.signal?.aborted) {
+        return { output: '', steps, stoppedReason: 'cancelled', toolCalls, error: 'Run cancelled' };
+      }
       const remaining = maxSteps - i;
       const user = this.#userPrompt(args.task, transcript, remaining);
-      const decision = await this.deps.llm.completeStructured<StepDecision>({ system, user, maxTokens: 900 });
+      const decision = await this.deps.llm.completeStructured<StepDecision>({
+        system,
+        user,
+        maxTokens: 900,
+        ...(args.signal ? { signal: args.signal } : {}),
+      });
 
       if (!decision) {
-        this.deps.logger?.warn('agent_tool_loop.no_decision', { role: args.role, step: i });
-        return { output: lastObservationText(steps) ?? '', steps, stoppedReason: 'no_decision', toolCalls };
+        const error = this.deps.llm.lastError ?? 'model returned no structured decision';
+        this.deps.logger?.warn('agent_tool_loop.no_decision', { role: args.role, step: i, error });
+        return { output: lastObservationText(steps) ?? '', steps, stoppedReason: 'no_decision', toolCalls, error };
       }
 
       const thought = typeof decision.thought === 'string' ? decision.thought : undefined;
+      if (thought) args.onStep?.({ index: i, phase: 'thinking', thought });
 
       if (decision.action === 'final' || (decision.action !== 'tool' && typeof decision.output === 'string')) {
         const output = typeof decision.output === 'string' ? decision.output : '';
         steps.push({ thought });
+        args.onStep?.({ index: i, phase: 'final', thought, observation: output });
         return { output, steps, stoppedReason: 'final', toolCalls };
       }
 
@@ -115,10 +139,16 @@ export class AgentToolLoop {
 
       const toolArgs = (decision.args && typeof decision.args === 'object') ? decision.args : {};
       toolCalls += 1;
-      const res = await this.deps.runtime.execute(args.workspaceId, tool, toolArgs, args.role, { workflowId: args.workflowId, agentId: args.agentId });
+      args.onStep?.({ index: i, phase: 'tool_call', thought, tool, args: toolArgs });
+      const res = await this.deps.runtime.execute(args.workspaceId, tool, toolArgs, args.role, {
+        workflowId: args.workflowId,
+        agentId: args.agentId,
+        grantedTools: tools,
+      });
       const observation = res.ok ? res.result : undefined;
       const error = res.ok ? undefined : res.error;
       steps.push({ thought, tool, args: toolArgs, observation, error });
+      args.onStep?.({ index: i, phase: 'tool_result', tool, args: toolArgs, observation, error });
       transcript.push(
         `STEP ${i + 1}: ${tool}(${clip(JSON.stringify(toolArgs), 300)}) -> ${
           res.ok ? clip(stringify(observation), OBSERVATION_CLIP) : `ERROR: ${error}`
@@ -127,14 +157,24 @@ export class AgentToolLoop {
     }
 
     // Out of steps — make one final synthesis call so the loop always produces an answer.
+    if (args.signal?.aborted) {
+      return { output: '', steps, stoppedReason: 'cancelled', toolCalls, error: 'Run cancelled' };
+    }
     const finalUser = this.#userPrompt(args.task, transcript, 0);
     const final = await this.deps.llm.completeStructured<StepDecision>({
       system: `${system}\n\nYou are OUT OF STEPS. Respond now with action "final" and your best answer.`,
       user: finalUser,
       maxTokens: 900,
+      ...(args.signal ? { signal: args.signal } : {}),
     });
     const output = typeof final?.output === 'string' ? final.output : (lastObservationText(steps) ?? '');
-    return { output, steps, stoppedReason: 'max_steps', toolCalls };
+    return {
+      output,
+      steps,
+      stoppedReason: 'max_steps',
+      toolCalls,
+      ...(output ? {} : { error: this.deps.llm.lastError ?? 'agent exhausted the tool loop without output' }),
+    };
   }
 
   #systemPrompt(role: AgentRole, tools: AgentTool[], preamble?: string): string {

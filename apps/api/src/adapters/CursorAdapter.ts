@@ -1,26 +1,31 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import type {
   AgentAdapter,
   AdapterCapabilities,
   AdapterHealthStatus,
   ChatDelta,
+  ChatInvocationOptions,
   ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
   ToolDefinition,
+  RuntimeContext,
+  RuntimeDescriptor,
+  RuntimeSessionInfo,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { buildMarkerToolPrompt } from './markerToolProtocol.js';
+import { linkAbortSignal } from './abort.js';
 import {
-  buildMarkerToolPrompt,
-  extractMarkerToolCalls,
-  isProcessNoiseLine,
-  stripProcessNoise,
-} from './markerToolProtocol.js';
-
-/** Safety cap for one interactive chat turn when no explicit timeout is configured. */
-const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
+  chatHardCeilingMs,
+  clampChatTimeout,
+  DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  runCliChatTurn,
+  type CliChatPart,
+} from './cliChatRuntime.js';
+import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import { probeCliRuntime } from './cliRuntimeProbe.js';
 
 export interface CursorAdapterOptions {
   agentId: string;
@@ -30,6 +35,8 @@ export interface CursorAdapterOptions {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
+  workspaceId?: string;
+  sessionStore?: RuntimeSessionStore;
   logger: Logger;
 }
 
@@ -37,7 +44,8 @@ export class CursorAdapter implements AgentAdapter {
   readonly adapterType = 'cursor' as const;
   readonly #handlers = new Set<(event: NormalizedAgentEvent) => void>();
   readonly #inFlight = new Map<string, AbortController>();
-  #sessionId: string | undefined;
+  readonly #sessions = new Map<string, string>();
+  #version: string | null = null;
 
   constructor(private readonly opts: CursorAdapterOptions) {}
 
@@ -49,7 +57,15 @@ export class CursorAdapter implements AgentAdapter {
   }
 
   async healthCheck(): Promise<AdapterHealthStatus> {
-    return { isHealthy: true, checkedAt: new Date().toISOString() };
+    const result = await probeCliRuntime({
+      binary: this.opts.binaryPath || 'agent',
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      logger: this.opts.logger,
+      logTag: 'cursor',
+    });
+    this.#version = result.version;
+    return result.health;
   }
 
   capabilities(): AdapterCapabilities {
@@ -57,7 +73,75 @@ export class CursorAdapter implements AgentAdapter {
       interactiveChat: true,
       toolCalling: true,
       toolForwarding: 'marker_protocol',
+      execution: {
+        longRunning: true,
+        pausable: true,
+        sandbox: 'process',
+        maxConcurrent: 1,
+      },
+      affordances: {
+        codebaseIndex: true,
+        fileSystem: true,
+        terminal: true,
+      },
+      memory: {
+        ingestible: true,
+        injectable: true,
+      },
     };
+  }
+
+  async getRuntimeContext(): Promise<RuntimeContext> {
+    const currentModel = this.opts.model ?? 'cursor-default';
+    return {
+      provider: 'cursor',
+      models: [{
+        id: currentModel,
+        label: currentModel,
+        source: this.opts.model ? 'agent_config' : 'fallback',
+        verified: Boolean(this.opts.model),
+      }],
+      currentModel,
+      currentModelSource: this.opts.model ? 'agent_config' : 'fallback',
+      currentModelVerified: Boolean(this.opts.model),
+      fastModeSupported: false,
+    };
+  }
+
+  async describeRuntime(): Promise<Partial<RuntimeDescriptor>> {
+    const observedAt = new Date().toISOString();
+    return {
+      version: this.#version
+        ? { value: this.#version, source: 'runtime', observedAt, verified: true }
+        : null,
+      process: {
+        warm: false,
+        activeSessions: this.#sessions.size,
+      },
+    };
+  }
+
+  async listRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
+    if (this.opts.sessionStore && this.opts.workspaceId) {
+      return this.opts.sessionStore.list(this.opts.workspaceId, this.opts.agentId);
+    }
+    const now = new Date().toISOString();
+    return [...this.#sessions.entries()].map(([sessionKey, runtimeSessionId]) => ({
+      id: `${this.opts.agentId}:${sessionKey}`,
+      sessionKey,
+      runtimeSessionId,
+      status: 'idle',
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now,
+    }));
+  }
+
+  async closeRuntimeSession(sessionKey: string): Promise<void> {
+    this.#sessions.delete(sessionKey);
+    if (this.opts.sessionStore && this.opts.workspaceId) {
+      this.opts.sessionStore.remove(this.opts.workspaceId, this.opts.agentId, sessionKey);
+    }
   }
 
   onEvent(handler: (event: NormalizedAgentEvent) => void): void {
@@ -66,13 +150,13 @@ export class CursorAdapter implements AgentAdapter {
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
     const controller = new AbortController();
+    const unlinkAbort = linkAbortSignal(task.signal, controller);
     this.#inFlight.set(task.taskId, controller);
     const binary = this.opts.binaryPath || 'agent';
     const args = [
       '--output-format',
       'stream-json',
-      ...(this.opts.model ? [`--model=${this.opts.model}`] : []),
-      ...(this.#sessionId ? ['--resume', this.#sessionId] : []),
+      ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.extraArgs ?? []),
     ];
     let childProcess: ReturnType<typeof spawn>;
@@ -90,6 +174,7 @@ export class CursorAdapter implements AgentAdapter {
       });
     } catch (err) {
       this.#emitFailure(task, `cursor_spawn_failed: ${(err as Error).message}`);
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       return;
     }
@@ -113,6 +198,7 @@ export class CursorAdapter implements AgentAdapter {
       if (terminalEventEmitted) return;
       terminalEventEmitted = true;
       this.#emitFailure(task, `cursor_error: ${err.message}`);
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
     });
@@ -132,8 +218,6 @@ export class CursorAdapter implements AgentAdapter {
         if (!line) continue;
         try {
           const event = JSON.parse(line) as CursorJsonEvent;
-          const sessionId = firstString(event.session_id, event.sessionId, objectOf(event.session)?.id);
-          if (sessionId) this.#sessionId = sessionId;
           const text = extractText(event);
           if (text) {
             transcript += text;
@@ -177,6 +261,7 @@ export class CursorAdapter implements AgentAdapter {
     });
 
     childProcess.on('exit', (code) => {
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
       if (terminalEventEmitted) return;
@@ -204,144 +289,70 @@ export class CursorAdapter implements AgentAdapter {
     this.#inFlight.delete(taskId);
   }
 
-  async *chat(messages: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
-    const controller = new AbortController();
-    const binary = this.opts.binaryPath ?? 'agent';
+  async *chat(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    options?: ChatInvocationOptions,
+  ): AsyncIterable<ChatDelta> {
+    const sessionKey = options?.sessionKey?.trim() || 'default';
+    const storedSession = this.#sessions.get(sessionKey)
+      ?? (this.opts.sessionStore && this.opts.workspaceId
+        ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
+        : undefined);
     const args = [
       '--output-format',
       'stream-json',
-      ...(this.opts.model ? [`--model=${this.opts.model}`] : []),
-      ...(this.#sessionId ? ['--resume', this.#sessionId] : []),
+      ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
+      ...(storedSession ? ['--resume', storedSession] : []),
       ...(this.opts.extraArgs ?? []),
     ];
-    const queue = createChatQueue();
-    let childProcess: ReturnType<typeof spawn>;
-    let timeout: NodeJS.Timeout | undefined;
-
-    try {
-      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
-      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
-      childProcess = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
-        env,
-        windowsHide: true,
-        signal: controller.signal,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      const message = `Cursor adapter failed to start: ${(err as Error).message}`;
-      this.opts.logger.warn('cursor.chat.spawn_failed', { err: message });
-      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
-      yield { type: 'done', finishReason: 'error' };
-      return;
-    }
-
-    const chatTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
+    const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
       : DEFAULT_CHAT_TURN_TIMEOUT_MS;
-    timeout = setTimeout(() => controller.abort(), chatTimeoutMs);
-    timeout.unref?.();
+    const idleTimeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
 
-    let stderrText = '';
-    childProcess.stderr?.on('data', (data) => {
-      const chunk = String(data);
-      stderrText = `${stderrText}${chunk}`.slice(-1024);
-      this.opts.logger.warn('cursor.chat.stderr', { data: chunk.slice(0, 512) });
-    });
-
-    childProcess.on('error', (err) => {
-      queue.push({
-        type: 'tool_result',
-        id: 'adapter',
-        name: 'adapter.chat',
-        result: null,
-        error: `Cursor error: ${err.message}`,
-      });
-      queue.push({ type: 'done', finishReason: 'error' });
-      queue.close();
-      if (timeout) clearTimeout(timeout);
-    });
-
-    let buffer = '';
-    let transcript = '';
-    let rawFallback = '';
-    const pendingToolCalls: ChatDelta[] = [];
-
-    childProcess.stdout?.on('data', (chunk) => {
-      buffer += String(chunk);
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-        if (!line) continue;
-        try {
-          const event = JSON.parse(line) as CursorJsonEvent;
-          const sessionId = firstString(event.session_id, event.sessionId, objectOf(event.session)?.id);
-          if (sessionId) this.#sessionId = sessionId;
-
-          if (isReasoningEvent(event)) {
-            const reasoning = extractText(event);
-            if (reasoning) queue.push({ type: 'thinking', delta: reasoning });
-          } else {
-            const text = extractText(event);
-            if (text) transcript += text;
-            const toolCall = extractToolCall(event);
-            if (toolCall) {
-              pendingToolCalls.push({
-                type: 'tool_call',
-                id: randomUUID(),
-                name: toolCall.tool,
-                args: toolCall.input,
-              });
-            }
-          }
-        } catch {
-          if (!isProcessNoiseLine(line)) rawFallback += `${line}\n`;
+    const interpret = (event: unknown): CliChatPart => {
+      const ev = event as CursorJsonEvent;
+      const sessionId = firstString(ev.session_id, ev.sessionId, objectOf(ev.session)?.id);
+      if (sessionId) {
+        this.#sessions.set(sessionKey, sessionId);
+        if (this.opts.sessionStore && this.opts.workspaceId) {
+          this.opts.sessionStore.upsert({
+            workspaceId: this.opts.workspaceId,
+            agentId: this.opts.agentId,
+            conversationId: sessionKey,
+            sessionKey,
+            runtimeSessionId: sessionId,
+            selectedModel: options?.preferredModel ?? this.opts.model ?? null,
+            status: 'idle',
+          });
         }
       }
-    });
-
-    childProcess.on('exit', (code) => {
-      if (timeout) clearTimeout(timeout);
-      if (code !== 0) {
-        const details = stderrText.trim();
-        queue.push({
-          type: 'tool_result',
-          id: 'adapter',
-          name: 'adapter.chat',
-          result: null,
-          error: details ? `Cursor exited ${code}: ${details}` : `Cursor exited ${code}`,
-        });
-        queue.push({ type: 'done', finishReason: 'error' });
-        queue.close();
-        return;
+      if (isReasoningEvent(ev)) {
+        const reasoning = extractText(ev);
+        return reasoning ? { kind: 'thinking', text: reasoning } : { kind: 'ignore' };
       }
+      const text = extractText(ev);
+      if (text) return { kind: 'text', text };
+      const toolCall = extractToolCall(ev);
+      if (toolCall) return { kind: 'tool', name: toolCall.tool, args: toolCall.input };
+      return { kind: 'ignore' };
+    };
 
-      const source = transcript.trim().length > 0 ? transcript : stripProcessNoise(rawFallback);
-      const { calls: markerCalls, cleaned } = extractMarkerToolCalls(source);
-      if (cleaned) queue.push({ type: 'text', delta: cleaned });
-      const allToolCalls: ChatDelta[] = [
-        ...pendingToolCalls,
-        ...markerCalls.map((call) => ({
-          type: 'tool_call' as const,
-          id: randomUUID(),
-          name: call.name,
-          args: call.args,
-        })),
-      ];
-      for (const call of allToolCalls) queue.push(call);
-      queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop' });
-      queue.close();
+    yield* runCliChatTurn({
+      binary: this.opts.binaryPath ?? 'agent',
+      args,
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      stdin: buildCursorChatPrompt(messages, tools),
+      displayName: 'Cursor',
+      logTag: 'cursor.chat',
+      logger: this.opts.logger,
+      signal: options?.signal,
+      idleTimeoutMs,
+      hardCeilingMs: chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_CURSOR_CHAT_HARD_CEILING_MS'),
+      interpret,
     });
-
-    childProcess.stdin?.end(buildCursorChatPrompt(messages, tools));
-
-    try {
-      yield* queue.iterate();
-    } finally {
-      if (timeout) clearTimeout(timeout);
-      controller.abort();
-    }
   }
 
   #emit(event: NormalizedAgentEvent): void {
@@ -489,31 +500,4 @@ function isReasoningEvent(event: CursorJsonEvent): boolean {
   const item = objectOf(event.item);
   const itemType = String(item?.type ?? '').toLowerCase();
   return itemType.includes('reason') || itemType.includes('think');
-}
-
-function createChatQueue() {
-  const pending: ChatDelta[] = [];
-  const waiters: Array<() => void> = [];
-  let closed = false;
-  return {
-    push(delta: ChatDelta) {
-      if (closed) return;
-      pending.push(delta);
-      waiters.shift()?.();
-    },
-    close() {
-      closed = true;
-      while (waiters.length > 0) waiters.shift()?.();
-    },
-    async *iterate(): AsyncIterable<ChatDelta> {
-      while (!closed || pending.length > 0) {
-        const next = pending.shift();
-        if (next) {
-          yield next;
-          continue;
-        }
-        await new Promise<void>((resolve) => waiters.push(resolve));
-      }
-    },
-  };
 }

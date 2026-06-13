@@ -15,6 +15,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
+import { collectFailedNodeIds } from '../services/runStateFailures.js';
 
 const SCAN = 200; // recent runs to aggregate
 
@@ -44,9 +45,9 @@ export function buildAnalyticsRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
         const d = new Date(r.completedAt).getTime() - new Date(r.startedAt).getTime();
         if (Number.isFinite(d) && d >= 0) { durSum += d; durN += 1; }
       }
-      if (r.status === 'FAILED') {
+      if (r.status === 'FAILED' || r.status === 'COMPLETED_WITH_ERRORS') {
         const st = r.runState as unknown as WorkflowRunState | null;
-        for (const nid of st?.failedNodeIds ?? []) {
+        for (const nid of collectFailedNodeIds(st)) {
           const prev = nodeFailures.get(nid) ?? { count: 0, sample: '' };
           prev.count += 1;
           if (!prev.sample) prev.sample = String(st?.nodeStates?.[nid]?.error ?? '').slice(0, 160);
@@ -56,7 +57,8 @@ export function buildAnalyticsRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     }
 
     const terminal = (byStatus.COMPLETED ?? 0) + (byStatus.COMPLETED_WITH_CONTRACT_VIOLATION ?? 0)
-      + (byStatus.FAILED ?? 0) + (byStatus.CANCELLED ?? 0);
+      + (byStatus.COMPLETED_WITH_ERRORS ?? 0) + (byStatus.FAILED ?? 0) + (byStatus.CANCELLED ?? 0);
+    // COMPLETED_WITH_ERRORS is terminal but NOT a success (a node errored).
     const succeeded = (byStatus.COMPLETED ?? 0) + (byStatus.COMPLETED_WITH_CONTRACT_VIOLATION ?? 0);
 
     // Cost from the audit trail (sum of recorded node costs across these runs).

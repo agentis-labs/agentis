@@ -36,13 +36,13 @@ describe('scanArtifactBytes', () => {
 });
 
 describe('assertNoBlockingFindings', () => {
-  it('returns warnings only and throws SKILL_REGISTRY_SCAN_BLOCKED on block findings', () => {
+  it('returns warnings only and throws EXTENSION_REGISTRY_SCAN_BLOCKED on block findings', () => {
     expect(() =>
       assertNoBlockingFindings({
         ok: false,
         findings: [{ severity: 'block', rule: 'aws-access-key', detail: 'x' }],
       }),
-    ).toThrow(/SKILL_REGISTRY_SCAN_BLOCKED|Skill registry install blocked/);
+    ).toThrow(/EXTENSION_REGISTRY_SCAN_BLOCKED|Extension registry install blocked/);
   });
 
   it('returns warning findings when ok', () => {

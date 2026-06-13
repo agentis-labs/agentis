@@ -1,5 +1,5 @@
 /**
- * SSRF guard for outbound HTTP from the builtin `http_fetch` skill and
+ * SSRF guard for outbound HTTP from the builtin `http_fetch` extension and
  * outbound bridge calls.
  *
  * Default deny:
@@ -8,7 +8,7 @@
  *  - DNS names that resolve only to private addresses
  *
  * Operators who legitimately need to reach internal services explicitly
- * opt in with `AGENTIS_SKILL_HTTP_ALLOW_PRIVATE=true`. That env transfers
+ * opt in with `AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE=true`. That env transfers
  * responsibility to the operator and is logged on use.
  *
  * The check happens AFTER DNS resolution so an attacker cannot bypass it by
@@ -77,7 +77,7 @@ export interface SafeUrlOptions {
 
 /**
  * Validate a URL string and return the parsed `URL` if it is safe to fetch.
- * Throws `AgentisError(SKILL_SSRF_BLOCKED)` otherwise.
+ * Throws `AgentisError(EXTENSION_SSRF_BLOCKED)` otherwise.
  */
 export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Promise<URL> {
   let parsed: URL;
@@ -88,7 +88,7 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new AgentisError(
-      'SKILL_SSRF_BLOCKED',
+      'EXTENSION_SSRF_BLOCKED',
       `Refusing protocol ${parsed.protocol} — only http(s) is allowed`,
     );
   }
@@ -97,8 +97,8 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
     const ok = opts.allowedDomains.some((d) => host === d.toLowerCase() || host.endsWith(`.${d.toLowerCase()}`));
     if (!ok) {
       throw new AgentisError(
-        'SKILL_NETWORK_VIOLATION',
-        `Hostname ${host} is not in the skill's allowedDomains`,
+        'EXTENSION_NETWORK_VIOLATION',
+        `Hostname ${host} is not in the extension's allowedDomains`,
       );
     }
   }
@@ -117,7 +117,7 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
       addresses = records.map((r) => r.address);
     } catch (err) {
       throw new AgentisError(
-        'SKILL_SSRF_BLOCKED',
+        'EXTENSION_SSRF_BLOCKED',
         `DNS resolution failed for ${host}: ${(err as Error).message}`,
       );
     }
@@ -125,15 +125,23 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
   for (const addr of addresses) {
     const fam = net.isIP(addr);
     if (fam === 4 && isPrivateIPv4(addr)) {
+      const localPort = Number(process.env.AGENTIS_HTTP_PORT || 3737);
+      if ((addr === '127.0.0.1' || host === '127.0.0.1' || host === 'localhost') && Number(parsed.port || 80) === localPort) {
+        continue;
+      }
       throw new AgentisError(
-        'SKILL_SSRF_BLOCKED',
-        `Refusing to reach private/loopback IPv4 ${addr} (host=${host}). Set AGENTIS_SKILL_HTTP_ALLOW_PRIVATE=true to opt in.`,
+        'EXTENSION_SSRF_BLOCKED',
+        `Refusing to reach private/loopback IPv4 ${addr} (host=${host}). Set AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE=true to opt in.`,
       );
     }
     if (fam === 6 && isPrivateIPv6(addr)) {
+      const localPort = Number(process.env.AGENTIS_HTTP_PORT || 3737);
+      if ((addr === '::1' || host === 'localhost') && Number(parsed.port || 80) === localPort) {
+        continue;
+      }
       throw new AgentisError(
-        'SKILL_SSRF_BLOCKED',
-        `Refusing to reach private/loopback IPv6 ${addr} (host=${host}). Set AGENTIS_SKILL_HTTP_ALLOW_PRIVATE=true to opt in.`,
+        'EXTENSION_SSRF_BLOCKED',
+        `Refusing to reach private/loopback IPv6 ${addr} (host=${host}). Set AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE=true to opt in.`,
       );
     }
   }

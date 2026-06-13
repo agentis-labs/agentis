@@ -8,12 +8,23 @@ import { LiveStrip } from './components/LiveStrip';
 import { OnboardingStrip } from './components/OnboardingStrip';
 import { Sidebar } from './components/Sidebar';
 import { ChatPanelMount } from './components/chat/ChatPanelMount';
+import { RealtimeStatusIndicator } from './components/shared/RealtimeStatusIndicator';
 import { ChatPanelHeaderButton } from './components/chat/ChatPanelHeaderButton';
 import { NotificationPanel } from './components/shared/NotificationPanel';
 import { AvatarMenu } from './components/shared/AvatarMenu';
 import { ConfirmProvider } from './components/shared/ConfirmDialog';
 import { ToastProvider } from './components/shared/Toast';
 import { tokens, workspace as wsStore, ambient as ambientStore, api, logout } from './lib/api';
+import {
+  LOCAL_BYPASS_LAUNCH_TOKEN,
+  clearStoredLaunchToken,
+  getLaunchTokenFromUrl,
+  getStoredLaunchToken,
+  isLocalLaunchOrigin,
+  loginWithLaunchToken,
+  removeLaunchTokenFromUrl,
+  setStoredLaunchToken,
+} from './lib/launchAuth';
 import { useAgentisStore } from './store/agentisStore';
 import { useLocation } from 'react-router-dom';
 // Initialize theme on app boot
@@ -22,18 +33,19 @@ import './components/shared/ThemeToggle';
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
 const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage').then((m) => ({ default: m.WorkflowsPage })));
 const WorkflowCanvasPage = lazy(() => import('./pages/WorkflowCanvasPage').then((m) => ({ default: m.WorkflowCanvasPage })));
-const WorkflowBuilderPage = lazy(() => import('./pages/WorkflowBuilderPage').then((m) => ({ default: m.WorkflowBuilderPage })));
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((m) => ({ default: m.RunDetailPage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })));
 const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })));
+
 const PackagesPage = lazy(() => import('./pages/PackagesPage').then((m) => ({ default: m.PackagesPage })));
-const BrainPage = lazy(() => import('./pages/BrainPage').then((m) => ({ default: m.BrainPage })));
+const BrainPage = lazy(() => import('./pages/UnifiedBrainPage').then((m) => ({ default: m.UnifiedBrainPage })));
 const KnowledgeBasePage = lazy(() => import('./pages/KnowledgeBasePage').then((m) => ({ default: m.KnowledgeBasePage })));
 const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ default: m.HistoryPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
+const AbilityDetailPage = lazy(() => import('./pages/AbilityDetailPage').then((m) => ({ default: m.AbilityDetailPage })));
 
 interface Workspace {
   id: string;
@@ -49,33 +61,10 @@ interface OperatorMe {
   avatarUrl?: string | null;
 }
 
-function storeLaunchSession(json: { accessToken: string; refreshToken: string }) {
-  tokens.set(json.accessToken, json.refreshToken);
-}
-
-async function tryLaunchTokenAuth(token: string): Promise<boolean> {
+async function tryLaunchTokenAuth(token: string, options: { removeUrlToken?: boolean } = {}): Promise<boolean> {
   try {
-    const res = await fetch('/v1/auth/launch', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token }),
-    });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { accessToken: string; refreshToken: string };
-    storeLaunchSession(json);
-    window.history.replaceState({}, '', window.location.pathname);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function tryLocalLaunchAuth(): Promise<boolean> {
-  try {
-    const res = await fetch('/v1/auth/launch', { method: 'GET' });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { accessToken: string; refreshToken: string };
-    storeLaunchSession(json);
+    await loginWithLaunchToken(token);
+    if (options.removeUrlToken) removeLaunchTokenFromUrl();
     return true;
   } catch {
     return false;
@@ -92,25 +81,39 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
-      const urlToken = new URLSearchParams(window.location.search).get('token');
-      if (urlToken) {
+      const urlToken = getLaunchTokenFromUrl();
+      const hasAccessToken = Boolean(tokens.access());
+      if (!urlToken && hasAccessToken) {
+        setAuthed(true);
+        setInitializing(false);
+        return;
+      }
+      const launchToken = urlToken ?? (!hasAccessToken ? getStoredLaunchToken() : null);
+      if (launchToken) {
         try { logout(); } catch { /* noop */ }
         setInitializingLabel('Opening Agentis...');
-        const launched = await tryLaunchTokenAuth(urlToken);
+        const launched = await tryLaunchTokenAuth(launchToken, { removeUrlToken: Boolean(urlToken) });
+        if (launched) {
+          setStoredLaunchToken(launchToken);
+          setAuthed(true);
+          setInitializing(false);
+          return;
+        }
+        clearStoredLaunchToken();
+      }
+
+      if (!hasAccessToken && isLocalLaunchOrigin()) {
+        try { logout(); } catch { /* noop */ }
+        setInitializingLabel('Opening Agentis...');
+        const launched = await tryLaunchTokenAuth(LOCAL_BYPASS_LAUNCH_TOKEN);
         if (launched) {
           setAuthed(true);
           setInitializing(false);
           return;
         }
       }
+
       if (tokens.access()) {
-        setAuthed(true);
-        setInitializing(false);
-        return;
-      }
-      setInitializingLabel('Opening Agentis...');
-      const launched = await tryLocalLaunchAuth();
-      if (launched) {
         setAuthed(true);
         setInitializing(false);
         return;
@@ -135,9 +138,27 @@ export function App() {
           useAgentisStore.getState().setContext(picked.id, ambientStore.get());
           setWs(picked);
         }
-        if (meData?.user) setMe(meData.user);
+        if (meData?.user) {
+          const user = meData.user as any;
+          setMe({
+            id: user.id,
+            email: user.email ?? '',
+            name: user.displayName ?? user.name ?? 'Operator',
+            avatarUrl: user.avatarUrl,
+          });
+        }
       } catch {
         logout();
+        const launchToken = getStoredLaunchToken();
+        if (launchToken) {
+          setInitializingLabel('Opening Agentis...');
+          const launched = await tryLaunchTokenAuth(launchToken);
+          if (launched) {
+            window.location.reload();
+            return;
+          }
+          clearStoredLaunchToken();
+        }
         setAuthed(false);
       } finally {
         setWsReady(true);
@@ -179,6 +200,7 @@ export function App() {
           operator={me}
           onLogout={() => {
             logout();
+            clearStoredLaunchToken();
             useAgentisStore.getState().clearContext();
             setAuthed(false);
             setWsReady(false);
@@ -190,13 +212,16 @@ export function App() {
               <Route path="/home" element={<HomePage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agents/:id" element={<AgentDetailPage />} />
+
               <Route path="/workflows" element={<WorkflowsPage />} />
-              <Route path="/workflows/build" element={<WorkflowBuilderPage />} />
+              <Route path="/workflows/build" element={<Navigate to="/workflows" replace />} />
               <Route path="/workflows/:id" element={<WorkflowCanvasPage />} />
-              <Route path="/brain" element={<BrainPage />} />
+              <Route path="/brain/*" element={<BrainPage />} />
               <Route path="/knowledge" element={<BrainPage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />
+              <Route path="/abilities" element={<Navigate to="/agents" replace />} />
+              <Route path="/abilities/:id" element={<AbilityDetailPage />} />
               <Route path="/packages" element={<PackagesPage />} />
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/runs/:id" element={<RunDetailPage />} />
@@ -210,12 +235,12 @@ export function App() {
               <Route path="/runs" element={<Navigate to="/history?tab=runs" replace />} />
               <Route path="/activity" element={<Navigate to="/history?tab=activity" replace />} />
               <Route path="/approvals" element={<Navigate to="/home" replace />} />
+              <Route path="/spaces" element={<Navigate to="/home" replace />} />
+              <Route path="/spaces/:id" element={<Navigate to="/home" replace />} />
               <Route path="/gateways" element={<Navigate to="/settings?tab=connections" replace />} />
               <Route path="/conversations" element={<Navigate to="/chat" replace />} />
               <Route path="/conversations/:agentId" element={<Navigate to="/chat" replace />} />
               <Route path="/settings/channels" element={<Navigate to="/settings?tab=connections" replace />} />
-              <Route path="/skills" element={<Navigate to="/packages?tab=skills" replace />} />
-
               <Route path="*" element={<Navigate to="/home" replace />} />
             </Routes>
           </Suspense>
@@ -298,6 +323,7 @@ function Shell({
             Search
             <span className="rounded border border-line px-1 py-0.5 text-[9px]">⌘K</span>
           </button>
+          <RealtimeStatusIndicator />
           <NotificationPanel />
           {!onChatPage && <ChatPanelHeaderButton />}
           <AvatarMenu

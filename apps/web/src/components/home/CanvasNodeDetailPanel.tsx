@@ -1,6 +1,14 @@
-import { AlertTriangle, ArrowRight, Bot, Check, ExternalLink, MessageCircle, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronRight, ExternalLink, MessageCircle, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
+import { useRealtime } from '../../lib/realtime';
+import { useRunActivity } from '../../lib/useRunActivity';
+import {
+  REALTIME_ACTIVITY_EVENTS,
+  describeRealtimeActivity,
+  type RealtimeActivity,
+} from '../../lib/realtimeActivity';
 import type { CanvasNode } from './homeCanvasTypes';
 
 export function CanvasNodeDetailPanel({
@@ -71,9 +79,13 @@ export function CanvasNodeDetailPanel({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          {(node.agent || node.workflow) && <NodeLiveFeed node={node} />}
           {node.agent && <AgentLiveState node={node} />}
+          {node.workflow && <WorkflowRuntimeSection workflowId={node.workflow.id} onNavigate={onNavigate} />}
 
-          {node.tooltipLines.length > 0 && (
+          {/* Workflow nodes get the runtime section above — repeating
+              "Status: failed / Failed at: X" as plain lines is pure noise. */}
+          {!node.workflow && node.tooltipLines.length > 0 && (
             <section className="space-y-2">
               {node.tooltipLines.map((line) => (
                 <div key={line} className="rounded-card border border-line bg-canvas/35 px-3 py-2 text-[12px] text-text-secondary">
@@ -151,6 +163,298 @@ export function CanvasNodeDetailPanel({
       </aside>
     </div>
   );
+}
+
+/**
+ * Live, streaming activity for the selected node — the agent's real reasoning /
+ * steps / tool-calls (or its workflow's run), so the detail card shows what is
+ * happening right now instead of a static snapshot. Fed by the workspace activity
+ * spine; renders nothing until there's something to show.
+ */
+function NodeLiveFeed({ node }: { node: CanvasNode }) {
+  const agentId = node.agent?.id;
+  const workflowId = node.workflow?.id;
+  const [feed, setFeed] = useState<RealtimeActivity[]>([]);
+  const seqRef = useRef(0);
+
+  useRealtime([...REALTIME_ACTIVITY_EVENTS], (env) => {
+    const activity = describeRealtimeActivity(env);
+    if (!activity) return;
+    const match =
+      (agentId && activity.agentId === agentId) || (workflowId && activity.workflowId === workflowId);
+    if (!match) return;
+    seqRef.current += 1;
+    setFeed((current) => [{ ...activity, id: `${activity.id}:${seqRef.current}` }, ...current].slice(0, 6));
+  });
+
+  if (feed.length === 0) return null;
+
+  return (
+    <section className="mb-4 rounded-card border border-accent/25 bg-accent-soft/5 px-3 py-3">
+      <div className="flex items-center gap-2">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-accent">Live activity</span>
+      </div>
+      <div className="mt-2 space-y-1.5">
+        {feed.map((item) => (
+          <div key={item.id} className="flex items-start gap-2">
+            <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-accent/70" />
+            <span className="min-w-0 flex-1 line-clamp-2 font-mono text-[11px] leading-snug text-text-secondary">
+              {item.agentName ? `${item.agentName}: ` : ''}{item.detail}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ── Workflow runtime: latest run steps + history + live stream ──────────────
+
+interface RunSummaryRow {
+  id: string;
+  status: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+interface RunNodeRow {
+  id: string;
+  nodeId: string;
+  title: string;
+  status: string;
+  durationMs?: number;
+  output?: unknown;
+  outputSummary?: string;
+  error?: string;
+}
+interface RunDetail {
+  id: string;
+  status: string;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  nodes: RunNodeRow[];
+}
+
+function runStatusMeta(status: string | undefined): { color: string; label: string; live?: boolean } {
+  switch ((status ?? '').toLowerCase()) {
+    case 'running': case 'in_progress': case 'active':
+      return { color: 'bg-accent', label: 'Running', live: true };
+    case 'completed': case 'success':
+      return { color: 'bg-emerald-500', label: 'Completed' };
+    case 'failed': case 'error': case 'completed_with_errors':
+      return { color: 'bg-rose-500', label: 'Failed' };
+    case 'waiting': case 'paused': case 'blocked':
+      return { color: 'bg-amber-500', label: 'Waiting' };
+    case 'skipped': return { color: 'bg-text-muted/60', label: 'Skipped' };
+    case 'pending': case 'queued': return { color: 'bg-text-muted', label: 'Pending' };
+    default: return { color: 'bg-text-muted/40', label: status || 'Idle' };
+  }
+}
+
+function renderOutput(output: unknown): string {
+  if (output == null) return '';
+  if (typeof output === 'string') return output;
+  try { return JSON.stringify(output, null, 2); } catch { return String(output); }
+}
+
+/**
+ * The runtime half of a workflow's canvas card — so a workflow node answers
+ * "what did the last run do, where did it fail, what did it produce, and how
+ * has it behaved" without ever opening /history or the editor. Streams live
+ * while a run is active.
+ */
+function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string; onNavigate: (route: string) => void }) {
+  const [runs, setRuns] = useState<RunSummaryRow[] | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [selectedStep, setSelectedStep] = useState<string | null>(null);
+  const [showOutput, setShowOutput] = useState(true);
+  const [showAllSteps, setShowAllSteps] = useState(false);
+
+  const loadRuns = useCallback(() => {
+    void api<{ runs: RunSummaryRow[] }>(`/v1/runs?workflowId=${encodeURIComponent(workflowId)}&limit=8`)
+      .then((res) => {
+        setRuns(res.runs ?? []);
+        setSelectedRunId((current) => current ?? res.runs?.[0]?.id ?? null);
+      })
+      .catch(() => setRuns([]));
+  }, [workflowId]);
+
+  useEffect(() => { setRuns(null); setSelectedRunId(null); setDetail(null); loadRuns(); }, [loadRuns]);
+
+  const loadDetail = useCallback((runId: string) => {
+    void api<{ run: RunDetail }>(`/v1/runs/${runId}`)
+      .then((res) => { setDetail(res.run); setSelectedStep((cur) => cur ?? res.run.nodes.find((n) => n.status === 'failed')?.nodeId ?? null); })
+      .catch(() => setDetail(null));
+  }, []);
+
+  useEffect(() => { if (selectedRunId) { setSelectedStep(null); loadDetail(selectedRunId); } }, [selectedRunId, loadDetail]);
+
+  // Live: while the selected run is active, stream its tail and refresh detail.
+  const isActive = runStatusMeta(detail?.status).live ?? false;
+  const liveFeed = useRunActivity(isActive ? selectedRunId : null, { cap: 8 });
+  useEffect(() => {
+    if (!isActive || !selectedRunId) return;
+    loadDetail(selectedRunId);
+    loadRuns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveFeed.length]);
+
+  if (runs === null) {
+    return <div className="mb-4 rounded-card border border-line bg-canvas/55 px-3 py-3 text-[12px] text-text-muted">Loading runs…</div>;
+  }
+  if (runs.length === 0) {
+    return (
+      <div className="mb-4 rounded-card border border-line bg-canvas/55 px-3 py-3 text-[12px] text-text-muted">
+        No runs yet. Trigger this workflow to see its steps, outputs, and live progress here.
+      </div>
+    );
+  }
+
+  const headMeta = runStatusMeta(detail?.status);
+  const step = detail?.nodes.find((n) => n.nodeId === selectedStep) ?? detail?.nodes.find((n) => n.status === 'failed') ?? null;
+  const outputText = step ? renderOutput(step.output) : '';
+
+  return (
+    <section className="mb-4 overflow-hidden rounded-card border border-line bg-canvas/55">
+      {/* Latest run status */}
+      <div className="flex items-center justify-between gap-2 border-b border-line/60 px-3 py-2.5">
+        <span className="flex items-center gap-2 text-[12px] font-semibold text-text-primary">
+          <span className={clsx('inline-block h-2 w-2 rounded-full', headMeta.color, headMeta.live && 'animate-pulse')} />
+          {headMeta.label}
+          {detail?.durationMs != null && <span className="font-mono text-[10px] font-normal text-text-muted">· {fmtDuration(detail.durationMs)}</span>}
+        </span>
+        <button type="button" onClick={() => selectedRunId && onNavigate(`/runs/${selectedRunId}`)} className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-accent">
+          <ExternalLink size={10} /> Run
+        </button>
+      </div>
+
+      {/* Step breakdown — a SUMMARY first. Big workflows have dozens of steps;
+          listing them all is noise. Show counts + a segmented progress bar +
+          only the steps that matter (failed / running / waiting); the full
+          list stays one toggle away. */}
+      {detail && detail.nodes.length > 0 && (() => {
+        const total = detail.nodes.length;
+        const done = detail.nodes.filter((n) => runStatusMeta(n.status).label === 'Completed').length;
+        const failedSteps = detail.nodes.filter((n) => runStatusMeta(n.status).label === 'Failed');
+        const liveSteps = detail.nodes.filter((n) => runStatusMeta(n.status).live);
+        const waitingSteps = detail.nodes.filter((n) => runStatusMeta(n.status).label === 'Waiting');
+        const interesting = [...failedSteps, ...liveSteps, ...waitingSteps];
+        const shown = showAllSteps ? detail.nodes : interesting;
+        return (
+          <div className="px-3 py-2.5">
+            {/* Segmented progress bar: one sliver per step, status-colored. */}
+            <div className="flex items-center gap-2">
+              <div className="flex h-1.5 flex-1 gap-px overflow-hidden rounded-pill bg-surface-2">
+                {detail.nodes.map((n) => (
+                  <button
+                    key={n.nodeId}
+                    type="button"
+                    onClick={() => setSelectedStep(n.nodeId)}
+                    title={`${n.title} · ${runStatusMeta(n.status).label}`}
+                    className={clsx('h-full flex-1 transition-opacity hover:opacity-70', runStatusMeta(n.status).color, runStatusMeta(n.status).live && 'animate-pulse')}
+                  />
+                ))}
+              </div>
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">
+                {done}/{total}{failedSteps.length > 0 && <span className="text-danger"> · {failedSteps.length}✗</span>}
+              </span>
+            </div>
+            {/* Only the steps that need attention; everything else behind a toggle. */}
+            {(shown.length > 0 || total > 0) && (
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                {shown.map((n) => {
+                  const meta = runStatusMeta(n.status);
+                  const sel = n.nodeId === step?.nodeId;
+                  return (
+                    <button
+                      key={n.nodeId}
+                      type="button"
+                      onClick={() => setSelectedStep(n.nodeId)}
+                      title={`${n.title} · ${meta.label}${n.durationMs != null ? ` · ${fmtDuration(n.durationMs)}` : ''}`}
+                      className={clsx(
+                        'inline-flex max-w-[150px] items-center gap-1.5 rounded-pill border px-2 py-0.5 text-[10px]',
+                        sel ? 'border-text-primary/40 bg-surface-2 text-text-primary' : 'border-line bg-canvas/40 text-text-muted hover:text-text-secondary',
+                      )}
+                    >
+                      <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', meta.color, meta.live && 'animate-pulse')} />
+                      <span className="truncate">{n.title}</span>
+                    </button>
+                  );
+                })}
+                {!showAllSteps && shown.length === 0 && (
+                  <span className="text-[10px] text-text-muted">All {total} steps completed.</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowAllSteps((v) => !v)}
+                  className="rounded-pill px-1.5 py-0.5 text-[10px] text-text-muted underline decoration-dotted underline-offset-2 hover:text-text-primary"
+                >
+                  {showAllSteps ? 'Hide steps' : `All steps (${total})`}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Selected step output / error */}
+      {step && (outputText || step.error) && (
+        <div className="border-t border-line/60">
+          <button type="button" onClick={() => setShowOutput((v) => !v)} className="flex w-full items-center gap-1 px-3 py-1.5 text-[10px] uppercase tracking-wide text-text-muted hover:text-text-secondary">
+            {showOutput ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            {step.error ? `Error · ${step.title}` : `Output · ${step.title}`}
+          </button>
+          {showOutput && (
+            <div className="px-3 pb-2.5">
+              {step.error ? (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-danger/10 p-2 text-[11px] leading-snug text-danger">{step.error}</pre>
+              ) : (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-[#141414] p-2 font-mono text-[10.5px] leading-snug text-text-secondary">
+                  {outputText.length > 3000 ? `${outputText.slice(0, 3000)}\n…` : outputText}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Recent-run history strip */}
+      <div className="flex items-center gap-1.5 border-t border-line/60 px-3 py-2">
+        <span className="mr-0.5 text-[10px] uppercase tracking-wide text-text-muted">History</span>
+        {runs.map((r) => {
+          const meta = runStatusMeta(r.status);
+          return (
+            <button
+              key={r.id}
+              type="button"
+              onClick={() => setSelectedRunId(r.id)}
+              title={`${meta.label} · ${relTime(r.finishedAt ?? r.startedAt)}`}
+              className={clsx('h-3.5 w-3.5 shrink-0 rounded-full border transition-transform hover:scale-110', meta.color, r.id === selectedRunId ? 'border-text-primary' : 'border-transparent', meta.live && 'animate-pulse')}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function fmtDuration(ms?: number): string {
+  if (ms == null || !Number.isFinite(ms)) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+function relTime(iso?: string): string {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(diff)) return '';
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
 function AgentLiveState({ node }: { node: CanvasNode }) {

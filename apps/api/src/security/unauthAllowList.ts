@@ -28,8 +28,8 @@ export const UNAUTH_ALLOW_LIST: ReadonlyArray<UnauthEntry> = [
   { path: '/v1/auth/login', methods: ['POST'], reason: 'Bootstrap: must be reachable pre-token.' },
   {
     path: '/v1/auth/launch',
-    methods: ['GET', 'POST'],
-    reason: 'Local launch bootstrap for file-backed installs; returns 404 when env-managed secrets disable launch auth.',
+    methods: ['POST'],
+    reason: 'Local launch-token exchange for CLI auto-login; returns 404 when env-managed secrets disable launch auth.',
   },
   { path: '/v1/auth/refresh', methods: ['POST'], reason: 'Refresh tokens are presented in the body, not as bearer.' },
   {

@@ -6,41 +6,41 @@
  */
 
 import { and, desc, eq } from 'drizzle-orm';
-import type { SkillManifest } from '@agentis/core';
+import type { ExtensionManifest } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { BUILTIN_SKILL_ENTRYPOINTS } from '../builtinSkills.js';
+import { BUILTIN_EXTENSION_ENTRYPOINTS } from '../builtinExtensions.js';
 
-type SkillRow = typeof schema.skills.$inferSelect;
+type ExtensionRow = typeof schema.extensions.$inferSelect;
 
 export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
     {
       definition: {
-        id: 'agentis.app.inspect',
+        id: 'agentis.package.inspect',
         family: 'inspect',
-        description: 'Inspect an installed app and its components.',
-        inputSchema: { type: 'object', properties: { appId: { type: 'string' } }, required: ['appId'] },
+        description: 'Inspect an installed registry package and its components.',
+        inputSchema: { type: 'object', properties: { entryId: { type: 'string' } }, required: ['entryId'] },
         mutating: false,
         mcpExposed: true,
       },
       handler: async (args, ctx) => {
-        const appId = String(args.appId);
+        const entryId = String(args.entryId);
         const installed = deps.db
           .select()
           .from(schema.installedRegistryArtifacts)
           .where(
             and(
               eq(schema.installedRegistryArtifacts.workspaceId, ctx.workspaceId),
-              eq(schema.installedRegistryArtifacts.entryId, appId),
+              eq(schema.installedRegistryArtifacts.entryId, entryId),
             ),
           )
           .get();
         if (!installed) return { found: false };
         return {
           found: true,
-          appId,
+          entryId,
           version: installed.version,
           entryType: installed.entryType,
           installedAt: installed.installedAt,
@@ -161,6 +161,134 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
     },
     {
       definition: {
+        id: 'agentis.extensions.list',
+        family: 'inspect',
+        description:
+          'List workspace extensions with real extensionIds, schemas, runtimes, and capability tags. Use this before creating extension_task workflow nodes.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            runtime: { type: 'string', enum: ['builtin', 'node_worker', 'docker_sandbox'] },
+            capabilityTag: { type: 'string' },
+            limit: { type: 'number' },
+          },
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+        const runtime = typeof args.runtime === 'string' ? args.runtime : null;
+        const capabilityTag = typeof args.capabilityTag === 'string' ? args.capabilityTag.trim().toLowerCase() : '';
+        const limit = clampLimit(args.limit, 50, 200);
+        const rows = deps.db
+          .select()
+          .from(schema.extensions)
+          .where(eq(schema.extensions.workspaceId, ctx.workspaceId))
+          .orderBy(desc(schema.extensions.createdAt))
+          .all();
+
+        const filtered = rows
+          .map(toExtensionSummary)
+          .filter((extension) => !runtime || extension.runtime === runtime)
+          .filter((extension) => !capabilityTag || extension.capabilityTags.some((tag) => tag.toLowerCase() === capabilityTag))
+          .filter((extension) => {
+            if (!query) return true;
+            const haystack = [
+              extension.id,
+              extension.name,
+              extension.slug,
+              extension.entrypoint,
+              extension.runtime,
+              ...extension.capabilityTags,
+            ].join(' ').toLowerCase();
+            return haystack.includes(query);
+          });
+
+        const installedBuiltinEntrypoints = new Set(
+          rows
+            .filter((row) => row.runtime === 'builtin')
+            .map((row) => manifestFromRow(row).entrypoint)
+            .filter((entrypoint): entrypoint is string => typeof entrypoint === 'string' && entrypoint.length > 0),
+        );
+        const missingWorkspaceRows = BUILTIN_EXTENSION_ENTRYPOINTS.filter((entrypoint) => !installedBuiltinEntrypoints.has(entrypoint));
+
+        return {
+          count: Math.min(filtered.length, limit),
+          total: filtered.length,
+          extensions: filtered.slice(0, limit),
+          builtinExecutors: {
+            entrypoints: BUILTIN_EXTENSION_ENTRYPOINTS,
+            missingWorkspaceRows,
+            usableInWorkflows: missingWorkspaceRows.length === 0,
+            note: missingWorkspaceRows.length > 0
+              ? 'Builtin executors exist in code, but extension_task nodes need an installed workspace extension row so the graph can reference a real extensionId.'
+              : 'Builtin extensions are installed in this workspace and can be referenced by extensionId.',
+          },
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.extension.inspect',
+        family: 'inspect',
+        description:
+          'Inspect a single workspace extension by extensionId, slug, or builtin entrypoint. Returns the manifest and whether it can be used in workflow extension_task nodes.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            extensionId: { type: 'string' },
+            slug: { type: 'string' },
+            entrypoint: { type: 'string' },
+          },
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const extensionId = typeof args.extensionId === 'string' ? args.extensionId.trim() : '';
+        const slug = typeof args.slug === 'string' ? args.slug.trim() : '';
+        const entrypoint = typeof args.entrypoint === 'string' ? args.entrypoint.trim() : '';
+        if (!extensionId && !slug && !entrypoint) {
+          return { found: false, error: 'Provide one of extensionId, slug, or entrypoint.' };
+        }
+
+        const row = deps.db
+          .select()
+          .from(schema.extensions)
+          .where(eq(schema.extensions.workspaceId, ctx.workspaceId))
+          .all()
+          .find((candidate) => {
+            const manifest = manifestFromRow(candidate);
+            return (!!extensionId && candidate.id === extensionId)
+              || (!!slug && candidate.slug === slug)
+              || (!!entrypoint && manifest.entrypoint === entrypoint);
+          });
+
+        if (!row) {
+          const requested = entrypoint || slug || extensionId;
+          const builtinExecutorAvailable = BUILTIN_EXTENSION_ENTRYPOINTS.includes(requested);
+          return {
+            found: false,
+            requested,
+            builtinExecutorAvailable,
+            usableInWorkflows: false,
+            message: builtinExecutorAvailable
+              ? 'The builtin executor exists, but this workspace does not have an installed extension row for it. Run seed/bootstrap or install the extension before using it in a workflow graph.'
+              : 'No workspace extension matched the requested identifier.',
+          };
+        }
+
+        return {
+          found: true,
+          extension: toExtensionDetail(row),
+          usableInWorkflows: true,
+        };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.skills.list',
         family: 'inspect',
         description:
@@ -184,24 +312,24 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
         const limit = clampLimit(args.limit, 50, 200);
         const rows = deps.db
           .select()
-          .from(schema.skills)
-          .where(eq(schema.skills.workspaceId, ctx.workspaceId))
-          .orderBy(desc(schema.skills.createdAt))
+          .from(schema.extensions)
+          .where(eq(schema.extensions.workspaceId, ctx.workspaceId))
+          .orderBy(desc(schema.extensions.createdAt))
           .all();
 
         const filtered = rows
-          .map(toSkillSummary)
-          .filter((skill) => !runtime || skill.runtime === runtime)
-          .filter((skill) => !capabilityTag || skill.capabilityTags.some((tag) => tag.toLowerCase() === capabilityTag))
-          .filter((skill) => {
+          .map(toExtensionSummary)
+          .filter((extension) => !runtime || extension.runtime === runtime)
+          .filter((extension) => !capabilityTag || extension.capabilityTags.some((tag) => tag.toLowerCase() === capabilityTag))
+          .filter((extension) => {
             if (!query) return true;
             const haystack = [
-              skill.id,
-              skill.name,
-              skill.slug,
-              skill.entrypoint,
-              skill.runtime,
-              ...skill.capabilityTags,
+              extension.id,
+              extension.name,
+              extension.slug,
+              extension.entrypoint,
+              extension.runtime,
+              ...extension.capabilityTags,
             ].join(' ').toLowerCase();
             return haystack.includes(query);
           });
@@ -212,14 +340,14 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
             .map((row) => manifestFromRow(row).entrypoint)
             .filter((entrypoint): entrypoint is string => typeof entrypoint === 'string' && entrypoint.length > 0),
         );
-        const missingWorkspaceRows = BUILTIN_SKILL_ENTRYPOINTS.filter((entrypoint) => !installedBuiltinEntrypoints.has(entrypoint));
+        const missingWorkspaceRows = BUILTIN_EXTENSION_ENTRYPOINTS.filter((entrypoint) => !installedBuiltinEntrypoints.has(entrypoint));
 
         return {
           count: Math.min(filtered.length, limit),
           total: filtered.length,
-          skills: filtered.slice(0, limit),
+          extensions: filtered.slice(0, limit),
           builtinExecutors: {
-            entrypoints: BUILTIN_SKILL_ENTRYPOINTS,
+            entrypoints: BUILTIN_EXTENSION_ENTRYPOINTS,
             missingWorkspaceRows,
             usableInWorkflows: missingWorkspaceRows.length === 0,
             note: missingWorkspaceRows.length > 0
@@ -256,8 +384,8 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
 
         const row = deps.db
           .select()
-          .from(schema.skills)
-          .where(eq(schema.skills.workspaceId, ctx.workspaceId))
+          .from(schema.extensions)
+          .where(eq(schema.extensions.workspaceId, ctx.workspaceId))
           .all()
           .find((candidate) => {
             const manifest = manifestFromRow(candidate);
@@ -268,7 +396,7 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
 
         if (!row) {
           const requested = entrypoint || slug || skillId;
-          const builtinExecutorAvailable = BUILTIN_SKILL_ENTRYPOINTS.includes(requested);
+          const builtinExecutorAvailable = BUILTIN_EXTENSION_ENTRYPOINTS.includes(requested);
           return {
             found: false,
             requested,
@@ -282,7 +410,7 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
 
         return {
           found: true,
-          skill: toSkillDetail(row),
+          skill: toExtensionDetail(row),
           usableInWorkflows: true,
         };
       },
@@ -325,6 +453,122 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
         };
       },
     },
+    {
+      definition: {
+        id: 'agentis.memory.read',
+        family: 'inspect',
+        description: 'Search persistent memory for workspace notes and learnings.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            kind: { type: 'string' },
+            agentId: { type: 'string' },
+            limit: { type: 'number' },
+          },
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+        const kind = typeof args.kind === 'string' ? args.kind : null;
+        const agentId = typeof args.agentId === 'string' ? args.agentId : null;
+        const limit = clampLimit(args.limit, 20, 100);
+
+        let selectQuery = deps.db
+          .select()
+          .from(schema.workspaceMemory)
+          .where(
+            and(
+              eq(schema.workspaceMemory.workspaceId, ctx.workspaceId),
+              ...(kind ? [eq(schema.workspaceMemory.kind, kind)] : []),
+              ...(agentId ? [eq(schema.workspaceMemory.scopeId, agentId)] : []),
+            )
+          )
+          .orderBy(desc(schema.workspaceMemory.updatedAt))
+          .limit(limit)
+          .$dynamic();
+
+        const rows = selectQuery.all();
+        let memories = rows.map((r) => ({
+          id: r.id,
+          workspaceId: r.workspaceId,
+          scopeId: r.scopeId,
+          kind: r.kind,
+          source: r.source,
+          title: r.title,
+          content: r.content,
+          trust: Number(r.trust),
+          importance: Number(r.importance),
+          tags: Array.isArray(r.tags) ? r.tags : [],
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        }));
+
+        if (query) {
+          memories = memories.filter((m) =>
+            m.title.toLowerCase().includes(query) ||
+            m.content.toLowerCase().includes(query)
+          );
+        }
+
+        return { memories };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.knowledge.search',
+        family: 'inspect',
+        description: 'Full-text search across documents and knowledge base entries.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            limit: { type: 'number' },
+          },
+          required: ['query'],
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.knowledgeBases) {
+          return { error: 'Knowledge base service not available' };
+        }
+        const query = String(args.query);
+        const limit = clampLimit(args.limit, 5, 20);
+
+        const bases = deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId);
+        const results: any[] = [];
+        for (const base of bases) {
+          try {
+            const hits = await deps.knowledgeBases.search({
+              workspaceId: ctx.workspaceId,
+              knowledgeBaseId: base.id,
+              query,
+              topK: limit,
+            });
+            results.push(...hits.map((h) => ({ ...h, knowledgeBaseName: base.name })));
+          } catch (err) {
+            // ignore base search failure
+          }
+        }
+
+        results.sort((a, b) => b.score - a.score);
+        return {
+          results: results.slice(0, limit).map((r) => ({
+            id: r.id,
+            documentId: r.documentId,
+            chunkIndex: r.chunkIndex,
+            content: r.content,
+            score: r.score,
+            metadata: r.metadata,
+            knowledgeBaseName: r.knowledgeBaseName,
+          })),
+        };
+      },
+    },
   ]);
 }
 
@@ -359,11 +603,11 @@ function clampLimit(value: unknown, fallback: number, max: number): number {
   return Math.min(Math.max(Math.trunc(parsed), 1), max);
 }
 
-function manifestFromRow(row: SkillRow): Partial<SkillManifest> {
-  return recordFromUnknown(row.manifest) as Partial<SkillManifest>;
+function manifestFromRow(row: ExtensionRow): Partial<ExtensionManifest> {
+  return recordFromUnknown(row.manifest) as Partial<ExtensionManifest>;
 }
 
-function toSkillSummary(row: SkillRow) {
+function toExtensionSummary(row: ExtensionRow) {
   const manifest = manifestFromRow(row);
   return {
     id: row.id,
@@ -375,18 +619,17 @@ function toSkillSummary(row: SkillRow) {
     packageId: row.packageId,
     ambientId: row.ambientId,
     capabilityTags: stringArray(manifest.capabilityTags),
-    inputSchema: recordFromUnknown(manifest.inputSchema),
-    outputSchema: recordFromUnknown(manifest.outputSchema),
+    operations: Array.isArray(manifest.operations) ? manifest.operations : [],
     timeoutMs: typeof manifest.timeoutMs === 'number' ? manifest.timeoutMs : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-function toSkillDetail(row: SkillRow) {
+function toExtensionDetail(row: ExtensionRow) {
   const manifest = manifestFromRow(row);
   return {
-    ...toSkillSummary(row),
+    ...toExtensionSummary(row),
     manifest,
     allowedDomains: stringArray(manifest.allowedDomains),
     hasInlineSource: typeof manifest.source === 'string' && manifest.source.length > 0,

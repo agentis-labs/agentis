@@ -1,81 +1,112 @@
-import { CheckCircle2, ChevronDown, ChevronUp, Loader2, XCircle } from 'lucide-react';
-import { useState } from 'react';
+import { CheckCircle2, Loader2, X, XCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
-import type { ToolCallPillData } from '../ChatPanel/ToolCallPill';
+import type { ToolCallData } from './toolCalls';
 
+/**
+ * StickyProgressBanner - floating pill at the bottom-center
+ * of the chat viewport instead of a top sticky bar. Less intrusive, more
+ * contextual. Shows the currently running tool + overall progress.
+ */
 export function StickyProgressBanner({
   toolCalls,
   onJumpToLatest,
   activeRunId,
   onCancelRun,
 }: {
-  toolCalls: ToolCallPillData[];
+  toolCalls: ToolCallData[];
   onJumpToLatest?: () => void;
   activeRunId?: string;
   onCancelRun?: (runId: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
-  const running = toolCalls.filter((call) => call.status === 'running').length;
+  const [dismissed, setDismissed] = useState(false);
+  const running = toolCalls.filter((call) => call.status === 'running');
   const done = toolCalls.filter((call) => call.status === 'success').length;
   const failed = toolCalls.filter((call) => call.status === 'error').length;
+  const total = toolCalls.length;
+  const activeStep = running[0];
 
-  if (toolCalls.length === 0 || running === 0) return null;
+  const hasActiveTools = running.length > 0;
+
+  useEffect(() => {
+    if (hasActiveTools) setDismissed(false);
+  }, [hasActiveTools]);
+
+  if (toolCalls.length === 0 || running.length === 0 || dismissed) return null;
+
+  const progress = total > 0 ? Math.round((done / total) * 100) : 0;
 
   return (
-    <div className="sticky top-0 z-[1] mb-3 overflow-hidden rounded-xl border border-accent/25 bg-surface/95 text-[11px] shadow-[0_14px_30px_-22px_rgba(0,0,0,0.45)] backdrop-blur">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-surface-2/70 active:bg-surface-2"
-      >
-        <Loader2 size={13} className="animate-spin text-accent" />
-        <span className="font-semibold text-text-primary">Agent is working</span>
-        <span className="rounded-full bg-accent/10 px-2 py-0.5 font-medium text-accent">
-          {done}/{toolCalls.length} done
-        </span>
-        {failed > 0 && <span className="rounded-full bg-danger/10 px-2 py-0.5 font-medium text-danger">{failed} failed</span>}
-        <span className="ml-auto text-text-muted">{open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}</span>
-      </button>
-      {open && (
-        <div className="border-t border-line/60 px-3 py-2">
-          <div className="space-y-1.5">
-            {toolCalls.slice(0, 4).map((call) => (
-              <div key={call.id} className="flex items-center gap-2">
-                {call.status === 'running' ? (
-                  <Loader2 size={12} className="animate-spin text-accent" />
-                ) : call.status === 'error' ? (
-                  <XCircle size={12} className="text-danger" />
-                ) : (
-                  <CheckCircle2 size={12} className="text-accent" />
-                )}
-                <span className={clsx('min-w-0 flex-1 truncate font-mono', call.status === 'running' ? 'text-text-primary' : 'text-text-muted')}>
-                  {call.name}
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {onJumpToLatest && (
-              <button
-                type="button"
-                onClick={onJumpToLatest}
-                className="rounded-btn border border-line bg-canvas px-2 py-1 text-[10px] font-semibold text-text-secondary transition hover:border-accent/40 hover:text-text-primary active:scale-[0.98]"
-              >
-                View latest
-              </button>
-            )}
-            {onCancelRun && activeRunId && (
-              <button
-                type="button"
-                onClick={() => onCancelRun(activeRunId)}
-                className="rounded-btn border border-danger/20 bg-danger/10 px-2 py-1 text-[10px] font-semibold text-danger transition hover:bg-danger/20 hover:border-danger/30 active:scale-[0.98]"
-              >
-                Stop execution
-              </button>
-            )}
-          </div>
-        </div>
+    <div
+      className={clsx(
+        'pointer-events-none sticky bottom-3 z-20 mb-3 flex justify-center',
+        'animate-in slide-in-from-bottom-1 fade-in duration-300',
       )}
+    >
+      <div className={clsx(
+        'pointer-events-auto w-[min(100%,520px)]',
+        'flex items-center gap-2.5 rounded-xl px-3 py-2',
+        'border border-accent/25 bg-surface/95 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.5)] backdrop-blur-md',
+        'text-[11px]',
+      )}>
+        {/* Spinner */}
+        <Loader2 size={13} className="shrink-0 animate-spin text-accent" />
+
+        {/* Current step name */}
+        <div className="min-w-0 flex-1">
+          <span className="font-semibold text-text-primary">
+            {activeStep ? activeStep.name : 'Agent is working'}
+          </span>
+          {total > 1 && (
+            <span className="ml-2 font-mono text-[10px] text-text-muted tabular-nums">
+              {done}/{total}
+            </span>
+          )}
+          {failed > 0 && (
+            <span className="ml-1.5 font-medium text-danger">· {failed} failed</span>
+          )}
+        </div>
+
+        {/* Mini progress bar */}
+        {total > 1 && (
+          <div className="h-1 w-16 overflow-hidden rounded-full bg-surface-2 shrink-0">
+            <div
+              className="h-full rounded-full bg-accent transition-all duration-500 ease-out"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex shrink-0 items-center gap-1">
+          {onJumpToLatest && (
+            <button
+              type="button"
+              onClick={onJumpToLatest}
+              className="rounded-md border border-line px-2 py-1 text-[10px] font-medium text-text-secondary transition hover:border-accent/40 hover:text-text-primary"
+            >
+              Latest
+            </button>
+          )}
+          {onCancelRun && activeRunId && (
+            <button
+              type="button"
+              onClick={() => onCancelRun(activeRunId)}
+              className="rounded-md border border-danger/20 bg-danger/8 px-2 py-1 text-[10px] font-medium text-danger transition hover:bg-danger/15"
+            >
+              Stop
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setDismissed(true)}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted/60 transition hover:bg-surface-2 hover:text-text-muted"
+            aria-label="Dismiss progress banner"
+          >
+            <X size={11} />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

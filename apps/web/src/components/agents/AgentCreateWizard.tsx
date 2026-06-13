@@ -14,16 +14,11 @@ import {
 } from './RuntimePicker';
 import { PlaybookLibrary, type PlaybookEntry } from './PlaybookLibrary';
 import { ManagerGlyph, OrchestratorGlyph, WorkerGlyph } from './AgentRoleGlyphs';
+import { DomainEditorSheet, type DomainOption } from './DomainEditorSheet';
+import { specialistsApi, type SpecialistSummary } from '../../lib/specialists';
 type AgentRole = 'orchestrator' | 'manager' | 'worker';
 type ChannelKind = 'telegram' | 'discord';
 type GlyphComponent = (props: { size?: number }) => JSX.Element;
-
-interface Space {
-  id: string;
-  name: string;
-  colorHex?: string;
-  color?: string;
-}
 
 interface ExistingAgent {
   id: string;
@@ -64,7 +59,7 @@ interface ChannelDraft {
 interface AgentCreateWizardProps {
   open: boolean;
   onClose: () => void;
-  onCreated: (agent: { id: string; name: string }) => void;
+  onCreated: (agent: { id: string; name: string; role?: string }) => void;
   initialRole?: AgentRole | null;
   initialSpaceId?: string | null;
   lockInitialRole?: boolean;
@@ -95,22 +90,29 @@ const ROLE_OPTIONS: Array<{
   {
     value: 'orchestrator',
     title: 'Orchestrator',
-    subtitle: 'The workspace orchestrator. Routes goals, managers, and workers.',
+    subtitle: 'The workspace orchestrator. Routes goals and managers.',
     icon: OrchestratorGlyph,
   },
   {
     value: 'manager',
     title: 'Manager',
-    subtitle: 'Owns a domain or space. Coordinates execution under the orchestrator.',
+    subtitle: 'Owns a domain. Coordinates execution under the orchestrator.',
     icon: ManagerGlyph,
   },
   {
     value: 'worker',
-    title: 'Worker',
-    subtitle: 'Executes tasks. Specializes in one operating lane.',
+    title: 'Specialist',
+    subtitle: 'An expert role. Pick a specialty (or define one) — it executes tasks in workflows or for a manager.',
     icon: WorkerGlyph,
   },
 ];
+
+/** Stable role slug from a free-form specialty name (mirrors the API's slugifyRole). */
+function slugifySpecialty(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
+}
+
+const CUSTOM_SPECIALTY = '__custom__';
 
 function initials(name: string): string {
   if (!name) return '?';
@@ -125,13 +127,13 @@ function initials(name: string): string {
 function defaultNameForRole(role: AgentRole): string {
   if (role === 'orchestrator') return 'The Brain';
   if (role === 'manager') return 'Department Manager';
-  return 'Specialist Worker';
+  return 'Specialist';
 }
 
 function roleSummary(role: AgentRole): string {
   if (role === 'orchestrator') return 'Workspace orchestrator';
   if (role === 'manager') return 'Manager';
-  return 'Worker';
+  return 'Specialist';
 }
 
 function renderTemplate(markdown: string, name: string): string {
@@ -202,9 +204,13 @@ export function AgentCreateWizard({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [spaceId, setSpaceId] = useState('');
-  const [role, setRole] = useState<AgentRole>(initialRole ?? 'worker');
+  const [spaces, setSpaces] = useState<DomainOption[]>([]);
+  const [domainEditorOpen, setDomainEditorOpen] = useState(false);
+  const [role, setRole] = useState<AgentRole>(initialRole ?? 'manager');
+  const [specialties, setSpecialties] = useState<SpecialistSummary[]>([]);
+  const [specialty, setSpecialty] = useState<string>('');
+  const [customRole, setCustomRole] = useState('');
   const [reportsTo, setReportsTo] = useState('');
-  const [spaces, setSpaces] = useState<Space[]>([]);
   const [agents, setAgents] = useState<ExistingAgent[]>([]);
   const [detections, setDetections] = useState<HarnessDetectionResult[]>(EMPTY_DETECTIONS);
   const [detecting, setDetecting] = useState(false);
@@ -237,11 +243,13 @@ export function AgentCreateWizard({
   useEffect(() => {
     if (!open) return;
 
-    const nextRole = initialRole ?? 'worker';
+    const nextRole = initialRole ?? 'manager';
     setName(nextRole === 'orchestrator' ? 'The Brain' : '');
     setDescription('');
-    setSpaceId(initialSpaceId ?? '');
+    setSpaceId(nextRole === 'orchestrator' ? '' : initialSpaceId ?? '');
     setRole(nextRole);
+    setSpecialty('');
+    setCustomRole('');
     setReportsTo('');
     setDetections(EMPTY_DETECTIONS);
     setDetecting(true);
@@ -259,22 +267,20 @@ export function AgentCreateWizard({
     setTestError(null);
     seededRoleRef.current = null;
 
+    void specialistsApi.list().then((res) => setSpecialties(res.specialists)).catch(() => setSpecialties([]));
+
     void Promise.allSettled([
-      api<{ spaces: Space[] }>('/v1/spaces'),
       api<{ agents: ExistingAgent[] }>('/v1/agents'),
       api<DetectResponse>('/v1/harness/detect'),
       api<PlaybookResponse>('/v1/agents/playbook-library'),
-    ]).then(([spacesResult, agentsResult, detectResult, playbookResult]) => {
-      setSpaces(spacesResult.status === 'fulfilled' ? spacesResult.value.spaces ?? [] : []);
+      api<{ data: DomainOption[] }>('/v1/spaces'),
+    ]).then(([agentsResult, detectResult, playbookResult, spacesResult]) => {
       const loadedAgents = agentsResult.status === 'fulfilled' ? agentsResult.value.agents ?? [] : [];
       setAgents(loadedAgents);
+      setSpaces(spacesResult.status === 'fulfilled' ? spacesResult.value.data ?? [] : []);
       const existingOrchestrator = loadedAgents.find((agent) => agent.role === 'orchestrator');
       if (nextRole === 'manager' && existingOrchestrator) {
         setReportsTo(existingOrchestrator.id);
-      }
-      if (nextRole === 'worker') {
-        const workerSupervisor = loadedAgents.find((agent) => agent.role === 'manager') ?? existingOrchestrator;
-        if (workerSupervisor) setReportsTo(workerSupervisor.id);
       }
 
       if (detectResult.status === 'fulfilled') {
@@ -300,6 +306,7 @@ export function AgentCreateWizard({
   useEffect(() => {
     if (role === 'orchestrator') {
       setReportsTo('');
+      setSpaceId('');
       if (!name.trim()) setName('The Brain');
       return;
     }
@@ -314,6 +321,12 @@ export function AgentCreateWizard({
       if (workerSupervisor) setReportsTo(workerSupervisor.id);
     }
   }, [managers, name, orchestrator, reportsTo, role]);
+
+  useEffect(() => {
+    if (!open || role !== 'worker' || spaceId) return;
+    const supervisor = agents.find((agent) => agent.id === reportsTo);
+    if (supervisor?.spaceId) setSpaceId(supervisor.spaceId);
+  }, [agents, open, reportsTo, role, spaceId]);
 
   useEffect(() => {
     if (!open || visiblePlaybooks.length === 0) return;
@@ -367,12 +380,37 @@ export function AgentCreateWizard({
     seededRoleRef.current = role;
   }
 
+  function pickSpecialty(value: string) {
+    setSpecialty(value);
+    if (value === CUSTOM_SPECIALTY || value === '') return;
+    const chosen = specialties.find((s) => s.role === value);
+    if (!chosen) return;
+    // Prefill identity from the chosen specialty so the operator starts from a real expert.
+    if (!name.trim()) setName(chosen.name);
+    if (chosen.capabilityTags.length > 0) setCapabilityTags(chosen.capabilityTags);
+  }
+
+  // The role string the agent is actually created with. For specialists this is
+  // the functional slug (e.g. frontend_architect), never the literal "worker".
+  const functionalRole = role !== 'worker'
+    ? role
+    : specialty === CUSTOM_SPECIALTY
+      ? slugifySpecialty(customRole)
+      : specialty || 'specialist';
+
+  // A custom slug not already in the registry → author a library def on create so
+  // the engine resolves it richly and it joins the specialist registry.
+  const isNewCustomSpecialty = role === 'worker'
+    && functionalRole.length > 0
+    && !specialties.some((s) => s.role === functionalRole)
+    && functionalRole !== 'specialist';
+
   async function handleCreate() {
     if (!name.trim()) return;
 
     setCreating(true);
     try {
-      const runtimeUnavailable = adapterType !== 'http' && activeDetection?.status !== 'found';
+      const runtimeUnavailable = activeDetection?.status !== 'found';
       const adapterConfig = runtimeConfigToAdapterConfig(adapterType, runtimeConfig);
       const runtimeModel = runtimeModelFor(adapterType, runtimeConfig);
 
@@ -381,17 +419,17 @@ export function AgentCreateWizard({
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim() || undefined,
-          spaceId: role === 'orchestrator' ? undefined : (spaceId || undefined),
-          role,
-          reportsTo: role === 'orchestrator' ? null : reportsTo || null,
+          role: functionalRole,
+          reportsTo: reportsTo || undefined,
+          spaceId: spaceId || undefined,
           avatarGlyph: initials(name.trim()),
-          avatarUrl: avatarDataUrl || null,
+          avatarUrl: avatarDataUrl || undefined,
           colorHex: ROLE_COLOR[role],
           adapterType,
           runtimeModel,
           capabilityTags,
           instructions: playbook,
-          monthlyBudgetCents: budgetToCents(monthlyBudget),
+          monthlyBudgetCents: budgetToCents(monthlyBudget) ?? undefined,
           config: adapterConfig,
         }),
       });
@@ -429,7 +467,25 @@ export function AgentCreateWizard({
       if (channelErrors.length > 0) {
         toast.error('Some inbox channels were not saved', channelErrors.join(' | '));
       }
-      onCreated(created.agent);
+
+      // Register a brand-new custom specialty in the specialist library so the
+      // engine resolves its persona richly and it appears in the registry. This
+      // upserts the agent just created (same workspace+role) — no duplicate row.
+      if (isNewCustomSpecialty) {
+        try {
+          await specialistsApi.create({
+            role: functionalRole,
+            name: name.trim(),
+            description: description.trim() || undefined,
+            instructions: playbook.trim() || undefined,
+            capabilityTags,
+          });
+        } catch {
+          /* best effort — the agent already exists and runs regardless */
+        }
+      }
+
+      onCreated({ ...created.agent, role: functionalRole });
     } catch (error) {
       toast.error('Could not commission agent', apiErrorMessage(error));
     } finally {
@@ -455,10 +511,31 @@ export function AgentCreateWizard({
     }
   }
 
-  const canCreate = name.trim().length >= 2 && !(role === 'orchestrator' && Boolean(orchestrator));
+  function handleDomainChange(value: string) {
+    if (value === '__create__') {
+      setDomainEditorOpen(true);
+      return;
+    }
+    setSpaceId(value);
+  }
+
+  const canCreate = name.trim().length >= 2
+    && !(role === 'orchestrator' && Boolean(orchestrator))
+    && !(role === 'manager' && !spaceId)
+    && !(role === 'worker' && specialty === CUSTOM_SPECIALTY && slugifySpecialty(customRole).length === 0);
 
   return (
-    <div className="fixed inset-0 z-[60] flex justify-end bg-black/30" role="dialog" aria-modal="true">
+    <div
+      data-canvas-control
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onMouseUp={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
+      className="fixed inset-0 z-[60] flex justify-end bg-overlay-soft"
+      role="dialog"
+      aria-modal="true"
+    >
       <aside className="flex h-full w-full max-w-[620px] animate-slide-in-right flex-col border-l border-line bg-surface shadow-modal">
         <header className="border-b border-line px-5 py-4">
           <div className="flex items-start justify-between gap-3">
@@ -492,7 +569,7 @@ export function AgentCreateWizard({
                         {initials(name)}
                       </span>
                     )}
-                    <span className="absolute inset-0 hidden items-center justify-center bg-black/55 text-white group-hover:flex">
+                    <span className="absolute inset-0 hidden items-center justify-center bg-overlay text-white group-hover:flex">
                       <Upload size={14} />
                     </span>
                   </button>
@@ -524,26 +601,44 @@ export function AgentCreateWizard({
                   </div>
                 ) : null}
 
-                <label className="block space-y-1.5">
-                  <span className="text-xs font-medium text-text-secondary">Description</span>
-                  <input
-                    value={description}
-                    onChange={(event) => setDescription(event.target.value)}
-                    maxLength={160}
-                    placeholder="What does this agent do?"
-                    className={inputCls}
-                  />
-                </label>
+                {role !== 'orchestrator' && (
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-text-secondary">Domain</span>
+                    <div className="relative">
+                      <select
+                        value={spaceId}
+                        onChange={(event) => handleDomainChange(event.target.value)}
+                        className={clsx(inputCls, 'appearance-none pr-8')}
+                      >
+                        <option value="">{role === 'manager' ? 'Select a domain' : 'Inherit supervisor domain'}</option>
+                        {spaces.map(s => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                        <option value="__create__">Create new domain...</option>
+                      </select>
+                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
+                        <svg className="h-4 w-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-text-muted">
+                      {role === 'manager' ? 'Managers need a domain so the fleet can route work cleanly.' : 'Workers can inherit their manager domain or be placed manually.'}
+                    </p>
+                  </label>
+                )}
 
                 {role !== 'orchestrator' && (
                   <label className="block space-y-1.5">
-                    <span className="text-xs font-medium text-text-secondary">Space</span>
-                    <select value={spaceId} onChange={(event) => setSpaceId(event.target.value)} className={inputCls}>
-                      <option value="">No space</option>
-                      {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
-                    </select>
+                    <span className="text-xs font-medium text-text-secondary">Description</span>
+                    <input
+                      value={description}
+                      onChange={(event) => setDescription(event.target.value)}
+                      maxLength={160}
+                      placeholder={role === 'manager' ? 'What does this manager coordinate?' : 'What does this agent do?'}
+                      className={inputCls}
+                    />
                   </label>
                 )}
+
               </section>
 
               <section className="space-y-2">
@@ -576,6 +671,57 @@ export function AgentCreateWizard({
                 </div>
                 {role !== 'orchestrator' && (
                   <p className="text-[11px] text-text-muted">{ROLE_OPTIONS.find((o) => o.value === role)?.subtitle}</p>
+                )}
+
+                {role === 'worker' && (
+                  <div className="space-y-2 rounded-lg border border-line bg-surface-2 p-3">
+                    <span className="text-xs font-medium text-text-secondary">Specialty</span>
+                    <div className="relative">
+                      <select
+                        value={specialty}
+                        onChange={(event) => pickSpecialty(event.target.value)}
+                        className={clsx(inputCls, 'appearance-none pr-8')}
+                      >
+                        <option value="">Generic specialist</option>
+                        {specialties.length > 0 && (
+                          <optgroup label="Existing specialists">
+                            {specialties.map((s) => (
+                              <option key={s.role} value={s.role}>
+                                {s.name} · {s.source}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        <option value={CUSTOM_SPECIALTY}>+ Define a custom specialty…</option>
+                      </select>
+                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
+                        <svg className="h-4 w-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                      </div>
+                    </div>
+
+                    {specialty === CUSTOM_SPECIALTY ? (
+                      <label className="block space-y-1">
+                        <input
+                          value={customRole}
+                          onChange={(event) => setCustomRole(event.target.value)}
+                          placeholder="e.g. Frontend Architect"
+                          className={inputCls}
+                        />
+                        {customRole.trim() && (
+                          <span className="block font-mono text-[11px] text-text-muted">role: {slugifySpecialty(customRole) || '—'}</span>
+                        )}
+                      </label>
+                    ) : (
+                      <p className="text-[11px] text-text-muted">
+                        {specialty
+                          ? specialties.find((s) => s.role === specialty)?.description || `Specialist role: ${specialty}`
+                          : 'A general-purpose specialist. Pick an existing expert or define a custom specialty for a focused role.'}
+                      </p>
+                    )}
+                    <p className="text-[11px] text-text-muted">
+                      After commissioning, open the specialist to feed its mind (memory &amp; knowledge) and attach abilities.
+                    </p>
+                  </div>
                 )}
               </section>
 
@@ -662,6 +808,16 @@ export function AgentCreateWizard({
           </button>
         </footer>
       </aside>
+      <DomainEditorSheet
+        open={domainEditorOpen}
+        managers={managers}
+        onClose={() => setDomainEditorOpen(false)}
+        onSaved={(domain) => {
+          if (!domain) return;
+          setSpaces((current) => [...current.filter((item) => item.id !== domain.id), domain].sort((a, b) => a.name.localeCompare(b.name)));
+          setSpaceId(domain.id);
+        }}
+      />
     </div>
   );
 }

@@ -3,32 +3,24 @@
  *
  * Verifies repeat-failure pattern detection: when the same node fails with the
  * same root cause across enough recent runs, the engine proposes an instinct,
- * records it to MEMORY.md, and emits INSTINCT_PROPOSED.
+ * records it to DB-backed workspace memory, and emits INSTINCT_PROPOSED.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { REALTIME_EVENTS, type WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { InstinctEngine } from '../../src/services/instinctEngine.js';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { WorkspaceIntelligenceService } from '../../src/services/workspaceIntelligence.js';
+import { MemoryStore } from '../../src/services/memoryStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
 let engine: InstinctEngine;
-let intel: WorkspaceIntelligenceService;
-let dataDir: string;
 let workflowId: string;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-instinct-'));
-  intel = new WorkspaceIntelligenceService(new WorkspaceVolumeService(dataDir));
-  engine = new InstinctEngine(ctx.db, ctx.bus, intel, ctx.logger, 3);
+  engine = new InstinctEngine(ctx.db, ctx.bus, new MemoryStore(ctx.db, ctx.logger), ctx.logger, 3);
   workflowId = randomUUID();
   ctx.db.insert(schema.workflows).values({
     id: workflowId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
@@ -37,7 +29,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(dataDir, { recursive: true, force: true });
   ctx.close();
 });
 
@@ -57,7 +48,7 @@ function seedFailedRun(nodeId: string, error: string) {
 }
 
 describe('InstinctEngine', () => {
-  it('proposes an instinct + writes MEMORY after repeated same-cause failures', async () => {
+  it('proposes an instinct + writes DB memory after repeated same-cause failures', async () => {
     const events: Array<{ event: string; payload: unknown }> = [];
     const off = ctx.bus.subscribe((m) => { if (m.envelope.event === REALTIME_EVENTS.INSTINCT_PROPOSED) events.push({ event: m.envelope.event, payload: m.envelope.payload }); });
 
@@ -76,9 +67,11 @@ describe('InstinctEngine', () => {
     expect(proposal!.suggestion).toMatch(/truncate/i);
     expect(events).toHaveLength(1);
 
-    const memory = await intel.getContextFile(ctx.workspace.id, 'MEMORY.md');
-    expect(memory).toMatch(/Patterns That Failed/);
-    expect(memory).toMatch(/summarizer.*repeatedly fails/i);
+    const memory = ctx.db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.workspaceId, ctx.workspace.id)).all();
+    expect(memory).toHaveLength(1);
+    expect(memory[0]!.kind).toBe('lesson');
+    expect(memory[0]!.source).toBe('system');
+    expect(memory[0]!.content).toMatch(/summarizer.*repeatedly fails/i);
   });
 
   it('does not propose below the threshold', async () => {

@@ -43,8 +43,8 @@ export function buildTestHarnessRoutes(deps: {
     deps.db.delete(schema.channelConnections).run();
     deps.db.delete(schema.triggers).run();
     deps.db.delete(schema.credentials).run();
-    deps.db.delete(schema.skillExecutions).run();
-    deps.db.delete(schema.skills).run();
+    deps.db.delete(schema.extensionExecutions).run();
+    deps.db.delete(schema.extensions).run();
     deps.db.delete(schema.agentPackages).run();
     deps.db.delete(schema.openclawGateways).run();
     deps.db.delete(schema.agents).run();

@@ -1,8 +1,7 @@
 /**
  * SegmentedControl — central, segmented switcher.
  *
- * Used for the App Shell's `[Output] [Canvas] [Memory]` switch
- * (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §5).
+ * Used for compact, mutually exclusive surface switches.
  *
  * Heavier visual weight than Tabs — this is a *shell-level* control and the
  * design rule (§5) is that it should feel central and product-defining.

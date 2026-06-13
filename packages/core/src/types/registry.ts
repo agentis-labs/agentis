@@ -1,8 +1,8 @@
 /**
- * Skill registry contract — V1-SPEC §8.
+ * Extension registry contract.
  *
  * The registry is an anonymous, read-only third-party source of
- * shareable agent packages, workflows and skills. This file is the
+ * shareable agent packages, workflows and extensions. This file is the
  * sole shared contract between the API surface, the install pipeline
  * and the dashboard browser.
  *
@@ -14,12 +14,12 @@
 export type RegistryEntryType =
   | 'agent_package'
   | 'workflow'
-  | 'skill'
+  | 'extension'
   | 'workflow_template';
 
 export type RegistryArtifactType =
   | 'workflow_graph'
-  | 'skill_bundle'
+  | 'extension_bundle'
   | 'agent_package'
   | 'workflow_template';
 

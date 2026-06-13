@@ -1,9 +1,8 @@
 /**
- * ThemeToggle — dark/light theme switcher with correct state detection.
+ * ThemeToggle -- dark/light/system theme switcher.
  *
- * Reads from localStorage, defaults to 'dark'. Applies via the .dark/.light
- * class on <html> + the color-scheme CSS property. Also exposes a hook
- * so other components can reactively know the active theme.
+ * Theme preference is stored in localStorage and applied to the root element
+ * through both `data-theme` and `.dark/.light` for compatibility.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -18,21 +17,29 @@ function readStored(): Theme {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === 'dark' || v === 'light' || v === 'system') return v;
-  } catch { /* ignore */ }
+  } catch {
+    // ignore
+  }
   return 'dark';
 }
 
-function applyTheme(t: Theme): void {
-  const root = document.documentElement;
-  let effective: 'dark' | 'light' = 'dark';
+function resolveEffectiveTheme(t: Theme): 'dark' | 'light' {
   if (t === 'system') {
-    effective = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  } else {
-    effective = t;
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   }
+  return t;
+}
+
+function applyTheme(t: Theme): 'dark' | 'light' {
+  const root = document.documentElement;
+  const effective = resolveEffectiveTheme(t);
+
+  root.setAttribute('data-theme', effective);
   root.classList.remove('dark', 'light');
   root.classList.add(effective);
   root.style.colorScheme = effective;
+
+  return effective;
 }
 
 let listeners: Array<(t: Theme) => void> = [];
@@ -41,34 +48,35 @@ export function useTheme(): { theme: Theme; setTheme: (t: Theme) => void; effect
   const [theme, setTheme] = useState<Theme>(readStored());
   const [effective, setEffective] = useState<'dark' | 'light'>(() => {
     const t = readStored();
-    if (t === 'system') {
-      return typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-    }
-    return t;
+    return t === 'system'
+      ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+      : t;
   });
 
   useEffect(() => {
-    applyTheme(theme);
+    setEffective(applyTheme(theme));
     const handler = (t: Theme) => setTheme(t);
     listeners.push(handler);
-    return () => { listeners = listeners.filter((l) => l !== handler); };
+    return () => {
+      listeners = listeners.filter((l) => l !== handler);
+    };
   }, [theme]);
 
   useEffect(() => {
-    if (theme === 'system') {
-      setEffective(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-      const mq = window.matchMedia('(prefers-color-scheme: light)');
-      const onChange = () => setEffective(mq.matches ? 'light' : 'dark');
-      mq.addEventListener?.('change', onChange);
-      return () => mq.removeEventListener?.('change', onChange);
-    } else {
-      setEffective(theme);
-    }
+    if (theme !== 'system') return undefined;
+    const mq = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = () => setEffective(applyTheme('system'));
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
   }, [theme]);
 
   const updateTheme = useCallback((t: Theme) => {
-    try { localStorage.setItem(STORAGE_KEY, t); } catch { /* ignore */ }
-    applyTheme(t);
+    try {
+      localStorage.setItem(STORAGE_KEY, t);
+    } catch {
+      // ignore
+    }
+    setEffective(applyTheme(t));
     setTheme(t);
     listeners.forEach((l) => l(t));
   }, []);
@@ -96,9 +104,7 @@ export function ThemeToggle({ variant = 'compact', className }: ThemeToggleProps
               onClick={() => setTheme(t)}
               className={clsx(
                 'flex h-7 items-center gap-1 rounded-pill px-2.5 text-[12px] font-medium transition-colors',
-                theme === t
-                  ? 'bg-surface-3 text-text-primary'
-                  : 'text-text-muted hover:text-text-primary',
+                theme === t ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
               )}
             >
               <Icon size={12} />
@@ -110,7 +116,6 @@ export function ThemeToggle({ variant = 'compact', className }: ThemeToggleProps
     );
   }
 
-  // Compact toggle — cycles between dark and light
   return (
     <button
       type="button"
@@ -118,7 +123,7 @@ export function ThemeToggle({ variant = 'compact', className }: ThemeToggleProps
       aria-label={`Switch to ${effective === 'dark' ? 'light' : 'dark'} mode`}
       title={`Switch to ${effective === 'dark' ? 'light' : 'dark'} mode (currently ${effective})`}
       className={clsx(
-        'inline-flex h-9 w-9 items-center justify-center rounded-btn border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary transition-colors',
+        'inline-flex h-9 w-9 items-center justify-center rounded-btn border border-line bg-surface-2 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary',
         className,
       )}
     >
@@ -127,7 +132,6 @@ export function ThemeToggle({ variant = 'compact', className }: ThemeToggleProps
   );
 }
 
-// Apply stored theme on first import
 if (typeof window !== 'undefined') {
   applyTheme(readStored());
 }

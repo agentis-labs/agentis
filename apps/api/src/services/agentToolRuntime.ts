@@ -1,30 +1,18 @@
 /**
- * AgentToolRuntime — role-scoped tool execution (WORKFLOW-10X-MASTERPLAN §2.2.1).
+ * AgentToolRuntime - role-scoped tool execution.
  *
- * Executes the capabilities granted to a specialist role (ROLE_TOOLS): file I/O
- * scoped to the Workspace Volume, sandboxed code evaluation, code search,
- * knowledge retrieval, and safe URL fetch. This is the substance of the agentic
- * tool-use loop; the LLM function-calling loop that *drives* these handlers is
- * provided by the orchestrator runtime (out of scope here).
- *
- * Security boundaries (enforced here, in one place):
- *  - `read_file` / `write_file` are scoped to the workspace Volume (path-escape
- *    guarded) and reject `.env` / dotenv-style secrets.
- *  - `run_code` uses the same sandboxed evaluator as the Transform node — no I/O,
- *    no `require`, no `process`, no `fetch`.
- *  - `read_url` passes through the SSRF guard (`assertSafeUrl`).
- *  - `call_workflow` only invokes workflows in the same workspace (delegated to an
- *    injected callback so the engine dependency stays out of this module).
+ * Executes the capabilities granted to a specialist role. Workspace memory
+ * writes go to the canonical DB brain, not to workspace Markdown files.
  */
 
-import { AgentisError, ROLE_TOOLS, type AgentRole, type AgentTool } from '@agentis/core';
+import { AgentisError, roleTools, type AgentRole, type AgentTool } from '@agentis/core';
 import { evaluateExpression } from '../engine/safeExpression.js';
 import { assertSafeUrl } from './safeUrl.js';
 import type { WorkspaceVolumeService } from './workspaceVolume.js';
 import type { KnowledgeBaseService } from './knowledgeBase.js';
-import type { WorkspaceIntelligenceService } from './workspaceIntelligence.js';
 import type { WorkflowStoreService } from './workflowStore.js';
 import type { AgentMemoryService } from './agentMemory.js';
+import type { MemoryStore } from './memoryStore.js';
 import type { Logger } from '../logger.js';
 
 export interface AgentToolResult {
@@ -37,18 +25,26 @@ export interface AgentToolResult {
 export interface AgentToolContext {
   /** The workflow this agent is running inside, when dispatched from a graph. */
   workflowId?: string;
-  /** The concrete agent executing the tool — scopes the agent's personal memory. */
+  /** The concrete agent executing the tool; scopes agent-private memory. */
   agentId?: string;
+  /**
+   * Explicit granted manifest. When set, a tool is permitted if it's in this set
+   * OR the role's static manifest — so a custom/generated specialist with the
+   * default toolbox can act without a hardcoded role entry, while platform roles
+   * keep their manifest. The caller (the tool loop) is responsible for only
+   * granting tools it actually offered the model.
+   */
+  grantedTools?: AgentTool[];
 }
 
 export interface AgentToolRuntimeDeps {
   volume: WorkspaceVolumeService;
   knowledgeBases?: KnowledgeBaseService;
-  /** Brain memory log — backs the workspace scope of `memory_append`. */
-  workspaceIntelligence?: WorkspaceIntelligenceService;
-  /** Per-workflow persistent KV — backs `workflow_memory_read` / `workflow_memory_write`. */
+  /** Canonical DB brain memory; backs workspace-scoped `memory_append`. */
+  memory?: MemoryStore;
+  /** Per-workflow persistent KV; backs `workflow_memory_read` / `workflow_memory_write`. */
   workflowStore?: WorkflowStoreService;
-  /** Per-agent personal memory — backs `agent_memory_search` + the agent scope of `memory_append`. */
+  /** Per-agent personal memory; backs `agent_memory_search` and agent-scoped `memory_append`. */
   agentMemory?: AgentMemoryService;
   logger?: Logger;
   /** Same-workspace workflow invocation. Injected to avoid an engine import here. */
@@ -64,7 +60,7 @@ export class AgentToolRuntime {
 
   /** The tools a role is permitted to call. */
   toolsForRole(role: AgentRole): AgentTool[] {
-    return ROLE_TOOLS[role] ?? [];
+    return roleTools(role);
   }
 
   /** True when the role's manifest grants the tool. */
@@ -74,9 +70,7 @@ export class AgentToolRuntime {
 
   /**
    * Execute a tool. When `role` is provided, the call is rejected unless the
-   * role's manifest grants the tool (defense in depth alongside the LLM only
-   * being offered its allowed tools). `context.workflowId` scopes the Brain's
-   * workflow-memory tools to the workflow the agent is running inside.
+   * role manifest grants it. `context.workflowId` scopes workflow-memory tools.
    */
   async execute(
     workspaceId: string,
@@ -85,7 +79,8 @@ export class AgentToolRuntime {
     role?: AgentRole,
     context: AgentToolContext = {},
   ): Promise<AgentToolResult> {
-    if (role && !this.roleHasTool(role, tool)) {
+    const grantedByContext = context.grantedTools?.includes(tool) ?? false;
+    if (role && !this.roleHasTool(role, tool) && !grantedByContext) {
       return { ok: false, error: `role '${role}' is not granted tool '${tool}'` };
     }
     try {
@@ -128,8 +123,9 @@ export class AgentToolRuntime {
         const query = requireStr(args.query, 'query');
         const topK = typeof args.topK === 'number' ? args.topK : 5;
         const bases = this.deps.knowledgeBases.listKnowledgeBases(workspaceId);
-        const hits = bases.flatMap((b) =>
-          this.deps.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))
+        const hits = (await Promise.all(bases.map((b) =>
+          this.deps.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))))
+          .flat()
           .sort((a, b) => b.score - a.score)
           .slice(0, topK);
         return { query, results: hits };
@@ -138,15 +134,38 @@ export class AgentToolRuntime {
         const section = requireStr(args.section, 'section');
         const entry = requireStr(args.entry, 'entry');
         const scope = args.scope === 'agent' ? 'agent' : 'workspace';
+        // Memory is for durable statements, not questions or throwaway notes.
+        // Without this, a model can store the operator's question verbatim
+        // ("how do I like responses?") as if it were a learned preference.
+        const lowValue = lowValueMemoryReason(entry);
+        if (lowValue) {
+          return { ok: false, scope, section, skipped: true, reason: lowValue };
+        }
         if (scope === 'agent') {
           if (!this.deps.agentMemory) throw new AgentisError('VALIDATION_FAILED', 'agent memory service not available');
           if (!context.agentId) throw new AgentisError('VALIDATION_FAILED', 'agent-scoped memory requires an agent identity');
           this.deps.agentMemory.append({ agentId: context.agentId, workspaceId, section, content: entry });
           return { ok: true, scope, section };
         }
-        if (!this.deps.workspaceIntelligence) throw new AgentisError('VALIDATION_FAILED', 'workspace memory service not available');
-        await this.deps.workspaceIntelligence.appendMemory(workspaceId, section, entry);
-        return { ok: true, scope, section };
+        if (!this.deps.memory) throw new AgentisError('VALIDATION_FAILED', 'workspace memory service not available');
+        const memoryId = this.deps.memory.write({
+          workspaceId,
+          scopeId: null,
+          kind: kindFromSection(section),
+          source: 'agent',
+          title: titleFromSection(section, entry),
+          content: entry,
+          trust: 0.72,
+          importance: 0.62,
+          tags: ['agent_tool', 'memory_append', normalizeTag(section), ...(context.agentId ? ['agent'] : [])],
+          provenance: {
+            source: 'agent_tool_memory_append',
+            section,
+            workflowId: context.workflowId ?? null,
+            agentId: context.agentId ?? null,
+          },
+        });
+        return { ok: true, scope, section, memoryId };
       }
       case 'agent_memory_search': {
         if (!this.deps.agentMemory) throw new AgentisError('VALIDATION_FAILED', 'agent memory service not available');
@@ -158,7 +177,6 @@ export class AgentToolRuntime {
       case 'workflow_memory_read': {
         if (!this.deps.workflowStore) throw new AgentisError('VALIDATION_FAILED', 'workflow memory service not available');
         if (!context.workflowId) throw new AgentisError('VALIDATION_FAILED', 'workflow memory is only available inside a workflow run');
-        // No key → return the whole snapshot so an agent can survey prior state.
         if (args.key == null || args.key === '') {
           return { workflowId: context.workflowId, snapshot: this.deps.workflowStore.snapshot(workspaceId, context.workflowId) };
         }
@@ -182,7 +200,7 @@ export class AgentToolRuntime {
       case 'call_workflow': {
         if (!this.deps.callWorkflow) throw new AgentisError('VALIDATION_FAILED', 'call_workflow is not wired in this runtime');
         const workflowId = requireStr(args.workflowId, 'workflowId');
-        const inputs = (args.inputs && typeof args.inputs === 'object') ? args.inputs as Record<string, unknown> : {};
+        const inputs = args.inputs && typeof args.inputs === 'object' ? args.inputs as Record<string, unknown> : {};
         return await this.deps.callWorkflow({ workspaceId, workflowId, inputs });
       }
       case 'web_search': {
@@ -197,7 +215,7 @@ export class AgentToolRuntime {
     }
   }
 
-  /** Naive text search across Volume files (one level of recursion via known dirs). */
+  /** Naive text search across Volume files. */
   async #searchCode(workspaceId: string, query: string, dir: string): Promise<Array<{ path: string; line: number; text: string }>> {
     const out: Array<{ path: string; line: number; text: string }> = [];
     const needle = query.toLowerCase();
@@ -210,7 +228,7 @@ export class AgentToolRuntime {
           await visit(e.path, depth + 1);
           continue;
         }
-        if ((e.size ?? 0) > 512_000) continue; // skip large/binary
+        if ((e.size ?? 0) > 512_000) continue;
         const content = await this.deps.volume.read(workspaceId, e.path);
         if (content == null) continue;
         const lines = content.split('\n');
@@ -238,6 +256,42 @@ function assertNotSecret(path: string): void {
   if (SECRET_RE.test(path)) {
     throw new AgentisError('WORKSPACE_VOLUME_PATH_ESCAPE', `access to '${path}' is blocked (secrets/VCS)`);
   }
+}
+
+function kindFromSection(section: string): 'fact' | 'preference' | 'pattern' | 'rule' | 'lesson' {
+  const s = section.toLowerCase();
+  // `\w*` suffixes so plurals/inflections match ("rules", "preference",
+  // "patterns"). The previous `\bpref\b` never matched "preference".
+  if (/\b(rule|policy|decision|constraint|must|never|always)\w*/.test(s)) return 'rule';
+  if (/\b(pref|style|tone|default)\w*/.test(s)) return 'preference';
+  if (/\b(pattern|effective|repeat|work)\w*/.test(s)) return 'pattern';
+  if (/\b(fail|lesson|correction|avoid|mistake)\w*/.test(s)) return 'lesson';
+  return 'fact';
+}
+
+/**
+ * Reject memory writes that aren't durable statements. Returns a human reason
+ * when the entry should be skipped, or null when it's worth storing. Mirrors
+ * the chat-capture guard so both write paths stay consistent.
+ */
+function lowValueMemoryReason(entry: string): string | null {
+  const text = entry.trim();
+  if (text.length < 8) return 'entry too short to be a durable memory';
+  // A question ("how do I like responses?") is never a memory. Imperatives
+  // that open with "do not"/"don't" are rules, not questions.
+  if (/\?\s*$/.test(text) && !/^(do not|don'?t)\b/i.test(text)) return 'questions are not memories';
+  return null;
+}
+
+function titleFromSection(section: string, entry: string): string {
+  const label = section.trim() || 'Agent memory';
+  const body = entry.replace(/\s+/g, ' ').trim();
+  const clipped = body.length > 80 ? `${body.slice(0, 77).trim()}...` : body;
+  return `${label}: ${clipped}`;
+}
+
+function normalizeTag(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || 'memory';
 }
 
 /** Strip tags + collapse whitespace for read_url text extraction. */

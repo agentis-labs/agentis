@@ -68,7 +68,7 @@ export function KnowledgeBasePage() {
     if (!ok) return;
     await api(`/v1/knowledge-bases/${base.id}`, { method: 'DELETE' });
     toast.success('Knowledge base deleted');
-    nav('/knowledge?tab=bases');
+    nav('/brain?tab=knowledge');
   }
 
   async function deleteDocument(document: KnowledgeDocumentRow) {
@@ -120,7 +120,7 @@ export function KnowledgeBasePage() {
   return (
     <div className="flex h-full flex-col">
       <header className="border-b border-line px-6 py-4">
-        <button onClick={() => nav('/knowledge?tab=bases')} className="mb-3 inline-flex items-center gap-1 text-[12px] text-text-muted hover:text-text-primary">
+        <button onClick={() => nav('/brain?tab=knowledge')} className="mb-3 inline-flex items-center gap-1 text-[12px] text-text-muted hover:text-text-primary">
           <ArrowLeft size={12} /> Knowledge
         </button>
         <div className="flex flex-wrap items-end gap-3">

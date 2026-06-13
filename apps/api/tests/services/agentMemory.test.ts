@@ -8,27 +8,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@agentis/db/sqlite';
 import { AgentMemoryService } from '../../src/services/agentMemory.js';
+import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
+import { FailureReflectionService } from '../../src/services/failureReflection.js';
 import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
 import { WorkflowStoreService } from '../../src/services/workflowStore.js';
 import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { WorkspaceIntelligenceService } from '../../src/services/workspaceIntelligence.js';
+import { MemoryStore } from '../../src/services/memoryStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
 let dataDir: string;
 let agentMemory: AgentMemoryService;
 let runtime: AgentToolRuntime;
-let intelligence: WorkspaceIntelligenceService;
+let memory: MemoryStore;
 
 beforeEach(async () => {
   ctx = await createTestContext();
   dataDir = mkdtempSync(join(tmpdir(), 'agentmem-test-'));
   const volume = new WorkspaceVolumeService(dataDir);
-  intelligence = new WorkspaceIntelligenceService(volume);
-  agentMemory = new AgentMemoryService(ctx.db);
+  agentMemory = new AgentMemoryService(ctx.db, new EpisodicMemoryStore(ctx.db, ctx.logger));
+  memory = new MemoryStore(ctx.db, ctx.logger);
   runtime = new AgentToolRuntime({
     volume,
-    workspaceIntelligence: intelligence,
+    memory,
     workflowStore: new WorkflowStoreService(ctx.db),
     agentMemory,
   });
@@ -81,6 +83,46 @@ describe('AgentMemoryService', () => {
     agentMemory.append({ agentId, workspaceId: ctx.workspace.id, content: 'remembered fact' });
     expect(agentMemory.contextSection(agentId, ctx.workspace.id)).toContain('remembered fact');
   });
+
+  it('projects agent-specific memory into a private brain map', () => {
+    const agentId = seedAgent();
+    agentMemory.append({ agentId, workspaceId: ctx.workspace.id, section: 'Findings', content: 'The customer requested audit logs.' });
+
+    const graph = agentMemory.graph(agentId, ctx.workspace.id, 'Researcher');
+
+    expect(graph.meta.scopeId).toBe(agentId);
+    expect(graph.meta.atomCount).toBe(1);
+    expect(graph.nodes[0]!.label).toBe('Researcher');
+    expect(graph.nodes.map((node) => node.label)).toContain('Findings');
+  });
+
+  it('returns full agent memory detail for a selected map node', () => {
+    const agentId = seedAgent();
+    const entry = agentMemory.append({ agentId, workspaceId: ctx.workspace.id, section: 'Findings', content: 'The customer requested audit logs for all approvals.' });
+
+    const detail = agentMemory.detail(agentId, ctx.workspace.id, `memory:${entry.id}`, 'Researcher');
+
+    expect(detail?.content).toContain('audit logs');
+    expect(detail?.provenance).toMatchObject({ createdBy: 'Researcher', source: 'Agent memory' });
+    expect(detail?.usedBy[0]).toMatchObject({ id: agentId, type: 'agent' });
+  });
+
+  it('persists a compact lesson after a failed agent attempt', () => {
+    const agentId = seedAgent();
+    const reflection = new FailureReflectionService(agentMemory, ctx.logger);
+    reflection.reflect({
+      agentId,
+      workspaceId: ctx.workspace.id,
+      runId: 'run-failed',
+      nodeTitle: 'Publish release',
+      prompt: 'Deploy production after validating migrations',
+      error: 'migration validation timed out',
+    });
+
+    const entries = agentMemory.list(agentId, ctx.workspace.id);
+    expect(entries[0]!.section).toBe('Failure lessons');
+    expect(entries[0]!.content).toContain('migration validation timed out');
+  });
 });
 
 describe('AgentToolRuntime — Brain memory tools', () => {
@@ -92,8 +134,10 @@ describe('AgentToolRuntime — Brain memory tools', () => {
 
     const wsWrite = await runtime.execute(ctx.workspace.id, 'memory_append', { section: 'Decisions Made', entry: 'shared note', scope: 'workspace' }, 'researcher', { agentId });
     expect(wsWrite.ok).toBe(true);
-    const md = await intelligence.getContextFile(ctx.workspace.id, 'MEMORY.md');
-    expect(md).toContain('shared note');
+    const rows = ctx.db.select().from(schema.workspaceMemory).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toBe('shared note');
+    expect(rows[0]!.source).toBe('agent');
     // The shared write must NOT have landed in the agent's private memory.
     expect(agentMemory.list(agentId, ctx.workspace.id)).toHaveLength(1);
   });

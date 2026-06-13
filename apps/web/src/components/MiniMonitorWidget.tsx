@@ -4,6 +4,7 @@ import { REALTIME_EVENTS } from '@agentis/core';
 import clsx from 'clsx';
 import { api } from '../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
+import { describeRealtimeActivity } from '../lib/realtimeActivity';
 import { refreshWorkspaceSnapshot, useWorkspaceData, type WorkspaceActiveRun, type WorkspaceNotification } from '../lib/workspaceData';
 import { usePrimaryChatScopes } from './chat/usePrimaryChatScopes';
 import { useChatPanelStore } from './chat/ChatPanelStore';
@@ -273,68 +274,15 @@ function buildSeedFeed(notifications: WorkspaceNotification[], activeRuns: Works
 }
 
 function describeMonitorEvent(env: RealtimeEnvelope): FeedItem | null {
-  const payload = isRecord(env.payload) ? env.payload : null;
-  switch (env.event) {
-    case REALTIME_EVENTS.RUN_CREATED:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: stringField(payload, ['workflowName', 'title']) ?? 'Run started',
-        detail: stringField(payload, ['currentStep', 'status']) ?? 'Workflow execution is underway.',
-        tone: 'accent',
-        timestamp: env.emittedAt,
-      };
-    case REALTIME_EVENTS.RUN_COMPLETED:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: stringField(payload, ['workflowName', 'title']) ?? 'Run completed',
-        detail: stringField(payload, ['summary', 'result']) ?? 'Execution completed successfully.',
-        tone: 'accent',
-        timestamp: env.emittedAt,
-      };
-    case REALTIME_EVENTS.RUN_FAILED:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: stringField(payload, ['workflowName', 'title']) ?? 'Run failed',
-        detail: stringField(payload, ['error', 'failedNode', 'reason']) ?? 'The latest run needs attention.',
-        tone: 'danger',
-        timestamp: env.emittedAt,
-      };
-    case REALTIME_EVENTS.APPROVAL_REQUESTED:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: stringField(payload, ['agentName', 'title']) ?? 'Approval requested',
-        detail: stringField(payload, ['summary', 'workflowName']) ?? 'Operator input is required.',
-        tone: 'warn',
-        timestamp: env.emittedAt,
-      };
-    case REALTIME_EVENTS.APPROVAL_RESOLVED:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: 'Approval resolved',
-        detail: stringField(payload, ['status', 'summary']) ?? 'The pending question has been handled.',
-        tone: 'muted',
-        timestamp: env.emittedAt,
-      };
-    case REALTIME_EVENTS.AGENT_WORK_STEP:
-    case REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: stringField(payload, ['agentName', 'title']) ?? 'Agent update',
-        detail: stringField(payload, ['message', 'toolName', 'summary', 'detail']) ?? env.event,
-        tone: 'accent',
-        timestamp: env.emittedAt,
-      };
-    case REALTIME_EVENTS.AGENT_STATUS_CHANGED:
-      return {
-        id: `feed-${env.event}-${env.emittedAt}`,
-        title: stringField(payload, ['agentName']) ?? 'Agent status changed',
-        detail: stringField(payload, ['status', 'nextStatus']) ?? 'Status updated.',
-        tone: 'muted',
-        timestamp: env.emittedAt,
-      };
-    default:
-      return null;
-  }
+  const activity = describeRealtimeActivity(env);
+  if (!activity) return null;
+  return {
+    id: `feed-${activity.id}`,
+    title: activity.title,
+    detail: activity.detail,
+    tone: activity.tone === 'success' ? 'accent' : activity.tone,
+    timestamp: activity.at,
+  };
 }
 
 function relativeTime(iso: string): string {
@@ -349,15 +297,3 @@ function relativeTime(iso: string): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function stringField(source: Record<string, unknown> | null, keys: string[]): string | undefined {
-  if (!source) return undefined;
-  for (const key of keys) {
-    const value = source[key];
-    if (typeof value === 'string' && value.trim().length > 0) return value;
-  }
-  return undefined;
-}

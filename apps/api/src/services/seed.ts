@@ -2,7 +2,7 @@
  * First-boot seed.
  *
  * Creates the operator user, a Personal workspace, a Local ambient, and
- * registers the builtin `echo` and `http_fetch` skills. Idempotent — re-runs
+ * registers the builtin `echo` and `http_fetch` extensions. Idempotent — re-runs
  * skip rows that already exist (matched by username/slug).
  *
  * The seed password comes from `AGENTIS_SEED_PASSWORD`. If unset, we generate
@@ -13,13 +13,13 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import type { SkillManifest } from '@agentis/core';
+import type { ExtensionManifest } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { AuthService } from './auth.js';
 import type { AgentisEnv } from '../env.js';
-import { BUILTIN_SKILL_ENTRYPOINTS } from './builtinSkills.js';
+import { BUILTIN_EXTENSION_ENTRYPOINTS } from './builtinExtensions.js';
 
 export interface SeedResult {
   user: { id: string; username: string };
@@ -88,19 +88,23 @@ export async function seedIfEmpty(args: {
     .where(eq(schema.workspaces.id, workspaceId))
     .run();
 
-  // Register builtin skills.
-  for (const entrypoint of BUILTIN_SKILL_ENTRYPOINTS) {
-    const manifest: SkillManifest = {
+  // Register builtin extensions.
+  for (const entrypoint of BUILTIN_EXTENSION_ENTRYPOINTS) {
+    const manifest: ExtensionManifest = {
       name: entrypoint,
       slug: entrypoint,
       version: '1.0.0',
       runtime: 'builtin',
       entrypoint,
+      operations: [{
+        name: 'execute',
+        description: `Run the built-in ${entrypoint} operation.`,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object' },
+      }],
       capabilityTags: ['builtin'],
-      inputSchema: { type: 'object' },
-      outputSchema: { type: 'object' },
     };
-    db.insert(schema.skills)
+    db.insert(schema.extensions)
       .values({
         id: randomUUID(),
         workspaceId,

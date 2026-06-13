@@ -19,6 +19,7 @@
 import { AgentisError } from '@agentis/core';
 import type {
   AgentAdapter,
+  AdapterCapabilities,
   AdapterType,
   NormalizedAgentEvent,
   NormalizedTask,
@@ -97,6 +98,11 @@ export class AdapterManager {
 
   get(agentId: string): AdapterRegistration | undefined {
     return this.#adapters.get(agentId);
+  }
+
+  capabilities(agentId: string): AdapterCapabilities | null {
+    const reg = this.#adapters.get(agentId);
+    return reg?.adapter.capabilities?.() ?? null;
   }
 
   async dispatchTask(task: NormalizedTask, agentId: string): Promise<void> {

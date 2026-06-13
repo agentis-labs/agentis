@@ -12,7 +12,7 @@ import { ViewportPortal } from '@xyflow/react';
  * because operators can read the graph as "first this phase, then that one"
  * instead of as indecipherable spaghetti.
  *
- * The shape (`WorkflowPhase`) mirrors what brain-apps' AppLayoutSection will
+ * The shape (`WorkflowPhase`) mirrors what the Brain' layout section will
  * use — keep this dumb and dependency-free.
  */
 

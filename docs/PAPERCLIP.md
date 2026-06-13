@@ -1,4 +1,4 @@
-# Paperclip — Feature Reference
+﻿# Paperclip â€” Feature Reference
 
 > **"If OpenClaw is an employee, Paperclip is the company."**
 >
@@ -27,7 +27,7 @@
 13. [Inbox](#13-inbox)
 14. [Execution Workspaces](#14-execution-workspaces)
 15. [Skills System](#15-skills-system)
-16. [Plugin System](#16-plugin-system)
+16. [Extension System](#16-extension-system)
 17. [Adapter System](#17-adapter-system)
 18. [Company Portability (Export / Import / Clipmart)](#18-company-portability-export--import--clipmart)
 19. [Sidebar Navigation](#19-sidebar-navigation)
@@ -47,9 +47,9 @@ Paperclip is a **human control plane for AI labor**. It is not a chatbot, not an
 
 | Layer | What Paperclip provides |
 |---|---|
-| **Org chart** | Hierarchies, roles, reporting lines — agents have a boss, a title, and a job description |
+| **Org chart** | Hierarchies, roles, reporting lines â€” agents have a boss, a title, and a job description |
 | **Goal alignment** | Every task traces back to the company mission through a goal tree |
-| **Governance** | You sit at the top as the board of directors — approve hires, override strategy, pause or terminate any agent |
+| **Governance** | You sit at the top as the board of directors â€” approve hires, override strategy, pause or terminate any agent |
 | **Cost control** | Monthly budgets per agent; when they hit the limit, they stop. No runaway costs |
 | **Observability** | Every ticket traced, every decision explained, every tool call logged |
 | **Multi-company runtime** | One install can host unlimited companies with complete data isolation |
@@ -57,7 +57,7 @@ Paperclip is a **human control plane for AI labor**. It is not a chatbot, not an
 ### Philosophy
 
 - **Not a single-agent tool.** Designed for teams, hierarchies, and entire companies.
-- **Bring Your Own Agent.** Works with OpenClaw, Claude Code, Codex, Cursor, Gemini, OpenCode, raw HTTP, bash — anything that can receive a heartbeat.
+- **Bring Your Own Agent.** Works with OpenClaw, Claude Code, Codex, Cursor, Gemini, OpenCode, raw HTTP, bash â€” anything that can receive a heartbeat.
 - **You manage the organization, not the prompts.** Agents bring their own models and runtimes; Paperclip manages the org they work in.
 
 ---
@@ -71,10 +71,10 @@ The main command center for a company. Shows an at-a-glance summary of the busin
 
 ### Metric Cards (top row)
 Four summary tiles rendered by `MetricCard`:
-- **Agents** — total agent count with status breakdown
-- **Active runs** — currently running agent tasks
-- **Pending approvals** — items waiting for board decision
-- **Monthly cost** — formatted spend in cents (DollarSign icon)
+- **Agents** â€” total agent count with status breakdown
+- **Active runs** â€” currently running agent tasks
+- **Pending approvals** â€” items waiting for board decision
+- **Monthly cost** â€” formatted spend in cents (DollarSign icon)
 
 ### Active Agents Panel
 Component: `ActiveAgentsPanel`  
@@ -89,13 +89,13 @@ Shows a card grid of the most recent agent heartbeat runs (default: 4 cards on d
 
 ### Activity Charts (four chart cards)
 Component: `ChartCard`, `RunActivityChart`, `PriorityChart`, `IssueStatusChart`, `SuccessRateChart`
-- **Run activity** — bar chart of runs over time
-- **Priority distribution** — pie/donut of issue priorities
-- **Issue status** — breakdown of issue statuses
-- **Success rate** — agent run success vs failure trend
+- **Run activity** â€” bar chart of runs over time
+- **Priority distribution** â€” pie/donut of issue priorities
+- **Issue status** â€” breakdown of issue statuses
+- **Success rate** â€” agent run success vs failure trend
 
 ### Recent Issues
-Sorted by `updatedAt` descending — shows up to 10 most-recently-touched tickets with status icon, assignee avatar, and title.
+Sorted by `updatedAt` descending â€” shows up to 10 most-recently-touched tickets with status icon, assignee avatar, and title.
 
 ### Live Activity Feed
 Fetches last 10 activity events for the company. New items animate in (highlight for ~980 ms). Each row shows actor identity, action description, entity reference, and relative time. Keyed to a seen-IDs ref so only genuinely new items animate.
@@ -111,20 +111,20 @@ Shows up to 50 heartbeat run cards in a larger `3-column` grid. Each card is `42
 **Route:** `/org`  
 **File:** `ui/src/pages/OrgChart.tsx`
 
-An interactive, canvas-based visual org chart rendered in a raw `<canvas>` element (not SVG, not React Flow — fully hand-drawn for performance).
+An interactive, canvas-based visual org chart rendered in a raw `<canvas>` element (not SVG, not React Flow â€” fully hand-drawn for performance).
 
 ### Layout Engine
 Custom Reingold-Tilford-style tree algorithm:
 - `subtreeWidth()` recursively computes how wide each subtree needs to be
 - `layoutTree()` assigns absolute (x, y) coordinates top-down
 - Constants: `CARD_W=200`, `CARD_H=100`, `GAP_X=32`, `GAP_Y=80`, `PADDING=60`
-- Minimum zoom: `0.2×`, maximum zoom: `2×`
+- Minimum zoom: `0.2Ã—`, maximum zoom: `2Ã—`
 
 ### Interaction
-- **Pan** — click + drag on empty canvas
-- **Pinch-to-zoom** — two-finger gesture on touch devices
-- **Scroll zoom** — mouse wheel
-- **Click node** — navigates to `/agents/:id`
+- **Pan** â€” click + drag on empty canvas
+- **Pinch-to-zoom** â€” two-finger gesture on touch devices
+- **Scroll zoom** â€” mouse wheel
+- **Click node** â€” navigates to `/agents/:id`
 - **Expand/collapse** subtrees via chevron button inside each node
 
 ### Agent Cards (on canvas)
@@ -132,13 +132,13 @@ Each node card shows:
 - Agent icon (custom emoji or default bot glyph)
 - Agent name (truncated to fit card width)
 - Role label (from `AGENT_ROLE_LABELS` map)
-- Status dot — `bg-green-400` (active), `bg-yellow-400` (paused), `bg-amber-400` (pending_approval), `bg-red-400` (error), `bg-neutral-400` (offline)
+- Status dot â€” `bg-green-400` (active), `bg-yellow-400` (paused), `bg-amber-400` (pending_approval), `bg-red-400` (error), `bg-neutral-400` (offline)
 
 ### Toolbar
-- **+/−** zoom buttons
-- **Maximize / Fit** — resets zoom to show entire tree
-- **Download** — exports the rendered canvas to a PNG file via `<a download>`
-- **Upload** — imports an org structure (planned)
+- **+/âˆ’** zoom buttons
+- **Maximize / Fit** â€” resets zoom to show entire tree
+- **Download** â€” exports the rendered canvas to a PNG file via `<a download>`
+- **Upload** â€” imports an org structure (planned)
 
 ### Sidebar Org-List variant
 **File:** `ui/src/pages/Org.tsx`  
@@ -160,7 +160,7 @@ One Paperclip deployment can host unlimited independent companies. Each company 
 - Brand color, logo URL, and issue identifier prefix
 
 ### Company Switcher (sidebar)
-The `CompanySwitcher` component at the top of the sidebar shows the currently selected company's name in bold. A dropdown lets you switch between companies or create a new one. Each company gets a `CompanyPatternIcon` — a procedurally generated SVG icon derived from the company's ID for quick visual recognition even before a logo is set.
+The `CompanySwitcher` component at the top of the sidebar shows the currently selected company's name in bold. A dropdown lets you switch between companies or create a new one. Each company gets a `CompanyPatternIcon` â€” a procedurally generated SVG icon derived from the company's ID for quick visual recognition even before a logo is set.
 
 ### Company Settings
 **Route:** `/company/settings`  
@@ -168,7 +168,7 @@ Editable fields:
 - Name, description, brand color
 - Logo (uploaded via asset API, displayed in sidebar)
 - Attachment max size (in MiB, min 1 MiB, max configurable)
-- `requireBoardApprovalForNewAgents` toggle — when on, every new agent hire triggers an approval request before the agent can run
+- `requireBoardApprovalForNewAgents` toggle â€” when on, every new agent hire triggers an approval request before the agent can run
 - Issue prefix (e.g. `ENG-`, `MKT-`)
 
 ### Company Environments
@@ -176,8 +176,8 @@ Editable fields:
 Define named environment tiers (e.g. production, staging) that agents and workspaces can target for execution.
 
 ### Company Access & Invites
-- **Access** (`/company/settings/access`) — manage company members and their roles
-- **Invites** (`/company/settings/invites`) — generate invite links or OpenClaw-compatible onboarding snippets; pending invites shown as a queue
+- **Access** (`/company/settings/access`) â€” manage company members and their roles
+- **Invites** (`/company/settings/invites`) â€” generate invite links or OpenClaw-compatible onboarding snippets; pending invites shown as a queue
 
 ---
 
@@ -190,9 +190,9 @@ Define named environment tiers (e.g. production, staging) that agents and worksp
 Filterable list of all company agents. Tab filters: All / Active / Paused / Error. Each row shows agent icon, name, role, adapter label, status badge, last run time.
 
 Actions from list:
-- **Run** — immediately triggers a heartbeat run
-- **Pause/Resume** — toggles agent availability
-- **New Agent** — opens `NewAgentDialog`
+- **Run** â€” immediately triggers a heartbeat run
+- **Pause/Resume** â€” toggles agent availability
+- **New Agent** â€” opens `NewAgentDialog`
 
 ### Agent Detail
 **Route:** `/agents/:agentId`  
@@ -201,42 +201,42 @@ Actions from list:
 Deep detail view with multiple tabs:
 
 #### Overview / Activity Tab
-- Run activity chart (bar), priority chart, issue status chart, success rate chart — same components as dashboard but scoped to the single agent
+- Run activity chart (bar), priority chart, issue status chart, success rate chart â€” same components as dashboard but scoped to the single agent
 - Recent activity feed for this agent
-- Agent icon (editable via `AgentIconPicker` — custom emoji/color picker)
+- Agent icon (editable via `AgentIconPicker` â€” custom emoji/color picker)
 - Inline title editor for agent name
 
 #### Runs Tab
 Full paginated run history:
 - Status icons: `CheckCircle2` (succeeded), `XCircle` (failed), `Loader2` (running), `Clock` (queued / scheduled_retry), `Timer` (timed_out), `Slash` (cancelled)
 - Per-run: issue link, start time, duration, cost (formatted in USD), token count (`formatTokens`)
-- Retry state description (`describeRunRetryState`) — shows retry count, delay, next attempt time
-- Click run → full transcript view
+- Retry state description (`describeRunRetryState`) â€” shows retry count, delay, next attempt time
+- Click run â†’ full transcript view
 
 #### Run Transcript View
 **Component:** `RunTranscriptView`  
 Two display modes: **"nice"** (rendered markdown with tool cards) and **"raw"** (paginated text, virtualized at >300 entries, 40-row overscan).
 
 Transcript block types:
-- **message** (role: assistant/user) — markdown-rendered with `MarkdownBody`
-- **thinking** — collapsible reasoning block (Claude extended thinking)
-- **tool** — expandable tool call card showing input + result, duration, error state
-- **command_group** — terminal command cluster (bash/shell tools grouped visually)
-- **activity** — in-progress or completed activity marker
+- **message** (role: assistant/user) â€” markdown-rendered with `MarkdownBody`
+- **thinking** â€” collapsible reasoning block (Claude extended thinking)
+- **tool** â€” expandable tool call card showing input + result, duration, error state
+- **command_group** â€” terminal command cluster (bash/shell tools grouped visually)
+- **activity** â€” in-progress or completed activity marker
 
 #### Config Tab
 All adapter configuration for the agent:
-- **Adapter type** — dropdown showing all available adapters (OpenClaw, Claude Code, Codex, Cursor, Gemini, OpenCode, HTTP, bash, + any installed external adapters)
-- **Role** — from `AGENT_ROLE_LABELS` enum (CEO, CTO, CMO, COO, Engineer, Designer, Marketer, etc.)
-- **Reports To** — `ReportsToPicker` component to set org chart parent
-- **Command** — the shell command / startup command for the agent, with secret redaction on display
-- **Environment variables** — key-value editor with:
-  - Auto-redaction of secrets matching regex `/(api[-_]?key|access[-_]?token|auth(?:_?token)?|secret|passwd|password|jwt|private[-_]?key|…)/i`
+- **Adapter type** â€” dropdown showing all available adapters (OpenClaw, Claude Code, Codex, Cursor, Gemini, OpenCode, HTTP, bash, + any installed external adapters)
+- **Role** â€” from `AGENT_ROLE_LABELS` enum (CEO, CTO, CMO, COO, Engineer, Designer, Marketer, etc.)
+- **Reports To** â€” `ReportsToPicker` component to set org chart parent
+- **Command** â€” the shell command / startup command for the agent, with secret redaction on display
+- **Environment variables** â€” key-value editor with:
+  - Auto-redaction of secrets matching regex `/(api[-_]?key|access[-_]?token|auth(?:_?token)?|secret|passwd|password|jwt|private[-_]?key|â€¦)/i`
   - `secret_ref` type support (references to vault entries, shown as `***SECRET_REF***`)
   - JWT value auto-detection and redaction
   - Username segment redaction for home path privacy
 - **Working directory (cwd)**
-- **Adapter-specific config fields** — dynamically loaded schema from the selected adapter
+- **Adapter-specific config fields** â€” dynamically loaded schema from the selected adapter
 
 #### Skills Tab
 - Shows agent's assigned skills from the company skill library
@@ -245,7 +245,7 @@ All adapter configuration for the agent:
 - Add/remove skills; skill file tree preview inline
 
 #### Budget Tab
-- `BudgetPolicyCard` — shows current month spend vs. budget limit
+- `BudgetPolicyCard` â€” shows current month spend vs. budget limit
 - Edit monthly budget cap (in dollars)
 - Budget incidents list (`BudgetIncidentCard`) for any overage events
 
@@ -255,8 +255,8 @@ All adapter configuration for the agent:
 - Show/hide key value toggle (`Eye`/`EyeOff`)
 
 #### Agent Actions
-- `RunButton` — triggers an immediate heartbeat run
-- `PauseResumeButton` — toggles active/paused
+- `RunButton` â€” triggers an immediate heartbeat run
+- `PauseResumeButton` â€” toggles active/paused
 - Delete agent (with confirmation)
 - Claude login flow (`ClaudeLoginResult`) for Claude-backed agents
 - Permission update system (`AgentPermissionUpdate`)
@@ -284,7 +284,7 @@ Paperclip's ticket system is modeled closely after Linear. Every piece of work i
 - Assignee avatars with agent icon or user avatar
 
 #### Kanban View (`KanbanBoard`)
-- Columns: Backlog → To Do → In Progress → In Review → Blocked → Done → Cancelled
+- Columns: Backlog â†’ To Do â†’ In Progress â†’ In Review â†’ Blocked â†’ Done â†’ Cancelled
 - Drag-and-drop between columns via `@dnd-kit/core` + `@dnd-kit/sortable`
 - `DragOverlay` for smooth drag preview
 - Card shows: identifier, title, priority icon, assignee identity, live dot
@@ -298,16 +298,16 @@ Built on `@assistant-ui/react` runtime with a custom `usePaperclipIssueRuntime` 
 
 - Full markdown rendering with syntax highlighting (`MarkdownBody`)
 - Markdown composer (`MarkdownEditor`) with: rich text, @mention autocomplete (agents + users), image paste/drag-drop upload, keyboard submit (Ctrl/Cmd+Enter)
-- Optimistic comment posting with queue — comments appear instantly and reconcile on server response
+- Optimistic comment posting with queue â€” comments appear instantly and reconcile on server response
 - Infinite scroll backward-loading of older messages (`useInfiniteQuery`, `getNextIssueCommentPageParam`)
-- Live run transcript entries interleaved into the thread — tool calls, thinking blocks, command groups all appear inline
-- `IssueContinuationHandoff` component — when an agent finishes and the issue is passed to another agent, a handoff card with summary appears
-- `IssueThreadInteractionCard` — special interactive cards for agent-triggered interactions:
-  - `AskUserQuestions` — agent asks clarifying questions, user fills in a form inline
-  - `RequestConfirmation` — agent pauses and asks the human to confirm before proceeding
-  - `SuggestTasks` — agent proposes a set of sub-tasks for user approval
+- Live run transcript entries interleaved into the thread â€” tool calls, thinking blocks, command groups all appear inline
+- `IssueContinuationHandoff` component â€” when an agent finishes and the issue is passed to another agent, a handoff card with summary appears
+- `IssueThreadInteractionCard` â€” special interactive cards for agent-triggered interactions:
+  - `AskUserQuestions` â€” agent asks clarifying questions, user fills in a form inline
+  - `RequestConfirmation` â€” agent pauses and asks the human to confirm before proceeding
+  - `SuggestTasks` â€” agent proposes a set of sub-tasks for user approval
 - Approval cards (`ApprovalCard`) inline in the thread when an agent triggers an approval request
-- Feedback buttons (`OutputFeedbackButtons`) — thumbs up/down with optional data sharing preference
+- Feedback buttons (`OutputFeedbackButtons`) â€” thumbs up/down with optional data sharing preference
 
 #### Properties Panel (`IssueProperties`)
 Collapsible right-side panel:
@@ -324,13 +324,13 @@ Collapsible right-side panel:
 #### Run Ledger (`IssueRunLedger`)
 Lists all agent heartbeat runs scoped to this issue:
 - Run ID, status, agent, start time, duration, cost
-- Click → opens full transcript side panel
+- Click â†’ opens full transcript side panel
 
 #### Documents Section (`IssueDocumentsSection`)
 Work products (files, screenshots, diffs) produced by agents during execution:
-- `DocumentDiffModal` — side-by-side diff view for file changes
-- `ImageGalleryModal` — full-screen image viewer for agent-produced screenshots
-- `PackageFileTree` — for skill/artifact packages attached to the issue
+- `DocumentDiffModal` â€” side-by-side diff view for file changes
+- `ImageGalleryModal` â€” full-screen image viewer for agent-produced screenshots
+- `PackageFileTree` â€” for skill/artifact packages attached to the issue
 
 #### Sub-Issues
 `shouldRenderRichSubIssuesSection` decides when to show a rich nested sub-issue section vs. a simple count. Full recursive sub-issue tree with create-new and link-existing actions.
@@ -342,11 +342,11 @@ Shows issues linked via `issue-references` (blocks/blocked-by, duplicates, relat
 Inline `#NUM` reference pills that open a quicklook popover (`IssueLinkQuicklook`) without navigating away.
 
 #### Keyboard Shortcuts
-- `G + I` — go to Issues
-- `G + D` — go to Dashboard
-- `E` — archive (when in inbox context)
-- `Cmd+Z` / `Ctrl+Z` — undo archive
-- `ArrowUp/Down` — navigate between issues in inbox
+- `G + I` â€” go to Issues
+- `G + D` â€” go to Dashboard
+- `E` â€” archive (when in inbox context)
+- `Cmd+Z` / `Ctrl+Z` â€” undo archive
+- `ArrowUp/Down` â€” navigate between issues in inbox
 
 ---
 
@@ -369,10 +369,10 @@ Projects are the primary unit of work organization. Each project has:
 - Inline editable description (markdown + image upload)
 - Status badge selector
 - Target date
-- `ProjectProperties` side panel — status, color swatch (from `PROJECT_COLORS`), target date, linked goal
+- `ProjectProperties` side panel â€” status, color swatch (from `PROJECT_COLORS`), target date, linked goal
 
 #### Issues Tab
-Full issue list scoped to this project — same list/kanban views as the global issues page, but filtered.
+Full issue list scoped to this project â€” same list/kanban views as the global issues page, but filtered.
 
 #### Workspaces Tab (`ProjectWorkspacesContent`)
 Lists all execution workspaces associated with this project as `ProjectWorkspaceSummaryCard` cards. Each card shows:
@@ -382,13 +382,13 @@ Lists all execution workspaces associated with this project as `ProjectWorkspace
 - Link to workspace detail
 
 #### Budget Tab
-`BudgetPolicyCard` for the project — monthly budget cap with current spend indicator.
+`BudgetPolicyCard` for the project â€” monthly budget cap with current spend indicator.
 
 #### Configuration Tab
 `ProjectProperties` full-edit form for all project metadata.
 
 ### Project Sidebar
-`SidebarProjects` — expandable list of projects in the sidebar with color-coded project icon.
+`SidebarProjects` â€” expandable list of projects in the sidebar with color-coded project icon.
 
 ---
 
@@ -412,22 +412,22 @@ A routine can have multiple triggers:
 **Webhook trigger:**
 - Unique webhook URL (auto-generated, shown once and then obscured)
 - Signing mode selection:
-  - `bearer` — shared bearer token in Authorization header
-  - `hmac_sha256` — HMAC-SHA256 over request body with shared secret
-  - `github_hmac` — GitHub-style `X-Hub-Signature-256` header
-  - `none` — URL as secret (no signing)
+  - `bearer` â€” shared bearer token in Authorization header
+  - `hmac_sha256` â€” HMAC-SHA256 over request body with shared secret
+  - `github_hmac` â€” GitHub-style `X-Hub-Signature-256` header
+  - `none` â€” URL as secret (no signing)
 - Secret rotation (`RotateRoutineTriggerResponse`)
 
 #### Concurrency Policy
 Controls what happens when a new trigger fires while a run is already active:
-- `coalesce_if_active` — keep at most one follow-up queued (default)
-- `always_enqueue` — queue every occurrence even if several stack up
-- `skip_if_active` — drop new occurrences while a run is active
+- `coalesce_if_active` â€” keep at most one follow-up queued (default)
+- `always_enqueue` â€” queue every occurrence even if several stack up
+- `skip_if_active` â€” drop new occurrences while a run is active
 
 #### Catch-up Policy
 Controls behavior after recovery from paused/offline state:
-- `skip_missed` — ignore windows that were missed
-- `enqueue_missed_with_cap` — catch up missed windows in capped batches
+- `skip_missed` â€” ignore windows that were missed
+- `enqueue_missed_with_cap` â€” catch up missed windows in capped batches
 
 #### Template Variables (`RoutineVariablesEditor`)
 Variables can be declared with `{variable_name}` syntax in the routine prompt. At run time they can be:
@@ -442,7 +442,7 @@ Variables can be declared with `{variable_name}` syntax in the routine prompt. A
 - Runs tab: history of all executions with status and live widget for active ones
 
 ### Routine Activity
-Dedicated "Activity" tab per routine — scoped audit log of all events for that routine.
+Dedicated "Activity" tab per routine â€” scoped audit log of all events for that routine.
 
 ---
 
@@ -454,30 +454,30 @@ Dedicated "Activity" tab per routine — scoped audit log of all events for that
 You operate as the **board of directors**. Agents cannot hire new agents, execute risky strategies, or make config changes without your approval.
 
 ### Approval Queue
-- **Pending tab** — items requiring action, sorted newest first, with count badge (yellow)
-- **All tab** — full history including resolved approvals
+- **Pending tab** â€” items requiring action, sorted newest first, with count badge (yellow)
+- **All tab** â€” full history including resolved approvals
 - Status filter: pending / revision_requested / approved / rejected
 
 ### Approval Card (`ApprovalCard`)
 Each approval displays:
 - Requesting agent name + icon
-- Approval type icon (`defaultTypeIcon` / `typeIcon` — e.g. user-plus for hiring, shield for governance)
+- Approval type icon (`defaultTypeIcon` / `typeIcon` â€” e.g. user-plus for hiring, shield for governance)
 - Human-readable label (`approvalLabel`)
-- Payload preview — type-specific rendering of what the agent wants to do (`ApprovalPayload`)
+- Payload preview â€” type-specific rendering of what the agent wants to do (`ApprovalPayload`)
 - Status badge (pending / approved / rejected / revision_requested)
 - Created timestamp
 
 ### Actions
-- **Approve** — marks as approved and resumes the agent's blocked execution
-- **Reject** — marks as rejected and notifies the agent
-- **Request Revision** — sends a comment back to the agent asking for changes before re-submitting
+- **Approve** â€” marks as approved and resumes the agent's blocked execution
+- **Reject** â€” marks as rejected and notifies the agent
+- **Request Revision** â€” sends a comment back to the agent asking for changes before re-submitting
 
 ### Approval Payload Rendering (`ApprovalPayload`)
-Renders the approval body according to its type — e.g. for a "hire" approval it shows the proposed agent config; for a strategy approval it shows the proposed plan as markdown.
+Renders the approval body according to its type â€” e.g. for a "hire" approval it shows the proposed agent config; for a strategy approval it shows the proposed plan as markdown.
 
 ### Governance Rules
-- `requireBoardApprovalForNewAgents` company setting — when enabled, every new agent creation blocks until approved
-- The approval system is also used inline in issue threads — approval cards appear in the chat when an agent pauses for human sign-off
+- `requireBoardApprovalForNewAgents` company setting â€” when enabled, every new agent creation blocks until approved
+- The approval system is also used inline in issue threads â€” approval cards appear in the chat when an agent pauses for human sign-off
 
 ---
 
@@ -490,10 +490,10 @@ Full financial visibility into every token, dollar, and budget policy across you
 
 ### Summary Metrics (top row)
 Four `MetricTile` components:
-- **Total spend** — formatted in USD for the selected date range
-- **Estimated charges** — provider-estimated upcoming charges
-- **Event count** — number of billable events
-- **Net position** — debit − credit balance
+- **Total spend** â€” formatted in USD for the selected date range
+- **Estimated charges** â€” provider-estimated upcoming charges
+- **Event count** â€” number of billable events
+- **Net position** â€” debit âˆ’ credit balance
 
 ### Date Range Selector
 Presets via `useDateRange` hook: This Week, Last Week, This Month, Last Month, Last 30 Days, Last 90 Days. Custom from/to range also supported.
@@ -501,31 +501,31 @@ Presets via `useDateRange` hook: This Week, Last Week, This Month, Last Month, L
 ### Tabs
 
 #### By Agent
-`BillerSpendCard` per agent — bar indicator of spend vs. budget, token breakdown (input / cached-input / output), model name.
+`BillerSpendCard` per agent â€” bar indicator of spend vs. budget, token breakdown (input / cached-input / output), model name.
 
 #### By Provider Model
 Grouped by LLM provider (Anthropic / OpenAI / Google / etc.) with per-model rows:
 - Input tokens, cached input tokens, output tokens
-- Cost in cents → formatted USD
+- Cost in cents â†’ formatted USD
 - Provider display name (`providerDisplayName`)
 
 #### By Biller
-`FinanceBillerCard` — for deployments using subscription-aware accounting (e.g. Claude subscription vs. API billing). Shows cost by biller type with `billingTypeDisplayName`.
+`FinanceBillerCard` â€” for deployments using subscription-aware accounting (e.g. Claude subscription vs. API billing). Shows cost by biller type with `billingTypeDisplayName`.
 
 #### Finance Ledger
-`FinanceSummaryCard` — account-level charges that don't map to a single inference request (e.g. Anthropic subscription charges). Shows debit / credit / net / estimated debit / event count.
+`FinanceSummaryCard` â€” account-level charges that don't map to a single inference request (e.g. Anthropic subscription charges). Shows debit / credit / net / estimated debit / event count.
 
 #### Timeline
-`FinanceTimelineCard` — spending over time as a chart, with the current date range overlaid.
+`FinanceTimelineCard` â€” spending over time as a chart, with the current date range overlaid.
 
 ### Budget Policies (`BudgetPolicyCard`)
 Per-agent or per-project monthly budget:
 - Current spend as a `QuotaBar` progress indicator
-- Hard limit — agent stops when limit is reached
+- Hard limit â€” agent stops when limit is reached
 - Budget incidents (`BudgetIncidentCard`) for any overage events with timestamp and overage amount
 
 ### Provider Quota Windows (`ProviderQuotaCard`)
-Tracks rate-limit quota windows per provider API — shows current usage vs. window limit, reset time.
+Tracks rate-limit quota windows per provider API â€” shows current usage vs. window limit, reset time.
 
 ---
 
@@ -539,11 +539,11 @@ An append-only, immutable audit trail of everything that happens in the company.
 - Up to 200 events loaded per page
 - Filter by entity type: issue, project, goal, agent, company, routine
 - Each `ActivityRow` shows:
-  - Actor — agent icon + name or user avatar + display name
-  - Action text — `formatIssueActivityAction` renders human-readable descriptions ("created issue ENG-42", "approved hire request for Claude-Coder", "updated budget policy", etc.)
-  - Entity reference — identifier + title (e.g. `ENG-42 Implement WebSocket handler`)
+  - Actor â€” agent icon + name or user avatar + display name
+  - Action text â€” `formatIssueActivityAction` renders human-readable descriptions ("created issue ENG-42", "approved hire request for Claude-Coder", "updated budget policy", etc.)
+  - Entity reference â€” identifier + title (e.g. `ENG-42 Implement WebSocket handler`)
   - Relative timestamp (`timeAgo`)
-- No deletions or edits — append-only by design for full accountability
+- No deletions or edits â€” append-only by design for full accountability
 
 ---
 
@@ -556,22 +556,22 @@ A unified inbox that aggregates everything requiring your attention, inspired by
 
 ### Content Sources
 Four categories displayed with tab filters:
-1. **Issues** — tickets assigned to you (filtered by `INBOX_MINE_ISSUE_STATUS_FILTER`)
-2. **Approvals** — pending governance requests with inline approve/reject actions
-3. **Failed runs** — heartbeat runs that errored out, surfaced as actionable items
-4. **Join requests** — users requesting to join a gated company (`JoinRequestQueue` via `accessApi`)
+1. **Issues** â€” tickets assigned to you (filtered by `INBOX_MINE_ISSUE_STATUS_FILTER`)
+2. **Approvals** â€” pending governance requests with inline approve/reject actions
+3. **Failed runs** â€” heartbeat runs that errored out, surfaced as actionable items
+4. **Join requests** â€” users requesting to join a gated company (`JoinRequestQueue` via `accessApi`)
 
 ### Inbox Features
-- **Badge system** (`useInboxBadge`) — separate counts for unread inbox items and failed runs. Failed runs turn the badge red in the sidebar.
-- **Search** — full-text filter within the inbox list
-- **Swipe to archive** (`SwipeToArchive`) — mobile-friendly swipe gesture to dismiss issues
-- **Undo archive** — keyboard `Cmd+Z` / toast-based undo for accidental dismissals
-- **Column picker** — choose which columns to display for issue rows
-- **Status grouping** — issues grouped by status with collapsible `IssueGroupHeader`
-- **Filter popover** (`IssueFiltersPopover`) — filter by status, priority, project, assignee simultaneously
-- **Quick assignee** — change assignee from inline selector without opening the issue
-- **Prefetch on hover** — `prefetchIssueDetail()` fires on mouse enter to pre-warm the cache
-- **Issue detail location state** — breadcrumb seed is stored in router state so the detail page can show "← Inbox" correctly
+- **Badge system** (`useInboxBadge`) â€” separate counts for unread inbox items and failed runs. Failed runs turn the badge red in the sidebar.
+- **Search** â€” full-text filter within the inbox list
+- **Swipe to archive** (`SwipeToArchive`) â€” mobile-friendly swipe gesture to dismiss issues
+- **Undo archive** â€” keyboard `Cmd+Z` / toast-based undo for accidental dismissals
+- **Column picker** â€” choose which columns to display for issue rows
+- **Status grouping** â€” issues grouped by status with collapsible `IssueGroupHeader`
+- **Filter popover** (`IssueFiltersPopover`) â€” filter by status, priority, project, assignee simultaneously
+- **Quick assignee** â€” change assignee from inline selector without opening the issue
+- **Prefetch on hover** â€” `prefetchIssueDetail()` fires on mouse enter to pre-warm the cache
+- **Issue detail location state** â€” breadcrumb seed is stored in router state so the detail page can show "â† Inbox" correctly
 
 ---
 
@@ -583,22 +583,22 @@ Four categories displayed with tab filters:
 Execution workspaces are **isolated development environments** that agents run code inside. They are associated with projects and provide a reproducible context for coding agents.
 
 ### Workspace Configuration Fields
-- **Name** — human-readable label
-- **CWD** — working directory path inside the environment
-- **Repo URL** — git repository URL
-- **Base ref** — branch or commit to base from
-- **Branch name** — the working branch the agent will push to
-- **Provider ref** — external reference (e.g. GitHub environment name)
-- **Provision command** — shell command to set up the environment (install deps, etc.)
-- **Teardown command** — run on workspace close
-- **Cleanup command** — run on agent checkout release
-- **Workspace runtime JSON** — arbitrary JSON config passed to the runtime driver
-- **Inherit runtime** — whether to inherit config from the project's default runtime
+- **Name** â€” human-readable label
+- **CWD** â€” working directory path inside the environment
+- **Repo URL** â€” git repository URL
+- **Base ref** â€” branch or commit to base from
+- **Branch name** â€” the working branch the agent will push to
+- **Provider ref** â€” external reference (e.g. GitHub environment name)
+- **Provision command** â€” shell command to set up the environment (install deps, etc.)
+- **Teardown command** â€” run on workspace close
+- **Cleanup command** â€” run on agent checkout release
+- **Workspace runtime JSON** â€” arbitrary JSON config passed to the runtime driver
+- **Inherit runtime** â€” whether to inherit config from the project's default runtime
 
 ### Workspace Detail Tabs
-- **Configuration** — all fields above with inline editing and validation
-- **Runtime Logs** — streaming log output from the workspace's running services (`WorkspaceRuntimeControls`)
-- **Issues** — issues linked to this workspace
+- **Configuration** â€” all fields above with inline editing and validation
+- **Runtime Logs** â€” streaming log output from the workspace's running services (`WorkspaceRuntimeControls`)
+- **Issues** â€” issues linked to this workspace
 
 ### WorkspaceRuntimeControls
 `buildWorkspaceRuntimeControlSections` organizes the workspace's services into control sections. Each service can be:
@@ -607,7 +607,7 @@ Execution workspaces are **isolated development environments** that agents run c
 
 ### Workspaces Overview Page
 Groups all workspaces by project with `ProjectWorkspaceGroup`. Sorted by:
-1. Running service count (descending — active workspaces first)
+1. Running service count (descending â€” active workspaces first)
 2. Last updated time
 3. Project name alphabetically
 
@@ -624,78 +624,78 @@ This is the implementation of the `SKILLS.md` pattern described on the Paperclip
 
 ### Skill Sources
 A skill can be sourced from:
-- **Inline** — write markdown directly in the UI editor
-- **GitHub repo** — fetched via `github-fetch` service, with branch/path selector
-- **Vercel** — fetched from a Vercel deployment URL (`VercelMark` logo shown)
-- **URL** — arbitrary HTTPS fetch
-- **Project scan** (`CompanySkillProjectScanResult`) — Paperclip scans the linked codebase for existing `SKILLS.md`, `AGENT.md`, `CLAUDE.md` etc. and imports them
+- **Inline** â€” write markdown directly in the UI editor
+- **GitHub repo** â€” fetched via `github-fetch` service, with branch/path selector
+- **Vercel** â€” fetched from a Vercel deployment URL (`VercelMark` logo shown)
+- **URL** â€” arbitrary HTTPS fetch
+- **Project scan** (`CompanySkillProjectScanResult`) â€” Paperclip scans the linked codebase for existing `SKILLS.md`, `AGENT.md`, `CLAUDE.md` etc. and imports them
 
 ### Skill File Tree (`PackageFileTree`)
 - Hierarchical file browser for multi-file skill packages
 - Expandable folder nodes
 - File kind badges: `markdown`, `code`, `image`, `data`, `config`, `other`
-- Click file → renders preview in the right panel (markdown rendered via `MarkdownBody`, code shown in textarea)
+- Click file â†’ renders preview in the right panel (markdown rendered via `MarkdownBody`, code shown in textarea)
 - `buildFileTree()` builds a `FileTreeNode` tree from a flat file list
 
 ### Skill Management
-- Create skill via `+` button → fill in name, source type, and content
+- Create skill via `+` button â†’ fill in name, source type, and content
 - Edit inline via `MarkdownEditor` with split-pane preview
-- `stripFrontmatter()` / `splitFrontmatter()` — the skill UI hides YAML frontmatter from the editor body but preserves it on save
-- Update status badge (`CompanySkillUpdateStatus`) — shows if a skill is up-to-date or has upstream changes available
-- Source badge (`CompanySkillSourceBadge`) — icon indicating origin (inline / github / vercel / url)
-- Refresh — re-fetch from source
+- `stripFrontmatter()` / `splitFrontmatter()` â€” the skill UI hides YAML frontmatter from the editor body but preserves it on save
+- Update status badge (`CompanySkillUpdateStatus`) â€” shows if a skill is up-to-date or has upstream changes available
+- Source badge (`CompanySkillSourceBadge`) â€” icon indicating origin (inline / github / vercel / url)
+- Refresh â€” re-fetch from source
 - Delete with confirmation
 
 ### Agent Skill Assignments
 - Each agent has a skill list managed in the **Skills tab** of Agent Detail
-- `applyAgentSkillSnapshot` — applies a saved snapshot to pin an agent to specific skill versions
-- `isReadOnlyUnmanagedSkillEntry` — marks skills managed externally that cannot be removed from the UI
+- `applyAgentSkillSnapshot` â€” applies a saved snapshot to pin an agent to specific skill versions
+- `isReadOnlyUnmanagedSkillEntry` â€” marks skills managed externally that cannot be removed from the UI
 
 ---
 
-## 16. Plugin System
+## 16. Extension System
 
-**Route:** `/plugins/:pluginId`, **Admin:** instance settings  
-**Files:** `ui/src/pages/PluginManager.tsx`, `ui/src/pages/PluginSettings.tsx`
+**Route:** `/extensions/:extensionId`, **Admin:** instance settings  
+**Files:** `ui/src/pages/ExtensionManager.tsx`, `ui/src/pages/ExtensionSettings.tsx`
 
-Plugins extend Paperclip's functionality via Node.js worker processes loaded at runtime. They follow a lifecycle defined in `PLUGIN_SPEC.md`.
+Extensions extend Paperclip's functionality via Node.js worker processes loaded at runtime. They follow a lifecycle defined in `EXTENSION_SPEC.md`.
 
-### Plugin Lifecycle
-States: `installing` → `loaded` → `enabled` / `disabled` / `error`
+### Extension Lifecycle
+States: `installing` â†’ `loaded` â†’ `enabled` / `disabled` / `error`
 
-### Plugin Manager UI
-- Lists all installed plugins with: name, version, category badges, status
-- **Install** — dialog to input an npm package name; installs via server-side npm
-- **Enable / Disable** — power toggle per plugin
-- **Settings** — navigates to per-plugin settings page if the plugin provides a settings UI
-- **Uninstall** — two-step confirmation dialog to prevent accidental removal
-- **Error details** — expandable error panel showing `plugin.lastError`
+### Extension Manager UI
+- Lists all installed extensions with: name, version, category badges, status
+- **Install** â€” dialog to input an npm package name; installs via server-side npm
+- **Enable / Disable** â€” power toggle per extension
+- **Settings** â€” navigates to per-extension settings page if the extension provides a settings UI
+- **Uninstall** â€” two-step confirmation dialog to prevent accidental removal
+- **Error details** â€” expandable error panel showing `extension.lastError`
 
-### Plugin Extension Points (Slots)
-Plugins declare UI slots via `PluginSlotOutlet` / `PluginSlotMount`:
-- `sidebar` — add nav items to the sidebar
-- `issue_detail` — inject UI into issue detail pages
-- `project_detail` — inject UI into project detail pages
-- `agent_detail` — inject UI into agent detail pages
-- `dashboard` — inject panels into the dashboard
+### Extension Extension Points (Slots)
+Extensions declare UI slots via `ExtensionSlotOutlet` / `ExtensionSlotMount`:
+- `sidebar` â€” add nav items to the sidebar
+- `issue_detail` â€” inject UI into issue detail pages
+- `project_detail` â€” inject UI into project detail pages
+- `agent_detail` â€” inject UI into agent detail pages
+- `dashboard` â€” inject panels into the dashboard
 
-### Plugin Launchers (`PluginLauncherOutlet`)
-Floating action buttons or contextual launchers that plugins can register on specific pages.
+### Extension Launchers (`ExtensionLauncherOutlet`)
+Floating action buttons or contextual launchers that extensions can register on specific pages.
 
-### Plugin Settings
-`PluginSettings.tsx` — each plugin can register a settings page with arbitrary configuration fields rendered via plugin-supplied schema.
+### Extension Settings
+`ExtensionSettings.tsx` â€” each extension can register a settings page with arbitrary configuration fields rendered via extension-supplied schema.
 
 ### Dev Mode
-`PluginDevWatcher` — in development, plugins can be loaded from a local path with live file watching and hot-reload.
+`ExtensionDevWatcher` â€” in development, extensions can be loaded from a local path with live file watching and hot-reload.
 
 ---
 
 ## 17. Adapter System
 
-**Route:** Instance Settings → Adapter Manager  
+**Route:** Instance Settings â†’ Adapter Manager  
 **File:** `ui/src/pages/AdapterManager.tsx`
 
-Adapters are the bridge between Paperclip and actual agent runtimes. They are simpler than plugins: no workers or event buses — just a `ServerAdapterModule` that provides model discovery and execution.
+Adapters are the bridge between Paperclip and actual agent runtimes. They are simpler than extensions: no workers or event buses â€” just a `ServerAdapterModule` that provides model discovery and execution.
 
 ### Built-in Adapters
 Located in `packages/adapters/`:
@@ -719,16 +719,16 @@ HTTP adapter supports any agent reachable over HTTP that can accept Paperclip's 
 
 ### Adapter Manager UI
 Per-adapter controls:
-- **Enable / Disable** — hide from agent config menus without uninstalling
-- **Reload** — hot-reload the adapter module without server restart
-- **Reinstall** — re-download from npm
-- **Remove** — uninstall from the server
+- **Enable / Disable** â€” hide from agent config menus without uninstalling
+- **Reload** â€” hot-reload the adapter module without server restart
+- **Reinstall** â€” re-download from npm
+- **Remove** â€” uninstall from the server
 - Source badge: `Built-in` vs `External`
 - Local-path indicator (amber folder icon)
-- Override badge — shows when a built-in is overridden by an external adapter of the same type
+- Override badge â€” shows when a built-in is overridden by an external adapter of the same type
 
 ### Adapter Capabilities
-`useAdapterCapabilities` hook — queries each adapter for what it supports (e.g. does it support streaming? does it support structured tool calls? does it have a native login flow?). The UI adjusts accordingly (e.g. hiding the Claude login button for non-Claude adapters).
+`useAdapterCapabilities` hook â€” queries each adapter for what it supports (e.g. does it support streaming? does it support structured tool calls? does it have a native login flow?). The UI adjusts accordingly (e.g. hiding the Claude login button for non-Claude adapters).
 
 ---
 
@@ -741,31 +741,31 @@ Paperclip companies are portable. You can export a full company as a ZIP archive
 
 ### Export Flow
 
-1. **Preview** — server generates a `CompanyPortabilityExportPreviewResult` showing all files that would be exported
-2. **File tree with checkboxes** — `PackageFileTree` with per-file and per-folder check/uncheck
-3. **Selection filtering** — `checkedSlugs()` extracts agent/project/routine slugs from checked file paths; `filterPaperclipYaml()` strips unchecked entries from `.paperclip.yaml` line-by-line
-4. **Secret scrubbing** — all credential values are replaced with `<redacted>` placeholders before export
-5. **Download as ZIP** — `createZipArchive()` assembles the checked files + filtered manifest into a client-side ZIP file
+1. **Preview** â€” server generates a `CompanyPortabilityExportPreviewResult` showing all files that would be exported
+2. **File tree with checkboxes** â€” `PackageFileTree` with per-file and per-folder check/uncheck
+3. **Selection filtering** â€” `checkedSlugs()` extracts agent/project/routine slugs from checked file paths; `filterPaperclipYaml()` strips unchecked entries from `.paperclip.yaml` line-by-line
+4. **Secret scrubbing** â€” all credential values are replaced with `<redacted>` placeholders before export
+5. **Download as ZIP** â€” `createZipArchive()` assembles the checked files + filtered manifest into a client-side ZIP file
 
 ### Export Archive Contents
 ```
-.paperclip.yaml              ← manifest: agents, projects, routines, sidebar order
+.paperclip.yaml              â† manifest: agents, projects, routines, sidebar order
 agents/
   {slug}/
-    AGENT.md                 ← agent instructions and config
-    skills/                  ← agent-specific skill files
+    AGENT.md                 â† agent instructions and config
+    skills/                  â† agent-specific skill files
 projects/
   {slug}/
-    PROJECT.md               ← project description and config
+    PROJECT.md               â† project description and config
 tasks/
   {slug}/
-    TASK.md                  ← routine/task template
+    TASK.md                  â† routine/task template
 ```
 
 ### Import Flow
 1. Upload ZIP or drag-drop onto import page
 2. Server parses manifest and shows a preview
-3. Collision detection — if agent/project slugs already exist, user is warned
+3. Collision detection â€” if agent/project slugs already exist, user is warned
 4. Import applies agents, projects, routines, and skills with configurable merge strategy
 
 ### Clipmart (Coming Soon)
@@ -787,34 +787,34 @@ The sidebar is the primary navigation shell. It is always visible on desktop and
 
 ### Structure (top to bottom)
 ```
-┌─────────────────────────────┐
-│  [CompanySwitcher]  [Search]│  ← 12px height header
-├─────────────────────────────┤
-│  [✏ New Issue]              │  ← Quick action button
-│  [Dashboard] [live:N badge] │  ← Shows count of active runs
-│  [Inbox]     [N badge]      │  ← Red badge if failed runs exist
-│  [Plugin sidebar slots]     │  ← Plugin-injected nav items
-├── Work ────────────────────┤
-│  [Issues]                   │
-│  [Goals]                    │
-│  [Projects]  ▼ expandable   │
-│    project-1                │
-│    project-2                │
-├── Agents ──────────────────┤
-│  [Agents]                   │
-│  [Org Chart]                │
-│  [Routines]                 │
-├── Company ─────────────────┤
-│  [Costs]                    │
-│  [Activity]                 │
-│  [Skills]                   │
-│  [Settings]                 │
-└─────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  [CompanySwitcher]  [Search]â”‚  â† 12px height header
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  [âœ New Issue]              â”‚  â† Quick action button
+â”‚  [Dashboard] [live:N badge] â”‚  â† Shows count of active runs
+â”‚  [Inbox]     [N badge]      â”‚  â† Red badge if failed runs exist
+â”‚  [Extension sidebar slots]     â”‚  â† Extension-injected nav items
+â”œâ”€â”€ Work â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  [Issues]                   â”‚
+â”‚  [Goals]                    â”‚
+â”‚  [Projects]  â–¼ expandable   â”‚
+â”‚    project-1                â”‚
+â”‚    project-2                â”‚
+â”œâ”€â”€ Agents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  [Agents]                   â”‚
+â”‚  [Org Chart]                â”‚
+â”‚  [Routines]                 â”‚
+â”œâ”€â”€ Company â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  [Costs]                    â”‚
+â”‚  [Activity]                 â”‚
+â”‚  [Skills]                   â”‚
+â”‚  [Settings]                 â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 ### Badge System
-- **Dashboard** — live run count in a small number badge (auto-refreshes every 10 s via `heartbeatsApi.liveRunsForCompany`)
-- **Inbox** — unread count from `useInboxBadge`; if `failedRuns > 0` the badge tone is `"danger"` (red)
+- **Dashboard** â€” live run count in a small number badge (auto-refreshes every 10 s via `heartbeatsApi.liveRunsForCompany`)
+- **Inbox** â€” unread count from `useInboxBadge`; if `failedRuns > 0` the badge tone is `"danger"` (red)
 
 ### SidebarAgents (`SidebarAgents`)
 Expandable section that lists agents inline with status dots. Agents with active runs show a pulsing indicator.
@@ -835,14 +835,14 @@ On mobile the sidebar is an overlay drawer controlled by `useSidebar().setSideba
 A `cmdk`-powered fuzzy search overlay for rapid navigation.
 
 ### Groups (when query is empty)
-- **Quick actions** — New Issue (SquarePen), New Agent (Bot)
-- **Navigate** — Dashboard, Inbox, Goals, Issues, Costs, Activity
-- **Recent issues** — last 50 issues from the cached list
-- **Agents** — all company agents with icon + name
-- **Projects** — all non-archived projects
+- **Quick actions** â€” New Issue (SquarePen), New Agent (Bot)
+- **Navigate** â€” Dashboard, Inbox, Goals, Issues, Costs, Activity
+- **Recent issues** â€” last 50 issues from the cached list
+- **Agents** â€” all company agents with icon + name
+- **Projects** â€” all non-archived projects
 
 ### Search Mode (when typing)
-- `issuesApi.list({ q: searchQuery, limit: 10, includeRoutineExecutions: true })` — full-text issue search including routine execution issues
+- `issuesApi.list({ q: searchQuery, limit: 10, includeRoutineExecutions: true })` â€” full-text issue search including routine execution issues
 - Results update on each keystroke with debounce
 - Agent and project results come from the already-cached lists (no extra requests)
 
@@ -856,7 +856,7 @@ Selecting any result calls `navigate(path)` and closes the palette. On mobile, o
 Paperclip's "always-on" feeling is driven by a polling-based heartbeat system (not WebSocket by default, though `packages/mcp-server` extends this).
 
 ### Live Run Tracking
-- `heartbeatsApi.liveRunsForCompany(companyId, { minCount, limit })` — returns active + recent completed runs for a company
+- `heartbeatsApi.liveRunsForCompany(companyId, { minCount, limit })` â€” returns active + recent completed runs for a company
 - Sidebar dashboard badge auto-refreshes every 10 s
 - Dashboard and DashboardLive pages show live cards for up to 50 simultaneous runs
 - `isRunActive(run)` checks `status === 'queued' || status === 'running'`
@@ -870,11 +870,11 @@ Paperclip's "always-on" feeling is driven by a polling-based heartbeat system (n
 - Used throughout the issues list and inbox to show a live pulse dot on issues that have an active run
 - Computed from the `liveRuns` query result by extracting `run.issueId`
 
-### Realtime Events (SSE / Plugin Bus)
-- `packages/mcp-server` — MCP (Model Context Protocol) server integration for advanced real-time agent communication
-- `server/src/realtime/` — server-sent event broadcasting for live state updates
-- `server/src/services/live-events.ts` — live event emitter service
-- `server/src/services/plugin-event-bus.ts` — plugin-to-plugin and plugin-to-UI event bus
+### Realtime Events (SSE / Extension Bus)
+- `packages/mcp-server` â€” MCP (Model Context Protocol) server integration for advanced real-time agent communication
+- `server/src/realtime/` â€” server-sent event broadcasting for live state updates
+- `server/src/services/live-events.ts` â€” live event emitter service
+- `server/src/services/extension-event-bus.ts` â€” extension-to-extension and extension-to-UI event bus
 
 ---
 
@@ -889,9 +889,9 @@ First-run setup: the first user who visits a fresh Paperclip instance claims the
 Token-based authentication for the `paperclipai` CLI. Generates a short-lived token that the CLI exchanges for a session.
 
 ### Company Invites
-- Open invite links — operator generates a URL and sends it to collaborators
-- OpenClaw onboarding snippet — generates a prompt that can be pasted into OpenClaw to onboard an agent as a company member automatically (`accessApi.createOpenClawInvitePrompt`)
-- `InviteLandingPage` — the page a user lands on when following an invite link
+- Open invite links â€” operator generates a URL and sends it to collaborators
+- OpenClaw onboarding snippet â€” generates a prompt that can be pasted into OpenClaw to onboard an agent as a company member automatically (`accessApi.createOpenClawInvitePrompt`)
+- `InviteLandingPage` â€” the page a user lands on when following an invite link
 
 ### Join Request Queue
 **Route:** `/join-queue`  
@@ -899,8 +899,8 @@ When a company has `requireBoardApprovalForNewAgents` enabled, external users wh
 
 ### User Roles
 Two-level RBAC:
-- **Instance level** — admin vs. member (`InstanceAccess` page)
-- **Company level** — board (admin) vs. member (`CompanyAccess` page)
+- **Instance level** â€” admin vs. member (`InstanceAccess` page)
+- **Company level** â€” board (admin) vs. member (`CompanyAccess` page)
 
 ### Profile Settings
 **Route:** `/profile`  
@@ -918,20 +918,20 @@ Server-level configuration: heartbeat intervals, retention policies, logging ver
 
 ### Experimental Settings
 Feature flags for opt-in beta functionality:
-- `enableIsolatedWorkspaces` — when true, shows the Workspaces nav item and enables execution workspace features
+- `enableIsolatedWorkspaces` â€” when true, shows the Workspaces nav item and enables execution workspace features
 
 ### Instance Access
 Manage which users have admin (board) rights at the instance level. Required for server operators who manage multiple companies.
 
-### Plugin Manager (instance-scoped)
-The plugin install/manage UI lives under Instance Settings since plugins are server-side Node.js workers that affect all companies.
+### Extension Manager (instance-scoped)
+The extension install/manage UI lives under Instance Settings since extensions are server-side Node.js workers that affect all companies.
 
 ### Adapter Manager (instance-scoped)
 Adapters are also server-side, so the Adapter Manager is under Instance Settings.
 
 ### Database Backups
 **Route:** `instance-database-backups`  
-Server-side SQLite backup management — trigger manual backups, list existing backup files, restore.
+Server-side SQLite backup management â€” trigger manual backups, list existing backup files, restore.
 
 ---
 
@@ -940,10 +940,10 @@ Server-side SQLite backup management — trigger manual backups, list existing b
 ### Onboarding Wizard
 **Component:** `OnboardingWizard.tsx`  
 A multi-step guided wizard shown on first login or when no company exists:
-1. **Create company** — name, description, brand color
-2. **Hire your first agent** — choose adapter, role, name
-3. **Set a goal** — define the company mission
-4. **Approve & run** — start the first heartbeat
+1. **Create company** â€” name, description, brand color
+2. **Hire your first agent** â€” choose adapter, role, name
+3. **Set a goal** â€” define the company mission
+4. **Approve & run** â€” start the first heartbeat
 
 ### CLI Quickstart
 ```bash
@@ -970,14 +970,14 @@ paperclip run <id>    # trigger a heartbeat
 
 ## 25. Mobile Support
 
-Paperclip is designed to work on phones — you can monitor and manage your autonomous businesses from anywhere.
+Paperclip is designed to work on phones â€” you can monitor and manage your autonomous businesses from anywhere.
 
 ### Mobile Components
-- **`MobileBottomNav`** — bottom tab bar replacing the sidebar on small screens. Tabs: Dashboard, Issues, Agents, Inbox, More.
-- **`SwipeToArchive`** — swipe left on an issue row to reveal an archive button; complete the swipe to archive. Uses `TouchEvent` tracking with threshold detection.
-- **Responsive grids** — all card grids use Tailwind responsive breakpoints: `grid-cols-1 sm:grid-cols-2 xl:grid-cols-4`
-- **Pinch-to-zoom** on the org chart canvas — `TouchGesture` state machine handles single-touch pan vs. two-finger pinch with `startDistance` + `startCenter` tracking
-- **`TOUCH_MOVE_THRESHOLD = 6px`** — prevents accidental navigation when tapping org chart nodes on touch screens
+- **`MobileBottomNav`** â€” bottom tab bar replacing the sidebar on small screens. Tabs: Dashboard, Issues, Agents, Inbox, More.
+- **`SwipeToArchive`** â€” swipe left on an issue row to reveal an archive button; complete the swipe to archive. Uses `TouchEvent` tracking with threshold detection.
+- **Responsive grids** â€” all card grids use Tailwind responsive breakpoints: `grid-cols-1 sm:grid-cols-2 xl:grid-cols-4`
+- **Pinch-to-zoom** on the org chart canvas â€” `TouchGesture` state machine handles single-touch pan vs. two-finger pinch with `startDistance` + `startCenter` tracking
+- **`TOUCH_MOVE_THRESHOLD = 6px`** â€” prevents accidental navigation when tapping org chart nodes on touch screens
 
 ### Mobile Auth
 `SidebarAccountMenu` provides a full-screen bottom sheet on mobile for account actions.
@@ -989,27 +989,27 @@ Paperclip is designed to work on phones — you can monitor and manage your auto
 ### Monorepo Layout
 ```
 paperclip/
-├── server/          Node.js + Express/Hono API (TypeScript)
-│   └── src/
-│       ├── routes/   REST API (one file per resource)
-│       ├── services/ Business logic (50+ services)
-│       ├── adapters/ Agent adapter integrations
-│       └── realtime/ SSE / event broadcasting
-├── ui/              React 18 SPA (TypeScript + Vite)
-│   └── src/
-│       ├── pages/    Route-level page components
-│       ├── components/ Shared UI components
-│       ├── api/      Typed API client wrappers
-│       ├── adapters/ Client-side adapter capabilities
-│       ├── hooks/    Custom React hooks
-│       └── plugins/  Plugin slot/launcher system
-└── packages/
-    ├── shared/       Canonical types shared by server + UI
-    ├── db/           Database schema + migrations (Drizzle ORM or similar)
-    ├── adapters/     Built-in agent adapter implementations
-    ├── adapter-utils/ Shared adapter utilities (log redaction, path scrubbing)
-    ├── mcp-server/   MCP (Model Context Protocol) integration
-    └── plugins/      Plugin runtime and sandbox
+â”œâ”€â”€ server/          Node.js + Express/Hono API (TypeScript)
+â”‚   â””â”€â”€ src/
+â”‚       â”œâ”€â”€ routes/   REST API (one file per resource)
+â”‚       â”œâ”€â”€ services/ Business logic (50+ services)
+â”‚       â”œâ”€â”€ adapters/ Agent adapter integrations
+â”‚       â””â”€â”€ realtime/ SSE / event broadcasting
+â”œâ”€â”€ ui/              React 18 SPA (TypeScript + Vite)
+â”‚   â””â”€â”€ src/
+â”‚       â”œâ”€â”€ pages/    Route-level page components
+â”‚       â”œâ”€â”€ components/ Shared UI components
+â”‚       â”œâ”€â”€ api/      Typed API client wrappers
+â”‚       â”œâ”€â”€ adapters/ Client-side adapter capabilities
+â”‚       â”œâ”€â”€ hooks/    Custom React hooks
+â”‚       â””â”€â”€ extensions/  Extension slot/launcher system
+â””â”€â”€ packages/
+    â”œâ”€â”€ shared/       Canonical types shared by server + UI
+    â”œâ”€â”€ db/           Database schema + migrations (Drizzle ORM or similar)
+    â”œâ”€â”€ adapters/     Built-in agent adapter implementations
+    â”œâ”€â”€ adapter-utils/ Shared adapter utilities (log redaction, path scrubbing)
+    â”œâ”€â”€ mcp-server/   MCP (Model Context Protocol) integration
+    â””â”€â”€ extensions/      Extension runtime and sandbox
 ```
 
 ### Key Libraries
@@ -1029,25 +1029,26 @@ paperclip/
 | Auth | JWT (RS256) |
 
 ### Server Services (selected)
-- `heartbeat.ts` — agent wakeup + run orchestration
-- `budgets.ts` — budget enforcement (atomic checkout + spend tracking)
-- `issue-execution-policy.ts` — determines which agent runs on an issue
-- `company-portability.ts` — export/import ZIP logic
-- `plugin-runtime-sandbox.ts` — isolated Node.js worker for plugins
-- `workspace-runtime.ts` — execution workspace lifecycle management
-- `agent-instructions.ts` — assembles the full SKILLS.md context for an agent at run time
-- `costs.ts` — per-run token cost accounting
-- `approvals.ts` — approval state machine
-- `routines.ts` — cron scheduler + webhook ingress
+- `heartbeat.ts` â€” agent wakeup + run orchestration
+- `budgets.ts` â€” budget enforcement (atomic checkout + spend tracking)
+- `issue-execution-policy.ts` â€” determines which agent runs on an issue
+- `company-portability.ts` â€” export/import ZIP logic
+- `extension-runtime-sandbox.ts` â€” isolated Node.js worker for extensions
+- `workspace-runtime.ts` â€” execution workspace lifecycle management
+- `agent-instructions.ts` â€” assembles the full SKILLS.md context for an agent at run time
+- `costs.ts` â€” per-run token cost accounting
+- `approvals.ts` â€” approval state machine
+- `routines.ts` â€” cron scheduler + webhook ingress
 
 ### Data Flow (agent run lifecycle)
 ```
-1. Trigger     → Schedule/webhook fires or user clicks Run
-2. Checkout    → heartbeat service checks budget, sets agent lock
-3. Context     → agent-instructions assembles skills + goal ancestry + issue context
-4. Dispatch    → adapter sends heartbeat to agent runtime (OpenClaw/Claude/etc.)
-5. Streaming   → run logs written to run-log-store, polled by UI
-6. Tool calls  → workspace operations, approvals, sub-issue creation all recorded
-7. Completion  → run status set, cost recorded, budget updated, activity logged
-8. Realtime    → live-events broadcasts run completion to subscribed UI clients
+1. Trigger     â†’ Schedule/webhook fires or user clicks Run
+2. Checkout    â†’ heartbeat service checks budget, sets agent lock
+3. Context     â†’ agent-instructions assembles skills + goal ancestry + issue context
+4. Dispatch    â†’ adapter sends heartbeat to agent runtime (OpenClaw/Claude/etc.)
+5. Streaming   â†’ run logs written to run-log-store, polled by UI
+6. Tool calls  â†’ workspace operations, approvals, sub-issue creation all recorded
+7. Completion  â†’ run status set, cost recorded, budget updated, activity logged
+8. Realtime    â†’ live-events broadcasts run completion to subscribed UI clients
 ```
+

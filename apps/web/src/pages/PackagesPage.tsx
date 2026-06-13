@@ -1,44 +1,101 @@
 /**
- * PackagesPage — card-based package library.
+ * PackagesPage - unified library for workflows, abilities, and extensions.
  *
- * Default tab: "My Library" (owned packages, not templates).
- * Fixed import/export icons. Delete with confirmation + undo toast.
+ * Extensions are first-class deterministic runtime units here: operators can
+ * inspect installed extensions and create local node-worker extensions without
+ * leaving the library surface.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Package as PackageIcon, Plus, ArrowDownToLine, ArrowUpFromLine,
-  MoreHorizontal, Trash2, Copy, Edit3, Sparkles, Bot,
-  Workflow as WorkflowIcon, SearchX, X, Check, ChevronRight, ArrowLeft, FolderTree,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Bot,
+  Boxes,
+  CheckCircle2,
+  Code2,
+  Copy,
+  Database,
+  Edit3,
+  FileJson,
+  Globe,
+  HardDrive,
+  Key,
+  MoreHorizontal,
+  Plus,
+  Puzzle,
+  Radio,
+  SearchX,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+  Trash2,
+  Workflow as WorkflowIcon,
+  X,
+  Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, apiErrorMessage } from '../lib/api';
+import { abilitiesApi, compileStatusLabel, compileStatusTone, type Ability } from '../lib/abilities';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
-import { Tabs } from '../components/shared/Tabs';
 import { Button } from '../components/shared/Button';
 import { SearchInput } from '../components/shared/SearchInput';
 import { Skeleton } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
+import { StatusBadge } from '../components/shared/StatusBadge';
+import { ExtensionStudioModal } from '../components/extensions/ExtensionStudioModal';
 
-interface Package {
+type LibraryFilter = 'all' | 'agents' | 'abilities' | 'workflows' | 'extensions';
+type LibraryKind = 'agent' | 'ability' | 'workflow' | 'extension';
+type ExtensionPermission =
+  | 'network' | 'credentials' | 'workspace.read' | 'workspace.write' | 'filesystem'
+  | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write';
+
+interface WorkflowPackage {
   id: string;
   name: string;
   slug: string;
-  kind: 'skill' | 'workflow' | 'agent' | 'integration' | 'app';
+  kind: 'workflow' | 'agent';
   version?: string;
   description?: string;
   isTemplate?: boolean;
-  metadata?: Record<string, unknown>;
+  role?: string | null;
 }
 
-interface WorkflowItem { id: string; title: string; status?: string; }
-interface AgentItem { id: string; name: string; status: string; adapterType: string; }
-interface SkillItem { id: string; name: string; slug: string; version: string; runtime: string; }
-interface WorkflowCollection { name: string; count: number; }
+interface ExtensionManifest {
+  name?: string;
+  slug?: string;
+  version?: string;
+  description?: string;
+  permissions?: string[];
+  allowedDomains?: string[];
+  credentialKeys?: string[];
+  categories?: string[];
+  capabilityTags?: string[];
+  operations?: ExtensionOperation[];
+  source?: string;
+  timeoutMs?: number;
+}
 
-type PackageTab = 'all' | 'workflows' | 'agents' | 'skills' | 'collections';
+interface ExtensionOperation {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+}
+
+interface WorkspaceExtension {
+  id: string;
+  name: string;
+  slug: string;
+  version: string;
+  runtime: 'builtin' | 'node_worker' | 'docker_sandbox' | string;
+  manifest: ExtensionManifest;
+  createdAt?: string;
+  updatedAt?: string;
+}
 
 interface PackageDetail {
   package: {
@@ -46,752 +103,666 @@ interface PackageDetail {
     name: string;
     version: string;
     slug: string;
-    kind: Package['kind'];
+    kind: WorkflowPackage['kind'];
     description: string;
     installedAt: string;
     manifest: unknown;
   };
   workflows: { id: string; title: string }[];
-  agents: { id: string; name: string; status: string; adapterType: string }[];
-  skills: { id: string; name: string; slug: string; version: string; runtime: string }[];
+  agents?: { id: string; name: string; role?: string }[];
 }
 
-const TYPE_ICONS: Record<Package['kind'], LucideIcon> = {
-  skill:    Sparkles,
-  workflow: WorkflowIcon,
-  agent:    Bot,
-  integration: PackageIcon,
-  app:      PackageIcon,
-};
+interface LibraryItem {
+  id: string;
+  kind: LibraryKind;
+  name: string;
+  slug: string;
+  version?: string;
+  description?: string | null;
+  searchText: string;
+  source: WorkflowPackage | Ability | WorkspaceExtension;
+}
+
+const PERMISSIONS: Array<{
+  value: ExtensionPermission;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+  tone: string;
+}> = [
+  {
+    value: 'network',
+    label: 'Network',
+    description: 'HTTP/HTTPS access to declared domains only.',
+    icon: Globe,
+    tone: 'text-sky-300 bg-sky-500/10 border-sky-400/20',
+  },
+  {
+    value: 'credentials',
+    label: 'Credentials',
+    description: 'Read named secrets from the workspace vault.',
+    icon: Key,
+    tone: 'text-amber-300 bg-amber-500/10 border-amber-400/20',
+  },
+  {
+    value: 'workspace.read',
+    label: 'Read state',
+    description: 'Read run/workspace scratchpad context.',
+    icon: Database,
+    tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-400/20',
+  },
+  {
+    value: 'workspace.write',
+    label: 'Write state',
+    description: 'Write deterministic state during a run.',
+    icon: Edit3,
+    tone: 'text-lime-300 bg-lime-500/10 border-lime-400/20',
+  },
+  {
+    value: 'filesystem',
+    label: 'Filesystem',
+    description: 'Use the extension sandbox temporary directory.',
+    icon: HardDrive,
+    tone: 'text-cyan-300 bg-cyan-500/10 border-cyan-400/20',
+  },
+  {
+    value: 'listener',
+    label: 'Listener source',
+    description: 'Allow operations to run as a persistent trigger source.',
+    icon: Radio,
+    tone: 'text-violet-300 bg-violet-500/10 border-violet-400/20',
+  },
+  {
+    value: 'listener.emit',
+    label: 'Emit events',
+    description: 'Allow ctx.emit() so a source can push events to the runtime.',
+    icon: Radio,
+    tone: 'text-violet-300 bg-violet-500/10 border-violet-400/20',
+  },
+  {
+    value: 'listener.cursor',
+    label: 'Listener cursor',
+    description: 'Read/write the durable resume cursor (ctx.cursor / ctx.setCursor).',
+    icon: Radio,
+    tone: 'text-violet-300 bg-violet-500/10 border-violet-400/20',
+  },
+  {
+    value: 'kv.read',
+    label: 'KV read',
+    description: 'Read the workspace-scoped extension KV store (ctx.kv.get).',
+    icon: Database,
+    tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-400/20',
+  },
+  {
+    value: 'kv.write',
+    label: 'KV write',
+    description: 'Write the workspace-scoped extension KV store (ctx.kv.set).',
+    icon: Edit3,
+    tone: 'text-lime-300 bg-lime-500/10 border-lime-400/20',
+  },
+];
 
 export function PackagesPage() {
   const nav = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
-  const [searchParams] = useSearchParams();
-  const initialTab = (searchParams.get('tab') as PackageTab) ?? 'all';
-  const [tab, setTab] = useState(initialTab);
-  const [packages, setPackages] = useState<Package[]>([]);
-  const [collections, setCollections] = useState<WorkflowCollection[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowPackage[]>([]);
+  const [abilities, setAbilities] = useState<Ability[]>([]);
+  const [extensions, setExtensions] = useState<WorkspaceExtension[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [openPkg, setOpenPkg] = useState<Package | null>(null);
+  const [filter, setFilter] = useState<LibraryFilter>('all');
+  const [openWorkflow, setOpenWorkflow] = useState<WorkflowPackage | null>(null);
+  const [openExtension, setOpenExtension] = useState<WorkspaceExtension | null>(null);
+  const [extensionStudioOpen, setExtensionStudioOpen] = useState(false);
 
   async function refresh() {
     setLoading(true);
     try {
-      const [packageRes, collectionRes] = await Promise.allSettled([
-        api<{ packages: Package[] }>('/v1/packages'),
-        api<{ collections: WorkflowCollection[] }>('/v1/workflows/collections'),
+      const [packageRes, abilityRes, extensionRes] = await Promise.allSettled([
+        api<{ packages: WorkflowPackage[] }>('/v1/packages'),
+        abilitiesApi.list(),
+        api<{ extensions: WorkspaceExtension[] }>('/v1/extensions'),
       ]);
-      setPackages(packageRes.status === 'fulfilled' ? packageRes.value.packages ?? [] : []);
-      setCollections(collectionRes.status === 'fulfilled' ? collectionRes.value.collections ?? [] : []);
-    } catch { setPackages([]); setCollections([]); }
-    finally { setLoading(false); }
+      setWorkflows(
+        packageRes.status === 'fulfilled'
+          ? (packageRes.value.packages ?? []).filter((pkg) => !pkg.isTemplate && (pkg.kind === 'workflow' || pkg.kind === 'agent'))
+          : [],
+      );
+      setAbilities(abilityRes.status === 'fulfilled' ? abilityRes.value.abilities ?? [] : []);
+      setExtensions(extensionRes.status === 'fulfilled' ? extensionRes.value.extensions ?? [] : []);
+    } catch {
+      setWorkflows([]);
+      setAbilities([]);
+      setExtensions([]);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const items = useMemo<LibraryItem[]>(() => {
+    const packageItems = workflows.map((pkg): LibraryItem => ({
+      id: `${pkg.kind}:${pkg.id}`,
+      kind: pkg.kind,
+      name: pkg.name,
+      slug: pkg.slug,
+      version: pkg.version,
+      description: pkg.description ?? '',
+      searchText: [pkg.name, pkg.slug, pkg.description].filter(Boolean).join(' ').toLowerCase(),
+      source: pkg,
+    }));
+    const abilityItems = abilities.map((ability): LibraryItem => ({
+      id: `ability:${ability.id}`,
+      kind: 'ability',
+      name: ability.name,
+      slug: ability.slug,
+      version: ability.version,
+      description: ability.description,
+      searchText: [ability.name, ability.slug, ability.domainTag, ability.description].filter(Boolean).join(' ').toLowerCase(),
+      source: ability,
+    }));
+    const extensionItems = extensions.map((extension): LibraryItem => ({
+      id: `extension:${extension.id}`,
+      kind: 'extension',
+      name: extension.name || extension.manifest.name || extension.slug,
+      slug: extension.slug,
+      version: extension.version,
+      description: extension.manifest.description ?? '',
+      searchText: [
+        extension.name,
+        extension.slug,
+        extension.runtime,
+        extension.manifest.description,
+        ...(extension.manifest.permissions ?? []),
+        ...(extension.manifest.capabilityTags ?? []),
+      ].filter(Boolean).join(' ').toLowerCase(),
+      source: extension,
+    }));
+    return [...extensionItems, ...abilityItems, ...packageItems];
+  }, [abilities, extensions, workflows]);
+
+  const counts = useMemo(() => ({
+    all: items.length,
+    agents: items.filter((item) => item.kind === 'agent').length,
+    abilities: abilities.length,
+    workflows: items.filter((item) => item.kind === 'workflow').length,
+    extensions: extensions.length,
+  }), [abilities.length, items, extensions.length]);
 
   const filtered = useMemo(() => {
-    // 10.12: "Yours" library is the single source of truth — always exclude
-    // templates. Type tabs filter by package kind.
-    let list = packages.filter((p) => !p.isTemplate);
-    if (tab === 'skills') list = list.filter((p) => p.kind === 'skill');
-    else if (tab === 'workflows') list = list.filter((p) => p.kind === 'workflow');
-    else if (tab === 'agents') list = list.filter((p) => p.kind === 'agent');
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter((p) => p.name.toLowerCase().includes(q) || (p.description ?? '').toLowerCase().includes(q));
-    }
-    return list;
-  }, [packages, tab, search]);
-
-  const filteredCollections = useMemo(() => {
-    if (tab !== 'collections') return [];
     const q = search.trim().toLowerCase();
-    return q ? collections.filter((collection) => collection.name.toLowerCase().includes(q)) : collections;
-  }, [collections, search, tab]);
+    return items.filter((item) => {
+      const kindMatches = filter === 'all' || pluralKind(item.kind) === filter;
+      const searchMatches = !q || item.searchText.includes(q);
+      return kindMatches && searchMatches;
+    });
+  }, [filter, items, search]);
 
   async function handleImport() {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.agentis,.json,application/json';
+    input.accept = '.agentis,.agentisagt,.json,application/json';
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
       try {
         const text = await file.text();
         const json = JSON.parse(text) as Record<string, unknown>;
-        if ('contents' in json && 'checksum' in json) {
-          // PackageManifest format (exported from libraryPackages via our export)
-          await api('/v1/packages/import', {
-            method: 'POST',
-            body: JSON.stringify({ manifest: json }),
-          });
-        } else if (json['manifestVersion'] === 1) {
-          await api('/v1/packages/install-local', {
-            method: 'POST',
-            body: JSON.stringify({ manifest: json, permissionsAcknowledged: true }),
-          });
-        } else if (typeof json['name'] === 'string') {
-          const src = (json['sourceIds'] as { workflowIds?: string[]; agentIds?: string[]; skillIds?: string[] } | undefined) ?? {};
-          await api('/v1/packages', {
-            method: 'POST',
-            body: JSON.stringify({
-              name: json['name'],
-              version: (json['version'] as string | undefined) ?? '1.0.0',
-              kind: (json['kind'] as string | undefined) ?? 'workflow',
-              description: (json['description'] as string | undefined) ?? '',
-              workflowIds: src.workflowIds ?? [],
-              agentIds: src.agentIds ?? [],
-              skillIds: src.skillIds ?? [],
-            }),
-          });
-        } else {
-          toast.error('Import failed', 'Unrecognized file format');
-          return;
-        }
+        const manifest = 'manifest' in json
+          ? json.manifest
+          : 'packageManifest' in json
+            ? json.packageManifest
+            : json;
+        await api('/v1/packages/import', {
+          method: 'POST',
+          body: JSON.stringify({ manifest }),
+        });
         toast.success('Imported', file.name);
         void refresh();
-      } catch (err: unknown) {
-        const e = err as { message?: string };
-        toast.error('Import failed', e.message ?? String(err));
+      } catch (err) {
+        toast.error('Import failed', apiErrorMessage(err));
       }
     };
     input.click();
   }
 
-  async function handleExport(p: Package) {
+  async function handleExportWorkflow(pkg: WorkflowPackage) {
     try {
-      const detail = await api<PackageDetail>(`/v1/packages/${p.id}`);
-      const blob = new Blob(
-        [JSON.stringify(detail.package.manifest, null, 2)],
-        { type: 'application/json' },
-      );
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${p.slug || p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.agentis`;
-      a.click();
-      URL.revokeObjectURL(url);
-      toast.success('Exported', p.name);
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Export failed', e.message ?? 'Unknown error');
+      const detail = await api<PackageDetail>(`/v1/packages/${pkg.id}`);
+      const ext = detail.package.kind === 'agent' ? 'agentisagt' : 'agentis';
+      downloadJson(detail.package.manifest, `${pkg.slug || slugify(pkg.name)}.${ext}`);
+      toast.success('Exported', pkg.name);
+    } catch (err) {
+      toast.error('Export failed', apiErrorMessage(err));
     }
   }
 
-  async function handleDelete(p: Package) {
+  async function handleDuplicateWorkflow(pkg: WorkflowPackage) {
+    try {
+      await api(`/v1/packages/${pkg.id}/duplicate`, { method: 'POST' });
+      toast.success('Duplicated', `Copy of ${pkg.name}`);
+      void refresh();
+    } catch (err) {
+      toast.error('Duplicate failed', apiErrorMessage(err));
+    }
+  }
+
+  async function handleDeleteWorkflow(pkg: WorkflowPackage) {
     const ok = await confirm({
-      title: `Delete "${p.name}"?`,
+      title: `Delete "${pkg.name}"?`,
       body: 'You can undo this for 5 seconds.',
       confirmLabel: 'Delete',
       tone: 'danger',
     });
     if (!ok) return;
-    // Snapshot before deleting so undo can re-create.
-    let snapshot: { name: string; version: string; kind: Package['kind']; description: string; workflowIds: string[]; agentIds: string[]; skillIds: string[] } | null = null;
+
     let manifestSnapshot: unknown = null;
-    let isLibraryPkg = false;
     try {
-      const detail = await api<PackageDetail>(`/v1/packages/${p.id}`);
-      const mfst = detail.package.manifest as Record<string, unknown>;
-      isLibraryPkg = 'contents' in mfst && 'checksum' in mfst;
-      if (isLibraryPkg) {
-        manifestSnapshot = mfst;
-      } else {
-        const src = (mfst['sourceIds'] as { workflowIds?: string[]; agentIds?: string[]; skillIds?: string[] } | undefined) ?? {};
-        snapshot = { name: p.name, version: p.version ?? '1.0.0', kind: p.kind, description: p.description ?? '', workflowIds: src.workflowIds ?? [], agentIds: src.agentIds ?? [], skillIds: src.skillIds ?? [] };
-      }
-    } catch { /* proceed without snapshot */ }
+      const detail = await api<PackageDetail>(`/v1/packages/${pkg.id}`);
+      manifestSnapshot = detail.package.manifest;
+    } catch {
+      // best effort
+    }
+
     try {
-      await api(`/v1/packages/${p.id}`, { method: 'DELETE' });
-      toast.undo(`Deleted "${p.name}"`, async () => {
-        if (!snapshot && !manifestSnapshot) return;
+      await api(`/v1/packages/${pkg.id}`, { method: 'DELETE' });
+      toast.undo(`Deleted "${pkg.name}"`, async () => {
+        if (!manifestSnapshot) return;
         try {
-          if (isLibraryPkg && manifestSnapshot) {
-            await api('/v1/packages/import', { method: 'POST', body: JSON.stringify({ manifest: manifestSnapshot }) });
-          } else if (snapshot) {
-            await api('/v1/packages', { method: 'POST', body: JSON.stringify(snapshot) });
-          }
-          toast.success('Restored', p.name);
+          await api('/v1/packages/import', {
+            method: 'POST',
+            body: JSON.stringify({ manifest: manifestSnapshot }),
+          });
+          toast.success('Restored', pkg.name);
           void refresh();
-        } catch { toast.error('Could not restore', p.name); }
+        } catch {
+          toast.error('Could not restore', pkg.name);
+        }
       });
       void refresh();
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Failed to delete', e.message ?? 'Unknown error');
+    } catch (err) {
+      toast.error('Failed to delete', apiErrorMessage(err));
     }
   }
 
-  async function handleDuplicate(p: Package) {
-    try {
-      await api(`/v1/packages/${p.id}/duplicate`, { method: 'POST' });
-      toast.success('Duplicated', `Copy of ${p.name}`);
-      void refresh();
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Duplicate failed', e.message ?? 'Unknown error');
-    }
+  function handleOpenItem(item: LibraryItem) {
+    if (item.kind === 'workflow' || item.kind === 'agent') setOpenWorkflow(item.source as WorkflowPackage);
+    if (item.kind === 'ability') nav(`/abilities/${(item.source as Ability).id}`);
+    if (item.kind === 'extension') setOpenExtension(item.source as WorkspaceExtension);
   }
+
+  const emptyTitle = filter === 'extensions'
+    ? 'No extensions installed yet'
+    : filter === 'abilities'
+      ? 'No abilities yet'
+      : filter === 'workflows'
+        ? 'No workflow packages yet'
+        : filter === 'agents'
+          ? 'No agent packages yet'
+          : 'No library items yet';
+
+  const emptyBody = filter === 'extensions'
+    ? 'Create a sandboxed node-worker extension to make deterministic runtime work available to workflows.'
+    : filter === 'abilities'
+      ? 'Abilities you create will appear here alongside workflows and extensions.'
+      : filter === 'workflows'
+        ? 'Workflows are mirrored into packages automatically when you create or update them.'
+        : filter === 'agents'
+          ? 'Agents can be packaged to carry their full configuration (instructions, role, memory configuration).'
+          : 'Create workflows, abilities, or extensions to fill this workspace library.';
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-line px-6 py-4">
         <div>
           <h1 className="text-display text-text-primary">Packages</h1>
-          <div className="mt-0.5 text-[12px] text-text-muted">Everything you've built - apps, workflows, agents, and skills</div>
+          <div className="mt-0.5 text-[12px] text-text-muted">
+            One library for runtime extensions, specialist abilities, and reusable workflows.
+          </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <Button variant="secondary" size="md" iconLeft={<ArrowDownToLine size={14} />} onClick={() => void handleImport()}>
             Import
           </Button>
-          <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreating(true)}>
-            New package
+          <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setExtensionStudioOpen(true)}>
+            New extension
           </Button>
         </div>
       </div>
 
-      <Tabs
-        value={tab}
-        onChange={(v) => setTab(v as typeof tab)}
-        tabs={[
-          { value: 'all',       label: 'All' },
-          { value: 'workflows', label: 'Workflows' },
-          { value: 'agents',    label: 'Agents' },
-          { value: 'skills',    label: 'Skills' },
-          { value: 'collections', label: 'Collections' },
-        ]}
-        className="px-6"
-      />
-
-      <div className="flex flex-wrap items-center gap-3 border-b border-line px-6 py-3">
-        <div className="ml-auto w-full sm:w-72">
-          <SearchInput value={search} onChange={setSearch} placeholder="Search packages…" bindSlashShortcut />
+      <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-3">
+        <FilterTabs value={filter} counts={counts} onChange={setFilter} />
+        <div className="ml-auto w-full sm:w-80">
+          <SearchInput
+            value={search}
+            onChange={setSearch}
+            placeholder={`Search ${filter === 'all' ? 'library' : filter}...`}
+            bindSlashShortcut
+          />
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5">
-        {loading && filtered.length === 0 && filteredCollections.length === 0 ? (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <Skeleton height={140} /><Skeleton height={140} /><Skeleton height={140} />
+        {filter === 'extensions' && (
+          <ExtensionStudioIntro extensionCount={extensions.length} onCreate={() => setExtensionStudioOpen(true)} />
+        )}
+
+        {loading && filtered.length === 0 ? (
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3 md:grid-cols-2">
+            <Skeleton height={172} />
+            <Skeleton height={172} />
+            <Skeleton height={172} />
           </div>
-        ) : tab === 'collections' ? (
-          filteredCollections.length === 0 ? (
-            collections.length === 0 ? (
-              <EmptyState
-                icon={<FolderTree size={48} />}
-                title="No collections yet"
-                body="Assign workflows to collections from the Workflows page."
-                primaryAction={<Button variant="secondary" size="md" iconLeft={<WorkflowIcon size={14} />} onClick={() => nav('/workflows')}>Open workflows</Button>}
-                variant="page"
-              />
-            ) : (
-              <EmptyState
-                icon={<SearchX size={48} />}
-                title="No matching collections"
-                body="Try adjusting your search."
-                primaryAction={<Button variant="secondary" size="sm" onClick={() => setSearch('')}>Clear search</Button>}
-                variant="page"
-              />
-            )
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {filteredCollections.map((collection) => (
-                <CollectionCard
-                  key={collection.name}
-                  collection={collection}
-                  onOpen={() => nav(`/workflows?collection=${encodeURIComponent(collection.name)}`)}
-                />
-              ))}
-            </div>
-          )
         ) : filtered.length === 0 ? (
-          packages.length === 0 ? (
-            <EmptyState
-              icon={<PackageIcon size={48} />}
-              title="Your library is empty"
-              body="Save apps, workflows, agents, or skills as reusable packages."
-              primaryAction={<Button variant="secondary" size="md" iconLeft={<ArrowDownToLine size={14} />} onClick={() => void handleImport()}>Import</Button>}
-              variant="page"
-            />
-          ) : (
-            <EmptyState
-              icon={<SearchX size={48} />}
-              title="No matching packages"
-              body="Try adjusting your search or category."
-              primaryAction={<Button variant="secondary" size="sm" onClick={() => setSearch('')}>Clear search</Button>}
-              variant="page"
-            />
-          )
+          <EmptyState
+            icon={filter === 'extensions' ? <Puzzle size={48} /> : <SearchX size={48} />}
+            title={search.trim() ? `No matching ${filter === 'all' ? 'items' : filter}` : emptyTitle}
+            body={search.trim() ? 'Try adjusting your search or changing the filter.' : emptyBody}
+            primaryAction={
+              search.trim()
+                ? <Button variant="secondary" size="sm" onClick={() => setSearch('')}>Clear search</Button>
+                : filter === 'extensions'
+                  ? <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setExtensionStudioOpen(true)}>Create extension</Button>
+                  : undefined
+            }
+            variant="page"
+          />
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {filtered.map((p) => (
-              <PackageCard
-                key={p.id}
-                p={p}
-                onExport={() => void handleExport(p)}
-                onDelete={() => void handleDelete(p)}
-                onOpen={() => setOpenPkg(p)}
-                onDuplicate={() => void handleDuplicate(p)}
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3 md:grid-cols-2">
+            {filtered.map((item) => (
+              <LibraryCard
+                key={item.id}
+                item={item}
+                onOpen={() => handleOpenItem(item)}
+                onExportWorkflow={() => void handleExportWorkflow(item.source as WorkflowPackage)}
+                onDuplicateWorkflow={() => void handleDuplicateWorkflow(item.source as WorkflowPackage)}
+                onDeleteWorkflow={() => void handleDeleteWorkflow(item.source as WorkflowPackage)}
               />
             ))}
           </div>
         )}
       </div>
 
-      <NewPackageDialog
-        open={creating}
-        onClose={() => setCreating(false)}
-        onCreated={() => { setCreating(false); void refresh(); }}
-      />
-      {openPkg && (
+      {openWorkflow && (
         <PackageDetailDrawer
-          pkg={openPkg}
-          onClose={() => setOpenPkg(null)}
+          pkg={openWorkflow}
+          onClose={() => setOpenWorkflow(null)}
           onDeleted={() => { void refresh(); }}
           onDuplicated={() => { void refresh(); }}
+        />
+      )}
+      {openExtension && (
+        <ExtensionDetailDrawer
+          extension={openExtension}
+          onClose={() => setOpenExtension(null)}
+          onDeleted={() => {
+            setOpenExtension(null);
+            void refresh();
+          }}
+        />
+      )}
+      {extensionStudioOpen && (
+        <ExtensionStudioModal
+          onClose={() => setExtensionStudioOpen(false)}
+          onCreated={() => {
+            setExtensionStudioOpen(false);
+            setFilter('extensions');
+            setSearch('');
+            void refresh();
+          }}
         />
       )}
     </div>
   );
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-function toggle<T>(set: Set<T>, id: T): Set<T> {
-  const next = new Set(set);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  return next;
-}
-
-function ResourceSection({
-  title, items, selected, onToggle, search, onSearch, loading, icon,
+function FilterTabs({
+  value,
+  counts,
+  onChange,
 }: {
-  title: string;
-  items: { id: string; primary: string; secondary: string }[];
-  selected: Set<string>;
-  onToggle: (id: string) => void;
-  search: string;
-  onSearch: (v: string) => void;
-  loading: boolean;
-  icon: React.ReactNode;
+  value: LibraryFilter;
+  counts: Record<LibraryFilter, number>;
+  onChange: (filter: LibraryFilter) => void;
 }) {
-  return (
-    <div>
-      <div className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-text-secondary">
-        {icon}
-        {title}
-        {selected.size > 0 && (
-          <span className="ml-1 rounded-full bg-accent-soft px-1.5 text-[10px] font-semibold text-accent">
-            {selected.size}
-          </span>
-        )}
-      </div>
-      <input
-        type="text"
-        value={search}
-        onChange={(e) => onSearch(e.target.value)}
-        placeholder={`Search ${title.toLowerCase()}…`}
-        className="mb-2 h-8 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-      />
-      <div className="overflow-y-auto rounded-card border border-line" style={{ maxHeight: '176px' }}>
-        {loading ? (
-          <div className="px-3 py-5 text-center text-[12px] text-text-muted">Loading…</div>
-        ) : items.length === 0 ? (
-          <div className="px-3 py-5 text-center text-[12px] text-text-muted">
-            {search ? 'No matches' : `No ${title.toLowerCase()} yet`}
-          </div>
-        ) : (
-          items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onToggle(item.id)}
-              className={`flex w-full items-center gap-3 border-b border-line px-3 py-2.5 text-left last:border-b-0 transition-colors hover:bg-surface-3 ${
-                selected.has(item.id) ? 'bg-surface-2' : 'bg-surface'
-              }`}
-            >
-              <span
-                className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
-                  selected.has(item.id)
-                    ? 'border-accent bg-accent text-canvas'
-                    : 'border-line bg-surface'
-                }`}
-              >
-                {selected.has(item.id) && <Check size={10} />}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] text-text-primary">{item.primary}</span>
-                <span className="block text-[11px] capitalize text-text-muted">{item.secondary}</span>
-              </span>
-            </button>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── dialog ───────────────────────────────────────────────────────────────────
-
-const KIND_CONFIG = [
-  { value: 'workflow' as const, label: 'Workflow', icon: WorkflowIcon },
-  { value: 'agent'    as const, label: 'Agent',    icon: Bot },
-  { value: 'skill'    as const, label: 'Skill',    icon: Sparkles },
-];
-
-function NewPackageDialog({
-  open, onClose, onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const toast = useToast();
-  const [step, setStep] = useState<'pick' | 'details'>('pick');
-  const [kind, setKind] = useState<Package['kind']>('workflow');
-
-  const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
-  const [agents, setAgents] = useState<AgentItem[]>([]);
-  const [skills, setSkills] = useState<SkillItem[]>([]);
-  const [loadingRes, setLoadingRes] = useState(false);
-
-  const [selWorkflows, setSelWorkflows] = useState<Set<string>>(new Set());
-  const [selAgents, setSelAgents] = useState<Set<string>>(new Set());
-  const [selSkills, setSelSkills] = useState<Set<string>>(new Set());
-
-  const [wSearch, setWSearch] = useState('');
-  const [aSearch, setASearch] = useState('');
-  const [sSearch, setSSearch] = useState('');
-
-  const [name, setName] = useState('');
-  const [version, setVersion] = useState('1.0.0');
-  const [description, setDescription] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    setStep('pick');
-    setKind('workflow');
-    setSelWorkflows(new Set()); setSelAgents(new Set()); setSelSkills(new Set());
-    setWSearch(''); setASearch(''); setSSearch('');
-    setName(''); setVersion('1.0.0'); setDescription('');
-    setLoadingRes(true);
-    void Promise.all([
-      api<{ workflows: WorkflowItem[] }>('/v1/workflows').then((d) => d.workflows ?? []).catch((): WorkflowItem[] => []),
-      api<{ agents: AgentItem[] }>('/v1/agents').then((d) => d.agents ?? []).catch((): AgentItem[] => []),
-      api<{ skills: SkillItem[] }>('/v1/skills').then((d) => d.skills ?? []).catch((): SkillItem[] => []),
-    ]).then(([wf, ag, sk]) => {
-      setWorkflows(wf);
-      setAgents(ag);
-      setSkills(sk);
-    }).finally(() => setLoadingRes(false));
-  }, [open]);
-
-  const showWorkflows = kind === 'workflow';
-  const showAgents    = kind === 'agent';
-  const showSkills    = kind === 'skill';
-
-  const canAdvance =
-    (kind === 'workflow' && selWorkflows.size > 0) ||
-    (kind === 'agent'    && selAgents.size > 0)    ||
-    (kind === 'skill'    && selSkills.size > 0);
-
-  const totalSelected = selWorkflows.size + selAgents.size + selSkills.size;
-
-  function goToDetails() {
-    let suggestion = '';
-    if (kind === 'workflow' && selWorkflows.size > 0) {
-      const titles = workflows.filter((w) => selWorkflows.has(w.id)).map((w) => w.title);
-      suggestion = titles.length === 1 ? (titles[0] ?? '') : `${titles[0] ?? ''} + ${titles.length - 1} more`;
-    } else if (kind === 'agent' && selAgents.size > 0) {
-      const names = agents.filter((a) => selAgents.has(a.id)).map((a) => a.name);
-      suggestion = names.length === 1 ? (names[0] ?? '') : `${names[0] ?? ''} + ${names.length - 1} more`;
-    } else if (kind === 'skill' && selSkills.size > 0) {
-      const names = skills.filter((s) => selSkills.has(s.id)).map((s) => s.name);
-      suggestion = names.length === 1 ? (names[0] ?? '') : `${names[0] ?? ''} + ${names.length - 1} more`;
-    }
-    setName(suggestion);
-    setStep('details');
-  }
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!name.trim() || busy) return;
-    setBusy(true);
-    try {
-      await api('/v1/packages', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: name.trim(),
-          version: version.trim() || '1.0.0',
-          kind,
-          description: description.trim() || undefined,
-          workflowIds: [...selWorkflows],
-          agentIds: [...selAgents],
-          skillIds: [...selSkills],
-        }),
-      });
-      toast.success('Package created', name.trim());
-      onCreated();
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Failed to create package', e.message ?? 'Unknown error');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!open) return null;
-
-  const filteredWorkflows = workflows.filter((w) => w.title.toLowerCase().includes(wSearch.toLowerCase()));
-  const filteredAgents    = agents.filter((a) => a.name.toLowerCase().includes(aSearch.toLowerCase()));
-  const filteredSkills    = skills.filter((s) => s.name.toLowerCase().includes(sSearch.toLowerCase()));
+  const tabs: Array<{ value: LibraryFilter; label: string; icon: ReactNode }> = [
+    { value: 'all', label: 'All', icon: <Boxes size={12} /> },
+    { value: 'agents', label: 'Agents', icon: <Bot size={12} /> },
+    { value: 'abilities', label: 'Abilities', icon: <Zap size={12} /> },
+    { value: 'workflows', label: 'Workflows', icon: <WorkflowIcon size={12} /> },
+    { value: 'extensions', label: 'Extensions', icon: <Puzzle size={12} /> },
+  ];
 
   return (
-    <div
-      className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
-      role="dialog"
-      aria-modal="true"
-    >
-      {step === 'pick' ? (
-        /* ── Step 1: pick type + resources ─────────────────────── */
-        <div className="animate-scale-in flex w-full max-w-lg flex-col rounded-modal border border-line bg-surface shadow-modal">
-          <header className="flex items-center justify-between border-b border-line px-5 py-4">
-            <h3 className="text-heading text-text-primary">New package</h3>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-            >
-              <X size={16} />
-            </button>
-          </header>
-
-          <div
-            className="space-y-5 overflow-y-auto px-5 py-5"
-            style={{ maxHeight: 'calc(100dvh - 180px)' }}
-          >
-            {/* Type selector */}
-            <div>
-              <div className="mb-2 text-[12px] font-medium text-text-secondary">Package type</div>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {KIND_CONFIG.map(({ value, label, icon: Icon }) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => {
-                      setKind(value);
-                      setSelWorkflows(new Set());
-                      setSelAgents(new Set());
-                      setSelSkills(new Set());
-                    }}
-                    className={`flex flex-col items-center gap-1.5 rounded-card border px-2 py-3 text-[12px] font-medium transition-colors ${
-                      kind === value
-                        ? 'border-accent bg-accent-soft text-accent'
-                        : 'border-line bg-surface-2 text-text-secondary hover:border-line-strong hover:text-text-primary'
-                    }`}
-                  >
-                    <Icon size={16} />
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {showWorkflows && (
-              <ResourceSection
-                title="Workflows"
-                items={filteredWorkflows.map((w) => ({ id: w.id, primary: w.title, secondary: w.status ?? 'draft' }))}
-                selected={selWorkflows}
-                onToggle={(id) => setSelWorkflows((s) => toggle(s, id))}
-                search={wSearch}
-                onSearch={setWSearch}
-                loading={loadingRes}
-                icon={<WorkflowIcon size={12} />}
-              />
-            )}
-            {showAgents && (
-              <ResourceSection
-                title="Agents"
-                items={filteredAgents.map((a) => ({ id: a.id, primary: a.name, secondary: a.adapterType }))}
-                selected={selAgents}
-                onToggle={(id) => setSelAgents((s) => toggle(s, id))}
-                search={aSearch}
-                onSearch={setASearch}
-                loading={loadingRes}
-                icon={<Bot size={12} />}
-              />
-            )}
-            {showSkills && (
-              <ResourceSection
-                title="Skills"
-                items={filteredSkills.map((s) => ({ id: s.id, primary: s.name, secondary: `${s.runtime} · v${s.version}` }))}
-                selected={selSkills}
-                onToggle={(id) => setSelSkills((s) => toggle(s, id))}
-                search={sSearch}
-                onSearch={setSSearch}
-                loading={loadingRes}
-                icon={<Sparkles size={12} />}
-              />
-            )}
-          </div>
-
-          <footer className="flex items-center justify-between border-t border-line bg-surface-2 px-5 py-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={!canAdvance}
-              onClick={goToDetails}
-              className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-50"
-            >
-              Next
-              <ChevronRight size={13} />
-            </button>
-          </footer>
-        </div>
-      ) : (
-        /* ── Step 2: name + details ─────────────────────────────── */
-        <form
-          onSubmit={submit}
-          className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal"
+    <div role="tablist" aria-label="Package library filter" className="flex rounded-pill border border-line bg-surface-2 p-1 text-[12px]">
+      {tabs.map((tab) => (
+        <button
+          key={tab.value}
+          type="button"
+          role="tab"
+          aria-selected={value === tab.value}
+          onClick={() => onChange(tab.value)}
+          className={`inline-flex h-7 items-center gap-1.5 rounded-pill px-3 transition-colors ${
+            value === tab.value ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'
+          }`}
         >
-          <header className="flex items-center gap-2 border-b border-line px-5 py-4">
-            <button
-              type="button"
-              onClick={() => setStep('pick')}
-              aria-label="Back"
-              className="-ml-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-            >
-              <ArrowLeft size={15} />
-            </button>
-            <h3 className="text-heading text-text-primary">Name your package</h3>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="-m-1 ml-auto rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-            >
-              <X size={16} />
-            </button>
-          </header>
-
-          <div className="space-y-4 px-5 py-5">
-            <label className="block">
-              <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Name</span>
-              <input
-                autoFocus
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Lead enrichment kit"
-                className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-              />
-            </label>
-
-            <label className="block">
-              <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Version</span>
-              <input
-                type="text"
-                value={version}
-                onChange={(e) => setVersion(e.target.value)}
-                placeholder="1.0.0"
-                className="h-10 w-48 rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-              />
-            </label>
-
-            <label className="block">
-              <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Description (optional)</span>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={2}
-                placeholder="What does this package do?"
-                className="w-full resize-none rounded-input border border-line bg-surface-2 px-3 py-2.5 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-              />
-            </label>
-
-            {totalSelected > 0 && (
-              <div className="rounded-card border border-line bg-surface-2 px-4 py-3">
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Includes</div>
-                <div className="space-y-1.5">
-                  {selWorkflows.size > 0 && (
-                    <div className="flex items-center gap-2 text-[12px] text-text-secondary">
-                      <WorkflowIcon size={11} className="text-text-muted" />
-                      {selWorkflows.size} workflow{selWorkflows.size > 1 ? 's' : ''}
-                    </div>
-                  )}
-                  {selAgents.size > 0 && (
-                    <div className="flex items-center gap-2 text-[12px] text-text-secondary">
-                      <Bot size={11} className="text-text-muted" />
-                      {selAgents.size} agent{selAgents.size > 1 ? 's' : ''}
-                    </div>
-                  )}
-                  {selSkills.size > 0 && (
-                    <div className="flex items-center gap-2 text-[12px] text-text-secondary">
-                      <Sparkles size={11} className="text-text-muted" />
-                      {selSkills.size} skill{selSkills.size > 1 ? 's' : ''}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={!name.trim() || busy}
-              className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
-            >
-              {busy ? 'Creating…' : 'Create package'}
-            </button>
-          </footer>
-        </form>
-      )}
+          {tab.icon}
+          {tab.label}
+          <span className="rounded-pill border border-line bg-surface px-1.5 py-0.5 text-[10px] leading-none text-text-muted">
+            {counts[tab.value]}
+          </span>
+        </button>
+      ))}
     </div>
   );
 }
 
-function PackageCard({ p, onExport, onDelete, onOpen, onDuplicate }: {
-  p: Package;
+function ExtensionStudioIntro({ extensionCount, onCreate }: { extensionCount: number; onCreate: () => void }) {
+  return (
+    <section className="mb-4 overflow-hidden rounded-card border border-line bg-surface">
+      <div className="grid gap-0 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="p-5">
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-accent">
+            <ShieldCheck size={12} /> Extension runtime
+          </div>
+          <h2 className="mt-2 text-heading text-text-primary">Sandboxed code, explicit permissions, reusable workflow nodes.</h2>
+          <p className="mt-2 max-w-2xl text-[13px] leading-5 text-text-secondary">
+            Extensions are deterministic capability units: typed inputs, declared permissions, structured outputs, and workflow-ready execution.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Pill icon={<Puzzle size={11} />} label={`${extensionCount} installed`} />
+            <Pill icon={<Code2 size={11} />} label="node_worker local authoring" />
+            <Pill icon={<FileJson size={11} />} label="manifest-backed" />
+          </div>
+        </div>
+        <div className="border-t border-line bg-canvas/35 p-5 lg:border-l lg:border-t-0">
+          <div className="grid grid-cols-2 gap-2">
+            {PERMISSIONS.slice(0, 4).map((permission) => {
+              const Icon = permission.icon;
+              return (
+                <div key={permission.value} className={`rounded-card border px-3 py-2.5 ${permission.tone}`}>
+                  <Icon size={14} />
+                  <div className="mt-2 text-[12px] font-semibold">{permission.label}</div>
+                  <div className="mt-0.5 line-clamp-2 text-[11px] opacity-80">{permission.description}</div>
+                </div>
+              );
+            })}
+          </div>
+          <Button className="mt-3 w-full" variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={onCreate}>
+            Create local extension
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Pill({ icon, label }: { icon: ReactNode; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-pill border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-text-secondary">
+      {icon}
+      {label}
+    </span>
+  );
+}
+
+function LibraryCard({
+  item,
+  onOpen,
+  onExportWorkflow,
+  onDuplicateWorkflow,
+  onDeleteWorkflow,
+}: {
+  item: LibraryItem;
+  onOpen: () => void;
+  onExportWorkflow: () => void;
+  onDuplicateWorkflow: () => void;
+  onDeleteWorkflow: () => void;
+}) {
+  if (item.kind === 'extension') {
+    return <ExtensionCard extension={item.source as WorkspaceExtension} onOpen={onOpen} />;
+  }
+  if (item.kind === 'ability') {
+    return <AbilityCard ability={item.source as Ability} onOpen={onOpen} />;
+  }
+  if (item.kind === 'agent') {
+    return (
+      <AgentPackageCard
+        p={item.source as WorkflowPackage}
+        onOpen={onOpen}
+        onExport={onExportWorkflow}
+        onDuplicate={onDuplicateWorkflow}
+        onDelete={onDeleteWorkflow}
+      />
+    );
+  }
+  return (
+    <WorkflowPackageCard
+      p={item.source as WorkflowPackage}
+      onOpen={onOpen}
+      onExport={onExportWorkflow}
+      onDuplicate={onDuplicateWorkflow}
+      onDelete={onDeleteWorkflow}
+    />
+  );
+}
+
+function ExtensionCard({ extension, onOpen }: { extension: WorkspaceExtension; onOpen: () => void }) {
+  const permissions = extension.manifest.permissions ?? [];
+  const operationCount = extension.manifest.operations?.length ?? 1;
+  return (
+    <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-emerald-400/20 bg-emerald-500/10 text-emerald-300">
+          <Puzzle size={17} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+              {extension.name || extension.slug}
+            </button>
+            <span className="rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">
+              {extension.runtime}
+            </span>
+          </div>
+          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{extension.slug}{extension.version ? `@${extension.version}` : ''}</div>
+          <div className="mt-2 inline-flex rounded-pill border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">
+            {operationCount} {operationCount === 1 ? 'operation' : 'operations'}
+          </div>
+          {extension.manifest.description && (
+            <div className="mt-2 line-clamp-2 text-[12px] leading-5 text-text-secondary">{extension.manifest.description}</div>
+          )}
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {permissions.length > 0 ? permissions.slice(0, 4).map((permission) => (
+          <PermissionBadge key={permission} permission={permission} />
+        )) : (
+          <span className="rounded-pill border border-line bg-surface-2 px-2 py-1 text-[11px] text-text-muted">no permissions</span>
+        )}
+        {permissions.length > 4 && <span className="text-[11px] text-text-muted">+{permissions.length - 4}</span>}
+      </div>
+      <div className="mt-4 flex items-center gap-2">
+        <Button variant="secondary" size="sm" iconLeft={<FileJson size={12} />} onClick={onOpen}>Inspect</Button>
+        <button
+          type="button"
+          onClick={() => void navigator.clipboard?.writeText(extension.slug)}
+          className="inline-flex h-8 items-center gap-1.5 rounded-btn px-2.5 text-[12px] text-text-muted hover:bg-surface-3 hover:text-text-primary"
+        >
+          <Copy size={12} /> Slug
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function AbilityCard({ ability, onOpen }: { ability: Ability; onOpen: () => void }) {
+  const tone = compileStatusTone(ability.compileStatus);
+  const badgeTone = tone === 'green' ? 'accent' : tone === 'amber' ? 'warn' : tone === 'red' ? 'danger' : 'muted';
+  return (
+    <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-amber-400/20 bg-amber-500/10 text-[16px]">
+          {ability.iconEmoji ?? '\u26A1'}
+        </span>
+        <div className="min-w-0 flex-1">
+          <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+            {ability.name}
+          </button>
+          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{ability.slug}{ability.version ? `@${ability.version}` : ''}</div>
+          {ability.description && (
+            <div className="mt-2 line-clamp-2 text-[12px] leading-5 text-text-secondary">{ability.description}</div>
+          )}
+        </div>
+        <StatusBadge
+          tone={badgeTone as 'accent' | 'warn' | 'danger' | 'muted'}
+          label={compileStatusLabel(ability.compileStatus)}
+          pulse={ability.compileStatus === 'compiling'}
+          size="sm"
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {ability.domainTag && <Pill icon={<Sparkles size={11} />} label={ability.domainTag.replace(/_/g, ' ')} />}
+        <Pill icon={<FileJson size={11} />} label={`${ability.exampleCount} examples`} />
+        <Pill icon={<Database size={11} />} label={`${ability.knowledgeCount} knowledge`} />
+      </div>
+      <div className="mt-4">
+        <Button variant="secondary" size="sm" iconLeft={<Zap size={12} />} onClick={onOpen}>Open ability</Button>
+      </div>
+    </article>
+  );
+}
+
+function WorkflowPackageCard({
+  p,
+  onExport,
+  onDelete,
+  onOpen,
+  onDuplicate,
+}: {
+  p: WorkflowPackage;
   onExport: () => void;
   onDelete: () => void;
   onOpen: () => void;
   onDuplicate: () => void;
 }) {
-  const Icon = TYPE_ICONS[p.kind];
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
+    <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
       <div className="flex items-start gap-3">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card bg-surface-2 text-text-secondary">
-          <Icon size={16} />
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-sky-400/20 bg-sky-500/10 text-sky-300">
+          <WorkflowIcon size={16} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-subheading text-text-primary">{p.name}</div>
-          <div className="mt-0.5 text-[11px] capitalize text-text-muted">
-            {p.kind}{p.version ? ` · v${p.version}` : ''}{p.isTemplate ? ' · template' : ''}
-          </div>
+          <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+            {p.name}
+          </button>
+          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{p.slug}{p.version ? `@${p.version}` : ''}</div>
           {p.description && <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">{p.description}</div>}
         </div>
         <div className="relative">
@@ -804,10 +775,7 @@ function PackageCard({ p, onExport, onDelete, onOpen, onDuplicate }: {
             <MoreHorizontal size={14} />
           </button>
           {menuOpen && (
-            <div
-              onMouseLeave={() => setMenuOpen(false)}
-              className="absolute right-0 z-10 mt-1 w-44 rounded-card border border-line bg-surface shadow-dropdown"
-            >
+            <div onMouseLeave={() => setMenuOpen(false)} className="absolute right-0 z-10 mt-1 w-44 rounded-card border border-line bg-surface shadow-dropdown">
               <MenuItem icon={<Edit3 size={12} />} onClick={() => { setMenuOpen(false); onOpen(); }}>Open</MenuItem>
               <MenuItem icon={<Copy size={12} />} onClick={() => { setMenuOpen(false); onDuplicate(); }}>Duplicate</MenuItem>
               <MenuItem icon={<ArrowUpFromLine size={12} />} onClick={() => { setMenuOpen(false); onExport(); }}>Export</MenuItem>
@@ -817,40 +785,110 @@ function PackageCard({ p, onExport, onDelete, onOpen, onDuplicate }: {
           )}
         </div>
       </div>
-      <div className="mt-3 flex gap-1.5">
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Pill icon={<WorkflowIcon size={11} />} label="workflow package" />
+      </div>
+      <div className="mt-4 flex gap-1.5">
         <Button variant="secondary" size="sm" onClick={onOpen}>Open</Button>
         <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={11} />} onClick={onExport}>Export</Button>
       </div>
-    </div>
+    </article>
   );
 }
 
-function CollectionCard({ collection, onOpen }: { collection: WorkflowCollection; onOpen: () => void }) {
+function AgentPackageCard({
+  p,
+  onExport,
+  onDelete,
+  onOpen,
+  onDuplicate,
+}: {
+  p: WorkflowPackage;
+  onExport: () => void;
+  onDelete: () => void;
+  onOpen: () => void;
+  onDuplicate: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const normRole = (p.role ?? 'worker').toLowerCase();
+  const roleLabel = normRole === 'orchestrator' ? 'Orchestrator'
+    : normRole === 'manager' ? 'Manager'
+    : 'Specialist';
+
+  const roleColorTone = normRole === 'orchestrator' ? 'text-violet-300 bg-violet-500/10 border-violet-400/20'
+    : normRole === 'manager' ? 'text-sky-300 bg-sky-500/10 border-sky-400/20'
+    : 'text-emerald-300 bg-emerald-500/10 border-emerald-400/20';
+
   return (
-    <div className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
+    <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
       <div className="flex items-start gap-3">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card bg-surface-2 text-text-secondary">
-          <FolderTree size={16} />
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-violet-400/20 bg-violet-500/10 text-violet-300">
+          <Bot size={17} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-subheading text-text-primary">{collection.name}</div>
-          <div className="mt-0.5 text-[11px] text-text-muted">
-            {collection.count} workflow{collection.count === 1 ? '' : 's'}
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+              {p.name}
+            </button>
+            <span className={`rounded-pill border px-1.5 py-0.5 text-[10px] ${roleColorTone}`}>
+              {roleLabel}
+            </span>
           </div>
-          <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">
-            Drop this collection onto an app canvas to connect its workflows as a group.
-          </div>
+          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{p.slug}{p.version ? `@${p.version}` : ''}</div>
+          {p.description && <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">{p.description}</div>}
+        </div>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label="Actions"
+            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-3 hover:text-text-primary"
+          >
+            <MoreHorizontal size={14} />
+          </button>
+          {menuOpen && (
+            <div onMouseLeave={() => setMenuOpen(false)} className="absolute right-0 z-10 mt-1 w-44 rounded-card border border-line bg-surface shadow-dropdown">
+              <MenuItem icon={<Edit3 size={12} />} onClick={() => { setMenuOpen(false); onOpen(); }}>Open</MenuItem>
+              <MenuItem icon={<Copy size={12} />} onClick={() => { setMenuOpen(false); onDuplicate(); }}>Duplicate</MenuItem>
+              <MenuItem icon={<ArrowUpFromLine size={12} />} onClick={() => { setMenuOpen(false); onExport(); }}>Export</MenuItem>
+              <div className="my-1 border-t border-line" />
+              <MenuItem icon={<Trash2 size={12} />} danger onClick={() => { setMenuOpen(false); onDelete(); }}>Delete</MenuItem>
+            </div>
+          )}
         </div>
       </div>
-      <div className="mt-3 flex gap-1.5">
-        <Button variant="secondary" size="sm" onClick={onOpen}>Open workflows</Button>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Pill icon={<Bot size={11} />} label="agent package" />
       </div>
-    </div>
+      <div className="mt-4 flex gap-1.5">
+        <Button variant="secondary" size="sm" onClick={onOpen}>Open</Button>
+        <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={11} />} onClick={onExport}>Export</Button>
+      </div>
+    </article>
   );
 }
 
-function MenuItem({ icon, danger, onClick, children }: {
-  icon?: React.ReactNode; danger?: boolean; onClick: () => void; children: React.ReactNode;
+function PermissionBadge({ permission }: { permission: string }) {
+  const meta = PERMISSIONS.find((p) => p.value === permission);
+  const Icon = meta?.icon ?? ShieldCheck;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-pill border px-2 py-1 text-[11px] ${meta?.tone ?? 'border-line bg-surface-2 text-text-muted'}`}>
+      <Icon size={10} />
+      {meta?.label ?? permission}
+    </span>
+  );
+}
+
+function MenuItem({
+  icon,
+  danger,
+  onClick,
+  children,
+}: {
+  icon?: ReactNode;
+  danger?: boolean;
+  onClick: () => void;
+  children: ReactNode;
 }) {
   return (
     <button
@@ -866,12 +904,203 @@ function MenuItem({ icon, danger, onClick, children }: {
   );
 }
 
-// ── PackageDetailDrawer ───────────────────────────────────────────────────────
+function ExtensionDetailDrawer({
+  extension,
+  onClose,
+  onDeleted,
+}: {
+  extension: WorkspaceExtension;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const permissions = extension.manifest.permissions ?? [];
+  const operations = extension.manifest.operations?.length
+    ? extension.manifest.operations
+    : [{ name: 'execute', description: 'Default operation', inputSchema: {}, outputSchema: {} }];
+
+  async function deleteExtension() {
+    const ok = await confirm({
+      title: `Uninstall "${extension.name}"?`,
+      body: 'Workflow nodes that reference this extension will need a replacement before they can run.',
+      confirmLabel: 'Uninstall',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await api(`/v1/extensions/${extension.id}`, { method: 'DELETE' });
+      toast.success('Extension uninstalled', extension.name);
+      onDeleted();
+    } catch (err) {
+      toast.error('Uninstall failed', apiErrorMessage(err));
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[55] bg-overlay-soft" onClick={onClose} />
+      <div className="animate-slide-in-right fixed inset-y-0 right-0 z-[56] flex w-full max-w-xl flex-col border-l border-line bg-surface shadow-modal">
+        <div className="flex items-start gap-3 border-b border-line px-5 py-4">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-emerald-400/20 bg-emerald-500/10 text-emerald-300">
+            <Puzzle size={18} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-heading text-text-primary">{extension.name || extension.slug}</div>
+            <div className="mt-0.5 font-mono text-[11px] text-text-muted">{extension.slug}@{extension.version}</div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <div className="space-y-5">
+            {extension.manifest.description && <p className="text-[13px] leading-5 text-text-secondary">{extension.manifest.description}</p>}
+
+            <section>
+              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                <ShieldCheck size={10} /> Permissions
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {permissions.length > 0 ? permissions.map((permission) => (
+                  <PermissionBadge key={permission} permission={permission} />
+                )) : (
+                  <span className="rounded-pill border border-line bg-surface-2 px-2 py-1 text-[11px] text-text-muted">no permissions</span>
+                )}
+              </div>
+            </section>
+
+            <section className="grid grid-cols-2 gap-2">
+              <Metric label="Runtime" value={extension.runtime} />
+              <Metric label="Timeout" value={`${extension.manifest.timeoutMs ?? 30000}ms`} />
+              <Metric label="Operations" value={String(operations.length)} />
+              <Metric label="Allowed domains" value={String(extension.manifest.allowedDomains?.length ?? 0)} />
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                <Boxes size={10} /> Operations
+              </div>
+              <div className="space-y-2">
+                {operations.map((operation) => (
+                  <div key={operation.name} className="rounded-card border border-line bg-surface-2 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-mono text-[12px] font-semibold text-text-primary">{operation.name}</div>
+                      <span className="rounded-pill border border-line bg-surface px-2 py-0.5 text-[10px] text-text-muted">
+                        {schemaType(JSON.stringify(operation.inputSchema))} → {schemaType(JSON.stringify(operation.outputSchema))}
+                      </span>
+                    </div>
+                    {operation.description && (
+                      <p className="mt-1 text-[12px] leading-5 text-text-secondary">{operation.description}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <ExtensionTestConsole extension={extension} operations={operations} />
+
+            <section>
+              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                <Terminal size={10} /> Source
+              </div>
+              <pre className="max-h-72 overflow-auto rounded-card border border-line bg-canvas p-3 text-[11px] leading-5 text-text-secondary">
+                {extension.manifest.source ?? '// source not stored on manifest'}
+              </pre>
+            </section>
+
+            <section className="grid gap-3 md:grid-cols-2">
+              <SchemaBlock title="Input schema" value={operations[0]?.inputSchema ?? {}} />
+              <SchemaBlock title="Output schema" value={operations[0]?.outputSchema ?? {}} />
+            </section>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <Button variant="secondary" size="sm" iconLeft={<Copy size={12} />} onClick={() => void navigator.clipboard?.writeText(extension.slug)}>
+            Copy slug
+          </Button>
+          <button
+            type="button"
+            onClick={() => void deleteExtension()}
+            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-btn px-2.5 text-[12px] font-medium text-danger hover:bg-danger-soft"
+          >
+            <Trash2 size={12} />
+            Uninstall
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ExtensionTestConsole({
+  extension,
+  operations,
+}: {
+  extension: WorkspaceExtension;
+  operations: ExtensionOperation[];
+}) {
+  const [operationName, setOperationName] = useState(operations[0]?.name ?? 'execute');
+  const [input, setInput] = useState('{\n  "url": "https://example.com"\n}');
+  const [result, setResult] = useState<unknown>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setRunning(true);
+    setError(null);
+    setResult(null);
+    try {
+      const parsed = JSON.parse(input) as Record<string, unknown>;
+      const response = await api<{ result: unknown }>(`/v1/extensions/${extension.id}/test`, {
+        method: 'POST',
+        body: JSON.stringify({ operationName, input: parsed }),
+      });
+      setResult(response.result);
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <section>
+      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+        <Terminal size={10} /> Test console
+      </div>
+      <div className="rounded-card border border-line bg-surface-2 p-3">
+        <div className="grid gap-2 md:grid-cols-[160px_1fr]">
+          <select className={INPUT_CLS} value={operationName} onChange={(event) => setOperationName(event.target.value)}>
+            {operations.map((operation) => (
+              <option key={operation.name} value={operation.name}>{operation.name}</option>
+            ))}
+          </select>
+          <Button variant="secondary" size="sm" iconLeft={<Zap size={12} />} loading={running} onClick={() => void run()}>
+            Run test
+          </Button>
+        </div>
+        <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={5} className={`${CODE_TEXTAREA_CLS} mt-2`} spellCheck={false} />
+        {error && <div className="mt-2 rounded-card border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-danger">{error}</div>}
+        {result !== null && (
+          <pre className="mt-2 max-h-56 overflow-auto rounded-card border border-line bg-canvas p-3 text-[11px] leading-5 text-text-secondary">
+            {JSON.stringify(result, null, 2)}
+          </pre>
+        )}
+      </div>
+    </section>
+  );
+}
 
 function PackageDetailDrawer({
-  pkg, onClose, onDeleted, onDuplicated,
+  pkg,
+  onClose,
+  onDeleted,
+  onDuplicated,
 }: {
-  pkg: Package;
+  pkg: WorkflowPackage;
   onClose: () => void;
   onDeleted: () => void;
   onDuplicated: () => void;
@@ -894,13 +1123,8 @@ function PackageDetailDrawer({
 
   async function drawerExport() {
     if (!detail) return;
-    const blob = new Blob([JSON.stringify(detail.package.manifest, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${detail.package.slug}.agentis`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const ext = detail.package.kind === 'agent' ? 'agentisagt' : 'agentis';
+    downloadJson(detail.package.manifest, `${detail.package.slug}.${ext}`);
     toast.success('Exported', detail.package.name);
   }
 
@@ -912,9 +1136,8 @@ function PackageDetailDrawer({
       toast.success('Duplicated', `Copy of ${detail.package.name}`);
       onDuplicated();
       onClose();
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Duplicate failed', e.message ?? 'Unknown error');
+    } catch (err) {
+      toast.error('Duplicate failed', apiErrorMessage(err));
     } finally {
       setDuplicating(false);
     }
@@ -928,95 +1151,78 @@ function PackageDetailDrawer({
       tone: 'danger',
     });
     if (!ok) return;
-    const mfst = detail ? (detail.package.manifest as Record<string, unknown>) : null;
-    const isLibraryPkg = mfst && 'contents' in mfst && 'checksum' in mfst;
-    const src = mfst && !isLibraryPkg
-      ? (mfst['sourceIds'] as { workflowIds?: string[]; agentIds?: string[]; skillIds?: string[] } | undefined) ?? {}
-      : {};
-    const snapshot = detail && !isLibraryPkg
-      ? { name: detail.package.name, version: detail.package.version, kind: detail.package.kind, description: detail.package.description, workflowIds: src.workflowIds ?? [], agentIds: src.agentIds ?? [], skillIds: src.skillIds ?? [] }
-      : null;
+
+    const manifest = detail ? (detail.package.manifest as Record<string, unknown>) : null;
     try {
       await api(`/v1/packages/${pkg.id}`, { method: 'DELETE' });
       onClose();
       onDeleted();
       toast.undo(`Deleted "${pkg.name}"`, async () => {
         try {
-          if (isLibraryPkg && mfst) {
-            await api('/v1/packages/import', { method: 'POST', body: JSON.stringify({ manifest: mfst }) });
-          } else if (snapshot) {
-            await api('/v1/packages', { method: 'POST', body: JSON.stringify(snapshot) });
+          if (manifest) {
+            await api('/v1/packages/import', { method: 'POST', body: JSON.stringify({ manifest }) });
           }
           toast.success('Restored', pkg.name);
           onDeleted();
-        } catch { toast.error('Could not restore', pkg.name); }
+        } catch {
+          toast.error('Could not restore', pkg.name);
+        }
       });
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error('Delete failed', e.message ?? 'Unknown error');
+    } catch (err) {
+      toast.error('Delete failed', apiErrorMessage(err));
     }
   }
 
-  const Icon = TYPE_ICONS[pkg.kind];
-  const totalItems = (detail?.workflows.length ?? 0)
-    + (detail?.agents.length ?? 0)
-    + (detail?.skills.length ?? 0);
+  const totalItems = (detail?.workflows.length ?? 0) + (detail?.agents?.length ?? 0);
 
   return (
     <>
-      {/* Backdrop */}
-      <div className="fixed inset-0 z-[55] bg-black/40" onClick={onClose} />
-      {/* Panel */}
+      <div className="fixed inset-0 z-[55] bg-overlay-soft" onClick={onClose} />
       <div className="animate-slide-in-right fixed inset-y-0 right-0 z-[56] flex w-full max-w-md flex-col border-l border-line bg-surface shadow-modal">
-        {/* Header */}
         <div className="flex items-start gap-3 border-b border-line px-5 py-4">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card bg-surface-2 text-text-secondary">
-            <Icon size={18} />
-          </span>
+          {pkg.kind === 'agent' ? (
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-violet-400/20 bg-violet-500/10 text-violet-300">
+              <Bot size={18} />
+            </span>
+          ) : (
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-sky-400/20 bg-sky-500/10 text-sky-300">
+              <WorkflowIcon size={18} />
+            </span>
+          )}
           <div className="min-w-0 flex-1">
             <div className="text-heading text-text-primary">{pkg.name}</div>
-            <div className="mt-0.5 text-[11px] capitalize text-text-muted">
-              {pkg.kind}{pkg.version ? ` · v${pkg.version}` : ''}
-            </div>
+            <div className="mt-0.5 font-mono text-[11px] text-text-muted">{pkg.slug}{pkg.version ? `@${pkg.version}` : ''}</div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-          >
+          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
             <X size={16} />
           </button>
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {loading ? (
             <div className="space-y-3">
-              <Skeleton height={20} /><Skeleton height={80} /><Skeleton height={80} />
+              <Skeleton height={20} />
+              <Skeleton height={80} />
             </div>
           ) : (
             <div className="space-y-5">
-              {pkg.description && (
-                <p className="text-[13px] text-text-secondary">{pkg.description}</p>
-              )}
-
+              {pkg.description && <p className="text-[13px] text-text-secondary">{pkg.description}</p>}
               {(detail?.workflows.length ?? 0) > 0 && (
                 <section>
                   <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
                     <WorkflowIcon size={10} /> Workflows
                   </div>
                   <div className="space-y-1">
-                    {detail!.workflows.map((w) => (
-                      <div key={w.id} className="flex items-center justify-between rounded-card border border-line bg-surface-2 px-3 py-2.5">
-                        <span className="text-[13px] text-text-primary">{w.title}</span>
-                        {w.id && !w.id.startsWith('pkg:') && (
+                    {detail!.workflows.map((workflow) => (
+                      <div key={workflow.id} className="flex items-center justify-between rounded-card border border-line bg-surface-2 px-3 py-2.5">
+                        <span className="text-[13px] text-text-primary">{workflow.title}</span>
+                        {workflow.id && !workflow.id.startsWith('pkg:') && (
                           <button
                             type="button"
-                            onClick={() => { onClose(); nav(`/workflows/${w.id}`); }}
+                            onClick={() => { onClose(); nav(`/workflows/${workflow.id}`); }}
                             className="text-[11px] font-medium text-accent hover:underline"
                           >
-                            Open canvas →
+                            Open canvas
                           </button>
                         )}
                       </div>
@@ -1024,26 +1230,22 @@ function PackageDetailDrawer({
                   </div>
                 </section>
               )}
-
-              {(detail?.agents.length ?? 0) > 0 && (
+              {detail?.package?.kind === 'agent' && detail?.agents && detail.agents.length > 0 && (
                 <section>
                   <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
                     <Bot size={10} /> Agents
                   </div>
                   <div className="space-y-1">
-                    {detail!.agents.map((a) => (
-                      <div key={a.id} className="flex items-center justify-between rounded-card border border-line bg-surface-2 px-3 py-2.5">
-                        <div>
-                          <span className="text-[13px] text-text-primary">{a.name}</span>
-                          <span className="ml-2 text-[11px] text-text-muted">{harnessLabel(a.adapterType)}</span>
-                        </div>
-                        {a.id && !a.id.startsWith('pkg:') && (
+                    {detail.agents.map((agent) => (
+                      <div key={agent.id} className="flex items-center justify-between rounded-card border border-line bg-surface-2 px-3 py-2.5">
+                        <span className="text-[13px] text-text-primary">{agent.name}</span>
+                        {agent.id && (
                           <button
                             type="button"
-                            onClick={() => { onClose(); nav(`/agents/${a.id}`); }}
+                            onClick={() => { onClose(); nav(`/agents/${agent.id}`); }}
                             className="text-[11px] font-medium text-accent hover:underline"
                           >
-                            Open →
+                            Open agent
                           </button>
                         )}
                       </div>
@@ -1051,57 +1253,23 @@ function PackageDetailDrawer({
                   </div>
                 </section>
               )}
-
-              {(detail?.skills.length ?? 0) > 0 && (
-                <section>
-                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                    <Sparkles size={10} /> Skills
-                  </div>
-                  <div className="space-y-1">
-                    {detail!.skills.map((s) => (
-                      <div key={s.id} className="rounded-card border border-line bg-surface-2 px-3 py-2.5">
-                        <span className="text-[13px] text-text-primary">{s.name}</span>
-                        <span className="ml-2 text-[11px] capitalize text-text-muted">{s.runtime} · v{s.version}</span>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
               {!loading && totalItems === 0 && (
                 <div className="rounded-card border border-line bg-surface-2 px-4 py-8 text-center text-[12px] text-text-muted">
-                  No linked resources in this package.
+                  No linked items in this package.
                 </div>
               )}
             </div>
           )}
         </div>
 
-        {/* Footer */}
         <div className="flex items-center gap-2 border-t border-line bg-surface-2 px-5 py-3">
-          <Button
-            variant="secondary"
-            size="sm"
-            iconLeft={<Copy size={12} />}
-            onClick={() => void drawerDuplicate()}
-            disabled={!detail || duplicating}
-          >
-            {duplicating ? 'Duplicating…' : 'Duplicate'}
+          <Button variant="secondary" size="sm" iconLeft={<Copy size={12} />} onClick={() => void drawerDuplicate()} disabled={!detail || duplicating}>
+            {duplicating ? 'Duplicating...' : 'Duplicate'}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            iconLeft={<ArrowUpFromLine size={12} />}
-            onClick={() => void drawerExport()}
-            disabled={!detail}
-          >
+          <Button variant="secondary" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => void drawerExport()} disabled={!detail}>
             Export
           </Button>
-          <button
-            type="button"
-            onClick={() => void drawerDelete()}
-            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-btn px-2.5 text-[12px] font-medium text-danger hover:bg-danger-soft"
-          >
+          <button type="button" onClick={() => void drawerDelete()} className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-btn px-2.5 text-[12px] font-medium text-danger hover:bg-danger-soft">
             <Trash2 size={12} />
             Delete
           </button>
@@ -1111,14 +1279,102 @@ function PackageDetailDrawer({
   );
 }
 
-function harnessLabel(adapterType: string) {
-  switch (adapterType) {
-    case 'openclaw': return 'OpenClaw';
-    case 'hermes_agent': return 'Hermes Agent';
-    case 'claude_code': return 'Claude Code';
-    case 'codex': return 'Codex';
-    case 'cursor': return 'Cursor';
-    case 'http': return 'HTTP / Webhook';
-    default: return 'Harness';
+function Field({
+  label,
+  children,
+  className = '',
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={`block ${className}`}>
+      <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-text-muted">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function PreviewRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-text-muted">{label}</span>
+      <span className={`truncate text-text-primary ${mono ? 'font-mono' : ''}`}>{value}</span>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-card border border-line bg-surface-2 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-text-muted">{label}</div>
+      <div className="mt-1 truncate text-[13px] font-semibold text-text-primary">{value}</div>
+    </div>
+  );
+}
+
+function SchemaBlock({ title, value }: { title: string; value: Record<string, unknown> }) {
+  return (
+    <section>
+      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+        <FileJson size={10} /> {title}
+      </div>
+      <pre className="max-h-44 overflow-auto rounded-card border border-line bg-canvas p-3 text-[11px] leading-5 text-text-secondary">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    </section>
+  );
+}
+
+function downloadJson(value: unknown, fileName: string) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function splitList(value: string): string[] {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function slugify(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+
+function schemaType(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as { type?: unknown };
+    return typeof parsed.type === 'string' ? parsed.type : 'object';
+  } catch {
+    return 'invalid';
   }
 }
+
+function pluralKind(kind: LibraryKind): Exclude<LibraryFilter, 'all'> {
+  if (kind === 'agent') return 'agents';
+  if (kind === 'ability') return 'abilities';
+  if (kind === 'workflow') return 'workflows';
+  return 'extensions';
+}
+
+const INPUT_CLS =
+  'w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent';
+
+const TEXTAREA_CLS =
+  'w-full resize-none rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] leading-5 text-text-primary placeholder:text-text-muted outline-none focus:border-accent';
+
+const CODE_TEXTAREA_CLS =
+  'w-full resize-none rounded-input border border-line bg-canvas px-3 py-2 font-mono text-[12px] leading-5 text-text-primary placeholder:text-text-muted outline-none focus:border-accent';

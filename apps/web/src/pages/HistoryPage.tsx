@@ -11,7 +11,7 @@ import {
   Clock, SearchX, Eye, RotateCcw, ArrowRight, AlertTriangle, Check, X, Bot,
 } from 'lucide-react';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { api, workspace as wsStore } from '../lib/api';
+import { api, apiErrorMessage, workspace as wsStore } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
 import { useToast } from '../components/shared/Toast';
 import { Tabs } from '../components/shared/Tabs';
@@ -134,7 +134,7 @@ export function HistoryPage() {
 
   async function handleRetry(runId: string) {
     try { await api(`/v1/runs/${runId}/retry`, { method: 'POST' }); toast.success('Retry started'); void refresh(); }
-    catch (e) { toast.error('Retry failed', String(e)); }
+    catch (e) { toast.error('Retry failed', apiErrorMessage(e)); }
   }
 
   return (

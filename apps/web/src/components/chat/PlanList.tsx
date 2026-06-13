@@ -1,6 +1,6 @@
-import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
+import { ArrowUpRight, CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
 import clsx from 'clsx';
-import type { ToolCallPillData } from '../ChatPanel/ToolCallPill';
+import type { ToolCallData } from './toolCalls';
 
 export interface ParsedPlan {
   before: string;
@@ -13,7 +13,10 @@ export interface PlanItemView {
   status: 'pending' | 'running' | 'done' | 'failed';
 }
 
-export function extractPlan(text: string): ParsedPlan | null {
+function extractNumberedList(
+  text: string,
+  matchesContext: (beforeLines: string[]) => boolean,
+): ParsedPlan | null {
   const lines = text.split(/\r?\n/);
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
@@ -35,7 +38,7 @@ export function extractPlan(text: string): ParsedPlan | null {
   if (items.length < 2) return null;
 
   const beforeLines = lines.slice(0, start);
-  if (/^\s*plan\s*:?\s*$/i.test(beforeLines.at(-1) ?? '')) beforeLines.pop();
+  if (!matchesContext(beforeLines)) return null;
 
   return {
     before: beforeLines.join('\n').trim(),
@@ -44,9 +47,25 @@ export function extractPlan(text: string): ParsedPlan | null {
   };
 }
 
+export function extractPlan(text: string): ParsedPlan | null {
+  return extractNumberedList(text, (beforeLines) => {
+    const marker = beforeLines.at(-1) ?? '';
+    if (!/^\s*(?:execution\s+)?plan\s*:?\s*$/i.test(marker)) return false;
+    beforeLines.pop();
+    return true;
+  });
+}
+
+export function extractSuggestions(text: string): ParsedPlan | null {
+  return extractNumberedList(text, (beforeLines) => {
+    const context = beforeLines.join('\n').trim().slice(-240);
+    return /(?:if you (?:want|would like)|if you'd like|i can next|try next|next steps?|you can next)\s*:?\s*$/i.test(context);
+  });
+}
+
 export function derivePlanItems(
   labels: string[],
-  toolCalls: ToolCallPillData[] = [],
+  toolCalls: ToolCallData[] = [],
   streaming = false,
 ): PlanItemView[] {
   const successful = toolCalls.filter((call) => call.status === 'success').length;
@@ -96,6 +115,39 @@ export function PlanList({ items }: { items: PlanItemView[] }) {
             )}>
               {item.label}
             </span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+export function SuggestionList({
+  items,
+  onSelect,
+}: {
+  items: string[];
+  onSelect?: (suggestion: string) => void;
+}) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-3 overflow-hidden rounded-xl border border-line/50 bg-canvas/35 text-[12px] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+      <div className="border-b border-line/30 px-3 py-2 text-[9.5px] font-semibold uppercase tracking-[0.15em] text-text-secondary">
+        Try next
+      </div>
+      <ol className="divide-y divide-line/20">
+        {items.map((item, index) => (
+          <li key={`${index}-${item}`}>
+            <button
+              type="button"
+              onClick={() => onSelect?.(item)}
+              disabled={!onSelect}
+              className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left text-text-secondary transition hover:bg-surface-2/60 hover:text-text-primary disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-text-secondary"
+            >
+              <ArrowUpRight size={13} className="mt-0.5 shrink-0 text-accent" />
+              <span className="min-w-0 flex-1 leading-relaxed">{item}</span>
+            </button>
           </li>
         ))}
       </ol>

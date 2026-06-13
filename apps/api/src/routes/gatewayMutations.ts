@@ -49,7 +49,7 @@ export function buildGatewayMutationRoutes(deps: {
     const body = pairSchema.parse(await c.req.json());
     // Validate the URL so we don't accept javascript: or private addresses unless opted in.
     await assertSafeUrl(body.gatewayUrl, {
-      allowPrivate: String(process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+      allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
     });
     const credId = randomUUID();
     deps.db

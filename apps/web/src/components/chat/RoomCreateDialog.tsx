@@ -80,7 +80,7 @@ export function RoomCreateDialog({ open, onClose, onCreated }: RoomCreateDialogP
   const selectedAgents = agents.filter((a) => selected.has(a.id));
 
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
       <form onSubmit={handleCreate} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <h3 className="text-heading text-text-primary">Create a room</h3>

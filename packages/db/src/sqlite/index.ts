@@ -74,14 +74,18 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
     }
   };
 
-  // App Canvas: per-instance app graph (docs/app-canvas/APP-CANVAS-ARCHITECTURE.md §12.4).
-  addColumn('agent_packages', 'app_graph', 'TEXT');
-
   // Workspace issue queue defaults.
   addColumn('workspaces', 'issue_prefix', "TEXT NOT NULL DEFAULT 'AGT'");
 
   // Layer 5 §5.3 — workspace/day cost ceiling.
   addColumn('workspaces', 'daily_budget_cents', 'INTEGER');
+
+  // Workspace metadata fields.
+  addColumn('workspaces', 'description', 'TEXT');
+  addColumn('workspaces', 'image_url', 'TEXT');
+
+  // Extensions: operation-level execution audit.
+  addColumn('extension_executions', 'operation_name', "TEXT NOT NULL DEFAULT 'execute'");
 
   // Layer 6 §6.4 — pin artifacts to the workspace output gallery.
   addColumn('artifacts', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
@@ -104,7 +108,6 @@ CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_i
   addColumn('agents', 'runtime_model', 'TEXT');
   addColumn('agents', 'role', 'TEXT');
   addColumn('agents', 'description', 'TEXT');
-  addColumn('agents', 'space_id', 'TEXT');
   addColumn('agents', 'reports_to', 'TEXT REFERENCES agents(id) ON DELETE SET NULL');
   addColumn('agents', 'is_paused', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('agents', 'monthly_budget_cents', 'INTEGER');
@@ -120,13 +123,13 @@ CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_i
   addColumn('workflows', 'budget_cents', 'INTEGER');
   addColumn('workflows', 'concurrency_overflow', "TEXT NOT NULL DEFAULT 'queue'");
   addColumn('workflows', 'tags', "TEXT NOT NULL DEFAULT '[]'");
-  addColumn('workflows', 'intended_behavior', 'TEXT');
-  // Normalize the concurrency_overflow column on databases created before it had
-  // a default: older schemas added it NOT NULL with no default, so every insert
-  // that omitted it failed with a NOT NULL constraint error. Rebuild the table
-  // to NOT NULL DEFAULT 'queue' and backfill NULLs. Idempotent (no-op once
-  // normalized). Must run after the addColumn calls above so the source table
-  // has every column.
+  addColumn('workflows', 'description', 'TEXT');
+  addColumn('agents', 'space_id', 'TEXT REFERENCES spaces(id) ON DELETE SET NULL');
+  addColumn('workflows', 'space_id', 'TEXT REFERENCES spaces(id) ON DELETE SET NULL');
+  reconcileSpacesSchema(sqlite, { tableExists, columnExists, addColumn });
+  // Normalize workflow metadata + concurrency. Older builds had summary and
+  // intended_behavior columns, and one drifted build added concurrency_overflow
+  // as NOT NULL without a default. Rebuild once into the current shape.
   migrateWorkflowsConcurrencyOverflow(sqlite);
   sqlite.exec(`
 CREATE TABLE IF NOT EXISTS workflow_run_queue (
@@ -203,9 +206,57 @@ CREATE INDEX IF NOT EXISTS idx_schedule_due ON schedule_runs(status, scheduled_a
   addColumn('workflow_runs', 'conversation_id', 'TEXT REFERENCES conversations(id) ON DELETE SET NULL');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_runs_conversation ON workflow_runs(conversation_id, created_at DESC)');
 
-  // Spaces: app grouping.
-  addColumn('spaces', 'icon_glyph', 'TEXT');
   migrateChannelDeliveriesUniqueness(sqlite);
+
+  // Cross-surface peer identity (OMNICHANNEL §5.2): one row per (workspace,
+  // channel kind, handle); opt-in `user_id` + `peer_key` unify the same human
+  // across channels so the orchestrator recognizes them everywhere.
+  sqlite.exec(`
+CREATE TABLE IF NOT EXISTS channel_peer_identities (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  channel_kind TEXT NOT NULL,
+  handle TEXT NOT NULL,
+  display_name TEXT,
+  user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  peer_key TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_peer ON channel_peer_identities(workspace_id, channel_kind, handle);
+CREATE INDEX IF NOT EXISTS idx_channel_peer_user ON channel_peer_identities(workspace_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_channel_peer_key ON channel_peer_identities(workspace_id, peer_key);
+`);
+
+  // Per-workspace orchestrator model-role overrides (OMNICHANNEL §4.4). One row
+  // per (workspace, role); api_key is vault-encrypted. Absent rows fall back to
+  // the env-configured default model.
+  sqlite.exec(`
+CREATE TABLE IF NOT EXISTS workspace_model_config (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  base_url TEXT,
+  model TEXT NOT NULL,
+  api_key_encrypted TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_model_role ON workspace_model_config(workspace_id, role);
+`);
+
+  // Vault-encrypted persistent-channel auth state (OMNICHANNEL §3.4 / §7).
+  // WhatsApp (baileys) creds + signal keys live here instead of plaintext files
+  // on disk. Key-value per (connection, key); value is vault ciphertext.
+  sqlite.exec(`
+CREATE TABLE IF NOT EXISTS channel_auth_state (
+  connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value_encrypted TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (connection_id, key)
+);
+`);
 
   sqlite.exec(`
 CREATE TABLE IF NOT EXISTS async_jobs (
@@ -233,6 +284,54 @@ CREATE INDEX IF NOT EXISTS idx_async_jobs_workspace ON async_jobs(workspace_id, 
   // which is a no-op for pre-existing databases. Patch the drift here.
   addColumn('async_jobs', 'priority', "TEXT NOT NULL DEFAULT 'normal'");
   addColumn('async_jobs', 'leased_at', 'TEXT');
+
+  // SMARTER-AGENTS-10X §VI — persistent, DB-backed agent sessions. A session is
+  // a row that lives between LLM inference calls (zero tokens while tools run);
+  // its messages are the episodic log, evictable to archival on compaction.
+  sqlite.exec(`
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  run_id TEXT,
+  node_id TEXT,
+  status TEXT NOT NULL DEFAULT 'idle',
+  persona_block TEXT NOT NULL DEFAULT '',
+  task_block TEXT NOT NULL DEFAULT '',
+  plan_block TEXT NOT NULL DEFAULT '',
+  observations_block TEXT NOT NULL DEFAULT '',
+  suspend_reason TEXT,
+  suspend_payload TEXT,
+  suspended_at TEXT,
+  wake_condition TEXT,
+  parent_session_id TEXT,
+  delegation_depth INTEGER NOT NULL DEFAULT 0,
+  total_steps INTEGER NOT NULL DEFAULT 0,
+  total_tokens_in INTEGER NOT NULL DEFAULT 0,
+  total_tokens_out INTEGER NOT NULL DEFAULT 0,
+  last_compaction_at TEXT,
+  output TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_run ON agent_sessions(run_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_wake ON agent_sessions(wake_condition) WHERE status = 'waiting';
+
+CREATE TABLE IF NOT EXISTS agent_session_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+  step_number INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tool_calls TEXT,
+  tool_call_id TEXT,
+  token_count INTEGER,
+  in_context_window INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_session_messages ON agent_session_messages(session_id, step_number);
+`);
 
   sqlite.exec(`
 CREATE VIRTUAL TABLE IF NOT EXISTS ledger_events_fts USING fts5(
@@ -327,6 +426,48 @@ CREATE INDEX IF NOT EXISTS idx_runs_workspace_created ON workflow_runs(workspace
 `);
 }
 
+function reconcileSpacesSchema(
+  sqlite: Database.Database,
+  helpers: {
+    tableExists: (table: string) => boolean;
+    columnExists: (table: string, column: string) => boolean;
+    addColumn: (table: string, column: string, ddl: string) => void;
+  },
+): void {
+  if (!helpers.tableExists('spaces')) return;
+
+  const hasLegacyColor = helpers.columnExists('spaces', 'color');
+  const hasLegacyIcon = helpers.columnExists('spaces', 'icon_glyph');
+
+  helpers.addColumn('spaces', 'slug', "TEXT NOT NULL DEFAULT ''");
+  helpers.addColumn('spaces', 'description', 'TEXT');
+  helpers.addColumn('spaces', 'color_hex', 'TEXT');
+  helpers.addColumn('spaces', 'icon_emoji', 'TEXT');
+  helpers.addColumn('spaces', 'manager_id', 'TEXT REFERENCES agents(id) ON DELETE SET NULL');
+
+  sqlite.exec(`
+UPDATE spaces
+SET slug = COALESCE(NULLIF(lower(replace(trim(name), ' ', '-')), ''), 'space-' || substr(id, 1, 8))
+WHERE slug IS NULL OR trim(slug) = '';
+`);
+
+  if (hasLegacyColor) {
+    sqlite.exec(`
+UPDATE spaces
+SET color_hex = color
+WHERE (color_hex IS NULL OR color_hex = '') AND color IS NOT NULL;
+`);
+  }
+
+  if (hasLegacyIcon) {
+    sqlite.exec(`
+UPDATE spaces
+SET icon_emoji = icon_glyph
+WHERE (icon_emoji IS NULL OR icon_emoji = '') AND icon_glyph IS NOT NULL;
+`);
+  }
+}
+
 function migrateWorkflowsConcurrencyOverflow(sqlite: Database.Database): void {
   const columns = sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{
     name: string;
@@ -342,14 +483,30 @@ function migrateWorkflowsConcurrencyOverflow(sqlite: Database.Database): void {
       && typeof overflow.dflt_value === 'string'
       && overflow.dflt_value.replace(/'/g, '').trim() === 'queue',
   );
-  if (alreadyNormalized) return;
 
   const names = new Set(columns.map((column) => column.name));
+  const hasLegacyDescriptionColumns = names.has('summary') || names.has('intended_behavior');
+  if (alreadyNormalized && names.has('description') && !hasLegacyDescriptionColumns) return;
+
   // Tolerate very old DBs that predate some columns by substituting a literal.
   const pick = (name: string, fallback: string) => (names.has(name) ? name : fallback);
+  const coalesceDescription = [
+    names.has('description') ? "NULLIF(description, '')" : null,
+    names.has('intended_behavior') ? "NULLIF(intended_behavior, '')" : null,
+    names.has('summary') ? "NULLIF(summary, '')" : null,
+  ].filter(Boolean).join(', ');
+  const descriptionExpr = coalesceDescription ? `COALESCE(${coalesceDescription})` : 'NULL';
   const overflowExpr = names.has('concurrency_overflow')
     ? "COALESCE(concurrency_overflow, 'queue')"
     : "'queue'";
+  const optionalDefinitions: string[] = [];
+  const optionalInsertColumns: string[] = [];
+  const optionalSelectExprs: string[] = [];
+  if (names.has('space_id')) {
+    optionalDefinitions.push('  space_id              TEXT REFERENCES spaces(id) ON DELETE SET NULL,');
+    optionalInsertColumns.push('space_id');
+    optionalSelectExprs.push('space_id');
+  }
 
   sqlite.exec(`
 PRAGMA foreign_keys = OFF;
@@ -358,29 +515,30 @@ CREATE TABLE workflows_next (
   workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   ambient_id            TEXT REFERENCES ambients(id) ON DELETE SET NULL,
   user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+${optionalDefinitions.length > 0 ? `${optionalDefinitions.join('\n')}\n` : ''}
   registry_entry_id     TEXT,
   registry_version      TEXT,
   title                 TEXT NOT NULL,
-  summary               TEXT,
-  intended_behavior     TEXT,
+  description           TEXT,
   graph                 TEXT NOT NULL,
   settings              TEXT NOT NULL DEFAULT '{}',
   is_from_registry      INTEGER NOT NULL DEFAULT 0,
   max_concurrent_runs   INTEGER,
+  budget_cents          INTEGER,
   concurrency_overflow  TEXT NOT NULL DEFAULT 'queue',
   tags                  TEXT NOT NULL DEFAULT '[]',
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 INSERT OR IGNORE INTO workflows_next (
-  id, workspace_id, ambient_id, user_id, registry_entry_id, registry_version,
-  title, summary, intended_behavior, graph, settings, is_from_registry,
-  max_concurrent_runs, concurrency_overflow, tags, created_at, updated_at
+  id, workspace_id, ambient_id, user_id, ${optionalInsertColumns.length > 0 ? `${optionalInsertColumns.join(', ')}, ` : ''}registry_entry_id, registry_version,
+  title, description, graph, settings, is_from_registry,
+  max_concurrent_runs, budget_cents, concurrency_overflow, tags, created_at, updated_at
 )
 SELECT
-  id, workspace_id, ambient_id, user_id, ${pick('registry_entry_id', 'NULL')}, ${pick('registry_version', 'NULL')},
-  title, summary, ${pick('intended_behavior', 'NULL')}, graph, settings, ${pick('is_from_registry', '0')},
-  ${pick('max_concurrent_runs', 'NULL')}, ${overflowExpr}, ${pick('tags', "'[]'")}, created_at, updated_at
+  id, workspace_id, ambient_id, user_id, ${optionalSelectExprs.length > 0 ? `${optionalSelectExprs.join(', ')}, ` : ''}${pick('registry_entry_id', 'NULL')}, ${pick('registry_version', 'NULL')},
+  title, ${descriptionExpr}, graph, settings, ${pick('is_from_registry', '0')},
+  ${pick('max_concurrent_runs', 'NULL')}, ${pick('budget_cents', 'NULL')}, ${overflowExpr}, ${pick('tags', "'[]'")}, ${pick('created_at', "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))")}, ${pick('updated_at', "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))")}
 FROM workflows;
 DROP TABLE workflows;
 ALTER TABLE workflows_next RENAME TO workflows;

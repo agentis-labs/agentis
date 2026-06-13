@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { listenerConfigSchema } from './listener.js';
 
 // ────────────────────────────────────────────────────────────
 // Node configs
@@ -13,12 +14,26 @@ const triggerConfigSchema = z.object({
   kind: z.literal('trigger'),
   triggerType: z.enum(['manual', 'cron', 'webhook', 'persistent_listener']),
   triggerId: z.string().uuid().optional(),
-});
+  /** Authoring form retained in the graph; deployment translates this to triggers.config.expression. */
+  schedule: z.string().optional(),
+  timezone: z.string().optional(),
+  /** Authoring form retained in the graph; deployment stores this object directly in triggers.config. */
+  listenerConfig: listenerConfigSchema.optional(),
+}).passthrough();
 
 const agentRoleSchema = z.enum([
   'planner', 'researcher', 'coder', 'reviewer', 'analyst',
   'writer', 'monitor', 'architect', 'debugger', 'deployer',
 ]);
+
+const agentRequirementsSchema = z.object({
+  browser: z.boolean().optional(),
+  codebaseIndex: z.boolean().optional(),
+  fileSystem: z.boolean().optional(),
+  terminal: z.boolean().optional(),
+  computerUse: z.boolean().optional(),
+  nativeMcp: z.boolean().optional(),
+}).partial();
 
 const agentTaskConfigSchema = z.object({
   ...outputConfigFields,
@@ -27,22 +42,43 @@ const agentTaskConfigSchema = z.object({
   agentRole: agentRoleSchema.optional(),
   agentPackageRef: z.string().optional(),
   capabilityTags: z.array(z.string()).default([]),
+  requires: agentRequirementsSchema.optional(),
   prompt: z.string().min(1),
   inputKeys: z.array(z.string()).default([]),
   outputKeys: z.array(z.string()).default([]),
   skills: z.array(z.string()).optional(),
+  extensions: z.array(z.string()).optional(),
   modelOverride: z.string().optional(),
   castingReason: z.string().optional(),
   useRoleTools: z.boolean().optional(),
   maxToolSteps: z.number().int().min(1).max(12).optional(),
+  memoryPolicy: z.enum(['form', 'episodic_only', 'none']).optional(),
 });
 
-const skillTaskConfigSchema = z.object({
+const agentSessionConfigSchema = z.object({
   ...outputConfigFields,
-  kind: z.literal('skill_task'),
-  skillId: z.string().min(1),
+  kind: z.literal('agent_session'),
+  agentId: z.string().uuid().optional(),
+  agentRole: agentRoleSchema.optional(),
+  prompt: z.string().min(1),
+  persona: z.string().optional(),
+  inputKeys: z.array(z.string()).default([]),
+  outputKeys: z.array(z.string()).default([]),
+  maxSteps: z.number().int().positive().optional(),
+  capabilityTags: z.array(z.string()).default([]),
+  requires: agentRequirementsSchema.optional(),
+});
+
+const extensionTaskConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('extension_task'),
+  extensionId: z.string().min(1).optional(),
+  extensionSlug: z.string().min(1).optional(),
+  operationName: z.string().min(1),
+  version: z.string().min(1).optional(),
   inputMapping: z.record(z.string(), z.string()).default({}),
   outputMapping: z.record(z.string(), z.string()).default({}),
+  timeoutMs: z.number().int().positive().optional(),
 });
 
 const knowledgeConfigSchema = z.object({
@@ -60,7 +96,7 @@ const knowledgeConfigSchema = z.object({
 const routerConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('router'),
-  routingMode: z.enum(['first_match', 'all_matching', 'llm_route']),
+  routingMode: z.enum(['first_match', 'all_matching', 'llm_route', 'space_route']),
   branches: z
     .array(
       z.object({
@@ -154,26 +190,13 @@ const browserConfigSchema = z.object({
 // with no fields yet, or legacy `variables` nodes from older versions).
 const fallbackConfigSchema = z
   .object({ kind: z.string().min(1), ...outputConfigFields })
-  .passthrough()
-  .superRefine((config, ctx) => {
-    // If a draft config includes known strict fields, keep their validation
-    // failures meaningful instead of letting malformed known configs pass as
-    // arbitrary passthrough objects.
-    if (config.kind === 'agent_task' && 'prompt' in config && !String(config.prompt ?? '').trim()) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: 'Required' });
-    }
-    if (config.kind === 'router' && 'branches' in config && (!Array.isArray(config.branches) || config.branches.length === 0)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['branches'], message: 'Expected at least one branch' });
-    }
-    if (config.kind === 'scratchpad' && 'key' in config && !String(config.key ?? '').trim()) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['key'], message: 'Required' });
-    }
-  });
+  .passthrough();
 
 export const workflowNodeConfigSchema = z.union([
   triggerConfigSchema,
   agentTaskConfigSchema,
-  skillTaskConfigSchema,
+  agentSessionConfigSchema,
+  extensionTaskConfigSchema,
   knowledgeConfigSchema,
   routerConfigSchema,
   mergeConfigSchema,
@@ -189,10 +212,14 @@ export const workflowNodeConfigSchema = z.union([
 
 export const workflowNodeSchema = z.object({
   id: z.string().min(1),
-  // Permissive at edit-time. Engine validates execution-time semantics.
-  type: z.string().min(1),
-  title: z.string().min(1).max(255),
-  position: z.object({ x: z.number(), y: z.number() }),
+  // Permissive at edit-time. Engine validates execution-time semantics. `type`
+  // and `title` are display/derived fields — the engine never requires them and
+  // happily persists graphs without them, so the edit-time schema must accept
+  // those too or autosave fails on graphs the engine just built. (A title is
+  // backfilled from the node kind on persist; see normalizeWorkflowGraphTitles.)
+  type: z.string().optional(),
+  title: z.string().max(255).optional(),
+  position: z.object({ x: z.number(), y: z.number() }).optional(),
   config: workflowNodeConfigSchema,
 });
 
@@ -211,7 +238,7 @@ export const workflowGraphSchema = z.object({
   nodes: z.array(workflowNodeSchema),
   edges: z.array(workflowEdgeSchema),
   viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }),
-});
+}).passthrough();
 
 // ────────────────────────────────────────────────────────────
 // API request bodies
@@ -220,17 +247,17 @@ export const workflowGraphSchema = z.object({
 export const createWorkflowSchema = z.object({
   workspaceId: z.string().uuid(),
   ambientId: z.string().uuid().nullable().optional(),
+  spaceId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(255),
-  summary: z.string().max(2000).optional(),
-  intendedBehavior: z.string().max(8000).nullable().optional(),
+  description: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
   settings: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const updateWorkflowSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
-  summary: z.string().max(2000).nullable().optional(),
-  intendedBehavior: z.string().max(8000).nullable().optional(),
+  spaceId: z.string().uuid().nullable().optional(),
+  description: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
 });
@@ -238,6 +265,10 @@ export const updateWorkflowSchema = z.object({
 export const runWorkflowSchema = z.object({
   triggerId: z.string().uuid().optional(),
   inputs: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const workflowDeploymentStatusSchema = z.object({
+  status: z.enum(['active', 'paused']),
 });
 
 export const replayFromNodeSchema = z.object({

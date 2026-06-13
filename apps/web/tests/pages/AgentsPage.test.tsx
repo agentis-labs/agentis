@@ -34,8 +34,6 @@ describe('<AgentsPage />', () => {
 
   it('renders the empty state when /v1/agents returns no agents', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-      const path = String(input);
-      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
       return jsonResponse({ agents: [] });
     }));
     render(
@@ -53,8 +51,6 @@ describe('<AgentsPage />', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
-        const path = String(input);
-        if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
         return jsonResponse({
           agents: [
             {
@@ -87,7 +83,7 @@ describe('<AgentsPage />', () => {
     expect(screen.queryByText(/^Managers$/i)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /Table view/i }));
-    expect(screen.getByText(/HTTP \/ Webhook/i)).toBeInTheDocument();
+    expect(screen.getByText(/(HTTP|No harness)/i)).toBeInTheDocument();
     expect(screen.getByText(/1 agent/i)).toBeInTheDocument();
   });
 
@@ -96,7 +92,6 @@ describe('<AgentsPage />', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
-        if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
         if (path === '/v1/channels') return jsonResponse({ connections: [] });
         return jsonResponse({
           agents: [
@@ -113,7 +108,7 @@ describe('<AgentsPage />', () => {
               runsToday: 3,
               spendTodayCents: 125,
               pendingApprovals: 1,
-              connectionCounts: { apps: 0, workflows: 1, memoryPlanes: 1 },
+              connectionCounts: { workflows: 1, memoryLayers: 1 },
             },
           ],
         });
@@ -137,7 +132,6 @@ describe('<AgentsPage />', () => {
   it('resets the canvas layout and persists the fallback positions', async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
       if (path === '/v1/agents/a1' && init?.method === 'PATCH') return jsonResponse({ ok: true });
       return jsonResponse({
         agents: [
@@ -154,7 +148,7 @@ describe('<AgentsPage />', () => {
             runsToday: 1,
             spendTodayCents: 50,
             pendingApprovals: 0,
-            connectionCounts: { apps: 0, workflows: 0, memoryPlanes: 0 },
+            connectionCounts: { workflows: 0, memoryLayers: 0 },
           },
         ],
       });
@@ -184,7 +178,6 @@ describe('<AgentsPage />', () => {
   it('reparents managers to the current orchestrator when roles change', async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
       if (path === '/v1/agents/mgr' && init?.method === 'PATCH') return jsonResponse({ ok: true });
       return jsonResponse({
         agents: [
@@ -229,7 +222,6 @@ describe('<AgentsPage />', () => {
   it('clears stale manager parents when there is no orchestrator', async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
       if (path === '/v1/agents/mgr' && init?.method === 'PATCH') return jsonResponse({ ok: true });
       return jsonResponse({
         agents: [
@@ -267,7 +259,6 @@ describe('<AgentsPage />', () => {
   it('opens the commissioning drawer when Add agent is clicked', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === '/v1/spaces') return jsonResponse({ spaces: [] });
       if (path === '/v1/adapters/harness-status') return jsonResponse({ adapters: [] });
       return jsonResponse({ agents: [] });
     }));

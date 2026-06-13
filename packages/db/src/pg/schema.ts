@@ -44,6 +44,8 @@ export const workspaces = pgTable('workspaces', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   name: varchar('name', { length: 100 }).notNull(),
   slug: varchar('slug', { length: 120 }).notNull(),
+  description: text('description'),
+  imageUrl: text('image_url'),
   defaultAmbientId: uuid('default_ambient_id'),
   ...baseTimestamps(),
 });
@@ -78,7 +80,7 @@ export const workflows = pgTable('workflows', {
   hubEntryId: text('hub_entry_id'),
   hubVersion: text('hub_version'),
   title: varchar('title', { length: 255 }).notNull(),
-  summary: text('summary'),
+  description: text('description'),
   graph: jsonb('graph').notNull(),
   settings: jsonb('settings').notNull().default(sql`'{}'::jsonb`),
   isPublishedToHub: boolean('is_published_to_hub').notNull().default(false),

@@ -28,7 +28,7 @@ function seedWorkflow() {
       ambientId: ctx.ambient.id,
       userId: ctx.user.id,
       title: 'Nightly Review',
-      summary: 'Review the day and prepare a short brief.',
+      description: 'Review the day and prepare a short brief.',
       graph: {
         version: 1,
         nodes: [
@@ -102,7 +102,28 @@ function seedKnowledgeBase() {
   return knowledgeBaseId;
 }
 
-describe('/v1/packages Library packages', () => {
+function seedAgent() {
+  const id = randomUUID();
+  ctx.db
+    .insert(schema.agents)
+    .values({
+      id,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Agent Smith',
+      adapterType: 'claude_code',
+      role: 'worker',
+      status: 'offline',
+      colorHex: '#000000',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
+    .run();
+  return id;
+}
+
+describe('/v1/packages packages', () => {
   it('packs a workflow, emits an event, and can use the package', async () => {
     const workflowId = seedWorkflow();
     const capture = ctx.captureBus();
@@ -176,25 +197,46 @@ describe('/v1/packages Library packages', () => {
     expect(body.error.code).toBe('PACKAGE_CHECKSUM_MISMATCH');
   });
 
-  it('does not expose knowledge packages while the package kind is disabled', async () => {
-    const knowledgeBaseId = seedKnowledgeBase();
-
-    const pack = await app().request(`/v1/packages/pack/knowledge/${knowledgeBaseId}`, {
+  it('packs an agent, exports it, and can import and use the agent package', async () => {
+    const agentId = seedAgent();
+    const pack = await app().request(`/v1/packages/pack/agent/${agentId}`, {
       method: 'POST',
       headers: ctx.authHeaders,
-      body: JSON.stringify({ tags: ['knowledge'] }),
+      body: JSON.stringify({}),
     });
-    expect(pack.status).toBe(404);
+    expect(pack.status).toBe(201);
+    const packed = (await pack.json()) as { package: { id: string; kind: string; checksum: string } };
+    expect(packed.package.kind).toBe('agent');
 
-    const create = await app().request('/v1/packages', {
+    const exported = await app().request(`/v1/packages/${packed.package.id}/export`, {
+      headers: ctx.authHeaders,
+    });
+    expect(exported.status).toBe(200);
+    const envelope = (await exported.json()) as {
+      packageManifest: {
+        checksum: string;
+        contents: { kind: 'agent'; agent: { name: string; role: string } };
+      };
+    };
+    expect(envelope.packageManifest.contents.agent.name).toBe('Agent Smith');
+    expect(envelope.packageManifest.contents.agent.role).toBe('worker');
+
+    const imported = await app().request('/v1/packages/import', {
       method: 'POST',
       headers: ctx.authHeaders,
-      body: JSON.stringify({
-        name: 'Support Playbooks',
-        kind: 'knowledge',
-        knowledgeBaseIds: [knowledgeBaseId],
-      }),
+      body: JSON.stringify(envelope),
     });
-    expect(create.status).toBe(422);
+    expect(imported.status).toBe(201);
+    const importedBody = (await imported.json()) as { agentId: string; packageId: string };
+    expect(importedBody.agentId).toBeDefined();
+
+    const agent = ctx.db
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.id, importedBody.agentId))
+      .get();
+    expect(agent).toBeDefined();
+    expect(agent?.name).toBe('Agent Smith');
+    expect(agent?.role).toBe('worker');
   });
 });

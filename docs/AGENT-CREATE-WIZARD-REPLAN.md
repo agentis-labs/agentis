@@ -316,15 +316,15 @@ Same as current. If model override is blank, just show the harness: `Research Le
 **Changes**:
 - `name`: `'No orchestrator yet'`
 - `ghostDescription`: `'The workspace brain. Needed for routing, approvals, and command.'`
-- No `spaceId` in `createPreset` (already correct — just making it explicit)
+- No domain preset in `createPreset` (already correct — just making it explicit)
 - In `AgentHierarchyNode.tsx`, the ghost card for `role === 'orchestrator'` uses **no tier-color accent**. Border: `border-dashed border-zinc-600`. Background: `bg-zinc-900/50`. No violet, no cyan.
 
 ### 3.2 Manager ghost
 
-Unchanged in data. Keep `spaceName` in `ghostDescription` — it is correct here because managers ARE space-scoped.
+Unchanged in data. Keep the manager ghost description focused on the domain it owns.
 
 ```
-ghostDescription: `Assign a manager to keep ${space.name} owned.`
+ghostDescription: `Assign a manager to keep its domain owned.`
 ```
 
 The ghost card for manager ghosts also drops color — `border-dashed border-zinc-600`, neutral. The tier-color borders (violet/cyan/blue) are for real, live agents only. Ghosts are always neutral.

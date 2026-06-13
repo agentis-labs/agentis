@@ -1,7 +1,7 @@
 /**
  * CommandIndex — Cmd+K command palette backend (V1-SPEC §13).
  *
- * Returns the union of workflows, agents, gateways, runs, approvals, skills
+ * Returns the union of workflows, agents, gateways, runs, approvals, extensions
  * and registry entries (when configured) matching a free-text query, ordered by
  * a small relevance heuristic. Callers cap the result to
  * COMMAND_PALETTE_RESULT_LIMIT.
@@ -13,7 +13,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, CONSTANTS } from '@agentis/core';
 
 export interface CommandHit {
-  type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'skill' | 'conversation';
+  type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'extension' | 'conversation';
   id: string;
   title: string;
   subtitle?: string;
@@ -97,14 +97,14 @@ export class CommandIndex {
         if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Approval ${id} not found`);
         return { type, id, href: `/approvals?focus=${id}` };
       }
-      case 'skill': {
+      case 'extension': {
         const row = this.db
           .select()
-          .from(schema.skills)
-          .where(and(eq(schema.skills.id, id), eq(schema.skills.workspaceId, workspaceId)))
+          .from(schema.extensions)
+          .where(and(eq(schema.extensions.id, id), eq(schema.extensions.workspaceId, workspaceId)))
           .get();
-        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Skill ${id} not found`);
-        return { type, id, href: `/skills?focus=${id}` };
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `extension ${id} not found`);
+        return { type, id, href: `/extensions?focus=${id}` };
       }
       case 'conversation': {
         return { type, id, href: `/activity?conversation=${id}` };
@@ -125,8 +125,8 @@ export class CommandIndex {
       .limit(20)
       .all();
     for (const w of workflows) {
-      const score = relevance(q, w.title, w.summary ?? '');
-      if (score > 0) hits.push({ type: 'workflow', id: w.id, title: w.title, subtitle: w.summary ?? undefined, href: `/workflows/${w.id}`, score });
+      const score = relevance(q, w.title, w.description ?? '');
+      if (score > 0) hits.push({ type: 'workflow', id: w.id, title: w.title, subtitle: w.description ?? undefined, href: `/workflows/${w.id}`, score });
     }
 
     const agents = this.db.select().from(schema.agents)
@@ -169,13 +169,13 @@ export class CommandIndex {
       if (score > 0) hits.push({ type: 'approval', id: a.id, title: a.title, subtitle: a.summary, href: `/approvals?focus=${a.id}`, score });
     }
 
-    const skills = this.db.select().from(schema.skills)
-      .where(and(eq(schema.skills.workspaceId, workspaceId), like(schema.skills.name, pattern)))
+    const extensions = this.db.select().from(schema.extensions)
+      .where(and(eq(schema.extensions.workspaceId, workspaceId), like(schema.extensions.name, pattern)))
       .limit(10)
       .all();
-    for (const s of skills) {
+    for (const s of extensions) {
       const score = relevance(q, s.name, s.runtime);
-      if (score > 0) hits.push({ type: 'skill', id: s.id, title: s.name, subtitle: `${s.runtime} • v${s.version}`, href: `/skills?focus=${s.id}`, score });
+      if (score > 0) hits.push({ type: 'extension', id: s.id, title: s.name, subtitle: `${s.runtime} • v${s.version}`, href: `/extensions?focus=${s.id}`, score });
     }
 
     return hits.sort((a, b) => b.score - a.score).slice(0, CONSTANTS.COMMAND_PALETTE_RESULT_LIMIT);

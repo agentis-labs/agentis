@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
 import { buildInitialRunState } from '../src/engine/initialRunState.js';
 
-function makeNode(id: string, kind: 'trigger' | 'skill_task' = 'skill_task') {
+function makeNode(id: string, kind: 'trigger' | 'extension_task' = 'extension_task') {
   if (kind === 'trigger') {
     return {
       id,
@@ -17,11 +17,11 @@ function makeNode(id: string, kind: 'trigger' | 'skill_task' = 'skill_task') {
   }
   return {
     id,
-    type: 'skill_task' as const,
+    type: 'extension_task' as const,
     title: id,
     position: { x: 0, y: 0 },
     config: {
-      kind: 'skill_task' as const,
+      kind: 'extension_task' as const,
       skillId: 'echo',
       inputMapping: {},
       outputMapping: {},
@@ -30,13 +30,13 @@ function makeNode(id: string, kind: 'trigger' | 'skill_task' = 'skill_task') {
 }
 
 function graph(
-  nodes: Array<{ id: string; kind?: 'trigger' | 'skill_task' }>,
+  nodes: Array<{ id: string; kind?: 'trigger' | 'extension_task' }>,
   edges: Array<{ id: string; source: string; target: string }>,
 ): WorkflowGraph {
   return {
     version: 1,
     viewport: { x: 0, y: 0, zoom: 1 },
-    nodes: nodes.map((n) => makeNode(n.id, n.kind ?? 'skill_task')),
+    nodes: nodes.map((n) => makeNode(n.id, n.kind ?? 'extension_task')),
     edges,
   };
 }

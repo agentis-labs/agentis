@@ -57,8 +57,8 @@ export function KnowledgeStatusCard({ hideWhenSeeded = false }: { hideWhenSeeded
         <Button variant="primary" size="sm" iconRight={<ArrowRight size={12} />} onClick={() => nav('/brain')}>Open Brain</Button>
       </div>
       <div className="mt-4 grid gap-2 sm:grid-cols-2">
-        <Metric icon={<FileText size={13} />} label="Documents" value={snapshot.documents.length} onClick={() => nav('/brain?tab=documents')} />
-        <Metric icon={<BookOpen size={13} />} label="Bases" value={snapshot.bases.length} onClick={() => nav('/brain?tab=bases')} />
+        <Metric icon={<FileText size={13} />} label="Documents" value={snapshot.documents.length} onClick={() => nav('/brain?tab=knowledge')} />
+        <Metric icon={<BookOpen size={13} />} label="Bases" value={snapshot.bases.length} onClick={() => nav('/brain?tab=knowledge')} />
       </div>
     </section>
   );

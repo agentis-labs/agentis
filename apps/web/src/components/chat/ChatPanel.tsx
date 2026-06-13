@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Clock, ChevronLeft, Maximize2, Plus, ChevronDown, Check } from 'lucide-react';
+import { X, Clock, ChevronLeft, Maximize2, Plus, ChevronDown, Check, Globe } from 'lucide-react';
 import clsx from 'clsx';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useChatPanelStore } from './ChatPanelStore';
@@ -21,7 +21,7 @@ import {
 import { workspace as wsStore } from '../../lib/api';
 import { rtSubscribe } from '../../lib/realtime';
 import { usePrimaryChatScopes } from './usePrimaryChatScopes';
-import { clearDraft } from '../ChatPanel/Composer';
+import { clearDraft } from './Composer';
 import { RoomCreateDialog } from './RoomCreateDialog';
 
 const MIN_DOCKED_WIDTH = 360;
@@ -256,6 +256,29 @@ export function ChatPanel() {
                         {scope.id === currentThread?.id && <Check size={12} className="shrink-0 text-accent" />}
                       </button>
                     ))}
+                    <div className="mx-2 my-1 h-px bg-line/60" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        selectThread({ kind: 'room', id: '__broadcast__', name: 'Global Chat' });
+                        setAgentMenuOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left hover:bg-surface-2"
+                    >
+                      <span className={clsx(
+                        'grid h-5 w-5 shrink-0 place-items-center rounded border',
+                        currentThread?.id === '__broadcast__'
+                          ? 'border-accent/40 bg-accent/10 text-accent'
+                          : 'border-line bg-surface-2 text-text-muted',
+                      )}>
+                        <Globe size={10} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11px] font-medium text-text-secondary">Global Chat</span>
+                        <span className="block text-[9px] text-text-muted">Workspace-wide interactions</span>
+                      </span>
+                      {currentThread?.id === '__broadcast__' && <Check size={12} className="shrink-0 text-accent" />}
+                    </button>
                   </div>
                 )}
               </div>

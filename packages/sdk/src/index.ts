@@ -27,7 +27,7 @@ export function defineAgentisPackage(definition: AgentisPackageDefinition): Agen
 export function defineWorkflow(args: {
   title: string;
   slug?: string;
-  summary?: string | null;
+  description?: string | null;
   graph: WorkflowGraph;
   settings?: Record<string, unknown>;
   maxConcurrentRuns?: number | null;

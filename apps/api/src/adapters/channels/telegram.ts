@@ -34,9 +34,24 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      let description = text.slice(0, 200);
+      try {
+        const json = JSON.parse(text) as { description?: string };
+        if (json.description) description = json.description;
+      } catch {
+        /* non-JSON body — keep the raw text */
+      }
+      // "chat not found" is Telegram's response when the bot has never had a
+      // conversation with this chat. Bots cannot initiate chats: the user must
+      // message the bot first (or the chat must be a group the bot has joined),
+      // and the chat ID must be that conversation's numeric ID. Surface that
+      // instead of the opaque API string.
+      const hint = /chat not found/i.test(description)
+        ? `: the bot can't message chat "${args.chatId}" until that chat messages the bot first (open the bot in Telegram and press Start), and the chat ID must be the numeric ID of that conversation`
+        : '';
       throw new AgentisError(
         'CHANNEL_SEND_FAILED',
-        `telegram sendMessage failed: ${res.status} ${text.slice(0, 200)}`,
+        `telegram sendMessage failed (${res.status}): ${description}${hint}`,
       );
     }
   }

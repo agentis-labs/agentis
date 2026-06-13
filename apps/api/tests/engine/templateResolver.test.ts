@@ -19,6 +19,7 @@ function ctx() {
     scratchpad: { leadStatus: 'qualified' },
     store: { runsToday: 3 },
     loop: { item: { id: 7, label: 'seven' }, index: 0 },
+    inputData: { name: 'Grace', items: [{ active: true }, { active: false }] },
   });
 }
 
@@ -59,6 +60,11 @@ describe('resolveTemplate', () => {
       .toBe('qualified / 3');
   });
 
+  it('evaluates inline AScript expressions in mixed strings', () => {
+    expect(resolveTemplate('Hello {{= $json.name.toUpperCase() }} ({{= $nodes.research.sources.length }})', ctx()))
+      .toBe('Hello GRACE (2)');
+  });
+
   it('returns the input untouched when no placeholders are present', () => {
     expect(resolveTemplate('plain text', ctx())).toBe('plain text');
   });
@@ -79,6 +85,19 @@ describe('resolveTemplateDeep', () => {
     expect(resolved.params[1]).toBe('static');
     expect(resolved.depth.keepNonString).toBe(true);
     expect(resolved.depth.count).toBe(42);
+  });
+
+  it('returns typed values for exact inline AScript fields', () => {
+    const resolved = resolveTemplateDeep({
+      count: '{{= $json.items.filter((item) => item.active).length }}',
+      firstSource: '{{= $nodes.research.sources[0] }}',
+      payload: '{{= ({ source: $trigger.metadata.source, score: $nodes.research.nested.score }) }}',
+    }, ctx());
+    expect(resolved).toEqual({
+      count: 1,
+      firstSource: 'https://a.example',
+      payload: { source: 'cli', score: 0.84 },
+    });
   });
 
   it('preserves null and undefined', () => {
@@ -105,6 +124,11 @@ describe('readTemplatePath', () => {
 
   it('returns undefined when the head namespace is unknown and not a node id', () => {
     expect(readTemplatePath(ctx(), 'missing.namespace.path')).toBeUndefined();
+  });
+
+  it('evaluates readTemplatePath expressions as typed values', () => {
+    expect(readTemplatePath(ctx(), '= $nodes.research.sources.filter((url) => url.includes("b."))'))
+      .toEqual(['https://b.example']);
   });
 
   it('permissive head: bare nodeId resolves through the nodes map', () => {

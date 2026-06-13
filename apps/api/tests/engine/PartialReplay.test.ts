@@ -194,6 +194,41 @@ describe('PartialReplayService — four modes', () => {
     expect(out.initialState.completedNodeIds).not.toContain('C');
   });
 
+  it('replay-failed-branch treats handled node errors as failed lineage too', () => {
+    const graph = linearGraph();
+    const { runId } = seedSource({
+      graph,
+      completedNodeIds: ['A', 'B', 'C'],
+    });
+    const row = ctx.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId))
+      .get()!;
+    const sourceState = row.runState as WorkflowRunState;
+    sourceState.status = 'COMPLETED_WITH_ERRORS';
+    sourceState.nodeStates.C = {
+      nodeId: 'C',
+      status: 'COMPLETED',
+      outputData: { caught: true },
+      error: 'handled failure',
+    };
+    ctx.db
+      .update(schema.workflowRuns)
+      .set({ status: 'COMPLETED_WITH_ERRORS', runState: sourceState as unknown as object })
+      .where(eq(schema.workflowRuns.id, runId))
+      .run();
+
+    const out = svc.prepare({
+      workspaceId: ctx.workspace.id,
+      sourceRunId: runId,
+      mode: 'replay-failed-branch',
+      userId: ctx.user.id,
+    });
+    expect(out.initialState.completedNodeIds).toEqual([]);
+    expect(out.initialState.nodeStates.C?.status).toBe('PENDING');
+  });
+
   it('replay-with-edited-node patches the target node config without mutating the source workflow', () => {
     const graph = linearGraph();
     const { wfId, runId } = seedSource({ graph, completedNodeIds: ['A', 'B', 'C', 'D'] });

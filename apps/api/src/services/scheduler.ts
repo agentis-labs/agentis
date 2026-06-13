@@ -309,23 +309,37 @@ async function queueWorkflowRun(deps: SchedulerDeps, args: QueueWorkflowArgs): P
   const runId = randomUUID();
   const queueId = randomUUID();
   const initialState = buildInitialRunState({ runId, workflowId: workflow.id, graph, inputs: args.inputs });
-  deps.db.insert(schema.workflowRunQueue).values({
-    id: queueId,
-    workspaceId: args.workspaceId,
-    ambientId: args.ambientId,
-    workflowId: workflow.id,
-    userId: args.userId,
-    triggerId: args.triggerId,
-    inputs: args.inputs,
-    initialState: initialState as unknown as object,
-    graphSnapshot: graph as unknown as object,
-    scheduledAt: args.scheduledAt ?? null,
-    priority: args.priority ?? 0,
-    reason: args.reason,
-    parentRunId: args.parentRunId ?? null,
-    chainDepth: args.chainDepth ?? 0,
-    status: 'pending',
-  }).run();
+  deps.db.transaction(() => {
+    deps.db.insert(schema.workflowRuns).values({
+      id: runId,
+      workspaceId: args.workspaceId,
+      ambientId: args.ambientId,
+      workflowId: workflow.id,
+      userId: args.userId,
+      triggerId: args.triggerId,
+      parentRunId: args.parentRunId ?? null,
+      status: 'CREATED',
+      runState: initialState as unknown as object,
+      replanCount: 0,
+    }).run();
+    deps.db.insert(schema.workflowRunQueue).values({
+      id: queueId,
+      workspaceId: args.workspaceId,
+      ambientId: args.ambientId,
+      workflowId: workflow.id,
+      userId: args.userId,
+      triggerId: args.triggerId,
+      inputs: args.inputs,
+      initialState: initialState as unknown as object,
+      graphSnapshot: graph as unknown as object,
+      scheduledAt: args.scheduledAt ?? null,
+      priority: args.priority ?? 0,
+      reason: args.reason,
+      parentRunId: args.parentRunId ?? null,
+      chainDepth: args.chainDepth ?? 0,
+      status: 'pending',
+    }).run();
+  });
   deps.bus.publish(REALTIME_ROOMS.workflow(workflow.id), REALTIME_EVENTS.RUN_QUEUED, {
     queueId,
     runId,

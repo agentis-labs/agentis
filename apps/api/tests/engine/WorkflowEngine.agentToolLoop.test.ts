@@ -9,7 +9,15 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { REALTIME_EVENTS, type WorkflowGraph } from '@agentis/core';
+import {
+  REALTIME_EVENTS,
+  type AdapterCapabilities,
+  type AdapterType,
+  type AgentAdapter,
+  type NormalizedAgentEvent,
+  type NormalizedTask,
+  type WorkflowGraph,
+} from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import { buildInitialRunState } from '../../src/engine/initialRunState.js';
@@ -22,8 +30,9 @@ import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
 import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
 import { EvaluatorRuntime } from '../../src/services/evaluatorRuntime.js';
 import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
+import type { BusMessage } from '../../src/event-bus.js';
 
 let ctx: TestContext;
 let engine: WorkflowEngine;
@@ -41,19 +50,73 @@ function scriptedFetch(decisions: Array<Record<string, unknown>>): typeof fetch 
   }) as unknown as typeof fetch;
 }
 
-beforeEach(async () => {
-  ctx = await createTestContext();
-  dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-engine-loop-'));
+function quotaErrorFetch(): typeof fetch {
+  return (async () => {
+    return new Response(JSON.stringify({
+      error: {
+        message: 'You exceeded your current quota. Please check your plan and billing details.',
+      },
+    }), {
+      status: 402,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+}
+
+class CapturingAgenticAdapter implements AgentAdapter {
+  readonly adapterType: AdapterType = 'codex';
+  readonly tasks: NormalizedTask[] = [];
+  readonly #handlers = new Set<(event: NormalizedAgentEvent) => void>();
+
+  constructor(private readonly agentId: string) {}
+
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async healthCheck() {
+    return { isHealthy: true, checkedAt: new Date().toISOString() };
+  }
+  capabilities(): AdapterCapabilities {
+    return {
+      interactiveChat: true,
+      toolCalling: true,
+      toolForwarding: 'marker_protocol',
+      affordances: { fileSystem: true, terminal: true },
+    };
+  }
+  onEvent(handler: (event: NormalizedAgentEvent) => void): void {
+    this.#handlers.add(handler);
+  }
+  async dispatchTask(task: NormalizedTask): Promise<void> {
+    this.tasks.push(task);
+    queueMicrotask(() => {
+      for (const handler of this.#handlers) {
+        handler({
+          eventType: 'task.completed',
+          agentId: this.agentId,
+          taskId: task.taskId,
+          runId: task.runId,
+          workflowId: task.workflowId,
+          output: { routedTo: this.agentId },
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
+  }
+  async cancelTask(): Promise<void> {}
+}
+
+function buildEngine(fetchImpl: typeof fetch, adapters = new AdapterManager(ctx.logger)): WorkflowEngine {
   const volume = new WorkspaceVolumeService(dataDir);
   const evaluatorRuntime = new EvaluatorRuntime({
-    baseUrl: 'http://stub/v1', model: 'stub', logger: ctx.logger,
-    fetchImpl: scriptedFetch([
-      { thought: 'write the result', action: 'tool', tool: 'write_file', args: { path: 'out/result.txt', content: 'hello from loop' } },
-      { thought: 'done', action: 'final', output: 'Wrote out/result.txt' },
-    ]),
+    baseUrl: 'http://stub/v1',
+    model: 'stub',
+    logger: ctx.logger,
+    fetchImpl,
   });
-  engine = new WorkflowEngine({
-    db: ctx.db, bus: ctx.bus, logger: ctx.logger,
+  const created = new WorkflowEngine({
+    db: ctx.db,
+    bus: ctx.bus,
+    logger: ctx.logger,
     ledger: new LedgerService(ctx.db, ctx.bus),
     scratchpad: new ScratchpadService(ctx.bus, ctx.logger),
     activity: new ActivityFeedService(ctx.db, ctx.bus),
@@ -61,9 +124,26 @@ beforeEach(async () => {
     specialists: new SpecialistAgentService(ctx.db),
     agentTools: new AgentToolRuntime({ volume }),
     evaluatorRuntime,
-    skills: {} as unknown as SkillRuntime,
-    adapters: new AdapterManager(ctx.logger),
+    extensions: {} as unknown as ExtensionRuntime,
+    adapters,
   });
+  adapters.onEvent((event) => {
+    if (event.eventType === 'task.completed') {
+      void created.notifyTaskCompleted({ runId: event.runId, nodeId: event.taskId, output: event.output });
+    } else if (event.eventType === 'task.failed') {
+      void created.notifyTaskFailed({ runId: event.runId, nodeId: event.taskId, error: event.error });
+    }
+  });
+  return created;
+}
+
+beforeEach(async () => {
+  ctx = await createTestContext();
+  dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-engine-loop-'));
+  engine = buildEngine(scriptedFetch([
+    { thought: 'write the result', action: 'tool', tool: 'write_file', args: { path: 'out/result.txt', content: 'hello from loop' } },
+    { thought: 'done', action: 'final', output: 'Wrote out/result.txt' },
+  ]));
 });
 
 afterEach(async () => {
@@ -71,7 +151,13 @@ afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-function runGraph(graph: WorkflowGraph, events: string[]): Promise<string> {
+function runGraph(
+  graph: WorkflowGraph,
+  events: string[],
+  isTerminal: (message: BusMessage) => boolean = (message) => {
+    return message.envelope.event === REALTIME_EVENTS.RUN_COMPLETED || message.envelope.event === REALTIME_EVENTS.RUN_FAILED;
+  },
+): Promise<string> {
   const wfId = randomUUID();
   ctx.db.insert(schema.workflows).values({
     id: wfId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
@@ -88,7 +174,7 @@ function runGraph(graph: WorkflowGraph, events: string[]): Promise<string> {
     const off = ctx.bus.subscribe((m) => {
       if (m.room === `run:${runId}`) {
         events.push(m.envelope.event);
-        if (m.envelope.event === REALTIME_EVENTS.RUN_COMPLETED || m.envelope.event === REALTIME_EVENTS.RUN_FAILED) {
+        if (isTerminal(m)) {
           clearTimeout(timer); off(); resolve(runId);
         }
       }
@@ -100,7 +186,7 @@ function runGraph(graph: WorkflowGraph, events: string[]): Promise<string> {
   });
 }
 
-describe('WorkflowEngine — agent_task useRoleTools', () => {
+describe('WorkflowEngine — agent_task agentic-by-default', () => {
   it('runs the tool loop in-process and completes the node with its output', async () => {
     const graph: WorkflowGraph = {
       version: 1, viewport: { x: 0, y: 0, zoom: 1 },
@@ -120,5 +206,133 @@ describe('WorkflowEngine — agent_task useRoleTools', () => {
     expect(run.status).toBe('COMPLETED');
     const state = run.runState as { nodeStates: Record<string, { outputData?: { output?: string } }> };
     expect(state.nodeStates.A?.outputData?.output).toMatch(/Wrote out\/result\.txt/);
+  });
+
+  it('runs the tool loop for a PLAIN agent_task (no useRoleTools) — agentic is the default', async () => {
+    // Same coder task, but WITHOUT useRoleTools. Gap-fix A: the loop is now the
+    // default path, so the agent still acts (writes the file) instead of a
+    // single fire-and-forget completion.
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Coder', position: { x: 200, y: 0 }, config: {
+          kind: 'agent_task', agentRole: 'coder', capabilityTags: [],
+          prompt: 'Write the result file.', inputKeys: [], outputKeys: [],
+        } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'A' }],
+    } as WorkflowGraph;
+
+    const events: string[] = [];
+    const runId = await runGraph(graph, events);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+    const state = run.runState as { nodeStates: Record<string, { outputData?: { output?: string; toolCalls?: number } }> };
+    expect(state.nodeStates.A?.outputData?.output).toMatch(/Wrote out\/result\.txt/);
+    expect(state.nodeStates.A?.outputData?.toolCalls).toBe(1);
+  });
+
+  it('gives a CUSTOM specialist role the default toolbox (tool-using, not single-shot)', async () => {
+    // A custom role has no platform tool manifest — Gap-fix A grants it the
+    // universal default toolbox (incl. run_code), so it can actually act.
+    engine = buildEngine(scriptedFetch([
+      { thought: 'compute', action: 'tool', tool: 'run_code', args: { expression: '2 + 2' } },
+      { thought: 'done', action: 'final', output: 'The answer is 4.' },
+    ]));
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Tax Analyst', position: { x: 200, y: 0 }, config: {
+          kind: 'agent_task', agentRole: 'tax_analyst', capabilityTags: [],
+          prompt: 'Compute the figure.', inputKeys: [], outputKeys: [],
+        } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'A' }],
+    } as WorkflowGraph;
+
+    const events: string[] = [];
+    const runId = await runGraph(graph, events);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+    const state = run.runState as { nodeStates: Record<string, { outputData?: { output?: string; toolCalls?: number } }> };
+    expect(state.nodeStates.A?.outputData?.output).toMatch(/answer is 4/i);
+    expect(state.nodeStates.A?.outputData?.toolCalls).toBe(1); // the custom role actually called a tool
+  });
+
+  it('defers to an agentic adapter instead of replacing its harness loop', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Codex Coder',
+      role: 'coder',
+      adapterType: 'codex',
+      capabilityTags: ['code'],
+      config: {},
+      status: 'online',
+    }).run();
+    const adapters = new AdapterManager(ctx.logger);
+    const adapter = new CapturingAgenticAdapter(agentId);
+    adapters.register(agentId, adapter);
+    engine = buildEngine(scriptedFetch([
+      { thought: 'this would prove the platform loop stole the task', action: 'tool', tool: 'write_file', args: { path: 'stolen.txt', content: 'wrong path' } },
+      { thought: 'wrong', action: 'final', output: 'wrong executor' },
+    ]), adapters);
+
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Coder', position: { x: 200, y: 0 }, config: {
+          kind: 'agent_task', agentId, agentRole: 'coder', capabilityTags: ['code'],
+          prompt: 'Use the configured harness.', inputKeys: [], outputKeys: [],
+        } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'A' }],
+    } as WorkflowGraph;
+
+    const events: string[] = [];
+    const runId = await runGraph(graph, events);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+    expect(adapter.tasks).toHaveLength(1);
+    const state = run.runState as { nodeStates: Record<string, { outputData?: { routedTo?: string; toolCalls?: number } }> };
+    expect(state.nodeStates.A?.outputData?.routedTo).toBe(agentId);
+    expect(state.nodeStates.A?.outputData?.toolCalls).toBeUndefined();
+  });
+
+  it('pauses instead of failing or fake-running when the model account has no credits', async () => {
+    engine = buildEngine(quotaErrorFetch());
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Coder', position: { x: 200, y: 0 }, config: {
+          kind: 'agent_task', agentRole: 'coder', useRoleTools: true, capabilityTags: [],
+          prompt: 'Write the result file.', inputKeys: [], outputKeys: [],
+        } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'A' }],
+    } as WorkflowGraph;
+
+    const events: string[] = [];
+    const runId = await runGraph(graph, events, (message) => {
+      const payload = message.envelope.payload as { status?: string };
+      return message.envelope.event === REALTIME_EVENTS.RUN_RUNNING && payload.status === 'WAITING';
+    });
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('WAITING');
+    const state = run.runState as {
+      nodeStates: Record<string, { status?: string; blockedReason?: string }>;
+      failedNodeIds: string[];
+    };
+    expect(state.nodeStates.A?.status).toBe('WAITING');
+    expect(state.nodeStates.A?.blockedReason).toMatch(/credits|billing/i);
+    expect(state.failedNodeIds).toEqual([]);
+    expect(events).toContain(REALTIME_EVENTS.NODE_WAITING_FOR_INPUT);
   });
 });

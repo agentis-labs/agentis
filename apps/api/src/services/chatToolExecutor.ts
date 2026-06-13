@@ -81,9 +81,11 @@ export class ChatToolExecutor {
         ambientId: ctx.ambientId ?? null,
         agentId: ctx.agentId,
         userId: ctx.userId,
+        runId: ctx.runId,
         conversationId: ctx.conversationId,
         viewport: ctx.viewport ?? null,
         caller: 'chat',
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
       },
     );
 

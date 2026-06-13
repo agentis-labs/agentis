@@ -6,7 +6,7 @@
  * resolver wired in. Network-dependent kinds (integration, http_request,
  * evaluator) have separate focused tests.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { eq } from 'drizzle-orm';
@@ -20,21 +20,22 @@ import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { WorkflowStoreService } from '../../src/services/workflowStore.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
 let engine: WorkflowEngine;
 let workflowStore: WorkflowStoreService;
+let approvals: ApprovalInboxService;
 
 beforeEach(async () => {
   ctx = await createTestContext();
   const ledger = new LedgerService(ctx.db, ctx.bus);
   const scratchpad = new ScratchpadService(ctx.bus, ctx.logger);
   const activity = new ActivityFeedService(ctx.db, ctx.bus);
-  const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
+  approvals = new ApprovalInboxService(ctx.db, ctx.bus);
   const adapters = new AdapterManager(ctx.logger);
-  const skills = {} as unknown as SkillRuntime;
+  const skills = {} as unknown as ExtensionRuntime;
   workflowStore = new WorkflowStoreService(ctx.db);
   engine = new WorkflowEngine({
     db: ctx.db,
@@ -110,6 +111,19 @@ function loadRun(runId: string) {
   return ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
 }
 
+async function waitForCheckpointApproval(): Promise<{ id: string; title: string; summary: string }> {
+  // 10s ceiling (returns the instant the approval lands) — the checkpoint runs a
+  // model-backed preview step before creating the approval, so a saturated CI
+  // host needs more headroom than the happy-path ~600ms. Matches the generous
+  // event-wait budgets used by the sibling engine tests.
+  for (let i = 0; i < 500; i += 1) {
+    const pending = approvals.list(ctx.workspace.id, 'pending').find((approval) => approval.source === 'checkpoint');
+    if (pending) return { id: pending.id, title: pending.title, summary: pending.summary };
+    await sleep(20);
+  }
+  throw new Error('no checkpoint approval created');
+}
+
 describe('WorkflowEngine — transform node', () => {
   it('reshapes input via a JS expression', async () => {
     const graph: WorkflowGraph = {
@@ -167,10 +181,13 @@ describe('WorkflowEngine — transform node', () => {
     const wfId = seedWorkflow(graph);
     const runId = await startAndWait(wfId, graph, {});
     const row = loadRun(runId);
-    // Error edge routed → run completes successfully.
-    expect(row.status).toBe('COMPLETED');
-    const state = row.runState as { nodeStates: Record<string, { outputData?: Record<string, unknown> }> };
+    // Error edge routed → the catch branch ran, but a node ERRORED, so the run
+    // is honestly COMPLETED_WITH_ERRORS (not a green "success"): the operator
+    // must know it didn't cleanly succeed, and auto-diagnosis fires.
+    expect(row.status).toBe('COMPLETED_WITH_ERRORS');
+    const state = row.runState as { nodeStates: Record<string, { outputData?: Record<string, unknown>; error?: string }> };
     expect(state.nodeStates.C?.outputData).toMatchObject({ caught: true });
+    expect(state.nodeStates.X?.error).toBeTruthy();
   });
 });
 
@@ -266,6 +283,26 @@ describe('WorkflowEngine — workflow_store node', () => {
   });
 });
 
+describe('WorkflowEngine - http_request node', () => {
+  it('blocks private targets before issuing a network request', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'H', type: 'http_request', title: 'Private', position: { x: 200, y: 0 }, config: { kind: 'http_request', method: 'GET', url: 'http://127.0.0.1:9/private' } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'H' }],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    expect(loadRun(runId).status).toBe('FAILED');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+});
+
 describe('WorkflowEngine — interrupted run recovery', () => {
   function seedInterruptedRun(opts: {
     activeExecutions: Record<string, unknown>;
@@ -340,16 +377,93 @@ describe('WorkflowEngine — interrupted run recovery', () => {
     expect(state.completedNodeIds).toContain('X');
   });
 
-  it('fails a run with non-recoverable external work in flight', async () => {
-    const { runId } = seedInterruptedRun({
-      activeExecutions: {
-        A: { taskId: 'task-1', nodeId: 'A', executorType: 'agent', executorRef: 'agent-xyz', startedAt: new Date().toISOString() },
+  it('resumes a run by RE-DISPATCHING in-flight non-wait work (AEJ Proposal 1)', async () => {
+    // trigger(done) -> transform(was RUNNING at crash). The old engine failed
+    // the whole run; AEJ re-dispatches the in-flight node so the run survives.
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'X', type: 'transform', title: 'Work', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ done: true })', isOutput: true } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = randomUUID();
+    const state = {
+      runId, workflowId: wfId, status: 'RUNNING', readyQueue: [], waitingInputs: {},
+      nodeStates: {
+        T: { nodeId: 'T', status: 'COMPLETED' },
+        X: { nodeId: 'X', status: 'RUNNING', inputData: { from: 'trigger' } },
       },
-    });
+      activeExecutions: {
+        X: { taskId: 'task-x', nodeId: 'X', executorType: 'transform', executorRef: 'transform', startedAt: new Date().toISOString(), inputData: { from: 'trigger' } },
+      },
+      completedNodeIds: ['T'], failedNodeIds: [], skippedNodeIds: [], graphRevision: 1, replanCount: 0, lastLedgerSequence: 0,
+    };
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, status: 'RUNNING', runState: state,
+    }).run();
+
     const summary = await engine.recoverInterruptedRuns();
-    expect(summary.resumed).toBe(0);
+    expect(summary.resumed).toBe(1);
+    expect(summary.failed).toBe(0);
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), 15_000);
+      const off = ctx.bus.subscribe((m) => {
+        if (m.room === `run:${runId}` && m.envelope.event === REALTIME_EVENTS.RUN_COMPLETED) {
+          clearTimeout(timer); off(); resolve();
+        }
+      });
+    });
+    expect(loadRun(runId).status).toBe('COMPLETED');
+    expect((loadRun(runId).runState as { completedNodeIds: string[] }).completedNodeIds).toContain('X');
+  });
+
+  it('fails only a truly unrecoverable run (no workflow graph to resume against)', async () => {
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: null, userId: ctx.user.id, status: 'RUNNING',
+      runState: { runId, workflowId: null, status: 'RUNNING', readyQueue: [], waitingInputs: {}, nodeStates: {}, activeExecutions: { A: { taskId: 't', nodeId: 'A', executorType: 'agent', executorRef: 'x', startedAt: new Date().toISOString() } }, completedNodeIds: [], failedNodeIds: [], skippedNodeIds: [], graphRevision: 1, replanCount: 0, lastLedgerSequence: 0 },
+    }).run();
+    const summary = await engine.recoverInterruptedRuns();
     expect(summary.failed).toBe(1);
     expect(loadRun(runId).status).toBe('FAILED');
+  });
+});
+
+describe('WorkflowEngine — skip propagation (NP, Proposal 3)', () => {
+  it('skips an untaken branch subtree (cascade) and still settles COMPLETED', async () => {
+    // S gates two branches: the conditional A-branch is NOT taken (output.go is
+    // false) so D1 and its tail D3 must be SKIPPED; the B-branch (D2) runs.
+    // Before the fix the untaken branch left D1 blocked → run stuck WAITING.
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'M', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'S', type: 'transform', title: 'Gate', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ go: false })' } },
+        { id: 'D1', type: 'transform', title: 'A', position: { x: 400, y: -60 }, config: { kind: 'transform', expression: '({ a: 1 })' } },
+        { id: 'D3', type: 'transform', title: 'A tail', position: { x: 600, y: -60 }, config: { kind: 'transform', expression: '({ a: 2 })', isOutput: true } },
+        { id: 'D2', type: 'transform', title: 'B', position: { x: 400, y: 60 }, config: { kind: 'transform', expression: '({ b: 1 })', isOutput: true } },
+      ],
+      edges: [
+        { id: 'e1', source: 'T', target: 'S' },
+        { id: 'e2', source: 'S', target: 'D1', condition: 'output.go' },
+        { id: 'e3', source: 'D1', target: 'D3' },
+        { id: 'e4', source: 'S', target: 'D2' },
+      ],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    const row = loadRun(runId);
+    expect(row.status).toBe('COMPLETED');
+    const state = row.runState as { nodeStates: Record<string, { status: string }> };
+    expect(state.nodeStates.D2?.status).toBe('COMPLETED');
+    expect(state.nodeStates.D1?.status).toBe('SKIPPED');
+    expect(state.nodeStates.D3?.status).toBe('SKIPPED');
   });
 });
 
@@ -429,5 +543,90 @@ describe('WorkflowEngine — error edge routing', () => {
     const state = loadRun(runId).runState as { completedNodeIds: string[]; skippedNodeIds: string[] };
     expect(state.completedNodeIds).toContain('X');
     expect(state.completedNodeIds).not.toContain('C');
+  });
+});
+
+describe('WorkflowEngine - checkpoint approvals', () => {
+  it('previews the gated downstream action before asking for approval (generic, any connector)', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'prepare_message',
+          type: 'transform',
+          title: 'Prepare Message',
+          position: { x: 200, y: 0 },
+          config: {
+            kind: 'transform',
+            expression: JSON.stringify({
+              to: 'robsonpradodev@gmail.com',
+              subject: 'Hi Robson',
+              text: 'Hi Robson',
+            }),
+          },
+        },
+        {
+          id: 'approve_email_send',
+          type: 'checkpoint',
+          title: 'Approve Email Send',
+          position: { x: 400, y: 0 },
+          config: { kind: 'checkpoint', approvalMode: 'manual' },
+        },
+        {
+          id: 'send_email',
+          type: 'integration',
+          title: 'Send Email',
+          position: { x: 600, y: 0 },
+          config: {
+            kind: 'integration',
+            integrationId: 'agentmail',
+            operationId: 'send_message',
+            inputs: {
+              to: '{{nodes.prepare_message.to}}',
+              subject: '{{nodes.prepare_message.subject}}',
+              text: '{{nodes.prepare_message.text}}',
+            },
+          },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'T', target: 'prepare_message' },
+        { id: 'e2', source: 'prepare_message', target: 'approve_email_send' },
+        { id: 'e3', source: 'approve_email_send', target: 'send_email' },
+      ],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = randomUUID();
+    const initialState = buildInitialRunState({ runId, workflowId: wfId, graph, inputs: {} });
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId: wfId,
+      userId: ctx.user.id,
+      status: 'CREATED',
+      runState: initialState,
+    }).run();
+
+    void engine.startRun({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId: wfId,
+      userId: ctx.user.id,
+      triggerId: null,
+      inputs: {},
+      initialState,
+      graph,
+    });
+
+    const approval = await waitForCheckpointApproval();
+    // Generic action preview — the engine describes whatever side-effecting node
+    // the checkpoint guards (here an integration), connector-agnostic.
+    expect(approval.summary).toContain('Send Email (agentmail');
+    expect(approval.summary).toContain('to: robsonpradodev@gmail.com');
+    expect(approval.summary).toContain('subject: Hi Robson');
+    expect(loadRun(runId).status).toBe('WAITING');
   });
 });

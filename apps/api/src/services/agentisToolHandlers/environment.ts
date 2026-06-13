@@ -7,10 +7,10 @@
 
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import type { SkillManifest } from '@agentis/core';
+import type { ExtensionManifest } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { runBuiltin } from '../builtinSkills.js';
+import { runBuiltin } from '../builtinExtensions.js';
 
 export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -91,7 +91,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
     },
     {
       definition: {
-        id: 'agentis.apps.status',
+        id: 'agentis.gateways.status',
         family: 'inspect',
         description: 'Check gateway and registered adapter health for the workspace.',
         inputSchema: { type: 'object', properties: { gatewayId: { type: 'string' } } },
@@ -149,7 +149,8 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
       },
       handler: async (args) => {
         const outcome = await runBuiltin(
-          { entrypoint: 'http_fetch' } as SkillManifest,
+          { entrypoint: 'http_fetch' } as ExtensionManifest,
+          'execute',
           {
             url: args.url,
             method: args.method,

@@ -27,6 +27,7 @@ import type { ConversationStore } from './conversationStore.js';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
 import type { ChannelAdapter, ChannelKind } from '../adapters/channels/types.js';
+import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 
 export interface ChannelBridgeDeps {
   db: AgentisSqliteDb;
@@ -45,10 +46,12 @@ export interface CreateConnectionInput {
   agentId: string;
   kind: ChannelKind;
   name: string;
-  /** Plaintext bot token. Encrypted on the way in. */
-  token: string;
+  /** Plaintext bot token. Encrypted on the way in. Omitted for QR-auth kinds (WhatsApp). */
+  token?: string;
   /** Optional outbound chat id default (e.g. Telegram numeric id). */
   defaultChatId?: string;
+  /** Persistent transport: Telegram 'polling' or Discord 'gateway' (no public webhook). */
+  transport?: 'polling' | 'webhook' | 'gateway';
 }
 
 export interface PublicConnection {
@@ -66,18 +69,113 @@ export interface PublicConnection {
   updatedAt: string;
 }
 
+/**
+ * A persistent, stateful channel transport (WhatsApp socket, Telegram long-poll)
+ * owned by the ChannelConnectionSupervisor. Unlike the webhook `ChannelAdapter`,
+ * sends route through a live connection keyed by connectionId, not a token.
+ */
+export interface PersistentChannelRef {
+  id: string;
+  kind: string;
+  settings?: unknown;
+}
+
+export interface PersistentChannelTransport {
+  /** True when outbound for this connection routes through a live session. */
+  handles(conn: PersistentChannelRef): boolean;
+  /** True when creating this kind needs no token (QR auth, e.g. WhatsApp). */
+  requiresNoToken(kind: string): boolean;
+  /** Post-create hook — start polling sessions (no-op for QR-login kinds). */
+  onCreated?(conn: PersistentChannelRef): void;
+  send(connectionId: string, chatId: string, body: string): Promise<void>;
+  /** Show/clear the typing indicator (best-effort). */
+  setTyping?(connectionId: string, chatId: string, on: boolean): Promise<void>;
+  /** Tear down the live session when a connection is deleted. */
+  stop?(connectionId: string): Promise<void>;
+}
+
 export class ChannelBridge {
   readonly #adapters: Map<ChannelKind, ChannelAdapter>;
   #unsub: (() => void) | null = null;
+  #turnDispatcher: ChannelTurnDispatcher | null = null;
+  #persistent: PersistentChannelTransport | null = null;
 
   constructor(private readonly deps: ChannelBridgeDeps) {
     this.#adapters = new Map();
     if (deps.adapters?.telegram) this.#adapters.set('telegram', deps.adapters.telegram);
     if (deps.adapters?.discord) this.#adapters.set('discord', deps.adapters.discord);
+    if (deps.adapters?.slack) this.#adapters.set('slack', deps.adapters.slack);
   }
 
   registerAdapter(adapter: ChannelAdapter) {
     this.#adapters.set(adapter.kind, adapter);
+  }
+
+  /**
+   * Wire the orchestrator turn dispatcher. Injected after the chat executor is
+   * configured (bootstrap), so inbound channel messages run a real turn instead
+   * of being mirrored inertly.
+   */
+  setTurnDispatcher(dispatcher: ChannelTurnDispatcher) {
+    this.#turnDispatcher = dispatcher;
+  }
+
+  /** Wire the persistent-transport supervisor (WhatsApp etc.). */
+  setPersistentTransport(transport: PersistentChannelTransport) {
+    this.#persistent = transport;
+  }
+
+  /**
+   * Show/clear the typing indicator for a connection's chat. Best-effort — only
+   * persistent transports with a live session support it; webhook channels no-op.
+   */
+  async setTyping(connectionId: string, chatId: string, on: boolean): Promise<void> {
+    if (!this.#persistent?.setTyping) return;
+    const row = this.deps.db
+      .select({ id: schema.channelConnections.id, kind: schema.channelConnections.kind, settings: schema.channelConnections.settings })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId))
+      .get();
+    if (!row || !this.#persistent.handles({ id: row.id, kind: row.kind, settings: row.settings })) return;
+    try {
+      await this.#persistent.setTyping(connectionId, chatId, on);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Deliver an outbound message to a single connection's channel. Used by the
+   * turn dispatcher to send the orchestrator's reply back to the origin chat.
+   * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
+   * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
+   */
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string }): Promise<void> {
+    const row = this.deps.db
+      .select()
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, args.connectionId))
+      .get();
+    if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
+    try {
+      if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings: row.settings })) {
+        await this.#persistent.send(row.id, args.chatId, args.body);
+      } else {
+        const adapter = this.#requireAdapter(row.kind as ChannelKind);
+        const token = this.deps.vault.decrypt(row.tokenEncrypted);
+        await adapter.send({ token, chatId: args.chatId, body: args.body });
+      }
+      this.#markActive(row.id);
+      this.deps.bus.publish(
+        REALTIME_ROOMS.workspace(row.workspaceId),
+        REALTIME_EVENTS.CHANNEL_MESSAGE_SENT,
+        { connectionId: row.id, kind: row.kind, agentId: row.agentId },
+      );
+    } catch (err) {
+      const msg = (err as Error).message ?? 'send failed';
+      this.#markError(row.id, msg);
+      throw err;
+    }
   }
 
   hasAdapter(kind: ChannelKind): boolean {
@@ -131,11 +229,25 @@ export class ChannelBridge {
   }
 
   create(input: CreateConnectionInput): { connection: PublicConnection; webhookSecret: string } {
-    if (!this.#adapters.has(input.kind)) {
+    const id = randomUUID();
+    const settings: Record<string, unknown> = {};
+    if (input.defaultChatId) settings.defaultChatId = input.defaultChatId;
+    if (input.transport) settings.transport = input.transport;
+    const ref = { id, kind: input.kind, settings };
+    const noToken = this.#persistent?.requiresNoToken(input.kind) ?? false;
+    const persistent = this.#persistent?.handles(ref) ?? false;
+    // A connection must be deliverable: either via a live persistent session, a
+    // registered webhook adapter, or QR auth (which needs no token at all).
+    if (!noToken && !persistent && !this.#adapters.has(input.kind)) {
       throw new AgentisError(
         'CHANNEL_KIND_UNAVAILABLE',
         `channel adapter for kind '${input.kind}' is not registered`,
       );
+    }
+    // QR-auth kinds (WhatsApp) link via QR, not a bot token; everything else
+    // (including Telegram polling, which uses the bot token) requires one.
+    if (!noToken && !input.token) {
+      throw new AgentisError('VALIDATION_FAILED', `channel kind '${input.kind}' requires a token`);
     }
     const agent = this.deps.db
       .select()
@@ -145,8 +257,9 @@ export class ChannelBridge {
     if (!agent || agent.workspaceId !== input.workspaceId) {
       throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${input.agentId} not found`);
     }
-    const id = randomUUID();
     const webhookSecret = randomBytes(24).toString('hex');
+    // tokenEncrypted is NOT NULL; QR-auth kinds store an encrypted marker.
+    const tokenPlain = input.token ?? `persistent:${input.kind}:${id}`;
     this.deps.db
       .insert(schema.channelConnections)
       .values({
@@ -157,20 +270,31 @@ export class ChannelBridge {
         agentId: input.agentId,
         kind: input.kind,
         name: input.name,
-        tokenEncrypted: this.deps.vault.encrypt(input.token),
+        tokenEncrypted: this.deps.vault.encrypt(tokenPlain),
         webhookSecret,
-        settings: input.defaultChatId ? { defaultChatId: input.defaultChatId } : {},
-        status: 'active',
+        settings,
+        // Persistent connections aren't usable until the session is live.
+        status: persistent ? 'connecting' : 'active',
         lastEventAt: null,
         lastError: null,
       })
       .run();
+    // Start polling sessions immediately (WhatsApp links via explicit QR login).
+    this.#persistent?.onCreated?.(ref);
     const connection = this.get(input.workspaceId, id);
     return { connection, webhookSecret };
   }
 
   delete(workspaceId: string, id: string): void {
     const existing = this.get(workspaceId, id); // 404s if not found
+    const row = this.deps.db
+      .select({ settings: schema.channelConnections.settings })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, existing.id))
+      .get();
+    if (this.#persistent?.handles({ id: existing.id, kind: existing.kind, settings: row?.settings })) {
+      void this.#persistent.stop?.(existing.id);
+    }
     this.deps.db
       .delete(schema.channelConnections)
       .where(eq(schema.channelConnections.id, existing.id))
@@ -262,6 +386,13 @@ export class ChannelBridge {
       sessionMessageId: parsed.externalId,
       authorType: 'system',
       body: `${fromTag}${parsed.body}`,
+      metadata: {
+        channel: row.kind,
+        channelConnectionId: row.id,
+        channelInbound: true,
+        ...(parsed.threadId ? { threadId: parsed.threadId } : {}),
+        ...(parsed.from ? { from: parsed.from } : {}),
+      },
     });
     this.deps.db
       .insert(schema.channelDeliveries)
@@ -281,6 +412,27 @@ export class ChannelBridge {
       chatId: parsed.chatId,
       messageId: message.id,
     });
+
+    // Run a real orchestrator turn for this message and deliver the reply back
+    // to the channel. Fire-and-forget so the webhook gets its fast ack while the
+    // (potentially slow) turn runs in the background.
+    if (this.#turnDispatcher) {
+      void this.#turnDispatcher.dispatch({
+        workspaceId: row.workspaceId,
+        ambientId: row.ambientId,
+        userId: row.userId,
+        agentId: row.agentId,
+        conversationId: conversation.id,
+        connectionId: row.id,
+        kind: row.kind,
+        chatId: parsed.chatId,
+        text: parsed.body,
+        ...(parsed.threadId ? { threadId: parsed.threadId } : {}),
+        ...(parsed.from ? { from: parsed.from } : {}),
+        inboundMessageId: message.id,
+      });
+    }
+
     return { accepted: true, idempotent: false, messageId: message.id };
   }
 

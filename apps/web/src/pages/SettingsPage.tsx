@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon } from 'lucide-react';
 import clsx from 'clsx';
-import { api } from '../lib/api';
+import { api, apiErrorMessage } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 import { Tabs } from '../components/shared/Tabs';
@@ -17,8 +17,12 @@ import { Button } from '../components/shared/Button';
 import { Skeleton } from '../components/shared/Skeleton';
 import { ThemeToggle } from '../components/shared/ThemeToggle';
 import { StatusBadge } from '../components/shared/StatusBadge';
+import { GovernancePanel } from '../components/settings/GovernancePanel';
+import { McpConnectionsPanel } from '../components/settings/McpConnectionsPanel';
+import { ChannelIdentitiesPanel } from '../components/settings/ChannelIdentitiesPanel';
+import { OrchestratorModelsPanel } from '../components/settings/OrchestratorModelsPanel';
 
-type Tab = 'profile' | 'workspace' | 'connections' | 'security' | 'budget' | 'runtimes';
+type Tab = 'profile' | 'workspace' | 'connections' | 'security' | 'budget' | 'runtimes' | 'governance';
 
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -37,6 +41,7 @@ export function SettingsPage() {
           { value: 'profile',     label: 'Profile' },
           { value: 'workspace',   label: 'Workspace' },
           { value: 'connections', label: 'Connections' },
+          { value: 'governance',  label: 'Governance' },
           { value: 'security',    label: 'Security' },
           { value: 'budget',      label: 'Budget' },
           { value: 'runtimes',    label: 'Runtimes' },
@@ -46,10 +51,22 @@ export function SettingsPage() {
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {tab === 'profile' && <ProfileTab />}
         {tab === 'workspace' && <WorkspaceTab />}
-        {tab === 'connections' && <ConnectionsTab />}
+        {tab === 'connections' && (
+          <div className="space-y-8">
+            <ConnectionsTab />
+            <ChannelIdentitiesPanel />
+            <McpConnectionsPanel />
+          </div>
+        )}
+        {tab === 'governance' && <GovernancePanel />}
         {tab === 'security' && <SecurityTab />}
         {tab === 'budget' && <BudgetTab />}
-        {tab === 'runtimes' && <RuntimesTab />}
+        {tab === 'runtimes' && (
+          <div className="space-y-8">
+            <OrchestratorModelsPanel />
+            <RuntimesTab />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -59,7 +76,7 @@ export function SettingsPage() {
 // capabilities each adapter declares server-side (apps/api/src/adapters/*),
 // so operators can see at a glance which runtimes can drive platform tools
 // from chat and which run in relay mode. (CHAT-10X-VISION §4.4.3)
-type ToolSupport = 'native' | 'marker' | 'http' | 'relay' | 'none';
+type ToolSupport = 'native' | 'marker' | 'relay' | 'none';
 
 interface RuntimeRow {
   type: string;
@@ -70,18 +87,16 @@ interface RuntimeRow {
 }
 
 const RUNTIME_MATRIX: RuntimeRow[] = [
-  { type: 'local_llm', label: 'Local LLM', interactiveChat: true, support: 'native', note: 'Ollama / LM Studio / vLLM. Native tool calls when the served model supports them.' },
-  { type: 'http', label: 'HTTP', interactiveChat: true, support: 'http', note: 'Tools forwarded over the HTTP contract when the endpoint sets supportsTools. Otherwise relay.' },
+  { type: 'http', label: 'HTTP', interactiveChat: true, support: 'native', note: 'Generic HTTP endpoint. Native tool calls work when the endpoint implements the Agentis chat contract.' },
   { type: 'codex', label: 'Codex CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Slower (re-spawns per tool round). Use the orchestrator fast path for native speed.' },
   { type: 'claude_code', label: 'Claude Code CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Same fast-path recommendation as Codex.' },
-  { type: 'openclaw', label: 'OpenClaw', interactiveChat: false, support: 'relay', note: 'Session-event relay. Chat is mirrored; platform tool calls run on the gateway, not the chat loop.' },
-  { type: 'hermes_agent', label: 'Hermes Agent', interactiveChat: false, support: 'none', note: 'Task runtime for workflow nodes. No interactive chat surface.' },
-  { type: 'cursor', label: 'Cursor', interactiveChat: false, support: 'none', note: 'Task runtime only. No interactive chat / tool forwarding yet.' },
+  { type: 'openclaw', label: 'OpenClaw', interactiveChat: true, support: 'relay', note: 'Chats through the gateway session: Agentis relays your message and streams the reply. Platform tool calls run on the gateway agent, not the local chat loop.' },
+  { type: 'hermes_agent', label: 'Hermes Agent', interactiveChat: true, support: 'marker', note: 'Marker protocol. Interactive chat and Agentis tool forwarding via the spawn-level JSON stream.' },
+  { type: 'cursor', label: 'Cursor', interactiveChat: true, support: 'marker', note: 'Marker protocol. Chat and tool forwarding via spawn-level JSON stream.' },
 ];
 
 const SUPPORT_META: Record<ToolSupport, { label: string; cls: string }> = {
   native: { label: 'Native', cls: 'bg-accent-soft text-accent' },
-  http: { label: 'Conditional', cls: 'bg-info-soft text-info' },
   marker: { label: 'Marker', cls: 'bg-warn-soft text-warn' },
   relay: { label: 'Relay', cls: 'bg-surface-3 text-text-muted' },
   none: { label: 'None', cls: 'bg-surface-3 text-text-muted' },
@@ -143,12 +158,23 @@ function ProfileTab() {
   const toast = useToast();
   const [me, setMe] = useState<{ id: string; email: string; name: string; avatarUrl?: string } | null>(null);
   const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void api<{ user: { id: string; email: string; name: string; avatarUrl?: string } }>('/v1/auth/me')
-      .then((d) => { setMe(d.user); setName(d.user.name); })
+    void api<{ user: { id: string; email: string | null; displayName: string; avatarUrl?: string } }>('/v1/auth/me')
+      .then((d) => {
+        const mapped = {
+          id: d.user.id,
+          email: d.user.email ?? '',
+          name: d.user.displayName ?? '',
+          avatarUrl: d.user.avatarUrl,
+        };
+        setMe(mapped);
+        setName(mapped.name);
+        setEmail(mapped.email);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
@@ -157,9 +183,11 @@ function ProfileTab() {
     if (!me) return;
     setSaving(true);
     try {
-      await api('/v1/auth/me', { method: 'PATCH', body: JSON.stringify({ name }) });
+      await api('/v1/auth/me', { method: 'PATCH', body: JSON.stringify({ name, email }) });
       toast.success('Profile updated');
-    } catch (e) { toast.error('Failed to update', String(e)); }
+      setMe((prev) => prev ? { ...prev, name, email } : null);
+      setTimeout(() => window.location.reload(), 800);
+    } catch (e) { toast.error('Failed to update', apiErrorMessage(e)); }
     finally { setSaving(false); }
   }
 
@@ -183,9 +211,9 @@ function ProfileTab() {
             <label className="text-[12px] font-medium text-text-secondary">Email</label>
             <input
               type="email"
-              value={me?.email ?? ''}
-              disabled
-              className="h-10 w-full rounded-input border border-line bg-surface-2/50 px-3 text-[14px] text-text-disabled"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
             />
           </div>
           <Button variant="primary" size="md" iconLeft={<Save size={12} />} disabled={saving} onClick={() => void save()}>
@@ -213,6 +241,7 @@ function WorkspaceTab() {
   const confirm = useConfirm();
   const [ws, setWs] = useState<{ id: string; name: string; slug: string; description?: string; imageUrl?: string | null } | null>(null);
   const [name, setName] = useState('');
+  const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -227,6 +256,7 @@ function WorkspaceTab() {
         if (current) {
           setWs(current);
           setName(current.name);
+          setSlug(current.slug);
           setDescription(current.description ?? '');
         }
       })
@@ -240,11 +270,13 @@ function WorkspaceTab() {
     try {
       await api(`/v1/workspaces/${ws.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ name, description, ...(imageDataUrl ? { imageDataUrl } : {}) }),
+        body: JSON.stringify({ name, slug, description, ...(imageDataUrl ? { imageDataUrl } : {}) }),
       });
       toast.success('Workspace updated');
       setImageDataUrl(null);
-    } catch (e) { toast.error('Failed to update', String(e)); }
+      setWs((prev) => prev ? { ...prev, name, slug, description } : null);
+      setTimeout(() => window.location.reload(), 800);
+    } catch (e) { toast.error('Failed to update', apiErrorMessage(e)); }
     finally { setSaving(false); }
   }
 
@@ -252,7 +284,7 @@ function WorkspaceTab() {
     if (!ws) return;
     const ok = await confirm({
       title: `Delete workspace "${ws.name}"?`,
-      body: 'This will permanently delete the workspace and all its agents, workflows, apps, and data. This action cannot be undone.',
+      body: 'This will permanently delete the workspace and all its agents, workflows, knowledge, and data. This action cannot be undone.',
       confirmLabel: 'Delete workspace',
       tone: 'danger',
       typeToConfirm: ws.name,
@@ -262,7 +294,7 @@ function WorkspaceTab() {
       await api(`/v1/workspaces/${ws.id}`, { method: 'DELETE' });
       toast.success('Workspace deleted');
       window.location.reload();
-    } catch (e) { toast.error('Failed to delete', String(e)); }
+    } catch (e) { toast.error('Failed to delete', apiErrorMessage(e)); }
   }
 
   function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -297,7 +329,7 @@ function WorkspaceTab() {
                   {name.charAt(0).toUpperCase() || '?'}
                 </span>
               )}
-              <span className="absolute inset-0 hidden items-center justify-center bg-black/60 group-hover:flex">
+              <span className="absolute inset-0 hidden items-center justify-center bg-overlay group-hover:flex">
                 <Upload size={16} className="text-white" />
               </span>
             </button>
@@ -318,9 +350,9 @@ function WorkspaceTab() {
             <label className="text-[12px] font-medium text-text-secondary">Slug</label>
             <input
               type="text"
-              value={ws.slug}
-              disabled
-              className="h-10 w-full rounded-input border border-line bg-surface-2/50 px-3 font-mono text-[14px] text-text-disabled"
+              value={slug}
+              onChange={(e) => setSlug(e.target.value)}
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[14px] text-text-primary focus:border-accent focus:outline-none"
             />
           </div>
           <div className="space-y-1.5">
@@ -343,7 +375,7 @@ function WorkspaceTab() {
         <div className="space-y-3 rounded-card border border-danger/20 bg-danger-soft/30 p-5">
           <div className="text-[13px] text-text-primary">Delete this workspace permanently.</div>
           <div className="text-[12px] text-text-muted">
-            All agents, workflows, apps, and data inside it will be permanently deleted.
+            All agents, workflows, knowledge, and data inside it will be permanently deleted.
           </div>
           <Button variant="danger" size="md" iconLeft={<Trash2 size={12} />} onClick={() => void deleteWorkspace()}>
             Delete workspace
@@ -406,7 +438,7 @@ function ConnectionsTab() {
       await api(path, { method: 'DELETE' });
       toast.success('Disconnected', c.name);
       void refresh();
-    } catch (e) { toast.error('Failed to disconnect', String(e)); }
+    } catch (e) { toast.error('Failed to disconnect', apiErrorMessage(e)); }
   }
 
   return (
@@ -492,7 +524,7 @@ function SecurityTab() {
       setCreatingOpen(false);
       setRevealedKey({ name: name.trim(), secret: data.key.secret });
       void refresh();
-    } catch (e) { toast.error('Failed to create key', String(e)); }
+    } catch (e) { toast.error('Failed to create key', apiErrorMessage(e)); }
   }
 
   async function revoke(id: string) {
@@ -507,7 +539,7 @@ function SecurityTab() {
       await api(`/v1/auth/api-keys/${id}`, { method: 'DELETE' });
       toast.success('Key revoked');
       void refresh();
-    } catch (e) { toast.error('Failed to revoke', String(e)); }
+    } catch (e) { toast.error('Failed to revoke', apiErrorMessage(e)); }
   }
 
   return (
@@ -572,7 +604,7 @@ function ApiKeyCreateDialog({
   if (!open) return null;
 
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -632,7 +664,7 @@ function ApiKeyRevealDialog({
   const [copied, setCopied] = useState(false);
   if (!keyValue) return null;
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
       <div className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <h3 className="text-heading text-text-primary">Save your API key</h3>
@@ -732,14 +764,14 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
       toast.success('Connected', name.trim());
       onCreated();
     } catch (e) {
-      toast.error('Failed to connect', String(e));
+      toast.error('Failed to connect', apiErrorMessage(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
       <form onSubmit={submit} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <h3 className="text-heading text-text-primary">Add connection</h3>
@@ -881,7 +913,7 @@ function BudgetTab() {
       setEditingId(null);
       void refresh();
     } catch (e) {
-      toast.error('Failed to update', String(e));
+      toast.error('Failed to update', apiErrorMessage(e));
     } finally {
       setSaving(false);
     }

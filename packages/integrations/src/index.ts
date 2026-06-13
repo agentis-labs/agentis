@@ -11,3 +11,5 @@ export type {
 export { builtinIntegrationManifests } from './manifests.js';
 export { defaultConnectorRegistry, builtinConnectors } from './registry.js';
 export { executeManifestOperation, manifestHttpConnector } from './connectors/manifestHttp.js';
+export { normalizeEmailContent } from './connectors/emailContent.js';
+export { buildIntegrationDeliveryReceipt } from './deliveryReceipt.js';

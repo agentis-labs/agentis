@@ -196,15 +196,15 @@ export const openApiDocument = {
     '/v1/approvals/{id}/reject': {
       post: { tags: ['approvals'], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' } } },
     },
-    '/v1/skills/registry/status': {
-      get: { tags: ['skill-registry'], summary: 'Skill registry client configuration + breaker state', responses: { '200': { description: 'OK' } } },
+    '/v1/extensions/registry/status': {
+      get: { tags: ['extension-registry'], summary: 'extension registry client configuration + breaker state', responses: { '200': { description: 'OK' } } },
     },
-    '/v1/skills/registry': {
-      get: { tags: ['skill-registry'], summary: 'Browse skill registry entries', responses: { '200': { description: 'OK' } } },
+    '/v1/extensions/registry': {
+      get: { tags: ['extension-registry'], summary: 'Browse extension registry entries', responses: { '200': { description: 'OK' } } },
     },
-    '/v1/skills/registry/install/{slug}': {
+    '/v1/extensions/registry/install/{slug}': {
       post: {
-        tags: ['skill-registry'],
+        tags: ['extension-registry'],
         summary: 'Install a registry entry; verifies SHA-256 + runs the security scanner',
         parameters: [{ name: 'slug', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {

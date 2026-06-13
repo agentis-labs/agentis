@@ -11,7 +11,7 @@ test('agent registered via API appears on /agents and links to its detail page',
   const auth = await uiAuth(page, request);
   const res = await request.post('/v1/agents', {
     headers: auth.h,
-    data: { name: 'TerminalSpec', adapterType: 'http', capabilityTags: ['e2e'], config: { url: 'http://127.0.0.1:9' } },
+    data: { name: 'TerminalSpec', adapterType: 'http', capabilityTags: ['e2e'], config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' } },
   });
   expect(res.status(), `agent create returned ${res.status()}`).toBe(201);
   const created = await res.json();
@@ -26,7 +26,7 @@ test('agent detail page renders the terminal text area + send draft', async ({ p
   const auth = await uiAuth(page, request);
   const created = await (await request.post('/v1/agents', {
     headers: auth.h,
-    data: { name: 'PaneTest', adapterType: 'http', capabilityTags: [], config: { url: 'http://127.0.0.1:9' } },
+    data: { name: 'PaneTest', adapterType: 'http', capabilityTags: [], config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' } },
   })).json();
 
   await page.goto(`/agents/${created.id}`);
@@ -39,7 +39,7 @@ test('agent detail page shows "No messages yet." for a fresh agent', async ({ pa
   const auth = await uiAuth(page, request);
   const created = await (await request.post('/v1/agents', {
     headers: auth.h,
-    data: { name: 'EmptyConvo', adapterType: 'http', capabilityTags: [], config: { url: 'http://127.0.0.1:9' } },
+    data: { name: 'EmptyConvo', adapterType: 'http', capabilityTags: [], config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' } },
   })).json();
   await page.goto(`/agents/${created.id}`);
   await expect(page.getByText(/No messages yet/i)).toBeVisible({ timeout: 10_000 });

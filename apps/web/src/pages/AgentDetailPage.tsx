@@ -2,14 +2,14 @@
  * AgentDetailPage — restructured tabs (Overview / Instructions / Memory / Connections / History).
  *
  * No more playground tab. Avatar uses image fallback to initials.
- * Instructions tab renders harness-declared files (soul.md, agents.md, etc.)
- * generically — Agentis does not assume specific file types.
+ * Instructions renders files discovered from the real runtime profile and
+ * project, with the Agentis overlay shown as one explicit context layer.
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload } from 'lucide-react';
-import { api } from '../lib/api';
+import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine } from 'lucide-react';
+import { api, apiErrorMessage } from '../lib/api';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 import { Tabs } from '../components/shared/Tabs';
@@ -19,9 +19,11 @@ import { StatusBadge } from '../components/shared/StatusBadge';
 import { EmptyState } from '../components/shared/EmptyState';
 import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
 import { AgentChannelsTab } from '../components/agents/AgentChannelsTab';
+import { AgentInteractionFeed } from '../components/agents/AgentInteractionFeed';
+import { RuntimeNativePanel } from '../components/agents/RuntimeNativePanel';
 import { useAgentInstallSession } from '../hooks/useBackgroundInstall';
 
-type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'history';
+type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'interactions' | 'history';
 
 /** Map legacy tab values (overview / connections) onto the redesigned set. */
 function normalizeTab(raw: string | null): TabKey {
@@ -35,6 +37,7 @@ function normalizeTab(raw: string | null): TabKey {
     case 'instructions':
     case 'memory':
     case 'channels':
+    case 'interactions':
     case 'history':
       return raw;
     default:
@@ -65,16 +68,6 @@ interface AgentDetail {
   avatarUrl?: string | null;
   systemPrompt?: string;
   createdAt?: string;
-}
-
-interface InstructionFile {
-  key: string;
-  name: string;
-  description?: string;
-  content: string;
-  readonly?: boolean;
-  source: 'workspace' | 'runtime' | 'platform';
-  path?: string;
 }
 
 interface RunHistoryEntry {
@@ -165,6 +158,31 @@ export function AgentDetailPage() {
     } catch (e) { toast.error('Failed to delete', String(e)); }
   }
 
+  async function handlePackageAgent() {
+    if (!agent) return;
+    try {
+      const packed = await api<{ id: string }>(`/v1/packages/pack/agent/${agent.id}`, { method: 'POST', body: JSON.stringify({}) });
+      const envelope = await api<Record<string, unknown>>(`/v1/packages/${packed.id}/export`);
+      const filename = `${agent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.agentisagt`;
+      downloadJson(envelope, filename);
+      toast.success('Agent packaged successfully', agent.name);
+    } catch (e) {
+      toast.error('Failed to package agent', apiErrorMessage(e));
+    }
+  }
+
+  function downloadJson(value: unknown, fileName: string) {
+    const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   if (loading && !agent) {
     return (
       <div className="space-y-4 p-6">
@@ -229,6 +247,7 @@ export function AgentDetailPage() {
           </div>
           <div className="flex shrink-0 gap-1.5">
             <Button variant="secondary" size="sm" iconLeft={<MessageCircle size={12} />} onClick={() => nav(`/chat/agent/${agent.id}`)}>Talk</Button>
+            <Button variant="secondary" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => void handlePackageAgent()}>Package</Button>
             <Button variant="danger" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => void handleDelete()}>Delete</Button>
           </div>
         </div>
@@ -244,6 +263,7 @@ export function AgentDetailPage() {
           { value: 'runtime',      label: 'Runtime' },
           { value: 'memory',       label: 'Memory' },
           { value: 'channels',     label: 'Channels' },
+          { value: 'interactions', label: 'Interactions' },
           { value: 'history',      label: 'History' },
         ]}
         className="px-6"
@@ -251,10 +271,11 @@ export function AgentDetailPage() {
 
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {tab === 'identity' && <IdentityTab agent={agent} allAgents={allAgents} allSpaces={allSpaces} onChange={refresh} />}
-        {tab === 'instructions' && <InstructionsTab agent={agent} />}
+        {tab === 'instructions' && <RuntimeNativePanel agentId={agent.id} mode="resources" />}
         {tab === 'runtime' && <RuntimeTab agent={agent} allAgents={allAgents} onChange={refresh} />}
         {tab === 'memory' && <MemoryTab agent={agent} />}
         {tab === 'channels' && <AgentChannelsTab agentId={agent.id} agentName={agent.name} />}
+        {tab === 'interactions' && <AgentInteractionFeed agentId={agent.id} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
       </div>
     </div>
@@ -486,220 +507,44 @@ function IdentityField({ label, hint, children }: { label: string; hint?: string
   );
 }
 
-function InstructionsTab({ agent }: { agent: AgentDetail }) {
-  const toast = useToast();
-  const [files, setFiles] = useState<InstructionFile[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [active, setActive] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [newFileName, setNewFileName] = useState<string | null>(null);
-
-  function createFile() {
-    const raw = (newFileName ?? '').trim();
-    if (!raw) return;
-    const fileName = /\.[a-z0-9]+$/i.test(raw) ? raw : `${raw}.md`;
-    if (files.some((f) => f.name === fileName)) {
-      toast.error('File already exists', fileName);
-      return;
-    }
-    const created: InstructionFile = { key: `platform:${fileName}`, name: fileName, content: '', source: 'platform' };
-    setFiles((arr) => [...arr, created]);
-    setActive(created.key);
-    setDraft('');
-    setNewFileName(null);
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      setLoading(true);
-      try {
-        const data = await api<{ files: InstructionFile[] }>(`/v1/agents/${agent.id}/instructions`);
-        if (cancelled) return;
-        const list = data.files ?? [];
-        setFiles(list);
-        const first = list[0];
-        if (first) {
-          setActive(first.key);
-          setDraft(first.content);
-        } else {
-          setActive(null);
-          setDraft('');
-        }
-      } catch {
-        if (cancelled) return;
-        const sys = agent.systemPrompt ?? '';
-        const fallback: InstructionFile[] = sys
-          ? [{ key: 'platform:system.md', name: 'system.md', content: sys, source: 'platform', description: 'System prompt' }]
-          : [];
-        setFiles(fallback);
-        if (fallback[0]) { setActive(fallback[0].key); setDraft(fallback[0].content); }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [agent.id, agent.systemPrompt]);
-
-  const activeFile = files.find((f) => f.key === active);
-
-  async function save() {
-    if (!activeFile) return;
-    setSaving(true);
-    try {
-      await api(`/v1/agents/${agent.id}/instructions/${encodeURIComponent(activeFile.key)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ content: draft }),
-      });
-      toast.success('Saved', activeFile.name);
-      setFiles((arr) => arr.map((f) => f.key === activeFile.key ? { ...f, content: draft } : f));
-    } catch (e) { toast.error('Failed to save', String(e)); }
-    finally { setSaving(false); }
-  }
-
-  if (loading) return <Skeleton height={400} />;
-
-  if (files.length === 0) {
-    return (
-      <div className="mx-auto max-w-md rounded-card border border-line bg-surface px-6 py-8 text-center">
-        <FileText size={40} className="mx-auto text-text-muted" />
-        <h3 className="mt-3 text-subheading text-text-primary">No instruction files yet</h3>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-text-secondary">
-          Start by creating one — give this agent a persona, a role, or standing operating instructions.
-        </p>
-        {newFileName === null ? (
-          <Button variant="primary" size="sm" className="mt-4" onClick={() => setNewFileName('')}>
-            + Create first file
-          </Button>
-        ) : (
-          <div className="mt-4 flex items-center gap-2">
-            <input
-              autoFocus
-              value={newFileName}
-              onChange={(event) => setNewFileName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') createFile();
-                if (event.key === 'Escape') setNewFileName(null);
-              }}
-              placeholder="File name (e.g. persona.md)"
-              className="flex-1 rounded-input border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-            />
-            <Button variant="primary" size="sm" onClick={createFile}>Create</Button>
-            <Button variant="ghost" size="sm" onClick={() => setNewFileName(null)}>Cancel</Button>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-[200px_1fr]">
-      <aside className="space-y-1">
-        {files.map((f) => (
-          <button
-            key={f.key}
-            type="button"
-            onClick={() => { setActive(f.key); setDraft(f.content); }}
-            className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
-              active === f.key
-                ? 'bg-surface-2 text-text-primary'
-                : 'text-text-muted hover:bg-surface-2 hover:text-text-primary'
-            }`}
-          >
-            <FileText size={12} />
-            <span className="flex-1 truncate font-mono">{f.name}</span>
-            <span className="text-[10px] text-text-muted">{f.source}</span>
-          </button>
-        ))}
-        {newFileName === null ? (
-          <button
-            type="button"
-            onClick={() => setNewFileName('')}
-            className="flex w-full items-center gap-2 rounded-md border border-dashed border-line px-2.5 py-2 text-left text-[13px] text-text-muted transition-colors hover:border-line-strong hover:text-text-primary"
-          >
-            <FileText size={12} /> + New file
-          </button>
-        ) : (
-          <div className="space-y-1.5 rounded-md border border-line bg-surface-2 p-2">
-            <input
-              autoFocus
-              value={newFileName}
-              onChange={(event) => setNewFileName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') createFile();
-                if (event.key === 'Escape') setNewFileName(null);
-              }}
-              placeholder="persona.md"
-              className="w-full rounded-input border border-line bg-surface px-2 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-            />
-            <div className="flex gap-1.5">
-              <Button variant="primary" size="sm" onClick={createFile}>Create</Button>
-              <Button variant="ghost" size="sm" onClick={() => setNewFileName(null)}>Cancel</Button>
-            </div>
-          </div>
-        )}
-      </aside>
-
-      {activeFile && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <div>
-              <div className="font-mono text-subheading text-text-primary">{activeFile.name}</div>
-              {activeFile.description && (
-                <div className="text-[11px] text-text-muted">{activeFile.description}</div>
-              )}
-            </div>
-            <div className="ml-auto">
-              <Button
-                variant="primary" size="sm" iconLeft={<Save size={12} />}
-                disabled={saving || draft === activeFile.content || activeFile.readonly}
-                onClick={() => void save()}
-              >Save</Button>
-            </div>
-          </div>
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            disabled={activeFile.readonly}
-            className="h-[480px] w-full resize-none rounded-input border border-line bg-surface-2 p-4 font-mono text-[13px] leading-relaxed text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-            spellCheck={false}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-
 /**
  * Runtime tab — how the agent connects to a harness, its model, capability
  * tags, budget, and supervisor (AGENTS-PAGE-REDESIGN.md §3.4).
  */
 function RuntimeTab({ agent, allAgents, onChange }: { agent: AgentDetail; allAgents: AgentSummary[]; onChange: () => void }) {
   return (
-    <AgentConfigPanel
-      agent={{
-        id: agent.id,
-        name: agent.name,
-        adapterType: agentHarnessType(agent),
-        runtimeModel: agentRuntimeModel(agent),
-        role: agent.role ?? null,
-        status: agent.status ?? 'offline',
-        colorHex: agent.colorHex ?? null,
-        capabilityTags: agent.capabilityTags ?? null,
-        instructions: agent.instructions ?? agent.systemPrompt ?? null,
-        avatarGlyph: agent.avatarGlyph ?? null,
-        isPaused: agent.isPaused ?? null,
-        monthlyBudgetCents: agent.monthlyBudgetCents ?? null,
-        currentMonthSpendCents: agent.currentMonthSpendCents ?? null,
-        config: agent.config ?? agent.adapter?.config ?? null,
-        reportsTo: agent.reportsTo ?? null,
-        spaceId: agent.spaceId ?? null,
-      }}
-      allAgents={allAgents}
-      onSaved={onChange}
-    />
+    <div className="space-y-6">
+      <RuntimeNativePanel agentId={agent.id} />
+      <div className="rounded-card border border-line bg-surface p-5">
+        <div className="mb-4">
+          <h2 className="text-heading text-text-primary">Agentis runtime policy</h2>
+          <p className="mt-1 text-[12px] text-text-secondary">
+            Configure the Agentis-side model, budget, capabilities, and connection policy.
+          </p>
+        </div>
+        <AgentConfigPanel
+          agent={{
+            id: agent.id,
+            name: agent.name,
+            adapterType: agentHarnessType(agent),
+            runtimeModel: agentRuntimeModel(agent),
+            role: agent.role ?? null,
+            status: agent.status ?? 'offline',
+            colorHex: agent.colorHex ?? null,
+            capabilityTags: agent.capabilityTags ?? null,
+            instructions: agent.instructions ?? agent.systemPrompt ?? null,
+            avatarGlyph: agent.avatarGlyph ?? null,
+            isPaused: agent.isPaused ?? null,
+            monthlyBudgetCents: agent.monthlyBudgetCents ?? null,
+            currentMonthSpendCents: agent.currentMonthSpendCents ?? null,
+            config: agent.config ?? agent.adapter?.config ?? null,
+            reportsTo: agent.reportsTo ?? null,
+          }}
+          allAgents={allAgents}
+          onSaved={onChange}
+        />
+      </div>
+    </div>
   );
 }
 

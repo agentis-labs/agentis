@@ -22,6 +22,7 @@ const addDocumentSchema = z.object({
   mimeType: z.string().trim().min(1).max(120).default('text/plain'),
   content: z.string().min(1).optional(),
   contentBase64: z.string().min(1).optional(),
+  describeImage: z.boolean().optional(),
 }).refine((value) => Boolean(value.content || value.contentBase64), {
   message: 'content or contentBase64 is required',
 });
@@ -29,7 +30,10 @@ const addDocumentSchema = z.object({
 const searchSchema = z.object({
   query: z.string().trim().min(1),
   topK: z.number().int().min(1).max(20).optional(),
+  retrievalMode: z.enum(['contextual', 'strict', 'exploratory']).optional(),
 });
+
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 
 export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; knowledge: KnowledgeBaseService }) {
   const app = new Hono();
@@ -85,8 +89,9 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
           name: body.name,
           mimeType: body.mimeType,
           bytes: body.bytes,
+          describeImage: body.describeImage,
         })
-      : deps.knowledge.addDocument({
+      : await deps.knowledge.addDocument({
           workspaceId: ws.workspaceId,
           knowledgeBaseId: c.req.param('knowledgeBaseId'),
           name: body.name,
@@ -108,7 +113,7 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
   app.post('/:knowledgeBaseId/search', async (c) => {
     const ws = getWorkspace(c);
     const body = searchSchema.parse(await c.req.json());
-    const results = deps.knowledge.search({
+    const results = await deps.knowledge.search({
       workspaceId: ws.workspaceId,
       knowledgeBaseId: c.req.param('knowledgeBaseId'),
       ...body,
@@ -124,6 +129,7 @@ type DocumentUpload = {
   mimeType: string;
   content?: string;
   bytes?: Buffer;
+  describeImage?: boolean;
 };
 
 async function readDocumentUpload(c: Context): Promise<DocumentUpload> {
@@ -136,7 +142,8 @@ async function readDocumentUpload(c: Context): Promise<DocumentUpload> {
     return {
       name,
       mimeType: stringField(form.get('mimeType')) ?? file.type ?? mimeTypeFromName(name),
-      bytes: Buffer.from(await file.arrayBuffer()),
+      bytes: checkedBytes(Buffer.from(await file.arrayBuffer())),
+      describeImage: stringField(form.get('describeImage')) === 'true',
     };
   }
 
@@ -145,7 +152,7 @@ async function readDocumentUpload(c: Context): Promise<DocumentUpload> {
     return {
       name,
       mimeType: c.req.header('x-file-type') ?? contentType.split(';')[0] ?? mimeTypeFromName(name),
-      bytes: Buffer.from(await c.req.arrayBuffer()),
+      bytes: checkedBytes(Buffer.from(await c.req.arrayBuffer())),
     };
   }
 
@@ -154,14 +161,27 @@ async function readDocumentUpload(c: Context): Promise<DocumentUpload> {
     return {
       name: body.name,
       mimeType: body.mimeType,
-      bytes: Buffer.from(stripDataUrlPrefix(body.contentBase64), 'base64'),
+      bytes: checkedBytes(Buffer.from(stripDataUrlPrefix(body.contentBase64), 'base64')),
+      describeImage: body.describeImage,
     };
   }
+  assertDocumentBytes(Buffer.byteLength(body.content ?? '', 'utf8'));
   return {
     name: body.name,
     mimeType: body.mimeType,
     content: body.content,
   };
+}
+
+function checkedBytes(bytes: Buffer): Buffer {
+  assertDocumentBytes(bytes.byteLength);
+  return bytes;
+}
+
+function assertDocumentBytes(size: number): void {
+  if (size > MAX_DOCUMENT_BYTES) {
+    throw new AgentisError('VALIDATION_FAILED', 'Document exceeds the 10 MiB upload limit');
+  }
 }
 
 function isFileLike(value: FormDataEntryValue | null): value is File {

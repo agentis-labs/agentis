@@ -16,11 +16,15 @@ export function WorkspaceDocDropZone({
   createBasePath = '/v1/knowledge-bases',
   uploadPathForBase = (baseId) => `/v1/knowledge-bases/${baseId}/documents`,
   defaultBaseName = 'Workspace knowledge',
-  defaultBaseDescription = 'Shared documents available to apps and agents.',
+  defaultBaseDescription = 'Shared documents available to workflows and agents.',
   title = 'Add workspace knowledge',
-  description = 'Shared across every app and agent. PDF, DOCX, HTML, Markdown, plain text, CSV, and JSON are accepted.',
+  description = 'Shared across workflows and agents. Documents are accepted; images and spreadsheets require configured extractors.',
   emptySelectionLabel = 'Workspace knowledge (new)',
   newBasePlaceholder = 'New collection name',
+  compact = false,
+  accept = '.pdf,.docx,.html,.htm,.md,.markdown,.txt,.csv,.json,.xlsx,.png,.jpg,.jpeg,.webp,.mp3,.m4a,.wav,.ogg,text/*,image/*,audio/*,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  showDescribeImages = true,
+  hideBaseSelector = false,
 }: {
   bases: KnowledgeBaseRow[];
   selectedBaseId?: string | null;
@@ -34,6 +38,10 @@ export function WorkspaceDocDropZone({
   description?: string;
   emptySelectionLabel?: string;
   newBasePlaceholder?: string;
+  compact?: boolean;
+  accept?: string;
+  showDescribeImages?: boolean;
+  hideBaseSelector?: boolean;
 }) {
   const toast = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -42,6 +50,7 @@ export function WorkspaceDocDropZone({
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [savingBase, setSavingBase] = useState(false);
+  const [describeImages, setDescribeImages] = useState(false);
   const activeBaseId = selectedBaseId ?? bases[0]?.id ?? null;
 
   async function ensureBase(): Promise<string> {
@@ -83,6 +92,7 @@ export function WorkspaceDocDropZone({
       form.set('file', file);
       form.set('name', file.name);
       form.set('mimeType', file.type || mimeFromName(file.name));
+      if (describeImages) form.set('describeImage', 'true');
       await api(uploadPathForBase(baseId), {
         method: 'POST',
         body: form,
@@ -104,17 +114,29 @@ export function WorkspaceDocDropZone({
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => { event.preventDefault(); void upload(event.dataTransfer.files?.[0] ?? null); }}
       className={clsx(
-        'rounded-card border border-dashed bg-surface px-5 py-8 text-center transition-colors',
+        'rounded-card border border-dashed bg-surface transition-colors',
+        compact ? 'flex flex-wrap items-center gap-3 px-4 py-3' : 'px-5 py-8 text-center',
         dragging ? 'border-accent bg-accent-soft' : 'border-line',
       )}
     >
-      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-card border border-line bg-surface-2 text-accent">
-        <UploadCloud size={22} />
+      <div className={clsx('flex items-center justify-center rounded-card border border-line bg-surface-2 text-accent', compact ? 'h-9 w-9 shrink-0' : 'mx-auto h-12 w-12')}>
+        <UploadCloud size={compact ? 18 : 22} />
       </div>
-      <h3 className="mt-4 text-heading text-text-primary">{title}</h3>
-      <p className="mt-1 text-[13px] text-text-muted">{description}</p>
+      <div className={compact ? 'min-w-[220px] flex-1' : ''}>
+        <h3 className={clsx('text-heading text-text-primary', !compact && 'mt-4')}>{title}</h3>
+        <p className="mt-1 text-[13px] text-text-muted">{description}</p>
+        <label className="mt-2 inline-flex items-center gap-2 text-[12px] text-text-muted" style={showDescribeImages ? undefined : { display: 'none' }}>
+          <input
+            type="checkbox"
+            checked={describeImages}
+            onChange={(event) => setDescribeImages(event.target.checked)}
+            className="accent-accent"
+          />
+          Add compact AI descriptions for uploaded images
+        </label>
+      </div>
 
-      <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+      <div className={clsx('flex flex-wrap items-center gap-2', compact ? 'ml-auto justify-end' : 'mt-4 justify-center')}>
         {creating ? (
           <div className="flex items-center gap-1.5">
             <input
@@ -136,6 +158,10 @@ export function WorkspaceDocDropZone({
               Cancel
             </Button>
           </div>
+        ) : hideBaseSelector ? (
+          <Button variant="primary" size="md" loading={uploading} onClick={() => inputRef.current?.click()}>
+            Browse files
+          </Button>
         ) : (
           <>
             <span className="text-[12px] text-text-muted">Add to</span>
@@ -160,7 +186,7 @@ export function WorkspaceDocDropZone({
       <input
         ref={inputRef}
         type="file"
-        accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt,.csv,.json,text/*,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        accept={accept}
         className="hidden"
         onChange={(event) => void upload(event.target.files?.[0] ?? null)}
       />
@@ -175,6 +201,15 @@ function mimeFromName(name: string): string {
   if (lower.endsWith('.json')) return 'application/json';
   if (lower.endsWith('.pdf')) return 'application/pdf';
   if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.m4a')) return 'audio/mp4';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
   return 'text/plain';
 }

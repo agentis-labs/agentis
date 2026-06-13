@@ -3,7 +3,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { render, screen, waitFor } from '@testing-library/react';
 import { App } from '../src/App';
 
-function makeFetchMock(launchPath: string) {
+function makeFetchMock() {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path === '/v1/auth/launch') {
@@ -26,7 +26,7 @@ function makeFetchMock(launchPath: string) {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
-    void init; void launchPath;
+    void init;
   });
 }
 
@@ -37,7 +37,7 @@ beforeEach(() => {
 describe('<App /> launch auth', () => {
   it('exchanges the ?token= URL param (CLI flow)', async () => {
     window.history.pushState({}, '', '/workspaces?token=local-launch-token');
-    const fetchMock = makeFetchMock('/v1/auth/launch');
+    const fetchMock = makeFetchMock();
     vi.stubGlobal('fetch', fetchMock);
 
     render(
@@ -52,17 +52,19 @@ describe('<App /> launch auth', () => {
       expect(localStorage.getItem('agentis.access')).toBe('access.from.launch');
     });
     expect(localStorage.getItem('agentis.refresh')).toBe('refresh.from.launch');
+    expect(localStorage.getItem('agentis.launchToken')).toBe('local-launch-token');
     expect(window.location.search).not.toContain('token=');
-    expect(screen.queryByText(/Password/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /sign in/i })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       '/v1/auth/launch',
       expect.objectContaining({ method: 'POST' }),
     );
   });
 
-  it('auto-logs in via GET /v1/auth/launch when no ?token= (bare URL)', async () => {
+  it('reuses the stored launch token on a bare URL', async () => {
     window.history.pushState({}, '', '/');
-    const fetchMock = makeFetchMock('/v1/auth/launch');
+    localStorage.setItem('agentis.launchToken', 'remembered-launch-token');
+    const fetchMock = makeFetchMock();
     vi.stubGlobal('fetch', fetchMock);
 
     render(
@@ -71,25 +73,72 @@ describe('<App /> launch auth', () => {
       </BrowserRouter>,
     );
 
-    // Shows "Opening Agentis…" while probing localhost auto-login
-    expect(screen.getByText(/Opening Agentis/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(localStorage.getItem('agentis.access')).toBe('access.from.launch');
+    });
+    expect(screen.queryByRole('button', { name: /sign in/i })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/auth/launch',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const launchCall = fetchMock.mock.calls.find((call) => String(call[0]) === '/v1/auth/launch');
+    expect(launchCall).toBeDefined();
+    expect(String(launchCall?.[1]?.body)).toContain('remembered-launch-token');
+  });
+
+  it('uses the local-only launch bypass on a bare loopback URL', async () => {
+    window.history.pushState({}, '', '/');
+    const fetchMock = makeFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>,
+    );
 
     await waitFor(() => {
       expect(localStorage.getItem('agentis.access')).toBe('access.from.launch');
     });
-    expect(screen.queryByText(/Password/i)).not.toBeInTheDocument();
+    expect(localStorage.getItem('agentis.launchToken')).toBeNull();
+    const launchCall = fetchMock.mock.calls.find((call) => String(call[0]) === '/v1/auth/launch');
+    expect(launchCall).toBeDefined();
+    expect(String(launchCall?.[1]?.body)).toContain('local-bypass');
+    expect(screen.queryByRole('button', { name: /sign in/i })).not.toBeInTheDocument();
+  });
+
+  it('shows login when local launch auth is unavailable', async () => {
+    window.history.pushState({}, '', '/');
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ error: { code: 'RESOURCE_NOT_FOUND' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    });
+    expect(localStorage.getItem('agentis.access')).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
       '/v1/auth/launch',
-      expect.objectContaining({ method: 'GET' }),
+      expect.objectContaining({ method: 'POST' }),
     );
   });
 
-  it('shows login form when localhost auto-login returns 404 (server deployment)', async () => {
-    window.history.pushState({}, '', '/');
+  it('shows login form when a supplied launch token is rejected', async () => {
+    window.history.pushState({}, '', '/?token=expired-token');
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input) === '/v1/auth/launch') {
         return new Response(JSON.stringify({ error: { code: 'RESOURCE_NOT_FOUND' } }), {
-          status: 404,
+          status: 401,
           headers: { 'content-type': 'application/json' },
         });
       }
@@ -107,5 +156,9 @@ describe('<App /> launch auth', () => {
       expect(screen.queryByText(/Opening Agentis/i)).not.toBeInTheDocument();
     });
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/auth/launch',
+      expect.objectContaining({ method: 'POST' }),
+    );
   });
 });

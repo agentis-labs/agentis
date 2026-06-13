@@ -10,30 +10,45 @@ import {
   REALTIME_EVENTS,
   REALTIME_ROOMS,
   schemas,
+  summarizeGraphCapabilities,
+  type IntegrationDeliveryReceipt,
   type WorkflowGraph,
   type WorkflowRunState,
 } from '@agentis/core';
+import { buildIntegrationDeliveryReceipt } from '@agentis/integrations';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
+import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
 import type { EventBus } from '../event-bus.js';
 import type { PackagerService } from '../services/packager.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { validateWorkflowGraph } from '../engine/validateGraph.js';
+import { validateGraphReferences } from '../engine/validateGraphReferences.js';
+import { analyzeWorkflowReadiness } from '../services/workflowReadiness.js';
 import { buildInitialRunState } from '../engine/initialRunState.js';
+import { hashWorkflowGraph } from '../services/graphHash.js';
+import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
+import { buildTemplateContext, resolveTemplateDeep } from '../engine/templateResolver.js';
+import { WorkflowTriggerDeploymentService } from '../services/workflowTriggerDeployment.js';
 
 export function buildWorkflowRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
   engine: WorkflowEngine;
   bus: EventBus;
+  triggerRuntime?: TriggerRuntime;
   /** Optional: when provided, every create/update mirrors the workflow into Packages. */
   packager?: PackagerService;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
+  const deletedWorkflowsCache = new Map<string, any>();
+  const triggerDeployments = deps.triggerRuntime
+    ? new WorkflowTriggerDeploymentService(deps.db, deps.triggerRuntime)
+    : null;
 
   app.get('/', (c) => {
     const ws = getWorkspace(c);
@@ -42,7 +57,14 @@ export function buildWorkflowRoutes(deps: {
       .from(schema.workflows)
       .where(eq(schema.workflows.workspaceId, ws.workspaceId))
       .all();
-    return c.json({ workflows: rows });
+    const latestRuns = loadLatestRunsByWorkflow(deps.db, ws.workspaceId, rows.map((row) => row.id));
+    const triggerMap = resolveTriggerTypes(
+      deps.db,
+      [...latestRuns.values()].map((run) => run.triggerId),
+    );
+    return c.json({
+      workflows: rows.map((row) => presentWorkflowListItem(row, latestRuns.get(row.id), triggerMap)),
+    });
   });
 
   // ── Workflow collections (UI grouping) ────────────────────────────────
@@ -52,13 +74,19 @@ export function buildWorkflowRoutes(deps: {
   app.get('/collections', (c) => {
     const ws = getWorkspace(c);
     const rows = deps.db
-      .select({ id: schema.workflows.id, settings: schema.workflows.settings, title: schema.workflows.title })
+      .select({
+        id: schema.workflows.id,
+        settings: schema.workflows.settings,
+        title: schema.workflows.title,
+      })
       .from(schema.workflows)
       .where(eq(schema.workflows.workspaceId, ws.workspaceId))
       .all();
     const counts = new Map<string, number>();
     for (const row of rows) {
-      const collection = (((row.settings as Record<string, unknown> | null) ?? {}).collection as string | undefined)?.trim();
+      const collection = (
+        ((row.settings as Record<string, unknown> | null) ?? {}).collection as string | undefined
+      )?.trim();
       if (!collection) continue;
       counts.set(collection, (counts.get(collection) ?? 0) + 1);
     }
@@ -80,8 +108,11 @@ export function buildWorkflowRoutes(deps: {
       edges: [],
       viewport: { x: 0, y: 0, zoom: 1 },
     }) as WorkflowGraph;
+    const normalizedGraph = normalizeWorkflowGraph(deps.db, ws.workspaceId, graph).graph;
     const id = randomUUID();
-    if (graph.nodes.length > 0) validateWorkflowGraph(graph, { currentWorkflowId: id });
+    if (body.spaceId) ensureWorkflowSpace(deps.db, ws.workspaceId, body.spaceId);
+    if (normalizedGraph.nodes.length > 0)
+      validateWorkflowGraph(normalizedGraph, { currentWorkflowId: id, strict: false });
     deps.db
       .insert(schema.workflows)
       .values({
@@ -89,18 +120,25 @@ export function buildWorkflowRoutes(deps: {
         workspaceId: ws.workspaceId,
         ambientId: ws.ambientId ?? body.ambientId ?? null,
         userId: ws.user.id,
+        spaceId: body.spaceId ?? null,
         title: body.title,
-        summary: body.summary ?? null,
-        intendedBehavior: body.intendedBehavior?.trim() || null,
-        graph,
+        description: body.description?.trim() || null,
+        graph: normalizedGraph,
+        contentHash: hashWorkflowGraph(normalizedGraph),
         settings: body.settings,
         concurrencyOverflow: 'queue',
       })
       .run();
     // 10.14: auto-save into the Packages library
-    try { deps.packager?.mirrorWorkflow({ workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id }, id); }
-    catch { /* best-effort mirror */ }
-    return c.json({ workflow: { id, ...body, graph } }, 201);
+    try {
+      deps.packager?.mirrorWorkflow(
+        { workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id },
+        id,
+      );
+    } catch {
+      /* best-effort mirror */
+    }
+    return c.json({ workflow: { id, ...body, graph: normalizedGraph } }, 201);
   });
 
   app.get('/:id', (c) => {
@@ -110,27 +148,128 @@ export function buildWorkflowRoutes(deps: {
     return c.json({ workflow: wf });
   });
 
+  /**
+   * GET /:id/capabilities — pre-run security/audit summary (NATIVE-ADVANCEMENT
+   * Proposal 6b). Aggregates every node's capability manifest into "what does
+   * this workflow actually touch" — external hosts, credentials, code execution
+   * — so the canvas can surface it before a run. Also returns `contentHash` so
+   * the client can detect divergence between its local graph and the saved one.
+   */
+  app.get('/:id/capabilities', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+    const graph = wf.graph as WorkflowGraph;
+    return c.json({
+      contentHash: (wf as { contentHash?: string | null }).contentHash ?? null,
+      capabilities: summarizeGraphCapabilities(graph),
+    });
+  });
+
+  /**
+   * GET /:id/lint — static template-reference check (NATIVE-ADVANCEMENT
+   * Proposal 2, reframed). Surfaces `{{nodes.X}}` references that are dangling
+   * (X doesn't exist) or forward (X isn't upstream, so it won't have run yet) —
+   * the bug class that otherwise resolves silently to empty input. Intended for
+   * canvas annotations before a run; non-mutating.
+   */
+  app.get('/:id/lint', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+    const issues = validateGraphReferences(wf.graph as WorkflowGraph);
+    return c.json({
+      issues,
+      errorCount: issues.filter((i) => i.severity === 'error').length,
+      warningCount: issues.filter((i) => i.severity === 'warning').length,
+    });
+  });
+
+  /**
+   * GET /:id/readiness — plain-language setup the workflow still needs before it
+   * can actually run (connect an account, supply credentials). Connector-agnostic
+   * and advisory; lets the UI/chat ask intelligently instead of dead-ending a run.
+   */
+  app.get('/:id/readiness', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+    return c.json(analyzeWorkflowReadiness(deps.db, ws.workspaceId, wf.graph as WorkflowGraph));
+  });
+
+  app.get('/:id/deployment', (c) => {
+    const ws = getWorkspace(c);
+    if (!triggerDeployments) {
+      throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Workflow trigger deployment is unavailable.');
+    }
+    return c.json({ deployment: triggerDeployments.get(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.post('/:id/publish', async (c) => {
+    const ws = getWorkspace(c);
+    if (!triggerDeployments) {
+      throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Workflow trigger deployment is unavailable.');
+    }
+    const deployment = await triggerDeployments.publish({
+      workspaceId: ws.workspaceId,
+      workflowId: c.req.param('id'),
+      ambientId: ws.ambientId ?? null,
+      userId: ws.user.id,
+    });
+    return c.json({ deployment });
+  });
+
+  app.patch('/:id/deployment', async (c) => {
+    const ws = getWorkspace(c);
+    if (!triggerDeployments) {
+      throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Workflow trigger deployment is unavailable.');
+    }
+    const body = schemas.workflowDeploymentStatusSchema.parse(await c.req.json());
+    const deployment = await triggerDeployments.setStatus(
+      ws.workspaceId,
+      c.req.param('id'),
+      body.status,
+    );
+    return c.json({ deployment });
+  });
+
   app.patch('/:id', async (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const wf = loadWorkflow(deps.db, ws.workspaceId, id);
     const body = schemas.updateWorkflowSchema.parse(await c.req.json());
-    if (body.graph) validateWorkflowGraph(body.graph as WorkflowGraph, { currentWorkflowId: id });
+    if (body.spaceId) ensureWorkflowSpace(deps.db, ws.workspaceId, body.spaceId);
+    const normalizedGraph = body.graph
+      ? normalizeWorkflowGraph(deps.db, ws.workspaceId, body.graph as WorkflowGraph).graph
+      : undefined;
+    if (normalizedGraph)
+      validateWorkflowGraph(normalizedGraph, { currentWorkflowId: id, strict: false });
+    const nextGraph = normalizedGraph ?? (wf.graph as WorkflowGraph);
     deps.db
       .update(schema.workflows)
       .set({
         title: body.title ?? wf.title,
-        summary: body.summary === undefined ? wf.summary : body.summary,
-        intendedBehavior: body.intendedBehavior === undefined ? wf.intendedBehavior : (body.intendedBehavior?.trim() || null),
-        graph: (body.graph as WorkflowGraph | undefined) ?? (wf.graph as WorkflowGraph),
+        description:
+          body.description === undefined
+            ? wf.description
+            : body.description?.trim() || null,
+        spaceId: body.spaceId === undefined ? wf.spaceId : body.spaceId ?? null,
+        graph: nextGraph,
+        contentHash: hashWorkflowGraph(nextGraph),
         settings: body.settings ?? (wf.settings as Record<string, unknown>),
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflows.id, id))
       .run();
     // 10.14: keep the mirrored package in sync
-    try { deps.packager?.mirrorWorkflow({ workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id }, id); }
-    catch { /* best-effort mirror */ }
+    try {
+      deps.packager?.mirrorWorkflow(
+        { workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id },
+        id,
+      );
+    } catch {
+      /* best-effort mirror */
+    }
     return c.json({ ok: true });
   });
 
@@ -140,11 +279,34 @@ export function buildWorkflowRoutes(deps: {
     const wf = loadWorkflow(deps.db, ws.workspaceId, id);
     const body = schemas.runWorkflowSchema.parse(await c.req.json().catch(() => ({})));
 
-    const graph = wf.graph as WorkflowGraph;
+    // `loadWorkflow` already normalized the graph and surfaced any repairs.
+    const graph = wf.graph;
     if (graph.nodes.length === 0) {
       throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'Cannot run an empty workflow');
     }
     validateWorkflowGraph(graph, { currentWorkflowId: wf.id });
+    // Heal the stored row when the normalization actually changed something, so
+    // the persisted graph matches what the engine will run (and so the next read
+    // is a no-op). Skipping this left the database permanently out of sync.
+    if (wf.graphRepairs.length > 0) {
+      deps.db
+        .update(schema.workflows)
+        .set({
+          graph,
+          contentHash: hashWorkflowGraph(graph),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.workflows.id, wf.id))
+        .run();
+      try {
+        deps.packager?.mirrorWorkflow(
+          { workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id },
+          wf.id,
+        );
+      } catch {
+        /* best-effort mirror */
+      }
+    }
 
     const runId = randomUUID();
     const state = buildInitialRunState({
@@ -206,9 +368,10 @@ export function buildWorkflowRoutes(deps: {
     const nodeId = c.req.param('nodeId');
     loadWorkflow(deps.db, ws.workspaceId, id);
     const body = (await c.req.json().catch(() => ({}))) as { inputs?: Record<string, unknown> };
-    const inputs = body.inputs && typeof body.inputs === 'object' && !Array.isArray(body.inputs)
-      ? body.inputs
-      : {};
+    const inputs =
+      body.inputs && typeof body.inputs === 'object' && !Array.isArray(body.inputs)
+        ? body.inputs
+        : {};
     const result = await deps.engine.testNode({
       workspaceId: ws.workspaceId,
       ambientId: ws.ambientId,
@@ -217,12 +380,16 @@ export function buildWorkflowRoutes(deps: {
       nodeId,
       inputs,
     });
-    deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.NODE_TEST_COMPLETED, {
-      workflowId: id,
-      nodeId,
-      ok: result.ok,
-      durationMs: result.durationMs,
-    });
+    deps.bus.publish(
+      REALTIME_ROOMS.workspace(ws.workspaceId),
+      REALTIME_EVENTS.NODE_TEST_COMPLETED,
+      {
+        workflowId: id,
+        nodeId,
+        ok: result.ok,
+        durationMs: result.durationMs,
+      },
+    );
     return c.json(result, result.ok ? 200 : 422);
   });
 
@@ -243,76 +410,290 @@ export function buildWorkflowRoutes(deps: {
     const rows = deps.db
       .select()
       .from(schema.workflowRuns)
-      .where(and(eq(schema.workflowRuns.workflowId, id), eq(schema.workflowRuns.workspaceId, ws.workspaceId)))
+      .where(
+        and(
+          eq(schema.workflowRuns.workflowId, id),
+          eq(schema.workflowRuns.workspaceId, ws.workspaceId),
+        ),
+      )
       .orderBy(desc(schema.workflowRuns.createdAt))
       .limit(limit)
       .all();
-    const triggerMap = resolveTriggerTypes(deps.db, rows.map((r) => r.triggerId));
+    const triggerMap = resolveTriggerTypes(
+      deps.db,
+      rows.map((r) => r.triggerId),
+    );
     return c.json({ runs: rows.map((r) => mapRunSummary(r, triggerMap)) });
   });
 
-  /**
-   * Outputs of the most recent completed run.
-   * Explicit `config.isOutput` nodes define the surface; otherwise every
-   * completed sink node is surfaced for zero-config workflows.
-   */
+  /** Output history, newest first, with immutable delivery artifacts per run. */
   app.get('/:id/output', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-    const run = deps.db
+    const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 20), 1), 50);
+    const rows = deps.db
       .select()
       .from(schema.workflowRuns)
       .where(
         and(
           eq(schema.workflowRuns.workflowId, id),
           eq(schema.workflowRuns.workspaceId, ws.workspaceId),
-          eq(schema.workflowRuns.status, 'COMPLETED'),
+          inArray(schema.workflowRuns.status, ['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'COMPLETED_WITH_ERRORS']),
         ),
       )
       .orderBy(desc(schema.workflowRuns.completedAt), desc(schema.workflowRuns.createdAt))
-      .limit(1)
-      .get();
-    if (!run) return c.json({ lastRun: null, outputs: [] });
+      .limit(limit + 1)
+      .all();
+    if (rows.length === 0) return c.json({ lastRun: null, outputs: [], runs: [], hasMore: false });
 
-    const triggerMap = resolveTriggerTypes(deps.db, [run.triggerId]);
-    const graph = ((run.graphSnapshot as WorkflowGraph | null) ?? (wf.graph as WorkflowGraph)) ?? {
-      version: 1,
-      nodes: [],
-      edges: [],
-      viewport: { x: 0, y: 0, zoom: 1 },
-    };
-    const state = run.runState as WorkflowRunState;
-    const outputs = buildFinalNodeOutputs(graph, state);
-    return c.json({ lastRun: mapRunSummary(run, triggerMap), outputs });
+    const hasMore = rows.length > limit;
+    const visibleRows = rows.slice(0, limit);
+    const triggerMap = resolveTriggerTypes(deps.db, visibleRows.map((run) => run.triggerId));
+    const runs = visibleRows.map((run) => {
+      const graph = (run.graphSnapshot as WorkflowGraph | null) ??
+        (wf.graph as WorkflowGraph) ?? {
+          version: 1,
+          nodes: [],
+          edges: [],
+          viewport: { x: 0, y: 0, zoom: 1 },
+        };
+      const state = run.runState as WorkflowRunState;
+      return {
+        run: mapRunSummary(run, triggerMap),
+        outputs: buildFinalNodeOutputs(graph, state, {
+          runId: run.id,
+          startedAt: run.startedAt ?? run.createdAt,
+          triggeredBy: triggerMap.get(run.triggerId ?? '') ?? 'manual',
+        }),
+      };
+    });
+    return c.json({
+      lastRun: runs[0]!.run,
+      outputs: runs[0]!.outputs,
+      runs,
+      hasMore,
+    });
   });
 
+  app.delete('/:id', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    try {
+      const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+      deletedWorkflowsCache.set(id, wf);
+      deps.db
+        .delete(schema.workflows)
+        .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, ws.workspaceId)))
+        .run();
+
+      try {
+        deps.packager?.mirrorWorkflow(
+          {
+            workspaceId: ws.workspaceId,
+            ambientId: ws.ambientId ?? null,
+            userId: ws.user.id,
+          },
+          id,
+        );
+      } catch {
+        /* best-effort */
+      }
+
+      deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.WORKFLOW_DELETED, {
+        workflowId: id,
+        workspaceId: ws.workspaceId,
+      });
+
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e) }, 404);
+    }
+  });
+
+  app.post('/:id/restore', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const cached = deletedWorkflowsCache.get(id);
+    if (!cached) {
+      return c.json({ error: 'Workflow not found in restore cache' }, 404);
+    }
+    deps.db
+      .insert(schema.workflows)
+      .values({
+        id: cached.id,
+        workspaceId: cached.workspaceId,
+        ambientId: cached.ambientId,
+        userId: cached.userId,
+        registryEntryId: cached.registryEntryId,
+        registryVersion: cached.registryVersion,
+        title: cached.title,
+        description: cached.description,
+        graph: cached.graph,
+        settings: cached.settings,
+        isFromRegistry: cached.isFromRegistry,
+        maxConcurrentRuns: cached.maxConcurrentRuns,
+        budgetCents: cached.budgetCents,
+        concurrencyOverflow: cached.concurrencyOverflow,
+        tags: cached.tags,
+        createdAt: cached.createdAt,
+        updatedAt: new Date().toISOString(),
+      })
+      .run();
+
+    try {
+      deps.packager?.mirrorWorkflow(
+        {
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId ?? null,
+          userId: ws.user.id,
+        },
+        id,
+      );
+    } catch {
+      /* best-effort */
+    }
+
+    deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.WORKFLOW_CREATED, {
+      workflowId: id,
+      workspaceId: ws.workspaceId,
+    });
+
+    deletedWorkflowsCache.delete(id);
+    return c.json({ ok: true });
+  });
 
   return app;
 }
 
+type WorkflowRow = typeof schema.workflows.$inferSelect;
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;
 
-/** CREATED/PLANNING/WAITING collapse to "pending"; RUNNING stays distinct. */
-function mapRunStatus(status: string): 'running' | 'completed' | 'completed_with_violation' | 'failed' | 'pending' | 'cancelled' {
+function loadLatestRunsByWorkflow(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  workflowIds: string[],
+): Map<string, WorkflowRunRow> {
+  if (workflowIds.length === 0) return new Map();
+  const rows = db
+    .select()
+    .from(schema.workflowRuns)
+    .where(
+      and(
+        eq(schema.workflowRuns.workspaceId, workspaceId),
+        inArray(schema.workflowRuns.workflowId, workflowIds),
+      ),
+    )
+    .orderBy(desc(schema.workflowRuns.createdAt))
+    .all();
+  const latest = new Map<string, WorkflowRunRow>();
+  for (const row of rows) {
+    if (!row.workflowId || latest.has(row.workflowId)) continue;
+    latest.set(row.workflowId, row);
+  }
+  return latest;
+}
+
+function presentWorkflowListItem(
+  workflow: WorkflowRow,
+  latestRun: WorkflowRunRow | undefined,
+  triggerMap: Map<string, string>,
+) {
+  const latest = latestRun ? mapRunSummary(latestRun, triggerMap) : null;
+  const status = latestRun ? workflowStatusFromRun(latestRun, latest?.status) : 'idle';
+  return {
+    ...workflow,
+    triggerType: inferWorkflowTriggerType(workflow.graph as WorkflowGraph),
+    status,
+    lastRun: latest,
+    activeRunStep: latestRun && isActiveRunStatus(latestRun.status)
+      ? activeRunStep(workflow, latestRun)
+      : undefined,
+  };
+}
+
+function workflowStatusFromRun(
+  run: WorkflowRunRow,
+  mappedStatus: ReturnType<typeof mapRunSummary>['status'] | undefined,
+): 'running' | 'paused' | 'waiting' | 'failed' | 'idle' | 'pending' {
+  if (mappedStatus === 'paused') return 'paused';
+  if (mappedStatus === 'waiting') return 'waiting';
+  if (run.status === 'RUNNING') return 'running';
+  if (run.status === 'CREATED' || run.status === 'PLANNING') return 'pending';
+  if (mappedStatus === 'failed') return 'failed';
+  return 'idle';
+}
+
+function isActiveRunStatus(status: string): boolean {
+  return status === 'RUNNING' || status === 'WAITING' || status === 'CREATED' || status === 'PLANNING';
+}
+
+function activeRunStep(workflow: WorkflowRow, run: WorkflowRunRow): { current: number; total: number; durationMs?: number } | undefined {
+  const graph = ((run.graphSnapshot as WorkflowGraph | null) ?? (workflow.graph as WorkflowGraph)) ?? null;
+  const nodes = graph?.nodes ?? [];
+  if (nodes.length === 0) return undefined;
+  const state = run.runState as WorkflowRunState;
+  const currentNodeId = currentRunNodeId(state);
+  const failedCount = state.failedNodeIds?.length ?? 0;
+  const current = Math.min(nodes.length, (state.completedNodeIds?.length ?? 0) + failedCount + (currentNodeId ? 1 : 0));
+  const durationMs = run.startedAt
+    ? Math.max(0, Date.now() - new Date(run.startedAt).getTime())
+    : undefined;
+  return {
+    current: Math.max(1, current),
+    total: nodes.length,
+    ...(Number.isFinite(durationMs) ? { durationMs } : {}),
+  };
+}
+
+function currentRunNodeId(state: WorkflowRunState): string | null {
+  const active = Object.keys(state.activeExecutions ?? {})[0];
+  if (active) return active;
+  const queued = state.readyQueue?.[0]?.nodeId;
+  if (queued) return queued;
+  const running = Object.values(state.nodeStates ?? {}).find((node) => node.status === 'RUNNING');
+  if (running) return running.nodeId;
+  const waiting = Object.values(state.nodeStates ?? {}).find((node) => node.status === 'WAITING');
+  return waiting?.nodeId ?? null;
+}
+
+function inferWorkflowTriggerType(graph: WorkflowGraph): 'manual' | 'cron' | 'webhook' | 'event' {
+  const trigger = graph.nodes.find((node) => node.config.kind === 'trigger');
+  const raw = trigger?.config.kind === 'trigger' ? String(trigger.config.triggerType ?? '') : '';
+  if (raw === 'cron') return 'cron';
+  if (raw === 'webhook') return 'webhook';
+  if (raw === 'persistent_listener' || raw === 'event') return 'event';
+  return 'manual';
+}
+
+/** CREATED/PLANNING collapse to "pending"; WAITING stays distinct for paused/waiting UX. */
+function mapRunStatus(
+  status: string,
+): 'running' | 'completed' | 'completed_with_violation' | 'failed' | 'pending' | 'cancelled' | 'waiting' {
   switch (status) {
     case 'COMPLETED':
       return 'completed';
     case 'COMPLETED_WITH_CONTRACT_VIOLATION':
       return 'completed_with_violation';
+    case 'COMPLETED_WITH_ERRORS':
     case 'FAILED':
       return 'failed';
     case 'CANCELLED':
       return 'cancelled';
     case 'RUNNING':
       return 'running';
+    case 'WAITING':
+      return 'waiting';
     default:
       return 'pending';
   }
 }
 
 /** Build a triggerId → triggerType lookup for a batch of runs. */
-function resolveTriggerTypes(db: AgentisSqliteDb, triggerIds: Array<string | null>): Map<string, string> {
+function resolveTriggerTypes(
+  db: AgentisSqliteDb,
+  triggerIds: Array<string | null>,
+): Map<string, string> {
   const ids = [...new Set(triggerIds.filter((t): t is string => Boolean(t)))];
   const map = new Map<string, string>();
   if (ids.length === 0) return map;
@@ -343,16 +724,19 @@ function mapRunSummary(run: WorkflowRunRow, triggerMap: Map<string, string>) {
         : rawType === 'persistent_listener'
           ? 'event'
           : 'manual';
-  const runState = run.runState as { contractViolations?: string[] } | null;
+  const runState = run.runState as ({ contractViolations?: string[] } & Partial<WorkflowRunState>) | null;
+  const paused = Object.values(runState?.nodeStates ?? {}).some((node) => node?.status === 'WAITING' && node?.blockedReason);
   return {
     id: run.id,
-    status: mapRunStatus(run.status),
+    status: paused ? 'paused' : mapRunStatus(run.status),
     startedAt,
     finishedAt,
     durationMs,
     triggeredBy,
     isReplay: run.isReplay,
-    contractViolations: Array.isArray(runState?.contractViolations) ? runState!.contractViolations : undefined,
+    contractViolations: Array.isArray(runState?.contractViolations)
+      ? runState!.contractViolations
+      : undefined,
   };
 }
 
@@ -363,6 +747,8 @@ interface FinalNodeOutput {
   value: unknown;
   /** Viewer hint for the Output Surface (Layer 6). Set by `return_output` nodes. */
   renderAs?: 'html' | 'markdown' | 'table' | 'json' | 'text';
+  role?: 'delivery' | 'declared';
+  delivery?: IntegrationDeliveryReceipt;
 }
 
 type CompletedNodeOutput = {
@@ -375,7 +761,11 @@ type CompletedNodeOutput = {
  * Explicit declarations are returned in graph order; zero-config leaf outputs
  * are returned newest-first by node completion time.
  */
-function buildFinalNodeOutputs(graph: WorkflowGraph, state: WorkflowRunState): FinalNodeOutput[] {
+function buildFinalNodeOutputs(
+  graph: WorkflowGraph,
+  state: WorkflowRunState,
+  run?: { runId: string; startedAt?: string | null; triggeredBy?: string },
+): FinalNodeOutput[] {
   const completedIds = state.completedNodeIds ?? [];
   if (completedIds.length === 0) return [];
   const hasOutgoing = new Set((graph.edges ?? []).map((e) => e.source));
@@ -387,18 +777,21 @@ function buildFinalNodeOutputs(graph: WorkflowGraph, state: WorkflowRunState): F
   if (completed.length === 0) return [];
 
   const completedById = new Map(completed.map((item) => [item.nid, item] as const));
-  const declaredOutputNodes = (graph.nodes ?? [])
-    .filter((node) => {
-      const cfg = node.config as { isOutput?: unknown; kind?: string };
-      // `return_output` nodes are always part of the output surface; the legacy
-      // `isOutput: true` flag on any node remains supported.
-      return cfg?.isOutput === true || cfg?.kind === 'return_output';
-    });
+  const deliveryOutputs = buildDeliveryOutputs(graph, state, completedById, run);
+  const deliveryNodeIds = new Set(deliveryOutputs.map((output) => output.nodeId));
+  const declaredOutputNodes = (graph.nodes ?? []).filter((node) => {
+    const cfg = node.config as { isOutput?: unknown; kind?: string };
+    // `return_output` nodes are always part of the output surface; the legacy
+    // `isOutput: true` flag on any node remains supported.
+    return cfg?.isOutput === true || cfg?.kind === 'return_output';
+  });
   if (declaredOutputNodes.length > 0) {
-    return declaredOutputNodes
+    const declared = declaredOutputNodes
+      .filter((node) => !deliveryNodeIds.has(node.id))
       .map((node) => completedById.get(node.id))
       .filter((item): item is CompletedNodeOutput => Boolean(item))
-      .map((item) => formatFinalNodeOutput(item.nid, item.st, nodeById));
+      .map((item) => ({ ...formatFinalNodeOutput(item.nid, item.st, nodeById), role: 'declared' as const }));
+    return [...deliveryOutputs, ...declared];
   }
 
   const sinks = completed
@@ -409,7 +802,67 @@ function buildFinalNodeOutputs(graph: WorkflowGraph, state: WorkflowRunState): F
       return tb - ta;
     });
 
-  return sinks.map((item) => formatFinalNodeOutput(item.nid, item.st, nodeById));
+  return [
+    ...deliveryOutputs,
+    ...sinks
+      .filter((item) => !deliveryNodeIds.has(item.nid))
+      .map((item) => formatFinalNodeOutput(item.nid, item.st, nodeById)),
+  ];
+}
+
+function buildDeliveryOutputs(
+  graph: WorkflowGraph,
+  state: WorkflowRunState,
+  completedById: Map<string, CompletedNodeOutput>,
+  run?: { runId: string; startedAt?: string | null; triggeredBy?: string },
+): FinalNodeOutput[] {
+  const nodeOutputs = Object.fromEntries(
+    Object.entries(state.nodeStates ?? {})
+      .filter(([, nodeState]) => nodeState?.outputData)
+      .map(([nodeId, nodeState]) => [nodeId, nodeState!.outputData!]),
+  );
+  const incoming = new Set((graph.edges ?? []).map((edge) => edge.target));
+  const root = (graph.nodes ?? []).find((node) => !incoming.has(node.id));
+  const triggerInputs = root ? state.nodeStates?.[root.id]?.inputData ?? {} : {};
+  const tctx = buildTemplateContext({
+    triggerInputs,
+    nodeOutputs,
+    scratchpad: {},
+    store: {},
+    run: run ? {
+      id: run.runId,
+      ...(run.startedAt ? { startedAt: run.startedAt } : {}),
+      ...(run.triggeredBy ? { triggeredBy: run.triggeredBy } : {}),
+    } : undefined,
+  });
+
+  return (graph.nodes ?? []).flatMap((node) => {
+    const completed = completedById.get(node.id);
+    if (!completed) return [];
+    const cfg = node.config as {
+      kind?: string;
+      integrationId?: string;
+      operationId?: string;
+      inputs?: Record<string, unknown>;
+    };
+    if (cfg.kind !== 'integration' || !cfg.integrationId || !cfg.operationId) return [];
+    const persisted = completed.st.deliveryReceipt;
+    const reconstructed = persisted ?? buildIntegrationDeliveryReceipt(
+      cfg.integrationId,
+      cfg.operationId,
+      resolveTemplateDeep(cfg.inputs ?? {}, tctx),
+    );
+    if (!reconstructed) return [];
+    return [{
+      nodeId: node.id,
+      nodeTitle: reconstructed.subject ?? node.title,
+      kind: 'delivery',
+      value: reconstructed.content,
+      renderAs: reconstructed.contentType,
+      role: 'delivery',
+      delivery: reconstructed,
+    }];
+  });
 }
 
 function formatFinalNodeOutput(
@@ -418,7 +871,9 @@ function formatFinalNodeOutput(
   nodeById: Map<string, WorkflowGraph['nodes'][number]>,
 ): FinalNodeOutput {
   const node = nodeById.get(nodeId);
-  const cfg = (node?.config as { kind?: string; renderAs?: FinalNodeOutput['renderAs'] } | undefined) ?? undefined;
+  const cfg =
+    (node?.config as { kind?: string; renderAs?: FinalNodeOutput['renderAs'] } | undefined) ??
+    undefined;
   const kind = cfg?.kind ?? node?.type ?? 'unknown';
   const out = nodeState.outputData ?? null;
   // `return_output` unwraps to its rendered value + carries the renderAs hint.
@@ -448,5 +903,20 @@ function loadWorkflow(db: AgentisSqliteDb, workspaceId: string, id: string) {
     .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, workspaceId)))
     .get();
   if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow not found');
-  return wf;
+  // Normalize on read so every consumer sees an engine-valid graph. Surface the
+  // repairs alongside the graph (instead of discarding them) so a caller that
+  // wants to heal the *stored* row — e.g. the run path — can persist the fix.
+  // Without this, the stored graph drifts permanently from what actually runs:
+  // each read re-normalizes in memory but the database keeps the stale draft.
+  const { graph, repairs } = normalizeWorkflowGraph(db, workspaceId, wf.graph as WorkflowGraph);
+  return { ...wf, graph, graphRepairs: repairs };
+}
+
+function ensureWorkflowSpace(db: AgentisSqliteDb, workspaceId: string, spaceId: string) {
+  const space = db
+    .select({ id: schema.spaces.id })
+    .from(schema.spaces)
+    .where(and(eq(schema.spaces.id, spaceId), eq(schema.spaces.workspaceId, workspaceId)))
+    .get();
+  if (!space) throw new AgentisError('RESOURCE_NOT_FOUND', `space ${spaceId} not found`);
 }

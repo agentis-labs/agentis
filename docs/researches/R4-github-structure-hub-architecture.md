@@ -266,7 +266,7 @@ Publish trigger
 
 GitHub Marketplace has two listing types:
 1. **Actions**: anyone can publish, some verified creator organizations
-2. **Apps**: anyone can list for free; only verified publisher organizations can sell (paid plans require financial onboarding)
+2. **Marketplace integrations**: anyone can list for free; only verified publisher organizations can sell (paid plans require financial onboarding)
 
 Discovery: search, categories (code quality, CI/CD, deployment, etc.), featured collections, trending.
 

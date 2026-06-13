@@ -12,7 +12,7 @@ const pool = new BrowserPool(createLogger({ level: 'error' }));
 
 afterAll(async () => {
   await pool.shutdown();
-});
+}, 60_000); // Chromium teardown can exceed the default 30s hook timeout under full-suite CPU load.
 
 describe('BrowserPool', () => {
   it('renders inline HTML to a PNG screenshot', async () => {
@@ -44,5 +44,9 @@ describe('BrowserPool', () => {
     const html = '<form><input id="email" value="" /></form>';
     const r = await pool.fillForm({ html, formData: { '#email': 'ada@lovelace.dev' } });
     expect(r.values['#email']).toBe('ada@lovelace.dev');
+  }, 60_000);
+
+  it('blocks private-network navigation by default', async () => {
+    await expect(pool.navigate({ url: 'http://127.0.0.1:9/private' })).rejects.toThrow(/private|loopback/i);
   }, 60_000);
 });

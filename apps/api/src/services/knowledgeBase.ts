@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or, sql } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { KnowledgeAutoLinker } from './knowledgeAutoLinker.js';
+import { cosineSimilarity, embedText, selectEmbeddingProvider, type EmbeddingProvider } from './embeddingProvider.js';
+import type { BrainEnrichmentProvider, ChunkEnrichment, EnrichedKnowledgeGraphWriter } from './brainEnrichment.js';
 
 export interface CreateKnowledgeBaseArgs {
   workspaceId: string;
@@ -24,6 +27,7 @@ export interface AddKnowledgeDocumentBytesArgs {
   name: string;
   mimeType?: string;
   bytes: Buffer;
+  describeImage?: boolean;
 }
 
 export interface UpdateKnowledgeBaseArgs {
@@ -38,10 +42,38 @@ export interface SearchKnowledgeArgs {
   knowledgeBaseId: string;
   query: string;
   topK?: number;
+  retrievalMode?: 'contextual' | 'strict' | 'exploratory';
 }
 
 export class KnowledgeBaseService {
+  private autoLinker: Pick<KnowledgeAutoLinker, 'autoLink' | 'autoLinkSemantic'> | null = null;
+  private embeddingProviderResolver: ((workspaceId: string) => EmbeddingProvider) | null = null;
+  private enrichmentProvider: BrainEnrichmentProvider | null = null;
+  private graphWriter: Pick<EnrichedKnowledgeGraphWriter, 'writeDocument'> | null = null;
+
   constructor(private readonly db: AgentisSqliteDb) {}
+
+  /**
+   * Attach the Brain linker after both services have been composed. Existing
+   * documents may predate graph linking, so bootstrap can repair only missing
+   * structural links without reinforcing complete documents on each restart.
+   */
+  setAutoLinker(linker: Pick<KnowledgeAutoLinker, 'autoLink' | 'autoLinkSemantic'>, repairExisting = false): number {
+    this.autoLinker = linker;
+    return repairExisting ? this.repairOrphanedDocumentLinks() : 0;
+  }
+
+  setEmbeddingProviderResolver(resolver: (workspaceId: string) => EmbeddingProvider): void {
+    this.embeddingProviderResolver = resolver;
+  }
+
+  setEnrichmentProvider(
+    provider: BrainEnrichmentProvider | null,
+    graphWriter?: Pick<EnrichedKnowledgeGraphWriter, 'writeDocument'> | null,
+  ): void {
+    this.enrichmentProvider = provider;
+    this.graphWriter = graphWriter ?? null;
+  }
 
   listKnowledgeBases(workspaceId: string) {
     return this.db
@@ -117,7 +149,7 @@ export class KnowledgeBaseService {
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
-  addDocument(args: AddKnowledgeDocumentArgs) {
+  async addDocument(args: AddKnowledgeDocumentArgs) {
     const knowledgeBase = this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
     const mimeType = args.mimeType ?? mimeTypeFromName(args.name);
     const content = extractText(args.content, mimeType);
@@ -135,7 +167,7 @@ export class KnowledgeBaseService {
   async addDocumentFromBytes(args: AddKnowledgeDocumentBytesArgs) {
     this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
     const mimeType = args.mimeType ?? mimeTypeFromName(args.name);
-    const content = await extractTextFromBytes(args.bytes, mimeType, args.name);
+    const content = await extractTextFromBytes(args.workspaceId, args.bytes, mimeType, args.name, this.enrichmentProvider, args.describeImage ?? false);
     if (!content.trim()) throw new AgentisError('VALIDATION_FAILED', 'Document content is empty');
 
     return this.persistDocument({
@@ -147,7 +179,7 @@ export class KnowledgeBaseService {
     });
   }
 
-  private persistDocument(args: AddKnowledgeDocumentArgs & { content: string }) {
+  private async persistDocument(args: AddKnowledgeDocumentArgs & { content: string }) {
     const now = new Date().toISOString();
     const documentId = randomUUID();
     const chunks = chunkText(args.content);
@@ -166,10 +198,23 @@ export class KnowledgeBaseService {
     };
     this.db.insert(schema.kbDocuments).values(document).run();
     const chunkIds: string[] = [];
+    const enrichments: Array<ChunkEnrichment | null> = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index]!;
       const chunkId = randomUUID();
       chunkIds.push(chunkId);
+      const generated = await this.enrichmentProvider?.enrichChunk({
+        workspaceId: args.workspaceId,
+        documentName: args.name,
+        mimeType: args.mimeType ?? 'text/plain',
+        chunkIndex: index,
+        chunkCount: chunks.length,
+        content: chunk,
+      }).catch(() => null);
+      const contextPrefix = generated?.contextPrefix ?? contextualPrefix(args.name, index, chunks.length, args.mimeType ?? 'text/plain');
+      const embeddingText = `${contextPrefix}\n\n${chunk}`;
+      const provider = this.embeddingProvider(args.workspaceId);
+      const initialEmbedding = provider.embed(embeddingText);
       this.db.insert(schema.kbChunks).values({
         id: chunkId,
         documentId,
@@ -177,12 +222,40 @@ export class KnowledgeBaseService {
         workspaceId: args.workspaceId,
         chunkIndex: index,
         content: chunk,
-        metadata: { source: args.name } as unknown as object,
+        metadata: {
+          source: args.name,
+          contextPrefix,
+          importanceScore: generated?.importanceScore ?? inferImportance(chunk),
+          entities: generated?.entities ?? extractEntities(chunk),
+          ingestionType: ingestionType(args.mimeType ?? 'text/plain'),
+          ...(generated ? {
+            generatedSummary: generated.summary,
+            keyFacts: generated.keyFacts,
+            enrichment: { generated: true, model: generated.model ?? 'configured-model' },
+          } : { enrichment: { generated: false, strategy: 'deterministic_context' } }),
+        } as unknown as object,
+        ...(Array.isArray(initialEmbedding) ? { embedding: initialEmbedding } : {}),
         tokenCount: tokenize(chunk).length,
         createdAt: now,
       }).run();
+      if (!Array.isArray(initialEmbedding)) {
+        void initialEmbedding
+          .then((embedding) => this.db.update(schema.kbChunks).set({ embedding }).where(eq(schema.kbChunks.id, chunkId)).run())
+          .catch(() => {});
+      }
+      enrichments.push(generated ?? null);
     }
 
+    this.linkDocumentChunks(documentId, args.workspaceId, args.name);
+    if (this.graphWriter && enrichments.some(Boolean)) {
+      await this.graphWriter.writeDocument({
+        workspaceId: args.workspaceId,
+        documentId,
+        documentName: args.name,
+        chunkIds,
+        enrichments,
+      });
+    }
     return { ...document, chunks: chunks.length };
   }
 
@@ -208,10 +281,9 @@ export class KnowledgeBaseService {
     return { id: documentId, archived: true };
   }
 
-  search(args: SearchKnowledgeArgs) {
+  async search(args: SearchKnowledgeArgs) {
     this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
-    const queryTokens = new Set(tokenize(args.query));
-    if (queryTokens.size === 0) return [];
+    if (tokenize(args.query).length === 0) return [];
     const topK = Math.min(Math.max(args.topK ?? 5, 1), 20);
     const chunks = this.db
       .select()
@@ -224,20 +296,102 @@ export class KnowledgeBaseService {
       )
       .all();
 
-    return chunks
+    const activeChunks = chunks
       .filter((chunk) => this.isDocumentActive(args.workspaceId, chunk.documentId))
-      .map((chunk) => ({ chunk, score: scoreChunk(queryTokens, chunk.content) }))
-      .filter((result) => result.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK)
-      .map(({ chunk, score }) => ({
+    const now = Date.now();
+    const provider = this.embeddingProvider(args.workspaceId);
+    const rankForQuery = async (query: string) => {
+      const queryTokens = new Set(tokenize(query));
+      let queryEmbedding: number[] | null = null;
+      try {
+        queryEmbedding = await embedText(provider, query);
+      } catch {
+        queryEmbedding = null;
+      }
+      return activeChunks
+        .map((chunk) => {
+          const lexical = scoreChunk(queryTokens, chunk.content);
+          const embedding = parseJsonArray<number>(chunk.embedding);
+          const semantic = queryEmbedding && embedding.length > 0 ? Math.max(0, cosineSimilarity(queryEmbedding, embedding)) : 0;
+          const metadata = parseJsonRecord(chunk.metadata);
+          const importance = typeof metadata.importanceScore === 'number' ? metadata.importanceScore : 0.5;
+          const ageDays = Math.max(0, (now - Date.parse(chunk.createdAt)) / 86_400_000);
+          const recency = Math.exp(-0.007 * ageDays);
+          const retrieval = semantic > 0 ? 0.7 * semantic + 0.3 * lexical : lexical;
+          const score = 0.65 * retrieval + 0.2 * importance + 0.15 * recency;
+          return { chunk, score, retrieval, retrievalMethod: semantic > 0 ? 'hybrid' : 'lexical' as 'hybrid' | 'lexical' };
+        })
+        .filter((result) => result.retrieval > (args.retrievalMode === 'strict' ? 0.18 : 0.01))
+        .sort((a, b) => b.score - a.score);
+    };
+    const initial = await rankForQuery(args.query);
+    let ranked = initial.slice(0, topK);
+    if (args.retrievalMode === 'exploratory' && this.enrichmentProvider && initial.length > 0) {
+      const expanded = await this.enrichmentProvider.expandGroundedQuery({
+        workspaceId: args.workspaceId,
+        query: args.query,
+        snippets: initial.slice(0, 4).map((result) => result.chunk.content),
+      }).catch(() => []);
+      if (expanded.length > 0) {
+        const resultLists = [initial, ...(await Promise.all(expanded.map((query) => rankForQuery(query))))];
+        const fused = new Map<string, { item: typeof initial[number]; rrf: number }>();
+        for (const list of resultLists) {
+          for (const [rank, item] of list.slice(0, 20).entries()) {
+            const existing = fused.get(item.chunk.id);
+            const rrf = 1 / (60 + rank + 1);
+            fused.set(item.chunk.id, { item, rrf: (existing?.rrf ?? 0) + rrf });
+          }
+        }
+        ranked = [...fused.values()]
+          .sort((a, b) => b.rrf - a.rrf)
+          .slice(0, topK)
+          .map(({ item, rrf }) => ({ ...item, score: rrf, retrievalMethod: 'hybrid' as const }));
+      }
+    }
+    const accessedAt = new Date().toISOString();
+    for (const result of ranked) {
+      this.db.update(schema.kbChunks)
+        .set({ accessCount: sql`${schema.kbChunks.accessCount} + 1`, lastAccessedAt: accessedAt })
+        .where(eq(schema.kbChunks.id, result.chunk.id))
+        .run();
+    }
+    return ranked.map(({ chunk, score, retrievalMethod }) => ({
         id: chunk.id,
         documentId: chunk.documentId,
         chunkIndex: chunk.chunkIndex,
         content: chunk.content,
         metadata: chunk.metadata,
         score,
+        retrievalMethod,
       }));
+  }
+
+  async backfillEmbeddings(workspaceId: string): Promise<{ embedded: number; failed: number }> {
+    const provider = this.embeddingProvider(workspaceId);
+    const rows = this.db.select().from(schema.kbChunks).where(eq(schema.kbChunks.workspaceId, workspaceId)).all();
+    let embedded = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const metadata = parseJsonRecord(row.metadata);
+        const prefix = typeof metadata.contextPrefix === 'string' ? metadata.contextPrefix : '';
+        const embedding = await embedText(provider, `${prefix}\n\n${row.content}`.trim());
+        this.db.update(schema.kbChunks).set({ embedding }).where(eq(schema.kbChunks.id, row.id)).run();
+        embedded += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { embedded, failed };
+  }
+
+  private embeddingProvider(workspaceId: string): EmbeddingProvider {
+    if (this.embeddingProviderResolver) return this.embeddingProviderResolver(workspaceId);
+    const row = this.db.select({
+      type: schema.workspaces.embeddingProviderType,
+      config: schema.workspaces.embeddingProviderConfig,
+    }).from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get();
+    return selectEmbeddingProvider(row?.type ?? 'hashing', parseJsonRecord(row?.config));
   }
 
   private isDocumentActive(workspaceId: string, documentId: string): boolean {
@@ -246,6 +400,96 @@ export class KnowledgeBaseService {
       .where(and(eq(schema.kbDocuments.workspaceId, workspaceId), eq(schema.kbDocuments.id, documentId)))
       .get();
     return Boolean(document && !document.archivedAt);
+  }
+
+  private linkDocumentChunks(documentId: string, workspaceId: string, name: string): number {
+    if (!this.autoLinker) return 0;
+    const chunks = this.db.select().from(schema.kbChunks)
+      .where(and(eq(schema.kbChunks.workspaceId, workspaceId), eq(schema.kbChunks.documentId, documentId)))
+      .all()
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+    const head = chunks[0];
+    if (!head) return 0;
+    let linked = 0;
+    for (const chunk of chunks) {
+      const input = {
+        workspaceId,
+        sourceId: chunk.id,
+        sourceKind: 'kb_chunk' as const,
+        sourceTitle: name,
+        sourceContent: chunk.content,
+        siblingHeadId: chunk.id === head.id ? null : head.id,
+        siblingHeadKind: chunk.id === head.id ? null : 'kb_chunk' as const,
+      };
+      linked += this.autoLinker.autoLink(input);
+      void this.autoLinker.autoLinkSemantic(input);
+    }
+    return linked;
+  }
+
+  private repairOrphanedDocumentLinks(): number {
+    if (!this.autoLinker) return 0;
+    const documents = this.db.select().from(schema.kbDocuments).all()
+      .filter((document) => !document.archivedAt);
+    let linked = 0;
+    for (const document of documents) {
+      const chunks = this.db.select().from(schema.kbChunks)
+        .where(and(
+          eq(schema.kbChunks.workspaceId, document.workspaceId),
+          eq(schema.kbChunks.documentId, document.id),
+        ))
+        .all()
+        .sort((a, b) => a.chunkIndex - b.chunkIndex);
+      const head = chunks[0];
+      if (!head) continue;
+      if (chunks.length === 1) {
+        if (!this.atomHasAnyLink(document.workspaceId, head.id)) {
+          linked += this.autoLinker.autoLink({
+            workspaceId: document.workspaceId,
+            sourceId: head.id,
+            sourceKind: 'kb_chunk',
+            sourceTitle: document.name,
+            sourceContent: head.content,
+          });
+        }
+        continue;
+      }
+      for (const chunk of chunks.slice(1)) {
+        if (this.hasSiblingLink(document.workspaceId, chunk.id, head.id)) continue;
+        linked += this.autoLinker.autoLink({
+          workspaceId: document.workspaceId,
+          sourceId: chunk.id,
+          sourceKind: 'kb_chunk',
+          sourceTitle: document.name,
+          sourceContent: chunk.content,
+          siblingHeadId: head.id,
+          siblingHeadKind: 'kb_chunk',
+        });
+      }
+    }
+    return linked;
+  }
+
+  private hasSiblingLink(workspaceId: string, chunkId: string, headId: string): boolean {
+    return Boolean(this.db.select({ id: schema.knowledgeLinks.id }).from(schema.knowledgeLinks)
+      .where(and(
+        eq(schema.knowledgeLinks.workspaceId, workspaceId),
+        eq(schema.knowledgeLinks.sourceId, chunkId),
+        eq(schema.knowledgeLinks.sourceKind, 'kb_chunk'),
+        eq(schema.knowledgeLinks.targetId, headId),
+        eq(schema.knowledgeLinks.targetKind, 'kb_chunk'),
+        eq(schema.knowledgeLinks.relation, 'derived_from'),
+      ))
+      .get());
+  }
+
+  private atomHasAnyLink(workspaceId: string, atomId: string): boolean {
+    return Boolean(this.db.select({ id: schema.knowledgeLinks.id }).from(schema.knowledgeLinks)
+      .where(and(
+        eq(schema.knowledgeLinks.workspaceId, workspaceId),
+        or(eq(schema.knowledgeLinks.sourceId, atomId), eq(schema.knowledgeLinks.targetId, atomId))!,
+      ))
+      .get());
   }
 }
 
@@ -264,9 +508,46 @@ function extractText(content: string, mimeType: string): string {
   return content;
 }
 
-async function extractTextFromBytes(bytes: Buffer, mimeType: string, fileName: string): Promise<string> {
+export async function extractTextFromBytes(
+  workspaceId: string,
+  bytes: Buffer,
+  mimeType: string,
+  fileName: string,
+  enrichment: BrainEnrichmentProvider | null,
+  describeImage: boolean,
+): Promise<string> {
   const normalizedType = mimeType.toLowerCase();
   const normalizedName = fileName.toLowerCase();
+  if (normalizedType.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/.test(normalizedName)) {
+    if (describeImage && enrichment?.describeImage) {
+      try {
+        return await enrichment.describeImage({ workspaceId, bytes, mimeType, fileName });
+      } catch (error) {
+        throw new AgentisError('VALIDATION_FAILED', `Could not describe image: ${(error as Error).message}`);
+      }
+    }
+    return extractImageText(bytes, fileName);
+  }
+
+  if (
+    normalizedType.includes('spreadsheet')
+    || normalizedType.includes('excel')
+    || normalizedName.endsWith('.xlsx')
+    || normalizedName.endsWith('.xls')
+  ) {
+    return extractSpreadsheetText(bytes, fileName);
+  }
+
+  if (normalizedType.startsWith('audio/') || /\.(mp3|m4a|wav|ogg)$/.test(normalizedName)) {
+    if (!enrichment?.transcribeAudio) {
+      throw new AgentisError('VALIDATION_FAILED', 'Audio transcription is not configured on this installation. Upload a transcript or configure a transcription provider.');
+    }
+    try {
+      return await enrichment.transcribeAudio({ workspaceId, bytes, mimeType, fileName });
+    } catch (error) {
+      throw new AgentisError('VALIDATION_FAILED', `Could not transcribe audio: ${(error as Error).message}`);
+    }
+  }
   if (normalizedType.includes('pdf') || normalizedName.endsWith('.pdf')) {
     try {
       const { PDFParse } = await import('pdf-parse') as typeof import('pdf-parse');
@@ -310,12 +591,16 @@ function looksBinary(text: string): boolean {
   return replacementChars + nullChars > Math.max(8, text.length * 0.01);
 }
 
-function mimeTypeFromName(fileName: string): string {
+export function mimeTypeFromName(fileName: string): string {
   const name = fileName.toLowerCase();
   if (name.endsWith('.pdf')) return 'application/pdf';
   if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.csv')) return 'text/csv';
+  if (name.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (name.endsWith('.xls')) return 'application/vnd.ms-excel';
+  if (/\.(png|jpg|jpeg|webp|gif)$/.test(name)) return `image/${name.endsWith('.jpg') ? 'jpeg' : name.slice(name.lastIndexOf('.') + 1)}`;
+  if (/\.(mp3|m4a|wav|ogg)$/.test(name)) return `audio/${name.slice(name.lastIndexOf('.') + 1)}`;
   if (name.endsWith('.html') || name.endsWith('.htm')) return 'text/html';
   if (name.endsWith('.md') || name.endsWith('.markdown')) return 'text/markdown';
   return 'text/plain';
@@ -399,4 +684,92 @@ function tokenize(value: string): string[] {
     .split(/[^a-z0-9_]+/)
     .map((token) => token.trim())
     .filter((token) => token.length > 1);
+}
+
+async function extractImageText(bytes: Buffer, fileName: string): Promise<string> {
+  const packageName = 'tesseract.js';
+  try {
+    const tesseract = await import(packageName) as { recognize?: (image: Buffer, language: string) => Promise<{ data?: { text?: string } }> };
+    const result = tesseract.recognize ? await tesseract.recognize(bytes, 'eng') : null;
+    const text = result?.data?.text?.trim() ?? '';
+    if (text) return `[Image source: ${fileName}]\n${text}`;
+  } catch {
+    // Optional OCR dependency is intentionally absent on minimal installs.
+  }
+  // No OCR available — store the image as a named reference so it still
+  // appears in the ability's knowledge list and can be embedded by filename.
+  return `[Image: ${fileName}]`;
+}
+
+async function extractSpreadsheetText(bytes: Buffer, fileName: string): Promise<string> {
+  try {
+    if (fileName.toLowerCase().endsWith('.xls')) {
+      throw new AgentisError('VALIDATION_FAILED', 'Legacy .xls files are not supported. Save as .xlsx or CSV before upload.');
+    }
+    const ExcelJS = await import('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes as unknown as ArrayBuffer);
+    const lines: string[] = [];
+    workbook.eachSheet((sheet) => {
+      lines.push(`[Sheet: ${sheet.name}]`);
+      const headers: string[] = [];
+      sheet.eachRow((row, rowNumber) => {
+        const values = row.values as unknown[];
+        if (rowNumber === 1) {
+          for (const value of values.slice(1)) headers.push(String(value ?? '').trim());
+          return;
+        }
+        const rendered = values.slice(1)
+          .map((value, index) => `${headers[index] || `Column ${index + 1}`}: ${String(value ?? '')}`)
+          .join(' | ');
+        if (rendered.trim()) lines.push(rendered);
+      });
+    });
+    return lines.join('\n').trim();
+  } catch (error) {
+    if (error instanceof AgentisError) throw error;
+    throw new AgentisError('VALIDATION_FAILED', `Could not parse spreadsheet ${fileName}: ${(error as Error).message}`);
+  }
+}
+
+function contextualPrefix(name: string, index: number, count: number, mimeType: string): string {
+  return `Context: chunk ${index + 1} of ${count} from "${name}" (${mimeType || 'text/plain'}).`;
+}
+
+function inferImportance(content: string): number {
+  const signal = /\b(must|critical|decision|requirement|risk|deadline|policy|failure|lesson)\b/i.test(content) ? 0.72 : 0.5;
+  return signal;
+}
+
+function extractEntities(content: string): string[] {
+  const values = content.match(/\b[A-Z][A-Za-z0-9-]{2,}(?:\s+[A-Z][A-Za-z0-9-]{2,}){0,2}\b/g) ?? [];
+  return [...new Set(values)].slice(0, 12);
+}
+
+function ingestionType(mimeType: string): string {
+  if (mimeType.startsWith('image/')) return 'image_ocr';
+  if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) return 'spreadsheet';
+  return 'document';
+}
+
+function parseJsonArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }

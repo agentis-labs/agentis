@@ -10,6 +10,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
+import { firstFailedNodeId } from '../services/runStateFailures.js';
 
 type HistoryType = 'all' | 'runs' | 'activity' | 'audit';
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;
@@ -130,7 +131,7 @@ function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEv
   const status = mapRunStatus(run.status);
   const workflowName = workflow?.title ?? run.ephemeralTitle ?? 'Workflow';
   const state = run.runState as WorkflowRunState;
-  const failedNode = state.failedNodeIds?.[0] ?? undefined;
+  const failedNode = firstFailedNodeId(state) ?? undefined;
   return {
     id: `run-${run.id}`,
     type: status === 'failed'
@@ -185,6 +186,7 @@ function mapRunStatus(status: string): 'running' | 'completed' | 'failed' | 'pen
     case 'COMPLETED':
     case 'COMPLETED_WITH_CONTRACT_VIOLATION':
       return 'completed';
+    case 'COMPLETED_WITH_ERRORS':
     case 'FAILED':
       return 'failed';
     case 'CANCELLED':

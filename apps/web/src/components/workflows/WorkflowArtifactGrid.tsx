@@ -114,7 +114,7 @@ function canPreview(a: RunArtifact): boolean {
 function ArtifactPreview({ artifact, name }: { artifact: RunArtifact; name: string }) {
   const content = artifact.content ?? '';
   if (artifact.type === 'html') {
-    return <iframe title={`Preview of ${name}`} sandbox="allow-scripts" srcDoc={content} className="h-[360px] w-full rounded border border-line bg-white" />;
+    return <iframe title={`Preview of ${name}`} sandbox="" srcDoc={content} className="h-[360px] w-full rounded border border-line bg-white" />;
   }
   if (artifact.type === 'image') {
     return <ImageViewer src={content} alt={name} />;

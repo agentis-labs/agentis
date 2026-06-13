@@ -20,9 +20,9 @@ COPY apps ./apps
 COPY packages ./packages
 COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile
-RUN pnpm -r --filter "./packages/*" build || true \
+RUN pnpm -r --filter "./packages/*" build \
  && pnpm --filter @agentis/web build \
- && pnpm --filter @agentis/api build || true
+ && pnpm --filter @agentis/api build
 
 FROM base AS runtime
 ENV NODE_ENV=production \

@@ -17,7 +17,7 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -30,7 +30,7 @@ beforeEach(async () => {
   const activity = new ActivityFeedService(ctx.db, ctx.bus);
   const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
   const adapters = new AdapterManager(ctx.logger);
-  const skills = {} as unknown as SkillRuntime;
+  const extensions = {} as unknown as ExtensionRuntime;
   engine = new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
@@ -39,7 +39,7 @@ beforeEach(async () => {
     scratchpad,
     activity,
     approvals,
-    skills,
+    extensions,
     adapters,
   });
 });
@@ -115,10 +115,10 @@ describe('WorkflowEngine.applyGraphPatch', () => {
         addNodes: [
           {
             id: 'A',
-            type: 'skill_task',
+            type: 'extension_task',
             title: 'add',
             position: { x: 100, y: 0 },
-            config: { kind: 'skill_task', skillId: 'noop', inputMapping: {}, outputMapping: {} },
+            config: { kind: 'extension_task', extensionId: 'noop', operationName: 'run', inputMapping: {}, outputMapping: {} },
           },
         ],
         addEdges: [{ id: 'T-A', source: 'T', target: 'A' }],
@@ -160,10 +160,10 @@ describe('WorkflowEngine.applyGraphPatch', () => {
           addNodes: [
             {
               id: 'A',
-              type: 'skill_task',
+              type: 'extension_task',
               title: 'a',
               position: { x: 0, y: 0 },
-              config: { kind: 'skill_task', skillId: 'x', inputMapping: {}, outputMapping: {} },
+              config: { kind: 'extension_task', extensionId: 'x', operationName: 'run', inputMapping: {}, outputMapping: {} },
             },
           ],
           addEdges: [

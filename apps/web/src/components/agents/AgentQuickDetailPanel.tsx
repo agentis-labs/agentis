@@ -79,7 +79,7 @@ function harnessLabel(adapterType?: string | null): string {
     case 'claude_code': return 'Claude Code';
     case 'codex': return 'Codex';
     case 'cursor': return 'Cursor';
-    case 'http': return 'HTTP / Webhook';
+    case 'http': return 'HTTP';
     default: return 'No harness';
   }
 }
@@ -227,7 +227,7 @@ export function AgentQuickDetailPanel({
   return (
     <>
       <div
-        className="fixed inset-0 top-12 z-30 bg-black/30"
+        className="fixed inset-0 top-12 z-30 bg-overlay-soft"
         onClick={onClose}
         aria-hidden="true"
       />

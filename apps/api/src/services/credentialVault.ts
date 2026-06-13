@@ -8,7 +8,7 @@
  * detected by the tag mismatch, not by the application getting back garbage.
  *
  * The same vault is used for OpenClaw device tokens, channel bridge bot
- * tokens, and generic skill credentials. There is intentionally no
+ * tokens, and generic extension credentials. There is intentionally no
  * plaintext-storage fallback path.
  */
 

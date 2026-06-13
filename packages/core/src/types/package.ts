@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const packageKindSchema = z.enum(['agent', 'workflow', 'skill', 'agentis', 'integration']);
+export const packageKindSchema = z.enum(['agent', 'workflow', 'extension', 'agentis', 'integration']);
 export type PackageKind = z.infer<typeof packageKindSchema>;
 
 export const agentContentsSchema = z.object({
@@ -13,14 +13,62 @@ export const agentContentsSchema = z.object({
   runtimeModel: z.string().nullable().optional(),
   role: z.string().nullable().optional(),
   monthlyBudgetCents: z.number().int().nonnegative().nullable().optional(),
+  /**
+   * Slugs of abilities to pin to this agent after install (docs/brain/ABILITIES.md §3).
+   * Matched against ability slugs from `agentisPackageContentsSchema.abilities`.
+   * Unknown slugs are skipped with a warning rather than failing the install.
+   */
+  pinnedAbilitySlugs: z.array(z.string().min(1)).optional(),
 });
 export type AgentContents = z.infer<typeof agentContentsSchema>;
+
+/**
+ * Bundled ability shape (subset of AbilityPackage from `ability.ts`) — packed
+ * inside an `.agentiswf` bundle so install spins up agent + workflows + abilities
+ * + pins in a single operation.
+ *
+ * The embedding arrays are intentionally optional and float[] — when the source
+ * workspace embeds at a different dimension than the target, the packager drops
+ * them and queues a recompile. Compiled persona + structured rules carry over
+ * unconditionally so the ability is usable immediately.
+ */
+export const abilityPackageContentsSchema = z.object({
+  name: z.string().min(1),
+  slug: z.string().min(1),
+  version: z.string().min(1).default('1.0.0'),
+  domain_tag: z.string().min(1),
+  icon_emoji: z.string().optional(),
+  description: z.string().optional(),
+  compiled_prompt: z.string().default(''),
+  specs: z.record(z.string().or(z.undefined())).default({}),
+  rules_always: z.array(z.string()).default([]),
+  rules_never: z.array(z.string()).default([]),
+  tool_hints: z.array(z.string()).default([]),
+  examples: z.array(z.object({
+    input_text: z.string(),
+    output_text: z.string(),
+    input_media_url: z.string().nullable().optional(),
+    media_description: z.string().nullable().optional(),
+    quality_score: z.number().min(0).max(1).default(0.8),
+    source: z.enum(['user_curated', 'synthetic', 'promoted_from_run', 'imported']).default('user_curated'),
+    embedding: z.array(z.number()).nullable().optional(),
+  })).default([]),
+  knowledge: z.array(z.object({
+    title: z.string().nullable().optional(),
+    content: z.string(),
+    context_prefix: z.string().nullable().optional(),
+    embedding: z.array(z.number()).nullable().optional(),
+    source_type: z.enum(['document', 'image', 'audio', 'url', 'manual']).default('document'),
+    source_url: z.string().nullable().optional(),
+    importance_score: z.number().min(0).max(1).default(0.5),
+  })).default([]),
+});
+export type AbilityPackageContents = z.infer<typeof abilityPackageContentsSchema>;
 
 export const workflowContentsSchema = z.object({
   slug: z.string().min(1).optional(),
   title: z.string().min(1),
-  summary: z.string().nullable().optional(),
-  intendedBehavior: z.string().max(8000).nullable().optional(),
+  description: z.string().max(8000).nullable().optional(),
   graph: z.unknown(),
   settings: z.record(z.unknown()).default({}),
   maxConcurrentRuns: z.number().int().positive().nullable().optional(),
@@ -28,7 +76,7 @@ export const workflowContentsSchema = z.object({
 });
 export type WorkflowContents = z.infer<typeof workflowContentsSchema>;
 
-export const skillContentsSchema = z.object({
+export const extensionContentsSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
   version: z.string().min(1),
@@ -38,17 +86,21 @@ export const skillContentsSchema = z.object({
     slug: z.string().min(1),
     version: z.string().min(1),
     runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox']),
-    entrypoint: z.string().min(1),
+    entrypoint: z.string().min(1).optional(),
+    operations: z.array(z.object({
+      name: z.string().min(1),
+      description: z.string().optional(),
+      inputSchema: z.record(z.unknown()).default({}),
+      outputSchema: z.record(z.unknown()).default({}),
+    })).min(1),
     capabilityTags: z.array(z.string()).default([]),
-    inputSchema: z.record(z.unknown()).default({}),
-    outputSchema: z.record(z.unknown()).default({}),
     timeoutMs: z.number().int().positive().optional(),
     allowedDomains: z.array(z.string()).optional(),
     source: z.string().optional(),
     bundleDir: z.string().optional(),
   }),
 });
-export type SkillContents = z.infer<typeof skillContentsSchema>;
+export type ExtensionContents = z.infer<typeof extensionContentsSchema>;
 
 export const integrationContentsSchema = z.object({
   service: z.string().min(1),
@@ -104,9 +156,11 @@ export type CredentialSlot = z.infer<typeof credentialSlotSchema>;
 export const agentisPackageContentsSchema = z.object({
   kind: z.literal('agentis'),
   agents: z.array(agentContentsSchema).default([]),
-  skills: z.array(skillContentsSchema).default([]),
+  extensions: z.array(extensionContentsSchema).default([]),
   workflows: z.array(workflowContentsSchema).default([]),
   integrations: z.array(integrationContentsSchema).default([]),
+  /** Abilities (compiled behavioural specialisation units) — see ability.ts. */
+  abilities: z.array(abilityPackageContentsSchema).default([]),
   credentialSlots: z.array(credentialSlotSchema).default([]),
   knowledgeSeeds: z
     .array(
@@ -120,7 +174,6 @@ export const agentisPackageContentsSchema = z.object({
     .default([]),
   entryWorkflowSlug: z.string().optional(),
   category: z.string().optional(),
-  intendedBehavior: z.string().max(8000).nullable().optional(),
   replaces: z.string().optional(),
   costSavedPerMonth: z.string().optional(),
   readme: z.string().optional(),
@@ -138,9 +191,9 @@ const workflowPackageContentsSchema = z.object({
   workflow: workflowContentsSchema,
 });
 
-const skillPackageContentsSchema = z.object({
-  kind: z.literal('skill'),
-  skill: skillContentsSchema,
+const extensionPackageContentsSchema = z.object({
+  kind: z.literal('extension'),
+  extension: extensionContentsSchema,
 });
 
 const integrationPackageContentsSchema = z.object({
@@ -151,7 +204,7 @@ const integrationPackageContentsSchema = z.object({
 export const packageContentsSchema = z.discriminatedUnion('kind', [
   agentPackageContentsSchema,
   workflowPackageContentsSchema,
-  skillPackageContentsSchema,
+  extensionPackageContentsSchema,
   agentisPackageContentsSchema,
   integrationPackageContentsSchema,
 ]);

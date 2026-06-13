@@ -75,7 +75,7 @@ export function CommissionFlow({
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-overlay-strong p-4" role="dialog" aria-modal>
       <div className="flex max-h-[90vh] w-full max-w-5xl flex-col rounded-lg border border-line bg-surface shadow-card">
         <header className="flex items-center gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0 flex-1">
@@ -137,4 +137,3 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 const inputCls = 'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm outline-none focus:border-accent';
-

@@ -11,7 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import { REALTIME_EVENTS } from '@agentis/core';
 import clsx from 'clsx';
 import { RotateCcw } from 'lucide-react';
-import { api, workspace as workspaceStore } from '../../lib/api';
+import { api, apiErrorMessage, workspace as workspaceStore } from '../../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { useToast } from '../shared/Toast';
 import { formatDuration, relativeTime, type WorkflowRunSummary } from './runFormat';
@@ -24,6 +24,8 @@ const STATUS_DOT: Record<WorkflowRunSummary['status'], string> = {
   completed_with_violation: 'bg-warn',
   failed: 'bg-danger',
   pending: 'bg-warn',
+  paused: 'bg-warn',
+  waiting: 'bg-warn',
   cancelled: 'bg-text-muted',
 };
 
@@ -33,6 +35,8 @@ const STATUS_LABEL: Record<WorkflowRunSummary['status'], string> = {
   completed_with_violation: 'contract violation',
   failed: 'failed',
   pending: 'pending',
+  paused: 'paused',
+  waiting: 'waiting',
   cancelled: 'cancelled',
 };
 
@@ -60,7 +64,7 @@ export function WorkflowRunsTab({
         setRuns(d.runs);
         setError(null);
       } catch (e) {
-        setError((e as { message?: string })?.message ?? String(e));
+        setError(apiErrorMessage(e));
       } finally {
         setLoading(false);
       }
@@ -109,7 +113,7 @@ export function WorkflowRunsTab({
       toast.success('Retry started');
       nav(`/runs/${res.runId}`);
     } catch (e) {
-      toast.error('Retry failed', String(e));
+      toast.error('Retry failed', apiErrorMessage(e));
     } finally {
       setRetrying(null);
     }

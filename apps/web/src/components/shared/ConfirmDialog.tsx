@@ -67,7 +67,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     <ConfirmCtx.Provider value={confirm}>
       {children}
       {state && (
-        <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+        <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
           <div className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
             <div className="flex items-start gap-3 px-5 pt-5">
               <span

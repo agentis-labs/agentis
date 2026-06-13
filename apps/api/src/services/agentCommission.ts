@@ -15,7 +15,9 @@ import { CursorAdapter } from '../adapters/CursorAdapter.js';
 import { HermesAgentAdapter } from '../adapters/HermesAgentAdapter.js';
 import { assertSafeUrl } from './safeUrl.js';
 import { joinUrl, testHarnessConfig, type V1HarnessAdapterType } from './harnessProbe.js';
+import type { McpHarnessServer, McpHarnessSessionService } from './mcpHarnessSession.js';
 import { repairCliHarnessConfig } from './harnessConfigRepair.js';
+import { RuntimeSessionStore } from './runtimeSessionStore.js';
 
 export interface RegisterAdapterOptions {
   skipConfigRepair?: boolean;
@@ -28,6 +30,12 @@ export interface AgentCommissionDeps {
   adapters: AdapterManager;
   logger: Logger;
   bus?: EventBus;
+  /**
+   * Optional — when enabled, CLI harnesses (Codex / Claude Code) are registered
+   * with the Agentis MCP server so they call platform tools natively (one
+   * invocation, no marker re-spawn). (UNIVERSAL-HARNESS §5.)
+   */
+  mcpHarness?: McpHarnessSessionService;
 }
 
 export interface CommissionAgentInput {
@@ -35,7 +43,6 @@ export interface CommissionAgentInput {
   userId: string;
   ambientId?: string | null;
   gatewayId?: string | null;
-  spaceId?: string | null;
   name: string;
   description?: string | null;
   adapterType: V1HarnessAdapterType;
@@ -85,7 +92,6 @@ export async function commissionAgent(deps: AgentCommissionDeps, input: Commissi
       packageId: null,
       name: input.name,
       description: input.description ?? null,
-      spaceId: input.spaceId ?? null,
       adapterType: input.adapterType,
       capabilityTags: input.capabilityTags ?? [],
       config,
@@ -245,6 +251,8 @@ export async function registerAdapter(
     if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CodexAdapter({
       agentId,
+      workspaceId,
+      sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
@@ -255,6 +263,8 @@ export async function registerAdapter(
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
       timeoutSec: numberOf(config.timeoutSec),
+      browser: booleanOf(config.browser),
+      ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
       logger: deps.logger,
     });
     await adapter.connect();
@@ -265,6 +275,8 @@ export async function registerAdapter(
     if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CursorAdapter({
       agentId,
+      workspaceId,
+      sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
@@ -281,14 +293,19 @@ export async function registerAdapter(
     if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new HermesAgentAdapter({
       agentId,
+      workspaceId,
+      sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
+      chatTransport: stringOf(config.chatTransport) === 'acp' ? 'acp' : 'cli',
       maxTurns: numberOf(config.maxTurns),
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
       timeoutSec: numberOf(config.timeoutSec),
       graceSec: numberOf(config.graceSec),
+      instructions: agentInstructions(deps.db, agentId),
+      ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
       logger: deps.logger,
     });
     await adapter.connect();
@@ -298,14 +315,18 @@ export async function registerAdapter(
   if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
   const adapter = new ClaudeCodeAdapter({
     agentId,
+    workspaceId,
+    sessionStore: new RuntimeSessionStore(deps.db),
     binaryPath: cliCommandFromConfig(config) ?? undefined,
     cwd: stringOf(config.cwd) ?? undefined,
     model: stringOf(config.model) ?? undefined,
     maxTurns: numberOf(config.maxTurns),
     allowedTools: stringArrayOf(config.allowedTools),
+    dangerouslySkipPermissions: booleanOf(config.dangerouslySkipPermissions),
     extraArgs: stringArrayOf(config.extraArgs),
     env: recordStringOf(config.env),
     timeoutSec: numberOf(config.timeoutSec),
+    ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
     logger: deps.logger,
   });
   await adapter.connect();
@@ -331,6 +352,24 @@ function httpUrlFromConfig(config: Record<string, unknown>, pathKey: string, url
   const path = stringOf(config[pathKey]);
   if (!baseUrl || !path) return null;
   return joinUrl(baseUrl, path);
+}
+
+/** The Agentis MCP server(s) a harness in this workspace should mount, or undefined. */
+/** The agent's stored operating instructions, synced into its native AGENTS.md. */
+function agentInstructions(db: AgentisSqliteDb, agentId: string): string | null {
+  try {
+    return db.select({ instructions: schema.agents.instructions })
+      .from(schema.agents).where(eq(schema.agents.id, agentId)).get()?.instructions ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function mcpServersFor(deps: AgentCommissionDeps, workspaceId: string, agentId: string): McpHarnessServer[] | undefined {
+  if (!deps.mcpHarness?.enabled) return undefined;
+  const agent = deps.db.select({ userId: schema.agents.userId }).from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+  const server = deps.mcpHarness.forWorkspace(workspaceId, null, agent?.userId, agentId);
+  return server ? [server] : undefined;
 }
 
 function stringOf(value: unknown): string | null {
@@ -409,6 +448,6 @@ async function assertSafeGatewayUrl(rawUrl: string): Promise<void> {
     parsed.protocol = parsed.protocol === 'ws:' ? 'http:' : 'https:';
   }
   await assertSafeUrl(parsed.toString(), {
-    allowPrivate: String(process.env.AGENTIS_GATEWAY_ALLOW_PRIVATE ?? process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+    allowPrivate: String(process.env.AGENTIS_GATEWAY_ALLOW_PRIVATE ?? process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
   });
 }

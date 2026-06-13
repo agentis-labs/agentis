@@ -2,23 +2,26 @@ import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, Trash2, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { REALTIME_EVENTS, type ChatDelta, type ViewportContext } from '@agentis/core';
+import { REALTIME_EVENTS, type ChatDelta, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { api, apiErrorMessage, streamSse } from '../../lib/api';
 import { useViewportAwareness } from '../../lib/viewportContext';
+import { listInteractions, type InteractionEvent } from '../../lib/connections';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { Skeleton } from '../shared/Skeleton';
 import { rtSubscribe, useRealtime } from '../../lib/realtime';
-import { Composer } from '../ChatPanel/Composer';
-import type { ToolCallPillData } from '../ChatPanel/ToolCallPill';
-import { ProactiveCard, type ProactiveCardData } from '../ChatPanel/ProactiveCard';
+import { Composer } from './Composer';
+import type { ToolCallData as ToolCallPillData } from './toolCalls';
+import { ProactiveCard, type ProactiveCardData } from './ProactiveCard';
 import { AgentModelSelector } from './AgentModelSelector';
 import { ChatMarkdown } from './ChatMarkdown';
 import { useChatPanelStore } from './ChatPanelStore';
-import { ThinkingBubble } from './ThinkingBubble';
 import { ExecutionFeed } from './ExecutionFeed';
 import { PlanList, derivePlanItems, extractPlan } from './PlanList';
 import { StickyProgressBanner } from './StickyProgressBanner';
+import { LiveActivityTrace } from './LiveActivityTrace';
+import * as ScrollArea from '@radix-ui/react-scroll-area';
+import { formatDistanceToNow } from 'date-fns';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -58,6 +61,8 @@ interface MessageMeta {
   source?: 'openclaw_exec' | 'openclaw_session' | 'workflow' | 'manual' | 'proactive' | 'chat_loop' | 'chat_confirmation' | 'tool_call';
   card?: ProactiveCardData;
   thinking?: string;
+  activity?: Array<Extract<ChatDelta, { type: 'activity' }>>;
+  turn?: ChatTurnTrace;
   toolCalls?: ToolCallPillData[];
   confirmation?: ConfirmationCardData;
   runId?: string;
@@ -160,6 +165,38 @@ function normalizeRoomMessage(message: RoomMsg): ChatMessage {
     authorKind: message.authorType as ChatMessage['authorKind'],
     text: typeof message.content?.text === 'string' ? message.content.text : '',
     createdAt: message.createdAt,
+  };
+}
+
+function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
+  let text = event.summary;
+
+  // Transform A2A messages into conversational slack-like text
+  if (event.kind === 'message') {
+    // "Actor → Target: Message" or similar
+    // We just want it to look like it naturally flows.
+    // If it has an arrow indicating a target, let's try to extract it.
+    const parts = text.split('→');
+    if (parts.length > 1) {
+      const rightSide = parts[1]!.trim();
+      const colonIdx = rightSide.indexOf(':');
+      if (colonIdx > 0) {
+        const target = rightSide.substring(0, colonIdx).trim();
+        const content = rightSide.substring(colonIdx + 1).trim();
+        // Remove quotes if present
+        const unquoted = content.replace(/^"|"$/g, '');
+        text = `**@${target}** ${unquoted}`;
+      }
+    }
+  }
+
+  return {
+    id: `interaction-${event.id}`,
+    authorId: event.actor.id ?? 'system',
+    authorName: event.actor.id ?? 'System',
+    authorKind: event.actor.type === 'agent' ? 'agent' : 'system',
+    text,
+    createdAt: event.at,
   };
 }
 
@@ -269,7 +306,7 @@ function runtimeCapabilityWarning(runtime: AgentRuntimeInfo | null): { title: st
 }
 
 function defaultRuntimeModel(adapterType?: string | null): string | null {
-  if (adapterType === 'codex') return 'gpt-5.3-codex';
+  if (adapterType === 'codex') return 'gpt-5.5';
   if (adapterType === 'claude_code') return 'claude-sonnet-4-6';
   if (adapterType === 'cursor') return 'auto';
   if (adapterType === 'hermes_agent') return 'hermes-auto';
@@ -297,6 +334,17 @@ export function ThreadView({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [agentMap, setAgentMap] = useState<Record<string, { name: string; role?: string | null; colorHex?: string | null }>>({});
+
+  useEffect(() => {
+    api<{ agents: Array<{ id: string; name: string; role?: string | null; colorHex?: string | null }> }>('/v1/agents')
+      .then((res) => {
+        const map: Record<string, { name: string; role?: string | null; colorHex?: string | null }> = {};
+        for (const a of res.agents) map[a.id] = { name: a.name, role: a.role, colorHex: a.colorHex };
+        setAgentMap(map);
+      })
+      .catch(() => {});
+  }, []);
   const [agentNoAdapter, setAgentNoAdapter] = useState(false);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [agentTyping, setAgentTyping] = useState(false);
@@ -304,6 +352,7 @@ export function ThreadView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const preserveScrollRef = useRef(false);
   const typingTimer = useRef<number | null>(null);
+  const activeChatAbortRef = useRef<AbortController | null>(null);
   const autoSentDraftKeyRef = useRef<string | null>(null);
   const consumedLaunchKeyRef = useRef<string | null>(null);
   const pendingViewportOverrideRef = useRef<ViewportContext | null>(initialViewportOverride ?? null);
@@ -363,17 +412,22 @@ export function ThreadView({
       }
       return (threadData.messages ?? []).map(normalizeAgentMessage);
     }
+    if (id === '__broadcast__') {
+      const [data, interactions] = await Promise.all([
+        api<{ messages: RoomMsg[] }>(path).catch(() => ({ messages: [] as RoomMsg[] })),
+        listInteractions({ limit: PAGE_SIZE, before: before?.createdAt }).catch(() => ({ events: [] }))
+      ]);
+      const roomMessages = (data.messages ?? []).map(normalizeRoomMessage);
+      const interactionMessages = (interactions.events ?? [])
+        .filter((e) => e.kind === 'message')
+        .map(normalizeInteractionMessage);
+      return sortMessages([...roomMessages, ...interactionMessages]);
+    }
     const data = await api<{ messages: RoomMsg[] }>(path);
     return (data.messages ?? []).map(normalizeRoomMessage);
   }
 
   async function loadInitial() {
-    if (id === '__broadcast__') {
-      setMessages([]);
-      setHasMore(false);
-      setLoading(false);
-      return;
-    }
     setLoading(true);
     try {
       const page = await loadPage();
@@ -429,7 +483,13 @@ export function ThreadView({
       text: '',
       createdAt: new Date().toISOString(),
       deliveryStatus: 'sending',
-      metadata: { source: 'chat_loop' },
+      metadata: {
+        source: 'chat_loop',
+        turn: {
+          startedAt: new Date().toISOString(),
+          status: 'running',
+        },
+      },
     };
     setMessages((current) => dedupeMessages([...current, streamingMessage]));
     setAgentTyping(true);
@@ -589,7 +649,6 @@ export function ThreadView({
   }, [autoSendInitialDraft, id, initialDraft, initialViewportOverride, kind, onInitialDraftUsed]);
 
   useEffect(() => {
-    if (id === '__broadcast__') return undefined;
     return kind === 'room'
       ? rtSubscribe('room', { roomId: id })
       : rtSubscribe('conversation', { agentId: id });
@@ -606,7 +665,6 @@ export function ThreadView({
     REALTIME_EVENTS.ROOM_MESSAGE_DELETED,
   ], (env) => {
     if (readOnly) return;
-    if (id === '__broadcast__') return;
     const payload = env.payload as {
       id?: string;
       roomId?: string;
@@ -632,6 +690,23 @@ export function ThreadView({
     if (payload.message) {
       setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(payload.message as RoomMsg)));
     }
+  });
+
+  // Specifically for __broadcast__, we also want to merge in live interaction events.
+  // When an activity or generic room message occurs, we do a quick fetch of the latest interactions to merge them.
+  useRealtime(['activity.created', 'room.message.sent', 'room.message.received'], () => {
+    if (id !== '__broadcast__') return;
+    void listInteractions({ limit: 10 }).then((res) => {
+      setMessages((current) => {
+        let updated = [...current];
+        for (const event of res.events) {
+          if (event.kind === 'message') {
+            updated = mergeMessage(updated, normalizeInteractionMessage(event));
+          }
+        }
+        return sortMessages(updated);
+      });
+    }).catch(() => {});
   });
 
   useRealtime([REALTIME_EVENTS.CONVERSATION_AGENT_TYPING], (env) => {
@@ -834,9 +909,13 @@ export function ThreadView({
     try {
       let streamedBody = '';
       let streamedThinking = '';
+      const controller = new AbortController();
+      activeChatAbortRef.current?.abort();
+      activeChatAbortRef.current = controller;
       const viewportOverride = pendingViewportOverrideRef.current;
       await streamSse(sendEndpoint, {
         method: 'POST',
+        signal: controller.signal,
         body: JSON.stringify({
           body: value,
           useViewportContext: options?.useViewportContext !== false,
@@ -867,6 +946,20 @@ export function ThreadView({
                     }
                   : message
               )));
+            } else if (delta.type === 'activity') {
+              updateActiveTask({ label: delta.label });
+              setMessages((current) => current.map((message) => {
+                if (message.id !== streamId) return message;
+                const activity = message.metadata?.activity ?? [];
+                return {
+                  ...message,
+                  metadata: {
+                    ...(message.metadata ?? {}),
+                    source: message.metadata?.source ?? 'chat_loop',
+                    activity: [...activity.filter((entry) => entry.id !== delta.id), delta].slice(-80),
+                  },
+                };
+              }));
             } else if (delta.type === 'tool_call') {
               toolStartedAt.set(delta.id, performance.now());
               toolTotal += 1;
@@ -898,6 +991,8 @@ export function ThreadView({
                       ...persisted.metadata,
                       toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
                       thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
+                      activity: persisted.metadata?.activity ?? message.metadata?.activity,
+                      turn: persisted.metadata?.turn ?? message.metadata?.turn,
                     },
                   };
                 }
@@ -925,13 +1020,33 @@ export function ThreadView({
     } catch (error) {
       setAgentTyping(false);
       setActiveTask(null);
+      const stopped = error instanceof DOMException && error.name === 'AbortError';
       setMessages((current) => current.map((message) => (
-        message.id === streamId || message.id === operatorMessage.id
-          ? { ...message, deliveryStatus: 'failed' }
+        message.id === streamId
+          ? {
+              ...message,
+              deliveryStatus: stopped ? 'delivered' : 'failed',
+              metadata: {
+                ...(message.metadata ?? {}),
+                turn: {
+                  ...(message.metadata?.turn ?? { startedAt: message.createdAt }),
+                  completedAt: new Date().toISOString(),
+                  status: stopped ? 'stopped' : 'failed',
+                },
+              },
+            }
+          : message.id === operatorMessage.id
+            ? { ...message, deliveryStatus: stopped ? 'delivered' : 'failed' }
           : message
       )));
-      toast.error('Failed to send', apiErrorMessage(error));
+      if (!stopped) toast.error('Failed to send', apiErrorMessage(error));
+    } finally {
+      activeChatAbortRef.current = null;
     }
+  }
+
+  function stopActiveTurn() {
+    activeChatAbortRef.current?.abort();
   }
 
   async function startNewConversation() {
@@ -1052,6 +1167,13 @@ export function ThreadView({
   return (
     <div className="flex h-full flex-col">
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3">
+        {id === '__broadcast__' && (
+          <div className="mb-4 mt-2 flex items-center justify-center text-center">
+            <span className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-text-muted border border-line shadow-sm">
+              Observe agent-to-agent conversations, or use <strong className="text-text-secondary font-semibold">@</strong> to join in.
+            </span>
+          </div>
+        )}
         <StickyProgressBanner
           toolCalls={activeToolCalls}
           activeRunId={activeRunId}
@@ -1086,6 +1208,7 @@ export function ThreadView({
               <MessageBubble
                 key={message.id}
                 msg={message}
+                agentData={agentMap[message.authorId]}
                 assistantLabel={kind === 'agent' ? formatAssistantLabel(name, agentRuntime) : undefined}
                 onDelete={() => void handleDelete(message)}
                 onCopy={() => void handleCopy(message)}
@@ -1096,6 +1219,7 @@ export function ThreadView({
                 onCancelEdit={() => setEditingId(null)}
                 onConfirmAction={(confirmation, approved) => void handleConfirmationAction(message.id, confirmation, approved)}
                 onCancelRun={handleCancelRun}
+                onStopTurn={message.deliveryStatus === 'sending' ? stopActiveTurn : undefined}
               />
             ))}
           </ul>
@@ -1156,6 +1280,7 @@ export function ThreadView({
 
 function MessageBubble({
   msg,
+  agentData,
   assistantLabel,
   onDelete,
   onCopy,
@@ -1166,6 +1291,7 @@ function MessageBubble({
   onCancelEdit,
   onConfirmAction,
   onCancelRun,
+  onStopTurn,
 }: {
   msg: ChatMessage;
   assistantLabel?: string;
@@ -1178,6 +1304,8 @@ function MessageBubble({
   onCancelEdit: () => void;
   onConfirmAction: (confirmation: ConfirmationCardData, approved: boolean) => void;
   onCancelRun?: (runId: string) => void;
+  onStopTurn?: () => void;
+  agentData?: { name: string; role?: string | null; colorHex?: string | null };
 }) {
   const isOperator = msg.authorKind === 'operator';
   const [editDraft, setEditDraft] = useState(msg.text);
@@ -1191,6 +1319,7 @@ function MessageBubble({
   const bodyBeforePlan = parsedPlan ? parsedPlan.before : msg.text;
   const bodyAfterPlan = parsedPlan?.after ?? '';
   const toolCalls = msg.metadata?.toolCalls ?? [];
+  const activities = msg.metadata?.activity ?? [];
 
   useEffect(() => {
     if (isEditing) setEditDraft(msg.text);
@@ -1198,8 +1327,14 @@ function MessageBubble({
 
   return (
     <li className={clsx('group flex flex-col gap-0.5', isOperator ? 'items-end' : 'items-start')}>
-      {!isOperator && msg.authorName && (
-        <span className="px-1 text-[11px] text-text-muted">{msg.authorName}</span>
+      {!isOperator && msg.authorKind !== 'system' && (
+        <span
+          className="px-1 text-[11px] font-medium"
+          style={{ color: agentData?.colorHex || 'var(--text-muted)' }}
+        >
+          {agentData?.name || msg.authorName || msg.authorId}
+          {agentData?.role ? ` - ${agentData.role}` : ''}
+        </span>
       )}
       <div className="flex items-start gap-1.5">
         {isOperator && !readOnly && (
@@ -1215,8 +1350,15 @@ function MessageBubble({
                 : 'bg-surface-2 text-text-primary shadow-[0_18px_35px_-30px_rgba(0,0,0,0.7)]',
           )}
         >
-          {!isOperator && msg.metadata?.thinking && (
-            <ThinkingBubble text={msg.metadata.thinking} streaming={streaming && !msg.text.trim()} />
+          {!isOperator && (streaming || activities.length > 0 || Boolean(msg.metadata?.thinking)) && (
+            <LiveActivityTrace
+              text={msg.metadata?.thinking ?? ''}
+              activities={activities}
+              turn={msg.metadata?.turn}
+              streaming={streaming}
+              failed={msg.deliveryStatus === 'failed'}
+              onStop={onStopTurn}
+            />
           )}
           {!isEditing && bodyBeforePlan && (
             isOperator ? (
@@ -1308,7 +1450,7 @@ function MessageBubble({
                 {streaming ? <StreamingCursor /> : null}
               </div>
             )
-          ) : (msg.metadata?.card || msg.metadata?.confirmation || toolCalls.length > 0 || bodyBeforePlan || (!isOperator && msg.metadata?.thinking)) ? null : streaming && !isOperator ? (
+          ) : (msg.metadata?.card || msg.metadata?.confirmation || toolCalls.length > 0 || activities.length > 0 || bodyBeforePlan || (!isOperator && msg.metadata?.thinking)) ? null : streaming && !isOperator ? (
             <TypingDots />
           ) : !isOperator ? null : (
             <div className="text-[12px] italic text-text-muted">No text content</div>

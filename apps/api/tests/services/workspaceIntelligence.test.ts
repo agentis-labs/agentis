@@ -1,36 +1,28 @@
-/**
- * Layer 1 — Workspace Intelligence + Workspace Volume.
- *
- * Covers the path-escape guard on the Volume and the MEMORY.md
- * parse → score → select → buildContextBlock pipeline.
- */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import {
-  WorkspaceIntelligenceService,
-  parseMemoryEntries,
-  selectRelevantEntries,
-} from '../../src/services/workspaceIntelligence.js';
-
-let dataDir: string;
-let volume: WorkspaceVolumeService;
-let intel: WorkspaceIntelligenceService;
-const WS = 'ws-test-1';
-
-beforeEach(async () => {
-  dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-vol-'));
-  volume = new WorkspaceVolumeService(dataDir);
-  intel = new WorkspaceIntelligenceService(volume, () => ['github', 'slack']);
-});
-
-afterEach(async () => {
-  await rm(dataDir, { recursive: true, force: true });
-});
+import { WorkspaceIntelligenceService } from '../../src/services/workspaceIntelligence.js';
+import { MemoryStore } from '../../src/services/memoryStore.js';
+import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 describe('WorkspaceVolumeService', () => {
+  let dataDir: string;
+  let volume: WorkspaceVolumeService;
+  const WS = 'ws-test-1';
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-vol-'));
+    volume = new WorkspaceVolumeService(dataDir);
+  });
+
+  afterEach(async () => {
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
   it('writes, reads, and lists files', async () => {
     await volume.write(WS, 'reports/q2.md', '# Q2');
     expect(await volume.read(WS, 'reports/q2.md')).toBe('# Q2');
@@ -43,86 +35,74 @@ describe('WorkspaceVolumeService', () => {
     expect(() => volume.resolve(WS, '../escape')).toThrow(/escape/i);
   });
 
-  it('returns null for a missing file (not a throw)', async () => {
+  it('returns null for a missing file', async () => {
     expect(await volume.read(WS, 'nope.md')).toBeNull();
   });
-});
 
-describe('parseMemoryEntries', () => {
-  it('parses inline metadata tags and section headers', () => {
-    const md = [
-      '# Session Memory Log',
-      '## Patterns That Failed',
-      '- [2026-05-19][uses:3][wf:standup][conf:high] Summarizer hallucinated authors with >50 PRs. Fix: truncate to 20.',
-      '## Effective Patterns',
-      '- [2026-05-08][uses:7][wf:any][conf:medium] Evaluator-retry cut failure 23%→4%.',
-      '- a plain untagged note still parses',
-    ].join('\n');
-    const entries = parseMemoryEntries(md);
-    expect(entries).toHaveLength(3);
-    const failed = entries[0]!;
-    expect(failed.section).toBe('Patterns That Failed');
-    expect(failed.uses).toBe(3);
-    expect(failed.workflowId).toBe('standup');
-    expect(failed.confidence).toBe('high');
-    expect(failed.text).toMatch(/Summarizer hallucinated/);
-    expect(entries[2]!.workflowId).toBe('any'); // default
-  });
-});
+  it('refuses reads and writes through a symlink inside the volume', async () => {
+    const external = path.join(dataDir, 'outside');
+    await mkdir(external, { recursive: true });
+    await writeFile(path.join(external, 'secret.txt'), 'outside', 'utf8');
+    await volume.ensureScaffold(WS);
+    await symlink(
+      external,
+      path.join(volume.rootFor(WS), 'reports', 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
-describe('selectRelevantEntries', () => {
-  it('ranks workflow-matching, recent, high-use entries first', () => {
-    const now = Date.now();
-    const day = 86_400_000;
-    const entries = parseMemoryEntries([
-      '## Effective Patterns',
-      `- [${iso(now - day)}][uses:9][wf:standup][conf:high] Recent matching workflow pattern.`,
-      `- [${iso(now - 200 * day)}][uses:0][wf:other][conf:low] Old unrelated pattern.`,
-    ].join('\n'));
-    const selected = selectRelevantEntries(entries, { workflowId: 'standup', tokenBudget: 2000, maxEntries: 10 });
-    expect(selected[0]!.text).toMatch(/Recent matching/);
-  });
-
-  it('respects the token budget', () => {
-    const entries = parseMemoryEntries([
-      '## Effective Patterns',
-      `- ${'x'.repeat(8000)}`,
-    ].join('\n'));
-    const selected = selectRelevantEntries(entries, { workflowId: 'a', tokenBudget: 100, maxEntries: 10 });
-    expect(selected).toHaveLength(0); // single entry costs ~2000 tokens > 100
+    await expect(volume.read(WS, 'reports/escape/secret.txt')).rejects.toMatchObject({
+      code: 'WORKSPACE_VOLUME_PATH_ESCAPE',
+    });
+    await expect(volume.write(WS, 'reports/escape/new.txt', 'blocked')).rejects.toMatchObject({
+      code: 'WORKSPACE_VOLUME_PATH_ESCAPE',
+    });
   });
 });
 
 describe('WorkspaceIntelligenceService', () => {
-  it('seeds default context files on first read', async () => {
-    const ws = await intel.getContextFile(WS, 'WORKSPACE.md');
-    expect(ws).toMatch(/# Workspace Context/);
-    // Persisted to the volume's context dir.
-    expect(await volume.read(WS, 'context/WORKSPACE.md')).toBe(ws);
+  let ctx: TestContext;
+  let intel: WorkspaceIntelligenceService;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    intel = new WorkspaceIntelligenceService(new MemoryStore(ctx.db, ctx.logger), ctx.db, () => ['github', 'slack']);
   });
 
-  it('assembles a context block with workspace facts, integrations, and memory', async () => {
-    await intel.setContextFile(WS, 'WORKSPACE.md', '# Workspace Context\n\n## Tech Stack\nTypeScript + pnpm');
-    await intel.setContextFile(WS, 'MEMORY.md', [
-      '# Session Memory Log',
-      '## Effective Patterns',
-      '- [2026-05-20][uses:5][wf:any][conf:high] Prefer deterministic transform nodes over agent_task.',
-    ].join('\n'));
-    const block = await intel.buildContextBlock(WS);
+  afterEach(() => ctx.close());
+
+  it('returns empty for unauthored context (no placeholder seeding)', () => {
+    expect(intel.getContextFile(ctx.workspace.id, 'WORKSPACE.md')).toBe('');
+  });
+
+  it('stores authored context as an operator charter atom, not a Markdown file', () => {
+    intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', 'Tech stack: TypeScript + pnpm');
+    expect(intel.getContextFile(ctx.workspace.id, 'WORKSPACE.md')).toBe('Tech stack: TypeScript + pnpm');
+
+    const rows = ctx.db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.workspaceId, ctx.workspace.id)).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.source).toBe('operator');
+    expect(Number(rows[0]!.importance)).toBeGreaterThanOrEqual(0.8);
+    expect(rows[0]!.tags as string[]).toEqual(expect.arrayContaining(['charter', 'workspace']));
+  });
+
+  it('clearing a document deletes its atom so it stops injecting', () => {
+    intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', 'Tech stack: TypeScript + pnpm');
+    intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', '   ');
+    expect(intel.getContextFile(ctx.workspace.id, 'WORKSPACE.md')).toBe('');
+    expect(ctx.db.select().from(schema.workspaceMemory).all()).toHaveLength(0);
+  });
+
+  it('assembles a context block with workspace docs and integrations', async () => {
+    intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', 'Tech Stack: TypeScript + pnpm');
+    intel.setContextFile(ctx.workspace.id, 'DECISIONS.md', 'Use DB-backed memory.');
+    intel.setContextFile(ctx.workspace.id, 'WORKFLOW.md', 'Prefer deterministic transform nodes.');
+
+    const block = await intel.buildContextBlock(ctx.workspace.id);
     expect(block).toMatch(/<workspace_context>/);
     expect(block).toMatch(/TypeScript \+ pnpm/);
+    expect(block).toMatch(/Use DB-backed memory/);
+    expect(block).toMatch(/Prefer deterministic transform nodes/);
     expect(block).toMatch(/Active Integrations\ngithub, slack/);
-    expect(block).toMatch(/deterministic transform nodes/);
-  });
-
-  it('appendMemory inserts under the named section', async () => {
-    await intel.getContextFile(WS, 'MEMORY.md'); // seed
-    await intel.appendMemory(WS, 'Patterns That Failed', '[2026-05-22][uses:0][wf:x][conf:low] New failure note.');
-    const md = await intel.getContextFile(WS, 'MEMORY.md');
-    expect(md).toMatch(/## Patterns That Failed\n- \[2026-05-22\].*New failure note/);
+    expect(block).not.toMatch(/MEMORY\.md|Session Memory Log/);
   });
 });
-
-function iso(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}

@@ -1,10 +1,28 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><circle cx=%2212%22 cy=%2212%22 r=%2210%22 fill=%22%239cffb0%22/></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agentis</title>
+    <script>
+      (function () {
+        var key = 'agentis.theme';
+        var stored = 'dark';
+        try {
+          var raw = localStorage.getItem(key);
+          if (raw === 'light' || raw === 'dark' || raw === 'system') stored = raw;
+        } catch {}
+        var effective = stored === 'system'
+          ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+          : stored;
+        var root = document.documentElement;
+        root.setAttribute('data-theme', effective);
+        root.classList.remove('dark', 'light');
+        root.classList.add(effective);
+        root.style.colorScheme = effective;
+      })();
+    </script>
   </head>
   <body class="bg-canvas text-text-primary font-sans antialiased">
     <div id="root"></div>

@@ -22,9 +22,9 @@ describe('RegistryClient', () => {
     expect(b.isConfigured()).toBe(false);
   });
 
-  it('search() throws SKILL_REGISTRY_UNAVAILABLE when not configured', async () => {
+  it('search() throws EXTENSION_REGISTRY_UNAVAILABLE when not configured', async () => {
     const b = new RegistryClient({ timeoutMs: 1000, logger });
-    await expect(b.search({ q: 'x' })).rejects.toMatchObject({ code: 'SKILL_REGISTRY_UNAVAILABLE' });
+    await expect(b.search({ q: 'x' })).rejects.toMatchObject({ code: 'EXTENSION_REGISTRY_UNAVAILABLE' });
   });
 
   it('search() translates upstream {results} into RegistryEntry shape', async () => {
@@ -53,9 +53,9 @@ describe('RegistryClient', () => {
     expect(page.entries[0]!.artifacts[0]!.sha256).toBe('a'.repeat(64));
   });
 
-  it('search() also accepts {skills} as the array key', async () => {
+  it('search() also accepts {extensions} as the array key', async () => {
     global.fetch = vi.fn(async () =>
-      new Response(JSON.stringify({ skills: [{ slug: 's1', version: '1.0.0' }] }), {
+      new Response(JSON.stringify({ extensions: [{ slug: 's1', version: '1.0.0' }] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }),
@@ -87,9 +87,9 @@ describe('RegistryClient', () => {
     expect(r.bytes.toString()).toBe('raw script');
   });
 
-  it('throws SKILL_REGISTRY_UNAVAILABLE on upstream 5xx', async () => {
+  it('throws EXTENSION_REGISTRY_UNAVAILABLE on upstream 5xx', async () => {
     global.fetch = vi.fn(async () => new Response('boom', { status: 502 })) as never;
     const b = new RegistryClient({ registryUrl: 'https://example.test/api', timeoutMs: 1000, logger });
-    await expect(b.fetchArtifactBytes({ slug: 'x' })).rejects.toMatchObject({ code: 'SKILL_REGISTRY_UNAVAILABLE' });
+    await expect(b.fetchArtifactBytes({ slug: 'x' })).rejects.toMatchObject({ code: 'EXTENSION_REGISTRY_UNAVAILABLE' });
   });
 });

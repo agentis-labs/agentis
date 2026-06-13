@@ -18,7 +18,7 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import type { SkillRuntime } from '../../src/services/skillRuntime.js';
+import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -28,13 +28,13 @@ beforeEach(async () => {
 });
 afterEach(() => ctx.close());
 
-function buildEngine(skillsOverride?: SkillRuntime) {
+function buildEngine(skillsOverride?: ExtensionRuntime) {
   const ledger = new LedgerService(ctx.db, ctx.bus);
   const scratchpad = new ScratchpadService(ctx.bus, ctx.logger);
   const activity = new ActivityFeedService(ctx.db, ctx.bus);
   const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
   const adapters = new AdapterManager(ctx.logger);
-  const skills = skillsOverride ?? ({} as unknown as SkillRuntime);
+  const extensions = skillsOverride ?? ({} as unknown as ExtensionRuntime);
   return new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
@@ -43,7 +43,7 @@ function buildEngine(skillsOverride?: SkillRuntime) {
     scratchpad,
     activity,
     approvals,
-    skills,
+    extensions,
     adapters,
   });
 }
@@ -231,10 +231,10 @@ describe('WorkflowEngine — fan-out / multi-input merge', () => {
         },
         {
           id: 'S',
-          type: 'skill_task',
+          type: 'extension_task',
           title: 'bad skill',
           position: { x: 100, y: 0 },
-          config: { kind: 'skill_task', skillId: 'bad', inputMapping: {}, outputMapping: {} },
+          config: { kind: 'extension_task', extensionId: 'bad', operationName: 'run', inputMapping: {}, outputMapping: {} },
         },
         {
           id: 'D',
@@ -252,7 +252,7 @@ describe('WorkflowEngine — fan-out / multi-input merge', () => {
     const { wfId, runId } = seedWorkflow(graph);
     const skills = {
       execute: async () => ({ ok: false, errorCode: 'INTERNAL_ERROR', message: 'boom' }),
-    } as unknown as SkillRuntime;
+    } as unknown as ExtensionRuntime;
     const engine = buildEngine(skills);
     const initialState = buildInitialRunState({ runId, workflowId: wfId, graph, inputs: {} });
     await engine.startRun({

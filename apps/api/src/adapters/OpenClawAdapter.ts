@@ -23,13 +23,31 @@ import type {
   AgentAdapter,
   AdapterCapabilities,
   AdapterHealthStatus,
+  ChatDelta,
+  ChatInvocationOptions,
+  ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
+  ToolDefinition,
   TriggerConfig,
   TriggerListenerHandle,
+  RuntimeContext,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
+import { clampChatTimeout, createChatQueue, DEFAULT_CHAT_TURN_TIMEOUT_MS } from './cliChatRuntime.js';
+
+/**
+ * A single in-flight chat turn's view of the gateway's async event stream.
+ * OpenClaw doesn't answer a request synchronously — its reply arrives later as a
+ * `session.message`. A turn registers one of these so {@link OpenClawAdapter.chat}
+ * can stream live thinking and resolve on the agent's reply (or time out).
+ */
+interface OpenClawChatListener {
+  onThinking(text: string): void;
+  onAgentMessage(body: string): void;
+  onError(message: string): void;
+}
 
 interface WebSocketLike {
   readonly readyState: number;
@@ -80,6 +98,7 @@ export interface OpenClawAdapterOptions {
 export class OpenClawAdapter implements AgentAdapter {
   readonly adapterType = 'openclaw' as const;
   readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
+  readonly #chatListeners = new Set<OpenClawChatListener>();
   readonly #breaker = new CircuitBreaker({ failureThreshold: 3, cooldownMs: 30_000 });
   #ws: WebSocketLike | undefined;
   #closed = false;
@@ -129,12 +148,36 @@ export class OpenClawAdapter implements AgentAdapter {
 
   capabilities(): AdapterCapabilities {
     return {
-      interactiveChat: false,
+      interactiveChat: true,
+      // The gateway agent runs its OWN tool loop remotely; Agentis relays the
+      // operator's message and streams the reply rather than executing tools here.
       toolCalling: false,
       toolForwarding: 'session_event',
+      execution: {
+        longRunning: true,
+        pausable: true,
+        sandbox: 'none',
+      },
+      affordances: {
+        browser: true,
+        computerUse: true,
+        terminal: true,
+      },
+      memory: {
+        injectable: true,
+      },
       limitations: [
-        'OpenClaw mirrors gateway session messages, but it is not yet wired into the Agentis chat tool-execution loop.',
+        'OpenClaw chats through its gateway session; Agentis platform tools run on the gateway agent, not in the local chat tool loop.',
       ],
+    };
+  }
+
+  async getRuntimeContext(): Promise<RuntimeContext> {
+    return {
+      provider: 'openclaw',
+      models: [{ id: 'openclaw-gateway', label: 'OpenClaw Gateway' }],
+      currentModel: 'openclaw-gateway',
+      fastModeSupported: false,
     };
   }
 
@@ -190,7 +233,85 @@ export class OpenClawAdapter implements AgentAdapter {
     return this.#breaker.state();
   }
 
+  /**
+   * Interactive chat over the mirrored gateway session. Unlike the CLI adapters,
+   * OpenClaw has no synchronous response: we relay the operator's latest message
+   * and stream the gateway's async reply (live `agent.thinking` → ThinkingBubble,
+   * the agent's `session.message` → the answer) until it replies or times out.
+   * Agentis tools are not executed here — the gateway agent owns its own loop.
+   */
+  async *chat(
+    messages: ChatMessage[],
+    _tools: ToolDefinition[],
+    options?: ChatInvocationOptions,
+  ): AsyncIterable<ChatDelta> {
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user') ?? messages.at(-1);
+    const body = typeof lastUser?.content === 'string' ? lastUser.content : String(lastUser?.content ?? '');
+    const queue = createChatQueue();
+    const timeoutMs = clampChatTimeout(
+      this.opts.timeoutSec && this.opts.timeoutSec > 0 ? this.opts.timeoutSec * 1000 : DEFAULT_CHAT_TURN_TIMEOUT_MS,
+    );
+
+    let settled = false;
+    const listener: OpenClawChatListener = {
+      onThinking: (text) => {
+        if (settled || !text) return;
+        queue.push({ type: 'thinking', delta: text });
+      },
+      onAgentMessage: (replyBody) => {
+        if (settled || !replyBody.trim()) return;
+        settle();
+        queue.push({ type: 'text', delta: replyBody });
+        queue.push({ type: 'done', finishReason: 'stop' });
+        queue.close();
+      },
+      onError: (message) => {
+        if (settled) return;
+        settle();
+        queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message });
+        queue.push({ type: 'done', finishReason: 'error' });
+        queue.close();
+      },
+    };
+    const timer = setTimeout(
+      () => listener.onError(`OpenClaw did not reply within ${Math.round(timeoutMs / 1000)}s`),
+      timeoutMs,
+    );
+    timer.unref?.();
+    const settle = () => {
+      settled = true;
+      clearTimeout(timer);
+      this.#chatListeners.delete(listener);
+    };
+    const onAbort = () => listener.onError('OpenClaw request was canceled');
+    options?.signal?.addEventListener('abort', onAbort, { once: true });
+
+    this.#chatListeners.add(listener);
+    try {
+      await this.sendSessionMessage({ sessionId: this.opts.defaultSessionId, body });
+    } catch (err) {
+      listener.onError(`OpenClaw send failed: ${(err as Error).message}`);
+    }
+
+    try {
+      yield* queue.iterate();
+    } finally {
+      settle();
+      options?.signal?.removeEventListener('abort', onAbort);
+    }
+  }
+
   // ─────────────────────────────────────────────
+
+  #notifyChatListeners(fn: (listener: OpenClawChatListener) => void): void {
+    for (const listener of this.#chatListeners) {
+      try {
+        fn(listener);
+      } catch (err) {
+        this.opts.logger.warn('openclaw.chat_listener_threw', { err: (err as Error).message });
+      }
+    }
+  }
 
   #sendOrThrow(payload: unknown): void {
     if (!this.#ws || this.#ws.readyState !== 1 /* OPEN */) {
@@ -230,6 +351,7 @@ export class OpenClawAdapter implements AgentAdapter {
           text: String(msg.text ?? ''),
           timestamp: at,
         });
+        this.#notifyChatListeners((l) => l.onThinking(String(msg.text ?? '')));
         return;
       case 'agent.tool_call':
       case 'session.tool':
@@ -266,18 +388,26 @@ export class OpenClawAdapter implements AgentAdapter {
           error: String(msg.error ?? 'agent task failed'),
           timestamp: at,
         });
+        this.#notifyChatListeners((l) => l.onError(String(msg.error ?? 'OpenClaw agent task failed')));
         return;
-      case 'session.message':
+      case 'session.message': {
+        const authorType = String(msg.authorType ?? 'agent') as 'agent' | 'operator' | 'system';
         this.#emit({
           eventType: 'agent.session_message',
           agentId: this.opts.agentId,
           sessionId: String(msg.sessionId ?? ''),
           sessionMessageId: String(msg.id ?? ''),
-          authorType: (String(msg.authorType ?? 'agent') as 'agent' | 'operator' | 'system'),
+          authorType,
           body: String(msg.body ?? ''),
           timestamp: at,
         });
+        // The agent's reply resolves the in-flight chat turn (ignore the echo of
+        // the operator's own message and any system notices).
+        if (authorType === 'agent') {
+          this.#notifyChatListeners((l) => l.onAgentMessage(String(msg.body ?? '')));
+        }
         return;
+      }
       case 'exec.approval.requested':
         this.#emit({
           eventType: 'agent.approval_requested',

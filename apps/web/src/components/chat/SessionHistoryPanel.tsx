@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { ChevronLeft, Clock3, Hash, Megaphone, MessageCircle, Search, Pencil, Trash2, Archive, Check, X, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { ChevronLeft, Clock3, Hash, Megaphone, MessageCircle, Search, Pencil, Trash2, Archive, Check, X, ChevronDown, ChevronUp, Loader2, MoreVertical, ExternalLink } from 'lucide-react';
 import clsx from 'clsx';
+import * as Tabs from '@radix-ui/react-tabs';
+import * as Collapsible from '@radix-ui/react-collapsible';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { formatDistanceToNow, parseISO } from 'date-fns';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 
@@ -34,6 +38,7 @@ type HistoryEntry = {
   agentId: string;
   agentStatus?: string | null;
   agentColor?: string | null;
+  adapterType?: string | null;
   kind: 'agent' | 'room' | 'broadcast';
   title: string;
   subtitle?: string;
@@ -72,6 +77,7 @@ export function SessionHistoryPanel({
 }) {
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [rooms, setRooms] = useState<RoomRow[]>([]);
+  const [agents, setAgents] = useState<Array<{ id: string; adapterType: string }>>([]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<HistoryFilter>('all');
   const [loading, setLoading] = useState(true);
@@ -88,12 +94,14 @@ export function SessionHistoryPanel({
 
   async function load() {
     try {
-      const [conversationRes, roomRes] = await Promise.allSettled([
+      const [conversationRes, roomRes, agentRes] = await Promise.allSettled([
         api<{ conversations: ConversationRow[] }>('/v1/conversations'),
         api<{ rooms: RoomRow[] }>('/v1/rooms'),
+        api<{ agents: Array<{ id: string; adapterType: string }> }>('/v1/agents'),
       ]);
       if (conversationRes.status === 'fulfilled') setConversations(conversationRes.value.conversations ?? []);
       if (roomRes.status === 'fulfilled') setRooms(roomRes.value.rooms ?? []);
+      if (agentRes.status === 'fulfilled') setAgents(agentRes.value.agents ?? []);
     } catch (err) {
       console.error('Failed to load history', err);
     } finally {
@@ -120,8 +128,7 @@ export function SessionHistoryPanel({
     }
   }, [editingId]);
 
-  const handleStartRename = (e: React.MouseEvent, conversationId: string, currentTitle: string) => {
-    e.stopPropagation();
+  const handleStartRename = (conversationId: string, currentTitle: string) => {
     setEditingId(conversationId);
     setEditingTitle(currentTitle);
     setConfirmDeleteId(null);
@@ -149,8 +156,7 @@ export function SessionHistoryPanel({
     }
   };
 
-  const handleToggleArchive = async (e: React.MouseEvent, conversationId: string, currentArchived: boolean) => {
-    e.stopPropagation();
+  const handleToggleArchive = async (conversationId: string, currentArchived: boolean) => {
     setActionLoadingId(conversationId);
     try {
       await api(`/v1/conversations/session/${conversationId}`, {
@@ -160,14 +166,13 @@ export function SessionHistoryPanel({
       toast.success(currentArchived ? 'Session unarchived' : 'Session archived');
       window.dispatchEvent(new CustomEvent('agentis:chat-history-changed'));
     } catch (error) {
-      toast.error('Failed to update session archive status', apiErrorMessage(error));
+      toast.error('Failed to update archive status', apiErrorMessage(error));
     } finally {
       setActionLoadingId(null);
     }
   };
 
-  const handleDeleteConversation = async (e: React.MouseEvent, conversationId: string) => {
-    e.stopPropagation();
+  const handleDeleteConversation = async (conversationId: string) => {
     setActionLoadingId(conversationId);
     try {
       await api(`/v1/conversations/session/${conversationId}`, {
@@ -176,7 +181,6 @@ export function SessionHistoryPanel({
       toast.success('Session deleted');
       setConfirmDeleteId(null);
       
-      // If we deleted the currently active conversation, trigger a fallback
       if (activeConversationId === conversationId) {
         window.dispatchEvent(new CustomEvent('agentis:active-conversation-deleted'));
       }
@@ -189,6 +193,14 @@ export function SessionHistoryPanel({
     }
   };
 
+  const agentAdapterMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const a of agents) {
+      map[a.id] = a.adapterType;
+    }
+    return map;
+  }, [agents]);
+
   const recentEntries = useMemo<HistoryEntry[]>(() => {
     const threadEntries = conversations
       .filter((conversation) => !conversation.archivedAt || Boolean(conversation.lastMessageAt))
@@ -198,6 +210,7 @@ export function SessionHistoryPanel({
         agentId: conversation.agentId,
         agentStatus: conversation.agentStatus,
         agentColor: conversation.agentColor,
+        adapterType: agentAdapterMap[conversation.agentId] ?? null,
         kind: 'agent',
         title: conversation.title?.trim() || conversation.agentName,
         subtitle: conversation.archivedAt ? `${conversation.agentName} (Archived)` : conversation.agentName,
@@ -212,21 +225,21 @@ export function SessionHistoryPanel({
       }));
 
     return threadEntries.sort((left, right) => right.at.localeCompare(left.at));
-  }, [conversations, onOpenAgent]);
+  }, [conversations, onOpenAgent, agentAdapterMap]);
 
   const roomStarters = useMemo<RoomStarter[]>(() => {
-    const next = rooms.map<RoomStarter>((room) => ({
-      id: room.id,
-      kind: room.kind === 'workspace' ? 'broadcast' : 'room',
-      title: room.kind === 'workspace' ? 'Fleet broadcast' : room.name,
-      subtitle: room.kind === 'workspace'
-        ? 'Send one message to every live agent'
-        : room.lastMessagePreview?.trim() || `${room.kind} room`,
-      unread: room.unreadCount ?? 0,
-      onOpen: () => (room.kind === 'workspace' ? onOpenBroadcast() : onOpenRoom(room.id, room.name)),
-    }));
+    const next = rooms
+      .filter((room) => room.kind !== 'workspace')
+      .map<RoomStarter>((room) => ({
+        id: room.id,
+        kind: 'room',
+        title: room.name,
+        subtitle: room.lastMessagePreview?.trim() || `${room.kind} room`,
+        unread: room.unreadCount ?? 0,
+        onOpen: () => onOpenRoom(room.id, room.name),
+      }));
     return next.sort((left, right) => {
-      if (left.kind !== right.kind) return left.kind === 'broadcast' ? -1 : 1;
+      return left.title.localeCompare(right.title);
       return left.title.localeCompare(right.title);
     });
   }, [onOpenBroadcast, onOpenRoom, rooms]);
@@ -253,7 +266,6 @@ export function SessionHistoryPanel({
     return `${entry.title} ${entry.subtitle}`.toLowerCase().includes(normalizedQuery);
   });
 
-  // Separate Active and Archived entries
   const [activeRecent, archivedRecent] = useMemo(() => {
     const active: HistoryEntry[] = [];
     const archived: HistoryEntry[] = [];
@@ -286,80 +298,98 @@ export function SessionHistoryPanel({
 
   const isEmpty = !loading && activeGroups.length === 0 && archivedRecent.length === 0 && filteredRooms.length === 0;
 
+  // Global keyboard shortcut to focus search input
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
-    <div className="flex h-full flex-col bg-surface">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3">
+    <div className="flex h-full flex-col bg-surface border-r border-line shadow-inner">
+      <header className="flex h-14 shrink-0 items-center gap-2.5 border-b border-line px-4 bg-surface-2/40">
         {onBack && (
           <button
             type="button"
             onClick={onBack}
             aria-label="Back"
-            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+            className="-m-1 rounded-lg p-1.5 text-text-muted hover:bg-surface-3 hover:text-text-primary transition-colors"
           >
             <ChevronLeft size={16} />
           </button>
         )}
         <div className="min-w-0 flex-1">
-          <div className="text-subheading text-text-primary">Chat history</div>
-          <div className="text-[10px] text-text-muted">Saved agent sessions and room activity</div>
+          <div className="text-sm font-semibold text-text-primary">Chat history</div>
+          <div className="text-[10px] text-text-muted">Saved sessions and active room threads</div>
         </div>
       </header>
 
-      <div className="border-b border-line p-3">
-        <label className="flex items-center gap-2 rounded-md border border-line bg-canvas px-2 py-2 text-[12px] text-text-muted focus-within:border-accent/40">
-          <Search size={14} />
+      <div className="border-b border-line p-3.5 bg-surface/20">
+        <label className="flex items-center gap-2 rounded-xl border border-line bg-canvas/60 px-3 py-2 text-xs text-text-muted focus-within:border-accent/35 focus-within:bg-canvas/90 transition-all duration-200">
+          <Search size={14} className="text-text-muted" />
           <input
+            ref={searchInputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search conversations or rooms"
-            className="min-w-0 flex-1 bg-transparent text-text-primary outline-none placeholder:text-text-muted"
+            placeholder="Search... (Ctrl+K)"
+            className="min-w-0 flex-1 bg-transparent text-text-primary outline-none placeholder:text-text-muted/65"
           />
         </label>
-        <div className="mt-2 flex flex-wrap gap-1">
-          {(['all', 'recent', 'agent', 'room', 'broadcast'] as const).map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setFilter(item)}
-              className={clsx(
-                'rounded-full border px-2.5 py-1 text-[10px] font-medium capitalize transition-colors',
-                filter === item
-                  ? 'border-accent/40 bg-accent/10 text-accent font-semibold'
-                  : 'border-line text-text-muted hover:bg-surface-2 hover:text-text-primary',
-              )}
-            >
-              {item === 'agent' ? 'Direct' : item}
-            </button>
-          ))}
-        </div>
+        
+        <Tabs.Root value={filter} onValueChange={(val) => setFilter(val as HistoryFilter)}>
+          <Tabs.List className="mt-2.5 flex flex-wrap gap-1">
+            {(['all', 'recent', 'agent', 'room', 'broadcast'] as const).map((item) => (
+              <Tabs.Trigger
+                key={item}
+                value={item}
+                className={clsx(
+                  'rounded-lg border px-2.5 py-1 text-[10px] font-medium capitalize transition-all duration-150',
+                  filter === item
+                    ? 'border-accent/25 bg-accent/8 text-accent font-semibold shadow-sm'
+                    : 'border-line text-text-muted hover:bg-surface-3 hover:text-text-primary',
+                )}
+              >
+                {item === 'agent' ? 'Direct' : item}
+              </Tabs.Trigger>
+            ))}
+          </Tabs.List>
+        </Tabs.Root>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {loading ? (
-          <div className="flex h-full items-center justify-center px-4 text-[12px] text-text-muted">
-            <Loader2 size={16} className="animate-spin text-accent mr-2" />
-            Loading history…
+          <div className="flex h-full items-center justify-center px-4 text-xs text-text-muted font-mono">
+            <Loader2 size={15} className="animate-spin text-accent mr-2" />
+            Loading index...
           </div>
         ) : isEmpty ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
-            <Clock3 size={24} className="text-text-muted opacity-60" />
-            <div className="text-[13px] font-medium text-text-primary">Nothing matches this view</div>
-            <div className="max-w-[220px] text-[12px] text-text-muted">
-              Try a different search or switch filters.
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center animate-in fade-in duration-200">
+            <div className="h-10 w-10 rounded-2xl bg-surface-2 border border-line flex items-center justify-center text-text-muted/60">
+              <Clock3 size={18} />
+            </div>
+            <div className="text-xs font-semibold text-text-primary">No results match filters</div>
+            <div className="max-w-[200px] text-[11px] text-text-muted leading-relaxed">
+              Try updating search queries or clearing active filter tabs.
             </div>
           </div>
         ) : (
           <div className="space-y-4 px-3 py-3">
             {/* Active Conversations Section */}
             {activeGroups.length > 0 && (
-              <Section title="Conversations" subtitle="Active sessions">
+              <Section title="Conversations" subtitle="Active adapter sessions">
                 <div className="space-y-3">
                   {activeGroups.map((group) => (
                     <div key={group.label} className="space-y-1">
-                      <div className="mb-1 px-1 text-[9px] font-bold uppercase tracking-wider text-text-muted/70">
+                      <div className="mb-1 px-1.5 text-[9px] font-bold uppercase tracking-wider text-text-muted/60">
                         {group.label}
                       </div>
-                      <div className="overflow-hidden rounded-lg border border-line/50 bg-surface-2/20 space-y-[1px]">
+                      <div className="overflow-hidden rounded-xl border border-line bg-surface-2/15 space-y-[1px] shadow-sm">
                         {group.entries.map((entry) => (
                           <HistoryRow
                             key={entry.id}
@@ -370,9 +400,9 @@ export function SessionHistoryPanel({
                             setEditingTitle={setEditingTitle}
                             onSaveRename={() => handleSaveRename(entry.conversationId)}
                             onCancelRename={() => setEditingId(null)}
-                            onStartRename={(e) => handleStartRename(e, entry.conversationId, entry.title)}
-                            onToggleArchive={(e) => handleToggleArchive(e, entry.conversationId, false)}
-                            onConfirmDelete={(e) => handleDeleteConversation(e, entry.conversationId)}
+                            onStartRename={() => handleStartRename(entry.conversationId, entry.title)}
+                            onToggleArchive={() => handleToggleArchive(entry.conversationId, false)}
+                            onConfirmDelete={() => handleDeleteConversation(entry.conversationId)}
                             confirmDelete={confirmDeleteId === entry.conversationId}
                             setConfirmDelete={(val) => setConfirmDeleteId(val ? entry.conversationId : null)}
                             actionLoading={actionLoadingId === entry.conversationId}
@@ -388,52 +418,51 @@ export function SessionHistoryPanel({
 
             {/* Archived Conversations Collapsible Section */}
             {archivedRecent.length > 0 && (
-              <div className="rounded-lg border border-line bg-surface-2/10 overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setArchivedCollapsed((c) => !c)}
-                  className="flex w-full items-center justify-between px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-text-muted hover:bg-surface-2/30"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <Archive size={12} className="text-text-muted" />
-                    Archived Conversations ({archivedRecent.length})
-                  </span>
-                  {archivedCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                </button>
-                {!archivedCollapsed && (
-                  <div className="border-t border-line/60 bg-surface/30 p-1.5 space-y-1">
-                    {archivedRecent.map((entry) => (
-                      <HistoryRow
-                        key={entry.id}
-                        entry={entry}
-                        isActive={activeConversationId === entry.conversationId}
-                        isEditing={editingId === entry.conversationId}
-                        editingTitle={editingTitle}
-                        setEditingTitle={setEditingTitle}
-                        onSaveRename={() => handleSaveRename(entry.conversationId)}
-                        onCancelRename={() => setEditingId(null)}
-                        onStartRename={(e) => handleStartRename(e, entry.conversationId, entry.title)}
-                        onToggleArchive={(e) => handleToggleArchive(e, entry.conversationId, true)}
-                        onConfirmDelete={(e) => handleDeleteConversation(e, entry.conversationId)}
-                        confirmDelete={confirmDeleteId === entry.conversationId}
-                        setConfirmDelete={(val) => setConfirmDeleteId(val ? entry.conversationId : null)}
-                        actionLoading={actionLoadingId === entry.conversationId}
-                        renameInputRef={renameInputRef}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
+              <Collapsible.Root open={!archivedCollapsed} onOpenChange={(open) => setArchivedCollapsed(!open)} className="rounded-xl border border-line bg-surface-2/10 overflow-hidden shadow-sm">
+                <Collapsible.Trigger asChild>
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between px-3 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-text-muted hover:bg-surface-3/40 transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Archive size={12} className="text-text-muted" />
+                      Archived Sessions ({archivedRecent.length})
+                    </span>
+                    {archivedCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                  </button>
+                </Collapsible.Trigger>
+                <Collapsible.Content className="overflow-hidden animate-in fade-in duration-200 border-t border-line/50 bg-surface/30 p-1.5 space-y-1">
+                  {archivedRecent.map((entry) => (
+                    <HistoryRow
+                      key={entry.id}
+                      entry={entry}
+                      isActive={activeConversationId === entry.conversationId}
+                      isEditing={editingId === entry.conversationId}
+                      editingTitle={editingTitle}
+                      setEditingTitle={setEditingTitle}
+                      onSaveRename={() => handleSaveRename(entry.conversationId)}
+                      onCancelRename={() => setEditingId(null)}
+                      onStartRename={() => handleStartRename(entry.conversationId, entry.title)}
+                      onToggleArchive={() => handleToggleArchive(entry.conversationId, true)}
+                      onConfirmDelete={() => handleDeleteConversation(entry.conversationId)}
+                      confirmDelete={confirmDeleteId === entry.conversationId}
+                      setConfirmDelete={(val) => setConfirmDeleteId(val ? entry.conversationId : null)}
+                      actionLoading={actionLoadingId === entry.conversationId}
+                      renameInputRef={renameInputRef}
+                    />
+                  ))}
+                </Collapsible.Content>
+              </Collapsible.Root>
             )}
 
             {/* Rooms Section */}
             {filteredRooms.length > 0 && (
-              <Section title="Rooms" subtitle="Workspace and team rooms">
-                <div className="overflow-hidden rounded-lg border border-line/50 bg-surface-2/20 space-y-[1px]">
+              <Section title="Rooms" subtitle="Workspace channels">
+                <div className="overflow-hidden rounded-xl border border-line bg-surface-2/15 space-y-[1px] shadow-sm">
                   {filteredRooms.map((entry) => (
                     <StarterRow
                       key={entry.kind === 'broadcast' ? `broadcast-${entry.id}` : entry.id}
-                      icon={entry.kind === 'broadcast' ? <Megaphone size={14} /> : <Hash size={14} />}
+                      icon={entry.kind === 'broadcast' ? <Megaphone size={13} /> : <Hash size={13} />}
                       title={entry.title}
                       subtitle={entry.subtitle}
                       unread={entry.unread}
@@ -460,10 +489,10 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="space-y-1">
-      <div className="mb-1.5 px-1 flex flex-col">
+    <section className="space-y-1.5">
+      <div className="mb-2 px-1 flex flex-col">
         <div className="text-[10px] font-bold uppercase tracking-wider text-text-muted">{title}</div>
-        <div className="text-[10px] text-text-muted/80 leading-tight">{subtitle}</div>
+        <div className="text-[9px] text-text-muted/75 leading-tight">{subtitle}</div>
       </div>
       {children}
     </section>
@@ -475,8 +504,8 @@ function StatusDot({ status }: { status?: string | null }) {
   if (value === 'online' || value === 'active' || value === 'running') {
     return (
       <span className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]"></span>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-75"></span>
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-accent shadow-[0_0_8px_rgba(74,222,128,0.6)]"></span>
       </span>
     );
   }
@@ -488,7 +517,39 @@ function StatusDot({ status }: { status?: string | null }) {
       </span>
     );
   }
-  return <span className="h-2 w-2 rounded-full bg-gray-400/80"></span>;
+  return <span className="h-1.5 w-1.5 rounded-full bg-gray-400/80"></span>;
+}
+
+export function HarnessBadge({ adapterType }: { adapterType?: string | null }) {
+  if (!adapterType) return null;
+  const normalized = adapterType.toLowerCase();
+  
+  let label = adapterType;
+  let colorClasses = "bg-surface-3 border-line text-text-muted";
+  
+  if (normalized === 'codex') {
+    label = 'Codex';
+    colorClasses = "bg-[#10b981]/10 text-[#10b981] border-[#10b981]/20";
+  } else if (normalized === 'claude_code') {
+    label = 'Claude';
+    colorClasses = "bg-[#8b5cf6]/10 text-[#a78bfa] border-[#8b5cf6]/20";
+  } else if (normalized === 'cursor') {
+    label = 'Cursor';
+    colorClasses = "bg-[#3b82f6]/10 text-[#60a5fa] border-[#3b82f6]/20";
+  } else if (normalized === 'http') {
+    label = 'HTTP';
+    colorClasses = "bg-surface-3 border-line text-text-muted";
+  } else {
+    label = adapterType.split('_')[0] ?? '';
+    label = label.charAt(0).toUpperCase() + label.slice(1);
+    colorClasses = "bg-surface-3 border-line text-text-secondary";
+  }
+  
+  return (
+    <span className={clsx("inline-flex items-center rounded px-1.5 py-0.5 text-[8.5px] font-mono font-medium border uppercase tracking-wider scale-[0.9]", colorClasses)}>
+      {label}
+    </span>
+  );
 }
 
 function HistoryRow({
@@ -514,14 +575,16 @@ function HistoryRow({
   setEditingTitle: (val: string) => void;
   onSaveRename: () => void;
   onCancelRename: () => void;
-  onStartRename: (e: React.MouseEvent) => void;
-  onToggleArchive: (e: React.MouseEvent) => void;
-  onConfirmDelete: (e: React.MouseEvent) => void;
+  onStartRename: () => void;
+  onToggleArchive: () => void;
+  onConfirmDelete: () => void;
   confirmDelete: boolean;
   setConfirmDelete: (val: boolean) => void;
   actionLoading: boolean;
   renameInputRef: React.RefObject<HTMLInputElement>;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   return (
     <div
       onClick={() => {
@@ -529,22 +592,22 @@ function HistoryRow({
           entry.onOpen();
         }
       }}
-      onDoubleClick={(e) => {
+      onDoubleClick={() => {
         if (!entry.archivedAt && !isEditing) {
-          onStartRename(e);
+          onStartRename();
         }
       }}
       className={clsx(
-        'group relative flex w-full flex-col gap-1 border-b border-line/40 px-3 py-2.5 text-left last:border-b-0 cursor-pointer transition-all duration-200 select-none hover:bg-surface-3/50',
+        'group relative flex w-full flex-col gap-1 border-b border-line/45 px-3 py-3 text-left last:border-b-0 cursor-pointer transition-all duration-200 select-none hover:bg-surface-3/40',
         isActive
-          ? 'bg-accent/5 backdrop-blur-[4px] border-l-2 border-l-accent border-r border-r-line/20'
-          : 'bg-transparent border-l-2 border-l-transparent'
+          ? 'bg-accent/5 backdrop-blur-[2px] border-l-2 border-l-accent'
+          : 'bg-transparent border-l-2 border-l-transparent hover:-translate-x-0.5'
       )}
     >
       <div className="flex items-start gap-2.5">
         <span
-          className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors"
-          style={{ backgroundColor: entry.agentColor ? `${entry.agentColor}15` : 'rgba(122, 131, 144, 0.15)', color: entry.agentColor ?? '#7a8390' }}
+          className="mt-0.5 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-text-muted border border-line bg-surface"
+          style={{ color: entry.agentColor ?? '#7a8390' }}
         >
           <MessageCircle size={13} />
         </span>
@@ -566,7 +629,7 @@ function HistoryRow({
                     if (e.key === 'Enter') onSaveRename();
                     if (e.key === 'Escape') onCancelRename();
                   }}
-                  className="h-6 min-w-0 flex-1 rounded border border-accent bg-canvas px-1 text-xs text-text-primary outline-none focus:border-accent"
+                  className="h-6 min-w-0 flex-1 rounded border border-accent bg-canvas px-1 text-xs text-text-primary outline-none focus:border-accent font-sans"
                 />
                 <button
                   type="button"
@@ -587,23 +650,26 @@ function HistoryRow({
                 </button>
               </div>
             ) : (
-              <span className="truncate text-xs font-semibold text-text-primary leading-none">
+              <span className="truncate text-xs font-semibold text-text-primary leading-tight">
                 {entry.title}
               </span>
             )}
             {entry.unread > 0 && !isEditing && (
-              <span className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-1 text-[8px] font-extrabold text-canvas leading-none">
+              <span className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-1 text-[8px] font-extrabold text-canvas leading-none unread-badge-enter">
                 {entry.unread > 9 ? '9+' : entry.unread}
               </span>
             )}
           </span>
           {!isEditing && (
             <>
-              {entry.subtitle && (
-                <span className="block truncate text-[10px] text-text-muted leading-tight">
-                  {entry.subtitle}
-                </span>
-              )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {entry.adapterType && <HarnessBadge adapterType={entry.adapterType} />}
+                {entry.subtitle && (
+                  <span className="block truncate text-[10px] text-text-muted leading-tight max-w-[110px]">
+                    {entry.subtitle}
+                  </span>
+                )}
+              </div>
               <span className="block truncate text-[10px] text-text-muted/80 leading-normal font-normal">
                 {entry.preview}
               </span>
@@ -611,7 +677,7 @@ function HistoryRow({
           )}
         </span>
 
-        {/* Inline Confirmation Bubble or Action Buttons */}
+        {/* Action Button or Confirmation */}
         <div
           className="shrink-0 flex items-center gap-1.5"
           onClick={(e) => e.stopPropagation()}
@@ -619,57 +685,84 @@ function HistoryRow({
           {actionLoading ? (
             <Loader2 size={12} className="animate-spin text-accent" />
           ) : confirmDelete ? (
-            <div className="flex items-center gap-1 bg-surface-2 rounded-md border border-line p-0.5 shadow-sm">
-              <span className="text-[9px] font-bold text-rose-500 px-1">Delete?</span>
+            <div className="flex items-center gap-1 bg-surface rounded-md border border-line p-0.5 shadow-sm">
+              <span className="text-[9px] font-bold text-rose-500 px-1 font-mono">Delete?</span>
               <button
                 type="button"
                 onClick={onConfirmDelete}
-                className="rounded bg-rose-500 text-canvas px-1 py-0.5 text-[9px] font-bold hover:bg-rose-600"
+                className="rounded bg-rose-500 text-canvas px-1.5 py-0.5 text-[9px] font-bold hover:bg-rose-600"
               >
                 Yes
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmDelete(false)}
-                className="rounded bg-surface-3 px-1 py-0.5 text-[9px] font-bold text-text-muted hover:bg-surface-4"
+                className="rounded bg-surface-3 px-1.5 py-0.5 text-[9px] font-bold text-text-muted hover:bg-surface-4"
               >
                 No
               </button>
             </div>
           ) : (
-            <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity duration-150">
-              {!entry.archivedAt && (
-                <button
-                  type="button"
-                  onClick={onStartRename}
-                  title="Rename Session (Double click card)"
-                  className="rounded p-1 text-text-muted hover:bg-surface-3 hover:text-text-primary"
-                >
-                  <Pencil size={11} />
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onToggleArchive}
-                title={entry.archivedAt ? 'Unarchive Session' : 'Archive Session'}
-                className="rounded p-1 text-text-muted hover:bg-surface-3 hover:text-text-primary"
-              >
-                <Archive size={11} className={clsx(entry.archivedAt && 'text-accent')} />
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                title="Delete Session"
-                className="rounded p-1 text-text-muted hover:bg-surface-3 hover:text-rose-500"
-              >
-                <Trash2 size={11} />
-              </button>
+            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 flex items-center gap-0.5 transition-opacity duration-150">
+              <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    title="Actions"
+                    className="rounded-lg p-1 text-text-muted hover:bg-surface-3 hover:text-text-primary focus:outline-none"
+                  >
+                    <MoreVertical size={13} />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    className="z-[12000] min-w-[150px] rounded-xl border border-glass-border bg-glass-panel/98 backdrop-blur-xl p-1.5 shadow-dropdown animate-in fade-in slide-in-from-top-2 duration-150"
+                    align="end"
+                    sideOffset={5}
+                  >
+                    {!entry.archivedAt && (
+                      <DropdownMenu.Item
+                        onSelect={onStartRename}
+                        className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-text-secondary outline-none hover:bg-surface-3/50 hover:text-text-primary focus:bg-surface-3/50 focus:text-text-primary transition-colors"
+                      >
+                        <Pencil size={12} className="text-text-muted" />
+                        Rename Session
+                      </DropdownMenu.Item>
+                    )}
+                    <DropdownMenu.Item
+                      onSelect={onToggleArchive}
+                      className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-text-secondary outline-none hover:bg-surface-3/50 hover:text-text-primary focus:bg-surface-3/50 focus:text-text-primary transition-colors"
+                    >
+                      <Archive size={12} className={clsx('text-text-muted', entry.archivedAt && 'text-accent')} />
+                      {entry.archivedAt ? 'Unarchive' : 'Archive'}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      onSelect={() => {
+                        // Open in new tab by simulating direct navigation or dispatching event
+                        window.open(`/chat?session=${entry.conversationId}`, '_blank');
+                      }}
+                      className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-text-secondary outline-none hover:bg-surface-3/50 hover:text-text-primary focus:bg-surface-3/50 focus:text-text-primary transition-colors"
+                    >
+                      <ExternalLink size={12} className="text-text-muted" />
+                      Open in New Tab
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-[1px] bg-line" />
+                    <DropdownMenu.Item
+                      onSelect={() => setConfirmDelete(true)}
+                      className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-rose-500 font-medium outline-none hover:bg-rose-500/10 focus:bg-rose-500/10 transition-colors"
+                    >
+                      <Trash2 size={12} />
+                      Delete Session
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
             </div>
           )}
         </div>
       </div>
       {!isEditing && (
-        <span className="mt-0.5 block text-[8px] text-text-muted/60 text-right leading-none">
+        <span className="mt-1 block text-[8.5px] text-text-muted/50 text-right leading-none font-mono">
           {formatAt(entry.at)}
         </span>
       )}
@@ -694,16 +787,16 @@ function StarterRow({
     <button
       type="button"
       onClick={onOpen}
-      className="flex w-full items-start gap-2.5 border-b border-line/40 px-3 py-2.5 text-left last:border-b-0 hover:bg-surface-3/50 transition-colors"
+      className="flex w-full items-start gap-2.5 border-b border-line/45 px-3 py-3 text-left last:border-b-0 hover:bg-surface-3/40 transition-all duration-200 hover:-translate-x-0.5"
     >
-      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-text-muted">
+      <span className="mt-0.5 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full bg-surface border border-line text-text-muted shadow-sm">
         {icon}
       </span>
       <span className="min-w-0 flex-1 space-y-0.5">
         <span className="flex items-center gap-2">
-          <span className="truncate text-xs font-semibold text-text-primary leading-none">{title}</span>
+          <span className="truncate text-xs font-semibold text-text-primary leading-tight">{title}</span>
           {unread > 0 && (
-            <span className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-1 text-[8px] font-extrabold text-canvas leading-none">
+            <span className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-1 text-[8px] font-extrabold text-canvas leading-none unread-badge-enter">
               {unread > 9 ? '9+' : unread}
             </span>
           )}
@@ -728,7 +821,11 @@ function groupForDate(value: string): 'Today' | 'Yesterday' | 'Earlier' {
 
 function formatAt(value: string): string {
   if (!value || value === EMPTY_DATE) return 'No activity yet';
-  const date = new Date(value);
+  const date = parseISO(value);
   if (Number.isNaN(date.getTime())) return 'No activity yet';
-  return date.toLocaleString();
+  try {
+    return formatDistanceToNow(date, { addSuffix: true });
+  } catch {
+    return date.toLocaleDateString();
+  }
 }

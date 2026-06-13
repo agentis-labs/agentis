@@ -5,6 +5,7 @@ import type { WorkflowGraph } from '@agentis/core';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerInspectTools } from '../../src/services/agentisToolHandlers/inspect.js';
 import { registerBuildTools } from '../../src/services/agentisToolHandlers/build.js';
+import { registerCapabilityTools } from '../../src/services/agentisToolHandlers/capability.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -22,7 +23,7 @@ function deps(): ToolHandlerDeps {
     logger: ctx.logger,
     bus: ctx.bus,
     engine: {} as ToolHandlerDeps['engine'],
-    adapters: {} as ToolHandlerDeps['adapters'],
+    adapters: { get: () => undefined } as unknown as ToolHandlerDeps['adapters'],
     ledger: { listForRun: async () => [] } as unknown as ToolHandlerDeps['ledger'],
     scratchpad: {} as ToolHandlerDeps['scratchpad'],
     approvals: { list: () => [] } as unknown as ToolHandlerDeps['approvals'],
@@ -40,9 +41,9 @@ function toolContext() {
   };
 }
 
-function seedSkill(overrides: Partial<typeof schema.skills.$inferInsert> = {}) {
+function seedSkill(overrides: Partial<typeof schema.extensions.$inferInsert> = {}) {
   const id = randomUUID();
-  ctx.db.insert(schema.skills).values({
+  ctx.db.insert(schema.extensions).values({
     id,
     workspaceId: ctx.workspace.id,
     ambientId: ctx.ambient.id,
@@ -79,13 +80,13 @@ describe('agent-facing skill tools', () => {
     }, toolContext());
 
     expect(result.ok).toBe(true);
-    const output = result.output as { skills: Array<{ id: string; slug: string; entrypoint: string; inputSchema: unknown }> };
-    expect(output.skills).toEqual([
+    const output = result.output as { extensions: Array<{ id: string; slug: string; runtime: string; capabilityTags: string[] }> };
+    expect(output.extensions).toEqual([
       expect.objectContaining({
         id: skillId,
         slug: 'http_fetch',
-        entrypoint: 'http_fetch',
-        inputSchema: expect.objectContaining({ type: 'object' }),
+        runtime: 'builtin',
+        capabilityTags: expect.arrayContaining(['http']),
       }),
     ]);
   });
@@ -106,6 +107,150 @@ describe('agent-facing skill tools', () => {
     expect(output.usableInWorkflows).toBe(true);
     expect(output.skill.id).toBe(skillId);
     expect(output.skill.capabilityTags).toContain('http');
+  });
+});
+
+describe('agent-facing capability authoring tools', () => {
+  it('resolves an installed listener capability before creation', async () => {
+    const extensionId = seedSkill({
+      name: 'AI News Site Monitor',
+      slug: 'ai_news_site_monitor',
+      runtime: 'node_worker',
+      manifest: {
+        name: 'AI News Site Monitor',
+        slug: 'ai_news_site_monitor',
+        version: '1.0.0',
+        runtime: 'node_worker',
+        entrypoint: 'ai_news_site_monitor.js',
+        description: 'Monitors an AI news site for new posts.',
+        capabilityTags: ['listener', 'monitoring', 'ai-news'],
+        permissions: ['network', 'listener', 'listener.emit'],
+        operations: [{
+          name: 'fetchRecentPosts',
+          inputSchema: {},
+          outputSchema: {},
+          isListenerSource: true,
+        }],
+      },
+    });
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerCapabilityTools(registry, deps());
+
+    const result = await registry.execute({
+      toolId: 'agentis.extension.resolve',
+      arguments: {
+        query: 'AI News Site Monitor',
+        requiresListenerSource: true,
+        capabilityTags: ['monitoring', 'ai-news'],
+      },
+    }, toolContext());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toEqual(expect.objectContaining({
+      recommendation: 'reuse',
+      selectedExtensionId: extensionId,
+      candidates: [
+        expect.objectContaining({
+          extensionId,
+          reusable: true,
+          listenerOperations: ['fetchRecentPosts'],
+        }),
+      ],
+    }));
+  });
+
+  it('creates and queues a reusable ability from intent', async () => {
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    const draftCalls: unknown[] = [];
+    const toolDeps = deps();
+    toolDeps.abilityCreation = {
+      draft: async (input: unknown) => {
+        draftCalls.push(input);
+        return {
+          ability: {
+            id: 'ability_1',
+            name: 'Social Post Monitor',
+            slug: 'social-post-monitor',
+            compileStatus: 'queued',
+          },
+          synthesized: true,
+          notes: [],
+        };
+      },
+    } as ToolHandlerDeps['abilityCreation'];
+    registerCapabilityTools(registry, toolDeps);
+
+    const result = await registry.execute({
+      toolId: 'agentis.ability.create',
+      arguments: {
+        intent: 'Monitor public social posts for topics and extract matching links.',
+        name: 'Social Post Monitor',
+        domainTag: 'monitoring',
+      },
+    }, toolContext());
+
+    expect(result.ok).toBe(true);
+    expect(draftCalls).toEqual([expect.objectContaining({
+      workspaceId: ctx.workspace.id,
+      authorId: ctx.user.id,
+      from: 'intent',
+      name: 'Social Post Monitor',
+      domainTag: 'monitoring',
+    })]);
+    expect(result.output).toEqual(expect.objectContaining({
+      abilityId: 'ability_1',
+      compileStatus: 'queued',
+    }));
+  });
+
+  it('creates a listener extension and returns its real executable ID', async () => {
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    const createCalls: unknown[] = [];
+    const toolDeps = deps();
+    toolDeps.extensionLibrary = {
+      createNodeWorkerExtension: async (scope: unknown, input: unknown) => {
+        createCalls.push({ scope, input });
+        return {
+          id: 'extension_1',
+          path: 'extensions/social-listener.md',
+          manifest: {
+            name: 'Social Listener',
+            slug: 'social-listener',
+            runtime: 'node_worker',
+            operations: [{ name: 'listen' }],
+          },
+        };
+      },
+    } as ToolHandlerDeps['extensionLibrary'];
+    registerCapabilityTools(registry, toolDeps);
+
+    const result = await registry.execute({
+      toolId: 'agentis.extension.create',
+      arguments: {
+        name: 'Social Listener',
+        source: 'export async function listen(input, ctx) { await ctx.emit(input); }',
+        permissions: ['listener', 'listener.emit', 'root'],
+        operations: [{
+          name: 'listen',
+          inputSchema: { type: 'object' },
+          outputSchema: { type: 'object' },
+          isListenerSource: true,
+        }],
+      },
+    }, toolContext());
+
+    expect(result.ok).toBe(true);
+    expect(createCalls).toEqual([expect.objectContaining({
+      scope: expect.objectContaining({ workspaceId: ctx.workspace.id, userId: ctx.user.id }),
+      input: expect.objectContaining({
+        name: 'Social Listener',
+        permissions: ['listener', 'listener.emit'],
+      }),
+    })]);
+    expect(result.output).toEqual(expect.objectContaining({
+      extensionId: 'extension_1',
+      operations: ['listen'],
+    }));
   });
 });
 
@@ -140,6 +285,38 @@ describe('agentis.build_workflow fallback synthesis', () => {
     }));
   });
 
+  it('reuses the current MCP agent draft instead of creating duplicate workflows', async () => {
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerBuildTools(registry, deps());
+    const mcpContext = {
+      ...toolContext(),
+      caller: 'mcp',
+      agentId: randomUUID(),
+      conversationId: undefined,
+    };
+
+    // Domain-agnostic: a re-build with the same MCP context must REVISE the same
+    // workflow, never spawn a twin. (Uses the deterministic fast-path so the test
+    // needs no model; the dedup latch under test is connector-agnostic.)
+    const description = 'Create a manual Hello World workflow that returns the fixed object { text: "Workflow is working" }.';
+    const first = await registry.execute({
+      toolId: 'agentis.build_workflow',
+      arguments: { title: 'Hello World', description },
+    }, mcpContext);
+    const second = await registry.execute({
+      toolId: 'agentis.build_workflow',
+      arguments: { title: 'Hello World', description },
+    }, mcpContext);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    const firstId = (first.output as { workflowId: string }).workflowId;
+    const secondId = (second.output as { workflowId: string }).workflowId;
+    expect(secondId).toBe(firstId);
+    const workflows = ctx.db.select().from(schema.workflows).all();
+    expect(workflows).toHaveLength(1);
+  });
+
   it('instantiates a research-report template as a specialist pipeline', async () => {
     const registry = new AgentisToolRegistry({ logger: ctx.logger });
     registerBuildTools(registry, deps());
@@ -161,8 +338,11 @@ describe('agentis.build_workflow fallback synthesis', () => {
     // Weekly schedule was inferred from "Every Monday".
     const trigger = output.graph.nodes.find((n) => n.type === 'trigger');
     expect((trigger!.config as { triggerType?: string }).triggerType).toBe('cron');
-    // Ends in a return_output node.
-    expect(output.graph.nodes.at(-1)).toEqual(expect.objectContaining({ type: 'return_output' }));
+    // Produces a return_output terminal path even after recurring-state repair
+    // appends workflow_store bookkeeping nodes.
+    const terminal = output.graph.nodes.find((n) => n.type === 'return_output');
+    expect(terminal).toBeTruthy();
+    expect(output.graph.edges.some((e) => e.target === terminal!.id)).toBe(true);
     // Analyst carries the injected aarrr-framework skill.
     const analyst = output.graph.nodes.find((n) => (n.config as { agentRole?: string }).agentRole === 'analyst');
     expect((analyst!.config as { skills?: string[] }).skills).toContain('aarrr-framework');

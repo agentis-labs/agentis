@@ -200,6 +200,41 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.specialist.create',
+    description:
+      'Author a NEW specialist (custom functional role like frontend_architect or tax_analyst) and materialize it so you can delegate to it immediately. ' +
+      'Use this before delegating when no existing role fits the task — never delegate to a role that does not exist yet. ' +
+      'Provide a role slug or name, a focused instructions/system prompt, and optional model/tools/tags. ' +
+      'Returns the materialized agentId and role so the next step can delegate to it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        role: { type: 'string', description: 'Stable role slug, e.g. frontend_architect. Derived from name when omitted.' },
+        name: { type: 'string', description: 'Display name, e.g. "Frontend Architect".' },
+        description: { type: 'string', description: 'One-line description of what this specialist is trusted to do.' },
+        instructions: { type: 'string', description: 'System prompt defining identity, responsibilities, and boundaries.' },
+        model: { type: 'string', description: 'Optional model hint, e.g. gpt-4o or claude-sonnet.' },
+        tools: { type: 'array', items: { type: 'string' }, description: 'Optional role-scoped tool names.' },
+        capabilityTags: { type: 'array', items: { type: 'string' }, description: 'Capability tags for routing.' },
+      },
+    },
+  },
+  {
+    name: 'agentis.specialist.request',
+    description:
+      'Request the best specialist for a concrete task by capability need. Use this when the right role is unclear or when a manager/orchestrator needs an explainable routing decision. Returns selected role, materialized agentId, topology, explanation, context summary, and planned specialist run trace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Concrete task or mission brief.' },
+        modality: { type: 'string', description: 'Primary input modality: text, file, image, audio, or structured_data.' },
+        desiredTopology: { type: 'string', enum: ['direct', 'supervisor', 'sequential', 'swarm', 'hierarchical', 'shadow'] },
+        materialize: { type: 'boolean', description: 'Create/reuse the durable specialist agent instance. Default true.' },
+      },
+      required: ['task'],
+    },
+  },
+  {
     name: 'agentis.agent.dispatch',
     description:
       'Send a concrete task to an existing agent. Use after selecting a real agentId from agentis.agents.list. Never pass an agent name as agentId. Returns either a chat response or a dispatched task id. Example input: {"agentId":"agent_9d2...","task":"Inspect the failing onboarding workflow and summarize the blocker."}.',
@@ -296,6 +331,27 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.memory.delete',
+    description:
+      'Delete a memory entry from the workspace persistent memory by its ID. Use this when the operator ' +
+      'asks to remove, forget, or delete a memory entry, note, fact, or lesson. Make sure to find the ' +
+      'memory entry ID using agentis.memory.read first if not already known.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'The unique ID of the memory entry to delete.',
+        },
+        agentId: {
+          type: 'string',
+          description: 'Optional agent ID context.',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  {
     name: 'agentis.knowledge.search',
     description:
       'Full-text search across workspace documents, indexed URLs, and knowledge base entries. ' +
@@ -353,6 +409,27 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         },
       },
       required: ['title', 'content'],
+    },
+  },
+  {
+    name: 'agentis.knowledge.archive',
+    description:
+      'Archive a document in the knowledge base by documentId and knowledgeBaseId. Use this when the operator ' +
+      'asks to remove, delete, or archive a document or resource from the knowledge base. Use agentis.knowledge.search ' +
+      'first to resolve the documentId and knowledgeBaseId if not already known.',
+    parameters: {
+      type: 'object',
+      properties: {
+        documentId: {
+          type: 'string',
+          description: 'The unique ID of the document to archive.',
+        },
+        knowledgeBaseId: {
+          type: 'string',
+          description: 'The ID of the knowledge base containing the document.',
+        },
+      },
+      required: ['documentId', 'knowledgeBaseId'],
     },
   },
 
@@ -571,6 +648,63 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         },
       },
       required: ['description'],
+    },
+  },
+  {
+    name: 'agentis.ability.create',
+    description:
+      'Create a reusable Agentis ability from a natural-language intent and queue it for compilation. Use when the operator asks the agent to learn, package, or create a reusable specialist capability.',
+    parameters: {
+      type: 'object',
+      properties: {
+        intent: { type: 'string', description: 'The reusable specialist behavior to create.' },
+        name: { type: 'string', description: 'Optional ability name.' },
+        domainTag: { type: 'string', description: 'Optional routing domain.' },
+      },
+      required: ['intent'],
+    },
+  },
+  {
+    name: 'agentis.extension.resolve',
+    description:
+      'Resolve an extension requirement against installed workspace capabilities before creating anything. Returns ranked candidates and whether to reuse, update, or create.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Capability intent or extension name.' },
+        requiresListenerSource: { type: 'boolean' },
+        capabilityTags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'agentis.extension.create',
+    description:
+      'Create or update a reusable workspace extension from JavaScript source and operation manifests. Resolve first and pass extensionId to update a matching capability instead of creating a duplicate. After creation, use the returned extensionId in agentis.build_workflow.',
+    parameters: {
+      type: 'object',
+      properties: {
+        extensionId: { type: 'string', description: 'Existing extension ID returned by agentis.extension.resolve.' },
+        name: { type: 'string', description: 'Human-readable extension name.' },
+        slug: { type: 'string', description: 'Optional stable slug.' },
+        description: { type: 'string', description: 'What the extension does.' },
+        source: {
+          type: 'string',
+          description: 'JavaScript source exporting async functions matching the operation names.',
+        },
+        operations: {
+          type: 'array',
+          description: 'Operation manifests including name and input/output schemas; listener operations may declare listener configuration.',
+          items: { type: 'object' },
+        },
+        permissions: { type: 'array', items: { type: 'string' } },
+        capabilityTags: { type: 'array', items: { type: 'string' } },
+        allowedDomains: { type: 'array', items: { type: 'string' } },
+        timeoutMs: { type: 'number' },
+        listenerSourceOperation: { type: 'string', description: 'Operation that acts as a persistent listener source.' },
+      },
+      required: ['name', 'source', 'operations'],
     },
   },
   {
@@ -877,7 +1011,7 @@ export const CHAT_TOOL_CATALOG_MAP: Record<string, ToolDefinition> = Object.from
 export interface ReusableWorkflowSummary {
   id: string;
   title: string;
-  summary?: string | null;
+  description?: string | null;
   inputContract?: {
     fields?: Array<{ key: string; type?: string; required?: boolean; description?: string }>;
   } | null;
@@ -902,7 +1036,7 @@ export function buildWorkspaceToolCatalog(workflows: ReusableWorkflowSummary[]):
       name: `workflow.${wf.id}`,
       description:
         `Run the "${wf.title}" workflow.` +
-        (wf.summary ? ` ${wf.summary}` : '') +
+        (wf.description ? ` ${wf.description}` : '') +
         ' Inputs map to the workflow trigger. Returns the runId so you can follow up with agentis.workflow.status.',
       parameters: {
         type: 'object',

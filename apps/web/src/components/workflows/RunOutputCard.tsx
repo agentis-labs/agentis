@@ -13,9 +13,9 @@
 
 import { useState } from 'react';
 import clsx from 'clsx';
-import { Bot, Database, FileText, GitBranch, PauseCircle, Braces, Globe, Monitor, Tablet, Smartphone, ExternalLink } from 'lucide-react';
+import { Bot, Database, FileText, GitBranch, PauseCircle, Braces, Globe, Monitor, Tablet, Smartphone, Send } from 'lucide-react';
 import { ChatMarkdown } from '../chat/ChatMarkdown';
-import { DataTableViewer, rowsFrom } from './OutputViewers';
+import { DataTableViewer, rowsFrom, safeExternalUrl } from './OutputViewers';
 
 export type OutputRenderAs = 'html' | 'markdown' | 'table' | 'json' | 'text';
 
@@ -26,12 +26,23 @@ export interface FinalNodeOutput {
   value: unknown;
   /** Viewer hint from a `return_output` node (Layer 6). */
   renderAs?: OutputRenderAs;
+  role?: 'delivery' | 'declared';
+  delivery?: {
+    integrationId: string;
+    operationId: string;
+    recipient?: string;
+    subject?: string;
+    contentType: OutputRenderAs;
+    content: string;
+    text?: string;
+    capturedAt?: string;
+  };
 }
 
 const TEXT_KEYS = ['text', 'content', 'output', 'result', 'message', 'response', 'answer', 'summary', 'description', 'body', 'details', 'markdown'];
 const TITLE_KEYS = ['title', 'name', 'label', 'headline'];
-const COLLECTION_KEYS = ['records', 'rows', 'items', 'apps'];
-const WRAPPED_VALUE_KEYS = ['app', 'result', 'output', 'data', 'payload', 'value'];
+const COLLECTION_KEYS = ['records', 'rows', 'items'];
+const WRAPPED_VALUE_KEYS = ['result', 'output', 'data', 'payload', 'value'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -157,9 +168,13 @@ function summaryEntries(value: Record<string, unknown>): Array<[string, unknown]
 }
 
 function JsonBlock({ value }: { value: unknown }) {
+  const formatted = typeof value === 'string'
+    ? value
+    : JSON.stringify(value ?? {}, null, 2).replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
+
   return (
-    <pre className="max-h-80 overflow-auto rounded-input border border-line bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-primary">
-      {JSON.stringify(value ?? {}, null, 2)}
+    <pre className="w-full max-h-80 overflow-y-auto whitespace-pre-wrap break-words rounded-input border border-line bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-primary">
+      {formatted}
     </pre>
   );
 }
@@ -177,17 +192,11 @@ type DeviceMode = keyof typeof DEVICE_WIDTHS;
 
 /**
  * LiveHTMLRenderer — renders HTML output in a sandboxed iframe (Layer 6).
- * `sandbox="allow-scripts"` WITHOUT `allow-same-origin` keeps the page
- * origin-isolated: no access to the parent DOM, cookies, or localStorage.
+ * The frame is deliberately passive: generated output cannot execute script
+ * or send embedded data to arbitrary network endpoints.
  */
 function LiveHTMLRenderer({ html }: { html: string }) {
   const [device, setDevice] = useState<DeviceMode>('desktop');
-  const openInTab = () => {
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    window.open(url, '_blank', 'noopener,noreferrer');
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  };
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="flex items-center gap-1 border-b border-line bg-surface px-2 py-1.5">
@@ -208,19 +217,11 @@ function LiveHTMLRenderer({ html }: { html: string }) {
             <Icon size={14} />
           </button>
         ))}
-        <button
-          type="button"
-          onClick={openInTab}
-          aria-label="Open in new tab"
-          className="rounded p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-        >
-          <ExternalLink size={14} />
-        </button>
       </div>
       <div className="flex justify-center bg-white p-2">
         <iframe
           title="HTML output preview"
-          sandbox="allow-scripts"
+          sandbox=""
           srcDoc={html}
           className="h-[420px] rounded border border-line bg-white transition-[width]"
           style={{ width: DEVICE_WIDTHS[device] }}
@@ -334,7 +335,7 @@ function ListArtifact({ items }: { items: unknown[] }) {
 }
 
 function LinkArtifact({ value }: { value: Record<string, unknown> }) {
-  const href = typeof value.url === 'string' ? value.url : null;
+  const href = typeof value.url === 'string' ? safeExternalUrl(value.url) : null;
   const title = firstString(value, TITLE_KEYS) ?? href;
   if (!href) return <JsonBlock value={value} />;
   return (
@@ -351,7 +352,7 @@ function LinkArtifact({ value }: { value: Record<string, unknown> }) {
 }
 
 function FileArtifact({ value }: { value: Record<string, unknown> }) {
-  const href = typeof value.url === 'string' ? value.url : null;
+  const href = typeof value.url === 'string' ? safeExternalUrl(value.url) : null;
   const name = firstString(value, ['name', 'fileName', 'title']) ?? 'Download file';
   if (!href) return <JsonBlock value={value} />;
   return (
@@ -472,12 +473,39 @@ export function RunOutputCard({ output }: { output: FinalNodeOutput }) {
   if (renderAs) {
     return (
       <div>
-        <div className="mb-2 flex items-center gap-2 text-[12px] text-text-muted">
-          <span className="text-text-muted">{RENDER_AS_GLYPH[renderAs]}</span>
-          <span className="font-medium text-text-secondary">{output.nodeTitle}</span>
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px] text-text-muted">
+          <span className="text-text-muted">
+            {output.role === 'delivery' ? <Send size={14} /> : RENDER_AS_GLYPH[renderAs]}
+          </span>
+          <span className="font-medium text-text-secondary">
+            {output.role === 'delivery' ? 'Delivered output' : output.nodeTitle}
+          </span>
           <span className="font-mono text-[11px] uppercase tracking-wide">{renderAs}</span>
+          {output.delivery?.integrationId && (
+            <span className="rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-text-muted">
+              {output.delivery.integrationId}
+            </span>
+          )}
         </div>
-        {renderByRenderAs(renderAs, value)}
+        {output.delivery && (output.delivery.subject || output.delivery.recipient) && (
+          <div className="mb-3 grid gap-2 border-y border-line/70 py-3 text-[12px] sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            {output.delivery.subject && (
+              <div>
+                <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">Subject</div>
+                <div className="truncate font-medium text-text-primary">{output.delivery.subject}</div>
+              </div>
+            )}
+            {output.delivery.recipient && (
+              <div>
+                <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">Recipient</div>
+                <div className="truncate font-mono text-[11px] text-text-secondary">{output.delivery.recipient}</div>
+              </div>
+            )}
+          </div>
+        )}
+        <div>
+          {renderByRenderAs(renderAs, value)}
+        </div>
       </div>
     );
   }

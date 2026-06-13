@@ -1,200 +1,163 @@
 /**
- * WorkspaceIntelligenceService — Layer 1 of WORKFLOW-10X-MASTERPLAN.
+ * WorkspaceIntelligenceService — operator-authored workspace context.
  *
- * Solves RC1 ("agents start from zero every task"). Reads the three persistent
- * context files from the Workspace Volume's `context/` directory —
- * WORKSPACE.md (permanent facts), MEMORY.md (append-only decision/learning log),
- * DECISIONS.md (ADRs) — and assembles a prompt block injected into every
- * agent_task dispatch and the build_workflow synthesis prompt.
+ * Authored context (the workspace "charter": tech stack, architectural rules,
+ * decisions, workflow conventions) is NOT stored as Markdown files. It lives in
+ * the canonical DB brain as operator-sourced `workspace_memory` atoms tagged
+ * `charter`, with high importance so the dispatch builder's constitutional tier
+ * always injects them. Markdown is only a render/authoring format here — never
+ * a backend. External `.md` (harness runtime files, knowledge sources) lives in
+ * the volume/knowledge layer, not here.
  *
- * MEMORY.md is relevance-scored, not dumped wholesale: each entry carries inline
- * metadata `[date][uses:N][wf:slug][conf:low|medium|high]` that `buildContextBlock`
- * parses, scores (recency + usage + workflow match), and trims to a token budget
- * so old low-signal entries don't dilute recent high-value patterns (§1.6).
- *
- * NOTE: this is a distinct service from `WorkspaceContextService`
- * (services/workspaceContext.ts), which only resolves tenant headers. The
- * masterplan §1.3 conflated the two; this is the real context-file service.
+ * Each of the three logical documents maps to one charter atom (section
+ * `workspace` | `decisions` | `workflow`). Editing a document upserts its atom;
+ * clearing it deletes the atom. `buildContextBlock` renders the charter (plus
+ * knowledge-base passages) for callers that don't yet run full brain dispatch
+ * (chat, the creation pipeline); workflow dispatch reads the same atoms through
+ * the brain directly.
  */
 
-import type { WorkspaceVolumeService } from './workspaceVolume.js';
+import { and, eq, isNull } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
+import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { MemoryEpisode } from '@agentis/core';
+import type { MemoryStore } from './memoryStore.js';
 import type { KnowledgeBaseService } from './knowledgeBase.js';
 
-const CONTEXT_DIR = 'context';
-export const CONTEXT_FILES = {
-  workspace: `${CONTEXT_DIR}/WORKSPACE.md`,
-  memory: `${CONTEXT_DIR}/MEMORY.md`,
-  decisions: `${CONTEXT_DIR}/DECISIONS.md`,
-  workflow: `${CONTEXT_DIR}/WORKFLOW.md`,
-} as const;
+export type ContextFileName = 'WORKSPACE.md' | 'DECISIONS.md' | 'WORKFLOW.md';
 
-export type ContextFileName = 'WORKSPACE.md' | 'MEMORY.md' | 'DECISIONS.md' | 'WORKFLOW.md';
-
-export interface MemoryEntry {
-  raw: string;
-  text: string;
-  section: string;
-  timestamp: number;     // ms epoch, 0 when undated
-  uses: number;
-  workflowId: string;    // 'any' applies workspace-wide
-  confidence: 'low' | 'medium' | 'high';
+interface CharterSpec {
+  section: 'workspace' | 'decisions' | 'workflow';
+  title: string;
+  kind: MemoryEpisode['kind'];
 }
+
+const CHARTER_BY_FILE: Record<ContextFileName, CharterSpec> = {
+  'WORKSPACE.md': { section: 'workspace', title: 'Workspace context', kind: 'fact' },
+  'DECISIONS.md': { section: 'decisions', title: 'Architectural decisions', kind: 'fact' },
+  'WORKFLOW.md': { section: 'workflow', title: 'Workflow conventions', kind: 'rule' },
+};
+
+const SECTION_HEADING: Record<CharterSpec['section'], string> = {
+  workspace: 'Workspace Context',
+  decisions: 'Architectural Decisions',
+  workflow: 'Workflow Conventions',
+};
 
 export interface BuildContextOptions {
   workflowId?: string;
-  /** Approx token budget for the MEMORY section. Default 2000. */
-  tokenBudget?: number;
-  /** Max MEMORY entries to inject. Default 10. */
-  maxEntries?: number;
   /**
-   * When set, search the workspace Brain (knowledge bases) with this text and
-   * append the top passages as a `Relevant Workspace Knowledge` section. This is
-   * the prompt of the task about to run, used as the retrieval query. No-op when
-   * `knowledgeBases` is not provided or no Brain content matches.
+   * When set, search workspace knowledge bases with this text and append the
+   * top passages as a `Relevant Workspace Knowledge` section.
    */
   knowledgeQuery?: string;
-  /** Brain knowledge-base service. Required for `knowledgeQuery` to take effect. */
+  /** Knowledge-base service. Required for `knowledgeQuery` to take effect. */
   knowledgeBases?: KnowledgeBaseService;
-  /** Number of Brain passages to inject. Default 3. */
+  /** Number of passages to inject. Default 3. */
   knowledgeTopK?: number;
 }
 
-const DEFAULT_WORKSPACE_MD = `# Workspace Context
-
-## Tech Stack
-_(Describe the languages, frameworks, and tools agents should always use.)_
-
-## Architectural Rules
-_(Conventions agents must never contradict without flagging.)_
-
-## Active Integrations
-_(Updated automatically as integrations are configured.)_
-
-## Constraints
-_(Budgets, do-not-do rules, approval requirements.)_
-`;
-
-const DEFAULT_MEMORY_MD = `# Session Memory Log
-
-## Decisions Made
-
-## Patterns That Failed
-
-## Effective Patterns
-`;
-
-const DEFAULT_DECISIONS_MD = `# Architectural Decision Record
-`;
-
-const DEFAULT_WORKFLOW_MD = `# Workflow Conventions
-
-## Delivery Rules
-_(Which credential/channel to use for email, Slack, GitHub, etc.)_
-
-## Review Policy
-_(When a checkpoint/human approval is required before a workflow acts.)_
-
-## Standard Patterns
-_(Reusable shapes, e.g. "morning reports: cron -> knowledge -> agent_task -> gmail".)_
-
-## Model Preferences
-_(Which model for summarization vs. code review vs. drafting.)_
-
-## Cost Guardrails
-_(Per-run cost ceilings, max parallel fan-out.)_
-`;
-
 export class WorkspaceIntelligenceService {
   constructor(
-    private readonly volume: WorkspaceVolumeService,
+    private readonly memory: MemoryStore,
+    private readonly db: AgentisSqliteDb,
     /** Optional: provide currently-configured integration names for the block. */
     private readonly listActiveIntegrations?: (workspaceId: string) => string[],
   ) {}
 
-  /** Read a context file, seeding a default the first time it's requested. */
-  async getContextFile(workspaceId: string, name: ContextFileName): Promise<string> {
-    const rel = relFor(name);
-    const existing = await this.volume.read(workspaceId, rel);
-    if (existing != null) return existing;
-    const seed = defaultFor(name);
-    await this.volume.write(workspaceId, rel, seed);
-    return seed;
-  }
-
-  /** Overwrite a context file (operator edit from Settings > Workspace > Context). */
-  async setContextFile(workspaceId: string, name: ContextFileName, content: string): Promise<void> {
-    await this.volume.write(workspaceId, relFor(name), content);
-  }
-
-  /** Append an entry to a MEMORY.md section (auto-maintenance, §1.4). Creates the section if absent. */
-  async appendMemory(workspaceId: string, section: string, entry: string): Promise<void> {
-    const current = await this.getContextFile(workspaceId, 'MEMORY.md');
-    const line = entry.trim().startsWith('-') ? entry.trim() : `- ${entry.trim()}`;
-    const next = upsertSection(current, section, line);
-    await this.setContextFile(workspaceId, 'MEMORY.md', next);
+  /** Read one authored document's content (empty string when not authored). */
+  getContextFile(workspaceId: string, name: ContextFileName): string {
+    return this.#findDoc(workspaceId, CHARTER_BY_FILE[name].section)?.content ?? '';
   }
 
   /**
-   * Assemble the prompt block injected into agent calls. Empty string when no
-   * context exists yet (so prompts aren't polluted with empty headers).
+   * Upsert one authored document as an operator charter atom. Empty content
+   * deletes the atom so cleared documents stop injecting.
+   */
+  setContextFile(workspaceId: string, name: ContextFileName, content: string): void {
+    const spec = CHARTER_BY_FILE[name];
+    const trimmed = content.trim();
+    const existing = this.#findDoc(workspaceId, spec.section);
+    if (!trimmed) {
+      if (existing) this.memory.delete(workspaceId, null, existing.id);
+      return;
+    }
+    if (existing) {
+      this.memory.update(workspaceId, null, existing.id, { title: spec.title, content: trimmed, importance: 0.9 });
+      return;
+    }
+    this.memory.write({
+      workspaceId,
+      scopeId: null,
+      kind: spec.kind,
+      source: 'operator',
+      title: spec.title,
+      content: trimmed,
+      trust: 0.85,
+      importance: 0.9,
+      tags: ['charter', spec.section],
+      provenance: { source: 'workspace_context', section: spec.section },
+    });
+  }
+
+  /**
+   * Assemble the authored-context block for callers without full brain dispatch
+   * (chat, creation). Workflow dispatch injects the same atoms via the brain's
+   * constitutional tier instead. Empty string means no authored context exists.
    */
   async buildContextBlock(workspaceId: string, opts: BuildContextOptions = {}): Promise<string> {
-    const [workspaceMd, memoryMd, workflowMd] = await Promise.all([
-      this.getContextFile(workspaceId, 'WORKSPACE.md'),
-      this.getContextFile(workspaceId, 'MEMORY.md'),
-      this.getContextFile(workspaceId, 'WORKFLOW.md'),
-    ]);
-
-    const entries = parseMemoryEntries(memoryMd);
-    const selected = selectRelevantEntries(entries, {
-      workflowId: opts.workflowId,
-      tokenBudget: opts.tokenBudget ?? 2000,
-      maxEntries: opts.maxEntries ?? 10,
-    });
-
+    void opts.workflowId;
     const sections: string[] = [];
-    const ws = stripPlaceholders(workspaceMd);
-    if (ws.trim()) sections.push(`## Your Workspace Context\n${ws.trim()}`);
-
-    const conventions = stripPlaceholders(workflowMd);
-    if (conventions.trim()) sections.push(`## Workflow Conventions (follow these when building workflows)\n${conventions.trim()}`);
+    for (const spec of Object.values(CHARTER_BY_FILE)) {
+      const doc = this.#findDoc(workspaceId, spec.section);
+      const content = doc?.content.trim();
+      if (content) sections.push(`## ${SECTION_HEADING[spec.section]}\n${content}`);
+    }
 
     const active = this.listActiveIntegrations?.(workspaceId) ?? [];
     if (active.length) sections.push(`## Active Integrations\n${active.join(', ')}`);
 
-    if (selected.length) {
-      const lines = selected.map((e) => `- ${e.text}${e.section ? ` _(${e.section.toLowerCase()})_` : ''}`);
-      sections.push(`## Relevant Memory — apply effective patterns, avoid failed ones\n${lines.join('\n')}`);
-    }
-
-    const knowledge = this.#retrieveKnowledge(workspaceId, opts);
+    const knowledge = await this.#retrieveKnowledge(workspaceId, opts);
     if (knowledge) sections.push(knowledge);
 
     if (!sections.length) return '';
     return `<workspace_context>\n${sections.join('\n\n')}\n</workspace_context>`;
   }
 
+  /** The operator charter atom for a section, or null when not authored. */
+  #findDoc(workspaceId: string, section: CharterSpec['section']) {
+    const rows = this.db.select().from(schema.workspaceMemory)
+      .where(and(
+        eq(schema.workspaceMemory.workspaceId, workspaceId),
+        isNull(schema.workspaceMemory.scopeId),
+        eq(schema.workspaceMemory.source, 'operator'),
+      ))
+      .all();
+    return rows.find((row) => {
+      const tags = parseTags(row.tags);
+      return tags.includes('charter') && tags.includes(section);
+    }) ?? null;
+  }
+
   /**
-   * Best-effort Brain retrieval (§G1). Runs one lexical search across every
-   * workspace knowledge base using the task prompt as the query and folds the
-   * top passages into the context block. Returns null when there is nothing to
-   * inject so the caller never emits an empty header. Never throws — a Brain
-   * read failure must not block an agent dispatch.
+   * Best-effort knowledge-base retrieval. Never throws; context retrieval must
+   * not block an agent dispatch.
    */
-  #retrieveKnowledge(workspaceId: string, opts: BuildContextOptions): string | null {
+  async #retrieveKnowledge(workspaceId: string, opts: BuildContextOptions): Promise<string | null> {
     const query = opts.knowledgeQuery?.trim();
     if (!query || !opts.knowledgeBases) return null;
     const topK = Math.max(1, Math.min(opts.knowledgeTopK ?? 3, 8));
     try {
       const bases = opts.knowledgeBases.listKnowledgeBases(workspaceId);
       if (!bases.length) return null;
-      const hits = bases
-        .flatMap((b) => opts.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))
+      const hits = (await Promise.all(bases
+        .map((b) => opts.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))))
+        .flat()
         .sort((a, b) => b.score - a.score)
         .slice(0, topK);
       if (!hits.length) return null;
       const lines = hits.map((h) => `- ${collapse(h.content).slice(0, 500)}`);
-      return `## Relevant Workspace Knowledge (retrieved from the Brain for this task)\n${lines.join('\n')}`;
+      return `## Relevant Workspace Knowledge\n${lines.join('\n')}`;
     } catch {
       return null;
     }
@@ -206,116 +169,13 @@ function collapse(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-function relFor(name: ContextFileName): string {
-  if (name === 'WORKSPACE.md') return CONTEXT_FILES.workspace;
-  if (name === 'MEMORY.md') return CONTEXT_FILES.memory;
-  if (name === 'WORKFLOW.md') return CONTEXT_FILES.workflow;
-  return CONTEXT_FILES.decisions;
-}
-
-function defaultFor(name: ContextFileName): string {
-  if (name === 'WORKSPACE.md') return DEFAULT_WORKSPACE_MD;
-  if (name === 'MEMORY.md') return DEFAULT_MEMORY_MD;
-  if (name === 'WORKFLOW.md') return DEFAULT_WORKFLOW_MD;
-  return DEFAULT_DECISIONS_MD;
-}
-
-/** Drop `_(placeholder)_` italic hint lines so a freshly-seeded file reads as empty. */
-export function stripPlaceholders(md: string): string {
-  return md
-    .split('\n')
-    .filter((l) => !/^_\(.*\)_\s*$/.test(l.trim()))
-    .join('\n');
-}
-
-/**
- * Parse MEMORY.md into structured, scoreable entries. Recognizes list items of
- * the form `- [2026-05-19][uses:3][wf:standup][conf:high] <text>` under
- * `## Section` headers. Untagged list items still parse (defaults applied) so
- * hand-written memory works too.
- */
-export function parseMemoryEntries(md: string): MemoryEntry[] {
-  const entries: MemoryEntry[] = [];
-  let section = '';
-  for (const rawLine of md.split('\n')) {
-    const line = rawLine.trimEnd();
-    const heading = /^#{2,}\s+(.*)$/.exec(line);
-    if (heading) {
-      section = heading[1]!.trim();
-      continue;
-    }
-    const item = /^\s*-\s+(.*)$/.exec(line);
-    if (!item) continue;
-    const body = item[1]!;
-    const tags = [...body.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]!);
-    let timestamp = 0;
-    let uses = 0;
-    let workflowId = 'any';
-    let confidence: MemoryEntry['confidence'] = 'medium';
-    for (const tag of tags) {
-      const date = /^(\d{4})-(\d{2})-(\d{2})$/.exec(tag);
-      if (date) { const t = Date.parse(tag); if (!Number.isNaN(t)) timestamp = t; continue; }
-      const u = /^uses:(\d+)$/.exec(tag); if (u) { uses = Number(u[1]); continue; }
-      const wf = /^wf:(.+)$/.exec(tag); if (wf) { workflowId = wf[1]!; continue; }
-      const conf = /^conf:(low|medium|high)$/.exec(tag); if (conf) { confidence = conf[1] as MemoryEntry['confidence']; continue; }
-    }
-    // Text = body with all leading bracket tags stripped.
-    const text = body.replace(/^(\s*\[[^\]]+\])+\s*/, '').trim();
-    if (!text) continue;
-    entries.push({ raw: body, text, section, timestamp, uses, workflowId, confidence });
+function parseTags(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((t): t is string => typeof t === 'string');
+  if (typeof raw !== 'string') return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : [];
+  } catch {
+    return [];
   }
-  return entries;
-}
-
-/**
- * Relevance-score and select entries within a token budget (§1.6).
- * score = recency*0.40 + usage*0.35 + workflowMatch*0.25, with a confidence nudge.
- */
-export function selectRelevantEntries(
-  entries: MemoryEntry[],
-  ctx: { workflowId?: string; tokenBudget: number; maxEntries: number },
-): MemoryEntry[] {
-  const now = Date.now();
-  const confWeight = { low: 0.85, medium: 1, high: 1.1 } as const;
-  const scored = entries.map((e) => {
-    const ageDays = e.timestamp ? (now - e.timestamp) / 86_400_000 : 45; // undated → mid-life
-    const recency = Math.max(0, 1 - ageDays / 90);
-    const usage = Math.min(1, e.uses / 10);
-    const wfMatch = e.workflowId === ctx.workflowId ? 1 : e.workflowId === 'any' ? 0.5 : 0.3;
-    const base = recency * 0.40 + usage * 0.35 + wfMatch * 0.25;
-    return { entry: e, score: base * confWeight[e.confidence] };
-  });
-  scored.sort((a, b) => b.score - a.score);
-  const out: MemoryEntry[] = [];
-  let budget = ctx.tokenBudget;
-  for (const s of scored) {
-    if (out.length >= ctx.maxEntries) break;
-    const cost = estimateTokens(s.entry.text);
-    if (cost > budget) continue;
-    budget -= cost;
-    out.push(s.entry);
-  }
-  return out;
-}
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-/** Insert a list line under a `## Section`, creating the section at the end if missing. */
-function upsertSection(md: string, section: string, line: string): string {
-  const lines = md.split('\n');
-  const headerRe = new RegExp(`^#{2,}\\s+${escapeRegExp(section)}\\s*$`, 'i');
-  const idx = lines.findIndex((l) => headerRe.test(l.trim()));
-  if (idx === -1) {
-    const trimmed = md.replace(/\s*$/, '');
-    return `${trimmed}\n\n## ${section}\n${line}\n`;
-  }
-  // Insert right after the header (newest-first within the section).
-  lines.splice(idx + 1, 0, line);
-  return lines.join('\n');
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

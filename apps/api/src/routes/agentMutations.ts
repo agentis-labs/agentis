@@ -30,6 +30,8 @@ import { assertSafeUrl } from '../services/safeUrl.js';
 import { defaultInstructionsForRole, isDefaultRoleInstructions } from '../data/playbook-library.js';
 import { joinUrl, normalizeOpenClawGatewayUrl, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
 import { repairCliHarnessConfig } from '../services/harnessConfigRepair.js';
+import type { McpHarnessServer, McpHarnessSessionService } from '../services/mcpHarnessSession.js';
+import { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']);
 const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
@@ -40,7 +42,6 @@ const createSchema = z.object({
   adapterType: adapterTypeSchema,
   ambientId: z.string().nullish(),
   gatewayId: z.string().nullish(),
-  spaceId: z.string().nullish(),
   capabilityTags: z.array(z.string()).default([]),
   config: z.record(z.unknown()).default({}),
   instructions: z.string().nullish(),
@@ -49,6 +50,8 @@ const createSchema = z.object({
   runtimeModel: z.string().nullish(),
   role: z.string().max(120).nullish(),
   reportsTo: z.string().nullish(),
+  spaceTag: z.string().max(80).nullish(),
+  spaceId: z.string().nullish(),
   isPaused: z.boolean().optional(),
   monthlyBudgetCents: z.number().int().nonnegative().nullish(),
   canvasPosition: z.object({ x: z.number(), y: z.number() }).nullish(),
@@ -60,7 +63,6 @@ const createSchema = z.object({
 const updateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   description: z.string().max(240).nullish().optional(),
-  spaceId: z.string().nullish().optional(),
   capabilityTags: z.array(z.string()).optional(),
   config: z.record(z.unknown()).optional(),
   instructions: z.string().nullish().optional(),
@@ -69,6 +71,8 @@ const updateSchema = z.object({
   runtimeModel: z.string().nullish().optional(),
   role: z.string().max(120).nullish().optional(),
   reportsTo: z.string().nullish().optional(),
+  spaceTag: z.string().max(80).nullish().optional(),
+  spaceId: z.string().nullish().optional(),
   isPaused: z.boolean().optional(),
   monthlyBudgetCents: z.number().int().nonnegative().nullish().optional(),
   canvasPosition: z.object({ x: z.number(), y: z.number() }).nullish().optional(),
@@ -88,6 +92,7 @@ export interface AgentRouteDeps {
   adapters: AdapterManager;
   logger: Logger;
   conversations: ConversationStore;
+  mcpHarness?: McpHarnessSessionService;
 }
 
 export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
@@ -100,6 +105,12 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     if (body.reportsTo) ensureReportsToTarget(deps.db, ws.workspaceId, body.reportsTo);
     const id = randomUUID();
     ensureOrEstablishSingleOrchestrator(deps.db, ws.workspaceId, body.role ?? null, id, body.replaceExistingOrchestrator === true);
+    const domain = resolveAgentDomain(deps.db, ws.workspaceId, {
+      role: body.role ?? null,
+      requestedSpaceId: body.spaceId ?? null,
+      reportsTo: body.reportsTo ?? null,
+      fallbackSpaceTag: body.spaceTag ?? null,
+    });
     const colorHex = body.colorHex ?? CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
     const repaired = await repairCliHarnessConfig(body.adapterType, body.config);
     const config = repaired.config;
@@ -117,7 +128,6 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           packageId: null,
           name: body.name,
           description: body.description ?? null,
-          spaceId: body.spaceId ?? null,
           adapterType: body.adapterType,
           capabilityTags: body.capabilityTags,
           config,
@@ -129,6 +139,8 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           runtimeModel: body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, config),
           role: body.role ?? null,
           reportsTo: body.reportsTo ?? null,
+          spaceTag: domain.spaceTag,
+          spaceId: domain.spaceId,
           isPaused,
           monthlyBudgetCents: body.monthlyBudgetCents ?? null,
           canvasPosition: body.canvasPosition ?? null,
@@ -165,7 +177,10 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
       adapterType: body.adapterType,
       colorHex,
       status,
-      agent: { id, name: body.name, adapterType: body.adapterType, colorHex, status },
+      spaceId: domain.spaceId,
+      spaceTag: domain.spaceTag,
+      spaceName: domain.spaceName,
+      agent: { id, name: body.name, adapterType: body.adapterType, colorHex, status, spaceId: domain.spaceId, spaceTag: domain.spaceTag, spaceName: domain.spaceName },
     }, 201);
   });
 
@@ -196,6 +211,13 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
       if (regenerated) nextInstructions = regenerated;
     }
     if (body.reportsTo) ensureReportsToTarget(deps.db, ws.workspaceId, body.reportsTo, id);
+    const nextReportsTo = body.reportsTo === undefined ? existing.reportsTo : body.reportsTo ?? null;
+    const nextDomain = resolveAgentDomain(deps.db, ws.workspaceId, {
+      role: nextRole ?? null,
+      requestedSpaceId: body.spaceId === undefined ? existing.spaceId ?? null : body.spaceId ?? null,
+      reportsTo: nextReportsTo,
+      fallbackSpaceTag: body.spaceTag === undefined ? existing.spaceTag ?? null : body.spaceTag ?? null,
+    });
     const rawNextConfig = body.config ?? (existing.config as Record<string, unknown>);
     const repairedConfig = await repairCliHarnessConfig(existing.adapterType as V1HarnessAdapterType, rawNextConfig);
     const nextConfig = repairedConfig.config;
@@ -206,14 +228,15 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
         .set({
           name: body.name ?? existing.name,
           description: body.description === undefined ? existing.description : body.description,
-          spaceId: body.spaceId === undefined ? existing.spaceId : body.spaceId,
           capabilityTags: body.capabilityTags ?? (existing.capabilityTags as string[]),
           config: nextConfig,
           instructions: nextInstructions,
           avatarGlyph: body.avatarGlyph === undefined ? existing.avatarGlyph : body.avatarGlyph,
           runtimeModel: body.runtimeModel === undefined ? existing.runtimeModel : body.runtimeModel,
           role: nextRole,
-          reportsTo: body.reportsTo === undefined ? existing.reportsTo : body.reportsTo,
+          reportsTo: nextReportsTo,
+          spaceTag: nextDomain.spaceTag,
+          spaceId: nextDomain.spaceId,
           isPaused: nextIsPaused,
           monthlyBudgetCents: body.monthlyBudgetCents === undefined ? existing.monthlyBudgetCents : body.monthlyBudgetCents,
           canvasPosition: body.canvasPosition === undefined ? existing.canvasPosition : body.canvasPosition,
@@ -337,6 +360,44 @@ function loadAgent(db: AgentisSqliteDb, workspaceId: string, id: string) {
   return a;
 }
 
+function resolveAgentDomain(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  input: {
+    role: string | null;
+    requestedSpaceId: string | null;
+    reportsTo: string | null;
+    fallbackSpaceTag: string | null;
+  },
+): { spaceId: string | null; spaceName: string | null; spaceTag: string | null } {
+  if ((input.role ?? '').toLowerCase() === 'orchestrator') {
+    return { spaceId: null, spaceName: null, spaceTag: null };
+  }
+
+  let spaceId = input.requestedSpaceId;
+  if (!spaceId && input.reportsTo) {
+    const supervisor = db
+      .select({ spaceId: schema.agents.spaceId })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.id, input.reportsTo), eq(schema.agents.workspaceId, workspaceId)))
+      .get();
+    spaceId = supervisor?.spaceId ?? null;
+  }
+
+  if (!spaceId) {
+    const fallback = input.fallbackSpaceTag?.trim();
+    return { spaceId: null, spaceName: null, spaceTag: fallback ? fallback.slice(0, 80) : null };
+  }
+
+  const space = db
+    .select({ id: schema.spaces.id, name: schema.spaces.name })
+    .from(schema.spaces)
+    .where(and(eq(schema.spaces.id, spaceId), eq(schema.spaces.workspaceId, workspaceId)))
+    .get();
+  if (!space) throw new AgentisError('RESOURCE_NOT_FOUND', `space ${spaceId} not found`);
+  return { spaceId: space.id, spaceName: space.name, spaceTag: space.name.trim().slice(0, 80) };
+}
+
 function ensureOrEstablishSingleOrchestrator(db: AgentisSqliteDb, workspaceId: string, role: string | null | undefined, currentAgentId: string, replaceExisting: boolean) {
   if (role !== 'orchestrator') return;
   const predicates = [
@@ -453,6 +514,8 @@ async function registerAdapter(
     await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CodexAdapter({
       agentId,
+      workspaceId,
+      sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
@@ -463,6 +526,8 @@ async function registerAdapter(
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
       timeoutSec: numberOf(config.timeoutSec),
+      browser: booleanOf(config.browser),
+      ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
       logger: deps.logger,
     });
     await adapter.connect();
@@ -473,6 +538,8 @@ async function registerAdapter(
     await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new CursorAdapter({
       agentId,
+      workspaceId,
+      sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
@@ -489,14 +556,19 @@ async function registerAdapter(
     await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new HermesAgentAdapter({
       agentId,
+      workspaceId,
+      sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
+      chatTransport: stringOf(config.chatTransport) === 'acp' ? 'acp' : 'cli',
       maxTurns: numberOf(config.maxTurns),
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
       timeoutSec: numberOf(config.timeoutSec),
       graceSec: numberOf(config.graceSec),
+      instructions: deps.db.select({ instructions: schema.agents.instructions }).from(schema.agents).where(eq(schema.agents.id, agentId)).get()?.instructions ?? null,
+      ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
       logger: deps.logger,
     });
     await adapter.connect();
@@ -506,14 +578,18 @@ async function registerAdapter(
   await ensureCliHarnessAvailable(adapterType, config);
   const adapter = new ClaudeCodeAdapter({
     agentId,
+    workspaceId,
+    sessionStore: new RuntimeSessionStore(deps.db),
     binaryPath: cliCommandFromConfig(config) ?? undefined,
     cwd: stringOf(config.cwd) ?? undefined,
     model: stringOf(config.model) ?? undefined,
     maxTurns: numberOf(config.maxTurns),
     allowedTools: stringArrayOf(config.allowedTools),
+    dangerouslySkipPermissions: booleanOf(config.dangerouslySkipPermissions),
     extraArgs: stringArrayOf(config.extraArgs),
     env: recordStringOf(config.env),
     timeoutSec: numberOf(config.timeoutSec),
+    ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
     logger: deps.logger,
   });
   await adapter.connect();
@@ -530,6 +606,13 @@ async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterTy
 function runtimeModelFromConfig(adapterType: V1HarnessAdapterType, config: Record<string, unknown>): string | null {
   if (adapterType === 'openclaw' || adapterType === 'http') return null;
   return stringOf(config.model);
+}
+
+function mcpServersFor(deps: AgentRouteDeps, workspaceId: string, agentId: string): McpHarnessServer[] | undefined {
+  if (!deps.mcpHarness?.enabled) return undefined;
+  const agent = deps.db.select({ userId: schema.agents.userId }).from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+  const server = deps.mcpHarness.forWorkspace(workspaceId, null, agent?.userId, agentId);
+  return server ? [server] : undefined;
 }
 
 function httpUrlFromConfig(config: Record<string, unknown>, pathKey: string, urlKey: string): string | null {
@@ -617,6 +700,6 @@ async function assertSafeGatewayUrl(rawUrl: string): Promise<void> {
     parsed.protocol = parsed.protocol === 'ws:' ? 'http:' : 'https:';
   }
   await assertSafeUrl(parsed.toString(), {
-    allowPrivate: String(process.env.AGENTIS_GATEWAY_ALLOW_PRIVATE ?? process.env.AGENTIS_SKILL_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+    allowPrivate: String(process.env.AGENTIS_GATEWAY_ALLOW_PRIVATE ?? process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
   });
 }

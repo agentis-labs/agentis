@@ -7,6 +7,7 @@ export interface ChatPrimaryScope {
   role: 'orchestrator' | 'manager';
   status?: string | null;
   colorHex?: string | null;
+  /** Space/domain a manager governs — its secondary label in the scope switcher. */
   spaceName?: string | null;
 }
 

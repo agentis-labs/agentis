@@ -8,22 +8,43 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type {
   AgentAdapter,
   AdapterCapabilities,
   AdapterHealthStatus,
   ChatDelta,
+  ChatInvocationOptions,
   ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
+  RuntimeContext,
+  RuntimeDescriptor,
+  RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
-import { buildMarkerToolPrompt, extractMarkerToolCalls, formatToolManifestAwareness, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
+import { buildMarkerToolPrompt, formatToolManifestAwareness, stripProcessNoise } from './markerToolProtocol.js';
+import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
+import { codexServiceTierArgs } from './codexServiceTier.js';
+import { linkAbortSignal } from './abort.js';
+import {
+  chatHardCeilingMs,
+  clampChatTimeout,
+  DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  runCliChatTurn,
+  type CliChatPart,
+} from './cliChatRuntime.js';
+import { probeCliRuntime } from './cliRuntimeProbe.js';
+import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
 
-/** Safety cap for one interactive chat turn when no explicit timeout is configured. */
-const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
+const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 15_000;
+const DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS = 30_000;
+/** Idle floor for browser-enabled turns, sized to outlast the node_repl 120s boot. */
+const BROWSER_BOOT_IDLE_MS = 150_000;
 
 export interface CodexAdapterOptions {
   agentId: string;
@@ -39,6 +60,24 @@ export interface CodexAdapterOptions {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
+  /**
+   * Opt in to the harness's NATIVE browser / computer-use. The browser lives in
+   * the user's Codex config (the `browser@openai-bundled` plugin + the `node_repl`
+   * MCP backend with `BROWSER_USE_*`), which `--ignore-user-config` normally strips
+   * for fast, hermetic chat. When this is set, Agentis loads that config instead so
+   * the agent can really browse — at the cost of a heavier cold boot (the chat path
+   * gives browser turns a longer idle budget to absorb it). Off by default; set only
+   * for agents that declare the `browser` affordance. (UNIVERSAL-HARNESS §4/§6.)
+   */
+  browser?: boolean;
+  /**
+   * Agentis MCP servers to mount so the harness calls Agentis tools natively and
+   * runs its own loop in ONE invocation (no marker-protocol re-spawn). When set,
+   * `toolForwarding` becomes `mcp_native`. (UNIVERSAL-HARNESS §5.)
+   */
+  mcpServers?: McpHarnessServer[];
+  workspaceId?: string;
+  sessionStore?: RuntimeSessionStore;
   logger: Logger;
 }
 
@@ -46,6 +85,8 @@ export class CodexAdapter implements AgentAdapter {
   readonly adapterType = 'codex' as const;
   readonly #handlers = new Set<(event: NormalizedAgentEvent) => void>();
   readonly #inFlight = new Map<string, AbortController>();
+  readonly #sessions = new Map<string, string>();
+  #version: string | null = null;
 
   constructor(private readonly opts: CodexAdapterOptions) {}
 
@@ -57,15 +98,112 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async healthCheck(): Promise<AdapterHealthStatus> {
-    return { isHealthy: true, checkedAt: new Date().toISOString() };
+    const result = await probeCliRuntime({
+      binary: this.opts.binaryPath ?? 'codex',
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      logger: this.opts.logger,
+      logTag: 'codex',
+    });
+    this.#version = result.version;
+    return result.health;
+  }
+
+  #mcpNative(): boolean {
+    return (this.opts.mcpServers?.length ?? 0) > 0;
+  }
+
+  #browser(): boolean {
+    return this.opts.browser === true;
   }
 
   capabilities(): AdapterCapabilities {
     return {
       interactiveChat: true,
       toolCalling: true,
-      toolForwarding: 'marker_protocol',
+      toolForwarding: this.#mcpNative() ? 'mcp_native' : 'marker_protocol',
+      execution: {
+        longRunning: true,
+        pausable: false,
+        sandbox: 'process',
+        maxConcurrent: 1,
+      },
+      affordances: {
+        fileSystem: true,
+        terminal: true,
+        // The native browser/computer-use is only available when the operator
+        // opts the agent into loading the Codex browser config (see `browser`).
+        ...(this.#browser() ? { browser: true, computerUse: true } : {}),
+      },
+      memory: {
+        ingestible: true,
+        injectable: true,
+      },
     };
+  }
+
+  async getRuntimeContext(): Promise<RuntimeContext> {
+    const configuredModel = this.opts.model?.trim();
+    return {
+      provider: 'OpenAI',
+      models: configuredModel
+        ? [{
+          id: configuredModel,
+          label: configuredModel,
+          source: 'agent_config',
+          verified: false,
+        }]
+        : [],
+      currentModel: configuredModel ?? 'unknown',
+      currentModelSource: configuredModel ? 'agent_config' : 'fallback',
+      currentModelVerified: false,
+      efforts: [
+        { id: 'minimal', label: 'Minimal' },
+        { id: 'low', label: 'Low' },
+        { id: 'medium', label: 'Medium' },
+        { id: 'high', label: 'High' },
+        { id: 'xhigh', label: 'Extra High' },
+      ],
+      currentEffort: this.opts.modelReasoningEffort ?? (this.opts.fastMode ? 'minimal' : undefined),
+      fastModeSupported: true,
+      fastModeEnabled: this.opts.fastMode ?? false,
+    };
+  }
+
+  async describeRuntime(): Promise<Partial<RuntimeDescriptor>> {
+    const observedAt = new Date().toISOString();
+    return {
+      version: this.#version
+        ? { value: this.#version, source: 'runtime', observedAt, verified: true }
+        : null,
+      process: {
+        warm: false,
+        activeSessions: this.#sessions.size,
+      },
+    };
+  }
+
+  async listRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
+    if (this.opts.sessionStore && this.opts.workspaceId) {
+      return this.opts.sessionStore.list(this.opts.workspaceId, this.opts.agentId);
+    }
+    const now = new Date().toISOString();
+    return [...this.#sessions.entries()].map(([sessionKey, runtimeSessionId]) => ({
+      id: `${this.opts.agentId}:${sessionKey}`,
+      sessionKey,
+      runtimeSessionId,
+      status: 'idle',
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now,
+    }));
+  }
+
+  async closeRuntimeSession(sessionKey: string): Promise<void> {
+    this.#sessions.delete(sessionKey);
+    if (this.opts.sessionStore && this.opts.workspaceId) {
+      this.opts.sessionStore.remove(this.opts.workspaceId, this.opts.agentId, sessionKey);
+    }
   }
 
   onEvent(handler: (event: NormalizedAgentEvent) => void): void {
@@ -74,14 +212,15 @@ export class CodexAdapter implements AgentAdapter {
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
     const controller = new AbortController();
+    const unlinkAbort = linkAbortSignal(task.signal, controller);
     this.#inFlight.set(task.taskId, controller);
     const binary = this.opts.binaryPath ?? 'codex';
-    const args = buildCodexArgs(this.opts);
+    const args = buildCodexArgs(this.opts, task.preferredModel);
     let childProcess: ReturnType<typeof spawn>;
     let terminalEventEmitted = false;
     let timeout: NodeJS.Timeout | undefined;
     try {
-      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
+      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
       const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
       childProcess = spawn(target.command, target.args, {
         cwd: this.opts.cwd,
@@ -92,6 +231,7 @@ export class CodexAdapter implements AgentAdapter {
       });
     } catch (err) {
       this.#emitFailure(task, `codex_spawn_failed: ${(err as Error).message}`);
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       return;
     }
@@ -115,15 +255,20 @@ export class CodexAdapter implements AgentAdapter {
       if (terminalEventEmitted) return;
       terminalEventEmitted = true;
       this.#emitFailure(task, `codex_error: ${err.message}`);
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
     });
-    childProcess.stderr?.on('data', (data) =>
-      this.opts.logger.warn('codex.stderr', { data: String(data).slice(0, 512) }),
-    );
+    let stderrText = '';
+    childProcess.stderr?.on('data', (data) => {
+      const chunk = String(data);
+      stderrText = `${stderrText}${chunk}`.slice(-4096);
+      this.opts.logger.warn('codex.stderr', { data: chunk.slice(0, 512) });
+    });
 
     let buffer = '';
     let transcript = '';
+    let stdoutError = '';
     let lastOutput: Record<string, unknown> | undefined;
     childProcess.stdout?.on('data', (chunk) => {
       buffer += String(chunk);
@@ -134,6 +279,7 @@ export class CodexAdapter implements AgentAdapter {
         if (!line) continue;
         try {
           const event = JSON.parse(line) as CodexJsonEvent;
+          stdoutError = extractCodexError(event) ?? stdoutError;
           const text = extractText(event);
           if (text) {
             transcript += text;
@@ -170,6 +316,7 @@ export class CodexAdapter implements AgentAdapter {
     });
 
     childProcess.on('exit', (code) => {
+      unlinkAbort();
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
       if (terminalEventEmitted) return;
@@ -185,7 +332,7 @@ export class CodexAdapter implements AgentAdapter {
           timestamp: timestamp(),
         });
       } else {
-        this.#emitFailure(task, `codex exited ${code}`);
+        this.#emitFailure(task, formatCodexExitError(code, stderrText, stdoutError));
       }
     });
 
@@ -197,118 +344,115 @@ export class CodexAdapter implements AgentAdapter {
     this.#inFlight.delete(taskId);
   }
 
-  async *chat(messages: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
-    const controller = new AbortController();
-    const binary = this.opts.binaryPath ?? 'codex';
-    const args = buildCodexArgs(this.opts);
-    const queue = createChatQueue();
-    let childProcess: ReturnType<typeof spawn>;
-    let timeout: NodeJS.Timeout | undefined;
-    try {
-      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
-      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
-      childProcess = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
-        env,
-        windowsHide: true,
-        signal: controller.signal,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      const message = `Codex adapter failed to start: ${(err as Error).message}`;
-      this.opts.logger.warn('codex.chat.spawn_failed', { err: message });
-      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
-      yield { type: 'done', finishReason: 'error' };
-      return;
-    }
-    // A single interactive chat turn must be bounded even when the agent config
-    // sets no timeout — otherwise a CLI that goes off exploring its sandbox can
-    // hang the conversation indefinitely (no spinner end, no dismiss).
-    const chatTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
+  async *chat(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    options?: ChatInvocationOptions,
+  ): AsyncIterable<ChatDelta> {
+    const sessionKey = options?.sessionKey?.trim() || 'default';
+    const storedSession = this.#sessions.get(sessionKey)
+      ?? (this.opts.sessionStore && this.opts.workspaceId
+        ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
+        : undefined);
+    const interactive = options?.latencyClass === 'interactive';
+    const structured = options?.latencyClass === 'structured';
+    const callerOwnsToolLoop = options?.toolMode === 'caller_loop';
+    const baseArgs = buildCodexArgs(this.opts, options?.preferredModel, interactive
+      // `minimal` is rejected when Codex built-ins such as web_search or
+      // image_gen are available. `low` is the fastest universally compatible
+      // interactive profile.
+      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop }
+      : structured
+        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop }
+        : { mountMcp: !callerOwnsToolLoop });
+    const args = storedSession
+      ? ['exec', 'resume', storedSession, ...baseArgs.slice(1)]
+      : baseArgs;
+    // IDLE-based budget, not wall-clock (see cliChatRuntime). Browser turns load
+    // the heavy native config (node_repl has a 120s startup), which is silent —
+    // give them a longer idle floor or the watchdog kills the boot before the
+    // first browser event ever streams.
+    const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
-      : DEFAULT_CHAT_TURN_TIMEOUT_MS;
-    timeout = setTimeout(() => controller.abort(), chatTimeoutMs);
-    timeout.unref?.();
-    let stderrText = '';
-    childProcess.stderr?.on('data', (data) => {
-      const chunk = String(data);
-      stderrText = `${stderrText}${chunk}`.slice(-1024);
-      this.opts.logger.warn('codex.chat.stderr', { data: chunk.slice(0, 512) });
-    });
-    childProcess.on('error', (err) => {
-      queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: `Codex error: ${err.message}` });
-      queue.push({ type: 'done', finishReason: 'error' });
-      queue.close();
-      if (timeout) clearTimeout(timeout);
-    });
-    let buffer = '';
-    let transcript = '';
-    let rawFallback = '';
-    const pendingToolCalls: ChatDelta[] = [];
-    childProcess.stdout?.on('data', (chunk) => {
-      buffer += String(chunk);
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-        if (!line) continue;
-        try {
-          const event = JSON.parse(line) as CodexJsonEvent;
-          if (isReasoningEvent(event)) {
-            // Reasoning streams live into the ThinkingBubble rather than being
-            // mixed into the final answer text (CHAT-10X-VISION §3.3).
-            const reasoning = extractText(event);
-            if (reasoning) queue.push({ type: 'thinking', delta: reasoning });
-          } else {
-            const text = extractText(event);
-            if (text) transcript += text;
-            const toolCall = extractToolCall(event);
-            if (toolCall) pendingToolCalls.push({ type: 'tool_call', id: randomUUID(), name: toolCall.tool, args: toolCall.input });
-          }
-        } catch {
-          // Codex runs in --json mode, so every meaningful token arrives as a
-          // JSON event. Non-JSON lines are environment noise (e.g. Windows
-          // taskkill output: "ÊXITO: o processo com PID … foi finalizado").
-          // Never surface them as assistant text — retain a filtered copy only
-          // as a fallback for the rare case where the model emits no JSON.
-          if (!isProcessNoiseLine(line)) rawFallback += `${line}\n`;
+      : interactive
+        ? DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS
+        : structured
+          ? DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS
+        : DEFAULT_CHAT_TURN_TIMEOUT_MS;
+    const baseIdleMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
+    const idleTimeoutMs = this.#browser() ? Math.max(baseIdleMs, BROWSER_BOOT_IDLE_MS) : baseIdleMs;
+
+    // Every event `type` we saw — logged if the turn captured no text, so a future
+    // Codex CLI schema change surfaces immediately instead of silent empty replies.
+    const seenTypes = new Set<string>();
+    const interpret = (event: unknown): CliChatPart[] => {
+      const ev = event as CodexJsonEvent;
+      const envelope = objectOf(ev.msg) ?? ev;
+      const runtimeSessionId = firstString(
+        envelope.thread_id,
+        envelope.threadId,
+        ev.thread_id,
+        ev.threadId,
+      );
+      if (runtimeSessionId) {
+        this.#sessions.set(sessionKey, runtimeSessionId);
+        if (this.opts.sessionStore && this.opts.workspaceId) {
+          this.opts.sessionStore.upsert({
+            workspaceId: this.opts.workspaceId,
+            agentId: this.opts.agentId,
+            conversationId: sessionKey,
+            sessionKey,
+            runtimeSessionId,
+            selectedModel: options?.preferredModel ?? this.opts.model ?? null,
+            status: 'idle',
+          });
         }
       }
-    });
-    childProcess.on('exit', (code) => {
-      if (timeout) clearTimeout(timeout);
-      if (code !== 0) {
-        const details = stderrText.trim();
-        queue.push({
-          type: 'tool_result',
-          id: 'adapter',
-          name: 'adapter.chat',
-          result: null,
-          error: details ? `Codex exited ${code}: ${details}` : `Codex exited ${code}`,
-        });
-        queue.push({ type: 'done', finishReason: 'error' });
-        queue.close();
-        return;
+      seenTypes.add(String(envelope.type ?? '').toLowerCase() || '(none)');
+      const parts: CliChatPart[] = [];
+      const error = extractCodexError(ev);
+      if (error) parts.push({ kind: 'error', message: error });
+      const interp = interpretCodexChatEvent(ev);
+      switch (interp.kind) {
+        case 'reasoning':
+          // Reasoning streams live into the ThinkingBubble, not the answer text.
+          parts.push({ kind: 'thinking', text: interp.text });
+          break;
+        case 'text':
+          parts.push({ kind: 'text', text: interp.text });
+          break;
+        case 'final':
+          parts.push({ kind: 'final', text: interp.text });
+          break;
+        case 'activity':
+          // The harness's own shell/tool actions, surfaced live as progress.
+          parts.push({ kind: 'activity', delta: interp.delta });
+          break;
+        case 'tool':
+          parts.push({ kind: 'tool', name: interp.tool, args: interp.input });
+          break;
+        case 'ignore':
+          break;
       }
+      return parts;
+    };
 
-      const source = transcript.trim().length > 0 ? transcript : stripProcessNoise(rawFallback);
-      const { calls: markerCalls, cleaned } = extractMarkerToolCalls(source);
-      if (cleaned) queue.push({ type: 'text', delta: cleaned });
-      const allToolCalls: ChatDelta[] = [
-        ...pendingToolCalls,
-        ...markerCalls.map((call) => ({ type: 'tool_call' as const, id: randomUUID(), name: call.name, args: call.args })),
-      ];
-      for (const call of allToolCalls) queue.push(call);
-      queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop' });
-      queue.close();
+    yield* runCliChatTurn({
+      binary: this.opts.binaryPath ?? 'codex',
+      args,
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      stdin: buildCodexChatPrompt(messages, tools, this.#mcpNative() && !callerOwnsToolLoop),
+      displayName: 'Codex',
+      logTag: 'codex.chat',
+      logger: this.opts.logger,
+      signal: options?.signal,
+      idleTimeoutMs,
+      hardCeilingMs: chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_CODEX_CHAT_HARD_CEILING_MS'),
+      interpret,
+      formatExitError: (code, stderr, stdoutErr) => formatCodexExitError(code, stderr, stdoutErr),
+      onEmptyResult: () => this.opts.logger.warn('codex.chat.no_output_parsed', { types: [...seenTypes].slice(0, 40) }),
     });
-    childProcess.stdin?.end(buildCodexChatPrompt(messages, tools));
-    try {
-      yield* queue.iterate();
-    } finally {
-      if (timeout) clearTimeout(timeout);
-      controller.abort();
-    }
   }
 
   #emit(event: NormalizedAgentEvent): void {
@@ -334,20 +478,113 @@ export class CodexAdapter implements AgentAdapter {
   }
 }
 
-function buildCodexArgs(opts: CodexAdapterOptions): string[] {
-  const reasoningEffort = opts.modelReasoningEffort ?? (opts.fastMode ? 'minimal' : undefined);
+function buildCodexArgs(
+  opts: CodexAdapterOptions,
+  preferredModel?: string | null,
+  options: {
+    omitModel?: boolean;
+    reasoningEffort?: CodexAdapterOptions['modelReasoningEffort'];
+    fastMode?: boolean;
+    mountMcp?: boolean;
+  } = {},
+): string[] {
+  const fastMode = options.fastMode ?? opts.fastMode ?? false;
+  const reasoningEffort = options.reasoningEffort ?? opts.modelReasoningEffort ?? (fastMode ? 'minimal' : undefined);
+  const fastModeArgs = fastMode ? ['-c', 'service_tier="fast"', '-c', 'features.fast_mode=true'] : [];
+  // Headless isolation (default ON). Agentis drives Codex as a server subprocess,
+  // but `~/.codex/config.toml` is authored for INTERACTIVE desktop use: it mounts
+  // plugins (github/browser), a `node_repl` MCP server (120s startup timeout), and
+  // the `openai-bundled` "apps" marketplace. Loaded on every `codex exec` spawn,
+  // those cold-start child processes and reach the ChatGPT apps backend
+  // (`.../wham/apps`) + model-manager refresh — which time out ("failed to refresh
+  // available models: timeout waiting for child process to exit", rmcp worker quit)
+  // and burn the WHOLE turn budget before the model runs, so workflow synthesis and
+  // even plain chat fail (finishReason=error) regardless of how capable the model
+  // is. `--ignore-user-config` skips that file entirely; auth still resolves from
+  // CODEX_HOME, and everything Agentis needs (model, sandbox bypass, reasoning,
+  // service tier, its own MCP server) is supplied explicitly below via flags/`-c`,
+  // which apply on top of defaults independent of this flag. Opt back in (rare —
+  // e.g. a custom `[model_providers.*]` endpoint in config.toml) with
+  // AGENTIS_CODEX_LOAD_USER_CONFIG=true.
+  // Browser-enabled agents (`opts.browser`) deliberately load the user config so
+  // the `browser@openai-bundled` plugin + `node_repl` browser backend are present
+  // — that is the whole point of the opt-in, and the only place the native browser
+  // lives.
+  const browser = opts.browser === true;
+  const loadUserConfig = browser || String(
+    opts.env?.AGENTIS_CODEX_LOAD_USER_CONFIG ?? process.env.AGENTIS_CODEX_LOAD_USER_CONFIG ?? '',
+  ).toLowerCase() === 'true';
+  const mcpArgs = options.mountMcp === false
+    // Keep the user's configured MCP servers (e.g. `node_repl`, the browser
+    // backend) when the browser is opted in; only disable them when loading the
+    // config purely for a custom provider, where they would be dead-weight boots.
+    ? (loadUserConfig && !browser ? disableConfiguredMcpArgs(opts) : [])
+    : harnessMcpArgs('codex', opts.mcpServers ?? []);
+  // Honor the model Agentis resolved for this agent/turn. With the user config
+  // ignored the CLI no longer reads `model` from config.toml, so we MUST pass it
+  // ourselves — and this is also the fix for the agent model picker being silently
+  // dropped on ChatGPT-authenticated Codex (no API key → the old `canForceCodexModel`
+  // gate skipped `--model`, so the CLI fell back to config.toml's default model
+  // instead of the one the operator selected). `-m/--model` is honored under both
+  // API-key and ChatGPT auth as long as the account has access to the model.
+  const model = options.omitModel ? null : resolveCodexModel(preferredModel || opts.model || null, opts.env);
   return [
     'exec',
     '--json',
-    ...(opts.model ? [`--model=${opts.model}`] : []),
+    // See the headless-isolation note above.
+    ...(loadUserConfig ? [] : ['--ignore-user-config']),
+    ...(model ? [`--model=${model}`] : []),
     ...(reasoningEffort ? ['-c', `model_reasoning_effort="${reasoningEffort}"`] : []),
-    ...(opts.dangerouslyBypassApprovalsAndSandbox !== false ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+    ...fastModeArgs,
+    // Self-heal a version-skewed `service_tier` in the user's config.toml that
+    // would otherwise hard-fail the CLI at load (e.g. "default" → unknown variant).
+    // Only relevant when that file is actually loaded; `--ignore-user-config`
+    // already sidesteps the bad value, so skip the override there.
+    ...(loadUserConfig ? codexServiceTierArgs(opts.env) : []),
+    // Agentis drives Codex autonomously — there is NEVER a human at the keyboard to
+    // answer an approval prompt, and Codex's OS sandbox is unsupported on Windows.
+    // Without bypassing both, `codex exec` blocks on stdin ("Reading prompt from
+    // stdin...") until the turn times out and is killed → finishReason=error, empty
+    // chat. This mirrors ClaudeCodeAdapter's hardcoded `--dangerously-skip-permissions`.
+    // Don't refuse / prompt when the workspace cwd isn't a git repo.
+    '--skip-git-repo-check',
+    '--dangerously-bypass-approvals-and-sandbox',
+    // Mount Agentis tools over MCP so the harness runs its own loop natively.
+    ...mcpArgs,
     ...(opts.extraArgs ?? []),
   ];
 }
 
+function disableConfiguredMcpArgs(opts: CodexAdapterOptions): string[] {
+  const explicitHome = opts.env?.CODEX_HOME ?? process.env.CODEX_HOME;
+  const candidates = [
+    resolve(opts.cwd ?? process.cwd(), '.codex', 'config.toml'),
+    explicitHome?.trim()
+      ? join(explicitHome, 'config.toml')
+      : join(homedir(), '.codex', 'config.toml'),
+  ];
+  const names = new Set<string>();
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const config = readFileSync(path, 'utf8');
+      for (const match of config.matchAll(/^\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))(?:\.|\])/gm)) {
+        const name = match[1] ?? match[2];
+        if (name) names.add(name);
+      }
+    } catch {
+      // A missing/unreadable optional config must not prevent chat startup.
+    }
+  }
+  return [...names].flatMap((name) => ['-c', `mcp_servers.${name}.enabled=false`]);
+}
+
 type CodexJsonEvent = {
   type?: unknown;
+  thread_id?: unknown;
+  threadId?: unknown;
+  /** Modern `codex exec --json` envelope: `{ id, msg: { type, ... } }`. */
+  msg?: unknown;
   text?: unknown;
   content?: unknown;
   message?: unknown;
@@ -355,6 +592,7 @@ type CodexJsonEvent = {
   item?: unknown;
   result?: unknown;
   output?: unknown;
+  error?: unknown;
   name?: unknown;
   tool?: unknown;
   input?: unknown;
@@ -385,6 +623,17 @@ function safeJson(value: unknown): string {
 }
 
 function extractText(event: CodexJsonEvent): string {
+  // Modern envelope: only the FULL assistant message is progress text. Streaming
+  // deltas, reasoning, tool, and completion events are handled elsewhere — never
+  // here — so the answer is captured exactly once (no delta/full doubling).
+  const msg = objectOf(event.msg);
+  if (msg) {
+    const type = String(msg.type ?? '').toLowerCase();
+    if (type === 'agent_message' || type === 'agent_message_complete') {
+      return firstString(msg.message, msg.text, msg.content) ?? '';
+    }
+    return '';
+  }
   const direct = firstString(event.text, event.content, event.delta);
   if (direct) return direct;
   const message = objectOf(event.message);
@@ -394,7 +643,174 @@ function extractText(event: CodexJsonEvent): string {
   return firstString(item?.text, item?.content) ?? '';
 }
 
+type CodexChatInterpretation =
+  | { kind: 'text'; text: string }
+  | { kind: 'final'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'tool'; tool: string; input: unknown }
+  | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> }
+  | { kind: 'ignore' };
+
+/**
+ * Classify one `codex exec --json` event for the chat loop. Handles THREE wire
+ * formats so chat survives CLI upgrades:
+ *
+ * 1. The **0.138+ Responses schema** — top-level `item.*` / `turn.*` /
+ *    `thread.*`, with the real kind nested in `item.type`
+ *    (`agent_message`, `reasoning`, `command_execution`, tool/mcp/file items).
+ *    Checked FIRST: these carry no `msg` envelope, so the old branch below would
+ *    silently drop every shell command and surface the answer only by a lucky
+ *    `item.text` fallback — the "no realtime thinking / 90s blind timeout" bug.
+ * 2. The **modern `msg` envelope** `{ id, msg: { type, ... } }` (codex-rs ≤0.137).
+ * 3. The **legacy flat shape** `{ type: 'assistant', text }` the older tests use.
+ *
+ * The harness's OWN shell/tool actions become `activity` deltas (visible, live)
+ * rather than `tool_call` deltas — Agentis must never re-execute what the harness
+ * already ran. Only `agent_message` → text and `reasoning` → thinking; the final
+ * answer is taken once (on `*.completed`) so streamed partials never double it.
+ */
+function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation {
+  const topType = String(event.type ?? '').toLowerCase();
+  if (topType.startsWith('item.') || topType.startsWith('turn.') || topType.startsWith('thread.')) {
+    const item = objectOf(event.item);
+    if (!item) return { kind: 'ignore' }; // turn.started / turn.completed / thread.started
+    const itemType = String(item.type ?? '').toLowerCase();
+    const completed = topType.endsWith('.completed');
+    const started = topType.endsWith('.started');
+
+    if (itemType.includes('reason') || itemType.includes('think')) {
+      // Consolidated reasoning, taken once so streamed partials don't double it.
+      if (!completed) return { kind: 'ignore' };
+      const text = firstString(item.text, item.content, item.summary) ?? '';
+      return text ? { kind: 'reasoning', text } : { kind: 'ignore' };
+    }
+    if (itemType === 'agent_message' || itemType === 'assistant_message' || itemType === 'message') {
+      if (!completed) return { kind: 'ignore' };
+      const text = firstString(item.text, item.message, item.content) ?? '';
+      return text ? { kind: 'text', text } : { kind: 'ignore' };
+    }
+    if (itemType.includes('command') || itemType.includes('shell') || itemType.includes('exec')) {
+      // Codex's OWN shell command (it runs autonomously under sandbox bypass).
+      // Surface as a live step — NEVER an executable tool_call.
+      return { kind: 'activity', delta: codexCommandActivity(item, started) };
+    }
+    if (
+      itemType.includes('tool') || itemType.includes('function') || itemType.includes('mcp')
+      || itemType.includes('web_search') || itemType.includes('search')
+      || itemType.includes('file') || itemType.includes('patch')
+    ) {
+      return { kind: 'activity', delta: codexItemActivity(item, itemType, started) };
+    }
+    return { kind: 'ignore' };
+  }
+
+  const msg = objectOf(event.msg);
+  if (msg) {
+    const type = String(msg.type ?? '').toLowerCase();
+    if (type === 'agent_message' || type === 'agent_message_complete') {
+      return { kind: 'text', text: firstString(msg.message, msg.text, msg.content) ?? '' };
+    }
+    if (type === 'task_complete') {
+      return { kind: 'final', text: firstString(msg.last_agent_message, msg.message) ?? '' };
+    }
+    if (type.includes('reason') || type.includes('think')) {
+      // Take the consolidated reasoning event, not the per-token deltas.
+      if (type.includes('delta')) return { kind: 'ignore' };
+      return { kind: 'reasoning', text: firstString(msg.text, msg.message, msg.content) ?? '' };
+    }
+    if ((type.includes('tool') || type.includes('function')) && (type.includes('begin') || type.includes('call') || type.includes('start'))) {
+      const inv = objectOf(msg.invocation) ?? objectOf(msg.tool_call);
+      const tool = firstString(inv?.tool, inv?.name, msg.tool, msg.name) ?? 'tool';
+      return { kind: 'tool', tool, input: inv?.arguments ?? inv?.input ?? msg.arguments ?? msg.input ?? {} };
+    }
+    // agent_message_delta, token_count, task_started, exec_command_*, etc.
+    return { kind: 'ignore' };
+  }
+  // Legacy / non-envelope events: {"type":"assistant","text":"..."} and friends.
+  if (isReasoningEvent(event)) {
+    const reasoning = extractText(event);
+    return reasoning ? { kind: 'reasoning', text: reasoning } : { kind: 'ignore' };
+  }
+  const toolCall = extractToolCall(event);
+  if (toolCall) return { kind: 'tool', tool: toolCall.tool, input: toolCall.input };
+  const text = extractText(event);
+  return text ? { kind: 'text', text } : { kind: 'ignore' };
+}
+
+/** A live activity step for one of Codex's own shell command executions. */
+function codexCommandActivity(
+  item: Record<string, unknown>,
+  started: boolean,
+): Extract<ChatDelta, { type: 'activity' }> {
+  const id = `codex-${String(item.id ?? randomUUID())}`;
+  const pretty = prettyCommand(firstString(item.command, item.cmd, item.input) ?? 'command');
+  if (started) {
+    return { type: 'activity', id, phase: 'tool', status: 'running', label: `Running ${pretty}`, startedAt: new Date().toISOString() };
+  }
+  const exit = typeof item.exit_code === 'number' ? item.exit_code : null;
+  const failed = item.status === 'failed' || (exit !== null && exit !== 0);
+  const out = firstString(item.aggregated_output, item.output);
+  const detail = out ? clipText(stripProcessNoise(out).trim(), 240) : undefined;
+  return {
+    type: 'activity', id, phase: 'tool', status: failed ? 'error' : 'success',
+    label: `Ran ${pretty}`, ...(detail ? { detail } : {}), completedAt: new Date().toISOString(),
+  };
+}
+
+/** A live activity step for a non-shell Codex item (tool / mcp / file / search). */
+function codexItemActivity(
+  item: Record<string, unknown>,
+  itemType: string,
+  started: boolean,
+): Extract<ChatDelta, { type: 'activity' }> {
+  const id = `codex-${String(item.id ?? randomUUID())}`;
+  const inv = objectOf(item.invocation) ?? objectOf(item.tool_call);
+  const name = firstString(inv?.tool, inv?.name, item.name, item.tool) ?? humanizeCodexItemType(itemType);
+  const failed = item.status === 'failed' || Boolean(item.error);
+  const verb = started ? 'Using' : 'Used';
+  return {
+    type: 'activity', id, phase: 'tool',
+    status: started ? 'running' : failed ? 'error' : 'success',
+    label: `${verb} ${name}`,
+    ...(started ? { startedAt: new Date().toISOString() } : { completedAt: new Date().toISOString() }),
+  };
+}
+
+/** Reduce a spawned command to the meaningful part (drop the shell wrapper). */
+function prettyCommand(raw: string): string {
+  let cmd = raw.trim();
+  cmd = cmd.replace(/^"[^"]*"\s+/, '');                                              // quoted interpreter path
+  cmd = cmd.replace(/^\S*[\\/](?:powershell|pwsh|bash|zsh|cmd|sh)(?:\.exe)?\s+/i, ''); // unquoted interpreter path
+  cmd = cmd.replace(/^(?:powershell|pwsh|bash|zsh|cmd|sh)(?:\.exe)?\s+/i, '');        // bare interpreter
+  cmd = cmd.replace(/^-(?:Command|c|lc|EncodedCommand)\s+/i, '');                     // shell command flag
+  cmd = cmd.replace(/^(['"])([\s\S]*)\1$/, '$2');                                     // unwrap a fully-quoted command
+  cmd = cmd.replace(/\s+/g, ' ').trim() || raw.trim();
+  return clipText(cmd, 80);
+}
+
+function humanizeCodexItemType(itemType: string): string {
+  if (itemType.includes('web_search') || itemType.includes('search')) return 'web search';
+  if (itemType.includes('file') || itemType.includes('patch')) return 'a file change';
+  if (itemType.includes('mcp')) return 'an MCP tool';
+  return 'a tool';
+}
+
+function clipText(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
 function extractToolCall(event: CodexJsonEvent): { tool: string; input: unknown } | null {
+  const msg = objectOf(event.msg);
+  if (msg) {
+    const type = String(msg.type ?? '').toLowerCase();
+    if ((type.includes('tool') || type.includes('function')) && (type.includes('begin') || type.includes('call') || type.includes('start'))) {
+      const inv = objectOf(msg.invocation) ?? objectOf(msg.tool_call);
+      const tool = firstString(inv?.tool, inv?.name, msg.tool, msg.name) ?? 'tool';
+      return { tool, input: inv?.arguments ?? inv?.input ?? msg.arguments ?? msg.input ?? {} };
+    }
+    return null;
+  }
   const type = String(event.type ?? '').toLowerCase();
   if (!type.includes('tool') && !type.includes('function')) return null;
   const item = objectOf(event.item);
@@ -403,8 +819,8 @@ function extractToolCall(event: CodexJsonEvent): { tool: string; input: unknown 
 }
 
 function isCompletionEvent(event: CodexJsonEvent): boolean {
-  const type = String(event.type ?? '').toLowerCase();
-  return type === 'result' || type === 'done' || type.includes('completed') || type.includes('finished');
+  const type = String((objectOf(event.msg) ?? event).type ?? '').toLowerCase();
+  return type === 'result' || type === 'done' || type === 'task_complete' || type.includes('completed') || type.includes('finished');
 }
 
 /**
@@ -422,6 +838,11 @@ function isReasoningEvent(event: CodexJsonEvent): boolean {
 }
 
 function extractOutput(event: CodexJsonEvent, transcript: string): Record<string, unknown> {
+  const msg = objectOf(event.msg);
+  if (msg) {
+    const text = firstString(msg.last_agent_message, msg.message, msg.text) ?? transcript.trim();
+    return { text };
+  }
   const result = objectOf(event.result) ?? objectOf(event.output);
   if (result) return result;
   const text = firstString(event.text, event.content) ?? transcript.trim();
@@ -430,6 +851,78 @@ function extractOutput(event: CodexJsonEvent, transcript: string): Record<string
 
 function objectOf(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function extractCodexError(event: CodexJsonEvent): string | null {
+  const envelope = objectOf(event.msg) ?? event;
+  const type = String(envelope.type ?? '').toLowerCase();
+  if (!type.includes('error') && !type.includes('fail')) return null;
+  return normalizeCodexError(
+    firstString(
+      objectOf(envelope.error)?.message,
+      envelope.message,
+      envelope.error,
+      objectOf(event.error)?.message,
+      event.message,
+    ),
+  );
+}
+
+function normalizeCodexError(value: string | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const object = objectOf(parsed);
+    const nested = firstString(objectOf(object?.error)?.message, object?.message, object?.error);
+    if (nested) return nested;
+  } catch {}
+  return trimmed;
+}
+
+/**
+ * Self-heal the Codex model for the active auth mode.
+ *
+ * Codex run against a **ChatGPT account** (the default — `codex login`, no API
+ * key) rejects the `*-codex` model ids with a hard exit: "The '<id>' model is
+ * not supported when using Codex with a ChatGPT account." That takes the whole
+ * turn down even though the operator never deliberately chose an unsupported
+ * model (it was the historical default, persisted on older agents). `gpt-5.5`
+ * works under BOTH ChatGPT-account and API-key auth, so when no OpenAI API key
+ * is present we map any `*-codex` id to it instead of letting the turn fail.
+ *
+ * An API key in the environment means API-key auth, where the `*-codex` ids are
+ * valid — so they're left untouched. `AGENTIS_CODEX_ALLOW_CODEX_MODELS=true`
+ * forces the raw id through regardless (escape hatch for unusual setups).
+ */
+export function resolveCodexModel(
+  model: string | null,
+  env?: Record<string, string | undefined>,
+): string | null {
+  if (!model) return model;
+  const read = (key: string) => (env?.[key] ?? process.env[key] ?? '').trim();
+  if (read('AGENTIS_CODEX_ALLOW_CODEX_MODELS').toLowerCase() === 'true') return model;
+  const isCodexModel = /-codex(-|$)/i.test(model) || /^codex-/i.test(model);
+  if (!isCodexModel) return model;
+  const hasApiKey = Boolean(read('OPENAI_API_KEY') || read('CODEX_API_KEY'));
+  return hasApiKey ? model : 'gpt-5.5';
+}
+
+function formatCodexExitError(code: number | null, stderrText: string, stdoutError: string, signal?: NodeJS.Signals | null): string {
+  const stderr = stripProcessNoise(stderrText).trim();
+  const detail = normalizeCodexError(stdoutError) ?? normalizeCodexError(stderr) ?? stderr;
+  const exit = code === null ? `signal ${signal ?? 'unknown'}` : `code ${code}`;
+  if (detail) {
+    // A ChatGPT-authenticated Codex rejects the `*-codex` model ids with this
+    // exact message. Turn the cryptic CLI error into a one-step fix instead of
+    // leaving the operator guessing.
+    if (/model is not supported when using codex with a chatgpt account/i.test(detail)) {
+      return `${detail} — switch this agent's model to "gpt-5.5" (the model picker in the chat header / agent settings), which works on both ChatGPT-account and API-key Codex auth.`;
+    }
+    return `Codex exited with ${exit}: ${detail}`;
+  }
+  return `Codex exited with ${exit}`;
 }
 
 function firstString(...values: unknown[]): string | undefined {
@@ -447,9 +940,15 @@ function firstString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {
+function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], mcpNative = false): string {
+  // MCP-native: the harness mounts the `agentis` MCP server and calls those tools
+  // itself, so we drop the marker-protocol instructions entirely and just give it
+  // the conversation. It runs its own loop and returns the final answer.
+  const toolPreamble = mcpNative
+    ? 'You have the Agentis platform tools available via the "agentis" MCP server (build workflows, run them, inspect the workspace, dispatch agents, etc.). Use them directly to fulfill the request, then reply with a concise final answer.'
+    : buildMarkerToolPrompt(tools);
   return [
-    buildMarkerToolPrompt(tools),
+    toolPreamble,
     '',
     'Conversation:',
     formatMessagesForCodex(messages),
@@ -472,31 +971,4 @@ function formatMessagesForCodex(messages: ChatMessage[]): string {
     }
     return `${message.role.toUpperCase()}:\n${content}`;
   }).join('\n\n---\n\n');
-}
-
-function createChatQueue() {
-  const pending: ChatDelta[] = [];
-  const waiters: Array<() => void> = [];
-  let closed = false;
-  return {
-    push(delta: ChatDelta) {
-      if (closed) return;
-      pending.push(delta);
-      waiters.shift()?.();
-    },
-    close() {
-      closed = true;
-      while (waiters.length > 0) waiters.shift()?.();
-    },
-    async *iterate(): AsyncIterable<ChatDelta> {
-      while (!closed || pending.length > 0) {
-        const next = pending.shift();
-        if (next) {
-          yield next;
-          continue;
-        }
-        await new Promise<void>((resolve) => waiters.push(resolve));
-      }
-    },
-  };
 }

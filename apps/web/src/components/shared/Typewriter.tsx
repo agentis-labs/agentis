@@ -7,7 +7,7 @@
  * blended interpolation.
  *
  * Used for tool-call previews under WorkflowNodes, agent intent in the
- * RunDrawer, and skill registry install status messages.
+ * RunDrawer, and extension registry install status messages.
  */
 
 import { useEffect, useState } from 'react';

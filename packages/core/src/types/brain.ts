@@ -1,98 +1,234 @@
 /**
- * Brain — the workspace intelligence surface contract.
+ * Brain UX types — the high-level intelligence surface contract.
  *
- * The Brain is the layer that lets agents compound what they know over time. It
- * has three strata, all workspace-scoped:
+ * The Brain is a *composed* surface. The backend assembles a single
+ * BrainResponse from many sources (knowledge, memory, evaluators, baselines,
+ * dataset jobs); the frontend never reaches into the lower-level stores
+ * directly to assemble it.
  *
- *   1. Workspace context — WORKSPACE.md / WORKFLOW.md / DECISIONS.md (durable
- *      facts + conventions) and the MEMORY.md learning log.
- *   2. Knowledge bases   — documents chunked + indexed for retrieval.
- *   3. Workflow memory   — per-workflow key/value state that survives across runs.
+ * Visual model = four strata:
+ *   - core      → workspace identity + health
+ *   - knowledge → seeds, datasets, indexed clusters
+ *   - memory    → promoted episodes + patterns
+ *   - judgment  → evaluators + baselines
  *
- * `BrainOverview` is a *composed* read model: the backend assembles it from the
- * underlying stores so the frontend renders one honest picture (including gaps,
- * so absence is visible rather than faked).
+ * Three view modes:
+ *   - Map     → spatial knowledge map
+ *   - Flow    → directional intelligence-flow graph
+ *   - Ledger  → temporal table of memories / evaluators / baselines
  */
 
-export type BrainContextFileName = 'WORKSPACE.md' | 'WORKFLOW.md' | 'DECISIONS.md';
+export type BrainNodeType =
+  | 'core'
+  | 'dataset'
+  | 'knowledge_cluster'
+  | 'memory_episode'
+  | 'memory_pattern'
+  | 'evaluator'
+  | 'baseline'
+  | 'artifact'
+  | 'decision'
+  | 'warning'
+  | 'gap';
 
-export interface BrainContextFileStatus {
-  name: BrainContextFileName;
-  /** True when the file holds real content beyond the seeded placeholders. */
-  filled: boolean;
-  /** Byte length of the non-placeholder content. */
-  bytes: number;
-}
+export type BrainLayer = 'core' | 'knowledge' | 'memory' | 'judgment';
 
-export interface BrainMemoryEntryView {
-  section: string;
-  text: string;
-  confidence: 'low' | 'medium' | 'high';
-  /** ms epoch, or null when the entry is undated. */
-  timestamp: number | null;
-  uses: number;
-}
+export type BrainFreshness = 'fresh' | 'aging' | 'stale';
 
-export interface BrainMemoryStat {
-  totalEntries: number;
-  bySection: Array<{ section: string; count: number }>;
-  /** A few most-recent entries for the surface; not the whole log. */
-  recent: BrainMemoryEntryView[];
-}
+export type BrainStatus = 'ok' | 'warning' | 'error' | 'inactive';
 
-export interface BrainKnowledgeBaseStat {
+export interface BrainNode {
   id: string;
-  name: string;
-  description: string | null;
-  documentCount: number;
-  chunkCount: number;
-  /** ISO timestamp of the most recently indexed chunk, or null when empty. */
-  lastIndexedAt: string | null;
+  type: BrainNodeType;
+  label: string;
+  description?: string;
+  layer: BrainLayer;
+  /** Suggested layout positions (server-side hint, optional). */
+  x?: number;
+  y?: number;
+  /** Visual emphasis weight 0..1 — drives node size + glow. */
+  weight?: number;
+  /** 0..1 evaluator/baseline confidence; null when unknown. */
+  confidence?: number | null;
+  /** 0..1 trust score for memory items; null when not applicable. */
+  trust?: number | null;
+  /** Freshness bucket for datasets / sources. */
+  freshness?: BrainFreshness | null;
+  /** Lightweight health bucket. */
+  status?: BrainStatus | null;
+  /**
+   * Free-form metadata used by the inspector (sample counts, last-used,
+   * provenance, sparkline points, etc). The shape is intentionally open —
+   * the rail component switches on `type` to render it.
+   */
+  metadata: Record<string, unknown>;
 }
 
-export interface BrainWorkflowMemoryStat {
-  workflowId: string;
-  workflowTitle: string | null;
-  keyCount: number;
-  /** ISO timestamp of the most recently updated entry, or null. */
-  updatedAt: string | null;
+export type BrainEdgeKind =
+  | 'feeds'
+  | 'evaluates'
+  | 'derived_from'
+  | 'used_in'
+  | 'supersedes'
+  | 'supports'
+  | 'contradicts'
+  | 'refines'
+  | 'co_observed'
+  | 'measures';
+
+export interface BrainEdge {
+  id: string;
+  source: string;
+  target: string;
+  kind: BrainEdgeKind;
+  /** Edge strength 0..1 — used for line opacity and selection priority. */
+  weight?: number;
+  label?: string;
+}
+
+export interface BrainWarning {
+  code: string;
+  message: string;
+  nodeId?: string;
+  severity: 'info' | 'warning' | 'error';
 }
 
 export interface BrainGap {
-  code:
-    | 'no_knowledge_bases'
-    | 'empty_knowledge_base'
-    | 'blank_workspace_context'
-    | 'no_memory';
-  message: string;
-  /** Optional id of the entity the gap concerns (e.g. an empty KB). */
-  refId?: string;
+  id: string;
+  label: string;
+  reason: string;
+  /** Suggested action key (e.g. dataset key to ingest). */
+  fillSuggestion?: string;
 }
 
 export interface BrainStats {
-  knowledgeBases: number;
-  documents: number;
-  chunks: number;
-  memoryEntries: number;
-  workflowMemoryKeys: number;
-  /** How many of the three context files hold real content (0–3). */
-  contextFilesFilled: number;
+  knowledgeNodes: number;
+  memoryNodes: number;
+  evaluatorNodes: number;
+  baselineConfidence: number | null;
+  staleSources: number;
 }
 
-/** The full workspace Brain read model returned by `GET /v1/brain`. */
-export interface BrainOverview {
-  workspaceId: string;
+export interface BrainResponse {
+  scope: 'scoped' | 'workspace';
+  workspace?: {
+    id: string;
+    packageCount: number;
+  };
   stats: BrainStats;
-  context: {
-    files: BrainContextFileStatus[];
-    memory: BrainMemoryStat;
+  layers: {
+    core: BrainNode[];
+    knowledge: BrainNode[];
+    memory: BrainNode[];
+    judgment: BrainNode[];
   };
-  knowledge: {
-    bases: BrainKnowledgeBaseStat[];
-  };
-  workflowMemory: {
-    workflows: BrainWorkflowMemoryStat[];
-  };
-  /** Honest nudges surfaced when the Brain is under-filled. */
+  edges: BrainEdge[];
+  warnings: BrainWarning[];
   gaps: BrainGap[];
 }
+
+export type KnowledgeAtomKind = 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern';
+
+export type KnowledgeLinkRelation = 'supports' | 'contradicts' | 'refines' | 'derived_from' | 'co_observed';
+
+export type BrainGraphScope = 'workspace' | 'scoped';
+
+export interface BrainGraphNode {
+  id: string;
+  atomId: string;
+  /** `cora_*` kinds are the Workspace Brain's organizational overlay (sources, entities, claims). */
+  atomKind: KnowledgeAtomKind | 'core' | 'warning' | 'gap' | 'cora_source' | 'cora_entity' | 'cora_claim';
+  label: string;
+  summary?: string;
+  confidence: number;
+  trust?: number | null;
+  reinforceCount: number;
+  agentId?: string | null;
+  adapterType?: string | null;
+  scopeId?: string | null;
+  runId?: string | null;
+  isDisputed?: boolean;
+  isStale?: boolean;
+  status?: 'active' | 'stale' | 'archived' | string | null;
+  managed?: boolean | null;
+  pinnedAt?: string | null;
+  lastAccessedAt?: string | null;
+  disputeReason?: string | null;
+  disputeResolvedAt?: string | null;
+  disputeSnoozedUntil?: string | null;
+  contextCondition?: string | null;
+  compressedFrom?: string[] | null;
+  compressionTier?: number | null;
+  createdAt: string;
+  updatedAt: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface BrainGraphLink {
+  id: string;
+  source: string;
+  target: string;
+  sourceAtomId: string;
+  sourceKind: KnowledgeAtomKind | 'cora_source' | 'cora_entity' | 'cora_claim';
+  targetAtomId: string;
+  targetKind: KnowledgeAtomKind | 'cora_source' | 'cora_entity' | 'cora_claim';
+  relation: KnowledgeLinkRelation;
+  confidence: number;
+  reinforceCount: number;
+  agentId?: string | null;
+  adapterType?: string | null;
+  scopeId?: string | null;
+  runId?: string | null;
+  contextSplit?: boolean;
+  resolvedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrainGraph {
+  nodes: BrainGraphNode[];
+  links: BrainGraphLink[];
+  meta: {
+    workspaceId: string;
+    scope: BrainGraphScope;
+    scopeId?: string | null;
+    atomCount: number;
+    linkCount: number;
+    lastActivityAt: string | null;
+    adapterTypes: string[];
+  };
+}
+
+export interface BrainGraphEventPayload {
+  workspaceId: string;
+  scopeId?: string | null;
+  node?: BrainGraphNode;
+  link?: BrainGraphLink;
+  graph?: Pick<BrainGraph['meta'], 'atomCount' | 'linkCount' | 'lastActivityAt'>;
+}
+
+/**
+ * Default polar layout — `core` at center, three concentric rings for each
+ * remaining stratum. Used by both server hints and the client fallback when
+ * a node has no explicit (x, y).
+ */
+export const BRAIN_RING_RADIUS: Record<BrainLayer, number> = {
+  core: 0,
+  knowledge: 220,
+  memory: 360,
+  judgment: 480,
+};
+
+export const BRAIN_NODE_TYPES: ReadonlyArray<BrainNodeType> = [
+  'core',
+  'dataset',
+  'knowledge_cluster',
+  'memory_episode',
+  'memory_pattern',
+  'evaluator',
+  'baseline',
+  'artifact',
+  'decision',
+  'warning',
+  'gap',
+];

@@ -7,6 +7,16 @@ export interface WorkspaceUser {
   name: string;
 }
 
+export interface WorkspaceAgentAbility {
+  id: string;
+  name: string;
+  slug: string;
+  domainTag?: string | null;
+  iconEmoji?: string | null;
+  compileStatus?: string;
+  pinnedAt?: string;
+}
+
 export interface WorkspaceAgent {
   id: string;
   name: string;
@@ -14,15 +24,19 @@ export interface WorkspaceAgent {
   role?: string | null;
   managerId?: string | null;
   reportsTo?: string | null;
+  spaceId?: string | null;
+  spaceName?: string | null;
+  spaceColorHex?: string | null;
   runtimeModel?: string | null;
   adapterType?: string | null;
+  abilities?: WorkspaceAgentAbility[];
+  capabilityTags?: string[] | null;
+  spaceTag?: string | null;
   colorHex?: string | null;
   domainColor?: string | null;
   canvasAngle?: number | null;
   canvasPosition?: { x: number; y: number } | null;
   avatarGlyph?: string | null;
-  spaceId?: string | null;
-  spaceName?: string | null;
   currentTaskId?: string | null;
   description?: string | null;
   lastHeartbeatAt?: string | null;
@@ -53,6 +67,7 @@ export interface WorkspaceActiveRun {
 
 export interface WorkspaceFailedRun {
   id: string;
+  workflowId?: string;
   workflowName?: string;
   failedNode?: string;
   finishedAt?: string;
@@ -69,16 +84,6 @@ export interface WorkspaceArtifact {
   thumbnailUrl?: string | null;
   kind?: 'html' | 'image' | 'doc' | 'code' | 'data';
   type?: 'html' | 'image' | 'document' | 'code' | 'data';
-}
-
-export interface WorkspaceSpace {
-  id: string;
-  name: string;
-  slug: string;
-  color?: string | null;
-  colorHex?: string;
-  iconGlyph?: string | null;
-  appCount?: number;
 }
 
 export interface WorkspaceFleetOverview {
@@ -118,7 +123,6 @@ export interface WorkspaceSnapshot {
   activeRuns: WorkspaceActiveRun[];
   failedRuns: WorkspaceFailedRun[];
   artifacts: WorkspaceArtifact[];
-  spaces: WorkspaceSpace[];
   fleet: WorkspaceFleetOverview | null;
   latestActivity: WorkspaceActivityRow | null;
   notifications: WorkspaceNotification[];
@@ -138,7 +142,6 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   activeRuns: [],
   failedRuns: [],
   artifacts: [],
-  spaces: [],
   fleet: null,
   latestActivity: null,
   notifications: [],
@@ -164,13 +167,10 @@ export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.ARTIFACT_CREATED,
   REALTIME_EVENTS.ARTIFACT_UPDATED,
   REALTIME_EVENTS.ARTIFACT_DELETED,
-  REALTIME_EVENTS.SPACE_CREATED,
-  REALTIME_EVENTS.SPACE_UPDATED,
-  REALTIME_EVENTS.SPACE_DELETED,
   REALTIME_EVENTS.ACTIVITY_CREATED,
 ] as const;
 
-const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'running']);
+const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'WAITING', 'CREATED', 'running', 'waiting', 'paused', 'pending']);
 const LIVE_AGENT_STATUSES = new Set(['online', 'active', 'running']);
 
 let snapshot = EMPTY_SNAPSHOT;
@@ -208,7 +208,6 @@ function deriveNotifications(
   approvals: WorkspaceApproval[],
   failedRuns: WorkspaceFailedRun[],
   agents: WorkspaceAgent[],
-  spaces: WorkspaceSpace[],
 ): WorkspaceNotification[] {
   const setup: WorkspaceNotification[] = [];
   const rest: WorkspaceNotification[] = [];
@@ -224,27 +223,6 @@ function deriveNotifications(
       actionLabel: 'Commission orchestrator',
       actionEvent: 'agentis:commission-orchestrator',
     });
-  }
-
-  const managerlessSpaces = spaces.filter(
-    (space) => !agents.some((a) => (a.role ?? '').toLowerCase().includes('manager') && a.spaceId === space.id),
-  );
-  if (managerlessSpaces.length > 0) {
-    const first = managerlessSpaces[0];
-    if (first) {
-      setup.push({
-        id: 'setup-managers',
-        type: 'setup',
-        title: managerlessSpaces.length === 1
-          ? `${first.name} needs a manager`
-          : `${managerlessSpaces.length} spaces need managers`,
-        context: 'Spaces run more predictably with a coordinator above their workers and workflows.',
-        timestamp: new Date().toISOString(),
-        actionLabel: `Add manager for ${first.name}`,
-        actionEvent: 'agentis:commission-manager',
-        actionPayload: { spaceId: first.id },
-      });
-    }
   }
 
   for (const approval of approvals) {
@@ -304,17 +282,16 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
   setSnapshot({ ...base, workspaceId, loading: firstLoadForWorkspace });
 
   inflight = (async () => {
-    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, artifactsRes, fleetRes, activityRes, spacesRes] =
+    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, artifactsRes, fleetRes, activityRes] =
       await Promise.allSettled([
         api<{ user: WorkspaceUser }>('/v1/auth/me'),
         api<{ agents: WorkspaceAgent[] }>('/v1/agents'),
         api<{ approvals: WorkspaceApproval[] }>('/v1/approvals?status=pending'),
-        api<{ runs: WorkspaceActiveRun[] }>('/v1/runs?status=running&limit=5'),
+        api<{ runs: WorkspaceActiveRun[] }>('/v1/runs?status=active&limit=5'),
         api<{ runs: WorkspaceFailedRun[] }>('/v1/runs?status=failed&limit=5'),
         api<{ artifacts: WorkspaceArtifact[] }>('/v1/artifacts?limit=6'),
         api<WorkspaceFleetOverview>('/v1/dashboard/fleet-overview'),
         api<{ events: WorkspaceActivityRow[] }>('/v1/activity?limit=1'),
-        api<{ spaces: WorkspaceSpace[] }>('/v1/spaces'),
       ]);
 
     const previous = keepPreviousForWorkspace(workspaceId);
@@ -325,8 +302,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
     const failedRuns = fulfilled(failedRunsRes, { runs: previous.failedRuns }).runs ?? [];
     const artifacts = (fulfilled(artifactsRes, { artifacts: previous.artifacts }).artifacts ?? []).map(normalizeArtifact);
     const fleet = fleetRes.status === 'fulfilled' ? fleetRes.value : previous.fleet;
-    const latestActivity = fulfilled(activityRes, { events: previous.latestActivity ? [previous.latestActivity] : [] }).events[0] ?? null;
-    const spaces = fulfilled(spacesRes, { spaces: previous.spaces }).spaces ?? [];
+    const latestActivity = (fulfilled(activityRes, { events: previous.latestActivity ? [previous.latestActivity] : [] }).events ?? [])[0] ?? null;
 
     setSnapshot({
       workspaceId,
@@ -337,10 +313,9 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
       activeRuns,
       failedRuns,
       artifacts,
-      spaces,
       fleet,
       latestActivity,
-      notifications: deriveNotifications(approvals, failedRuns, agents, spaces),
+      notifications: deriveNotifications(approvals, failedRuns, agents),
       counts: deriveCounts(agents, activeRuns),
       updatedAt: Date.now(),
     });

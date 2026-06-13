@@ -33,6 +33,7 @@ const KNOWN: Record<string, StatusTone> = {
   warn: 'warn',
   attention: 'warn',
   setting_up: 'warn',
+  paused: 'warn',
 
   offline: 'danger',
   failed: 'danger',
@@ -45,7 +46,6 @@ const KNOWN: Record<string, StatusTone> = {
   draft: 'muted',
   unknown: 'muted',
   archived: 'muted',
-  paused: 'muted',
   stopped: 'muted',
 };
 

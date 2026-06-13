@@ -1,50 +1,17 @@
 /**
- * Tiny sandbox for `transform` / `filter` node expressions.
+ * Constrained expression evaluator for transform, filter, and run_code.
  *
- * What it allows:
- *   - Pure JS expressions that read from `input` and the `ctx.*` snapshot.
- *   - Access to `JSON`, `Math`, `Date.now`, and `String/Number/Boolean/Array/Object`.
- *
- * What it blocks:
- *   - `require`, `import`, `process`, `globalThis`, `eval`, `Function`, network,
- *     filesystem, child processes, timers — every API that touches the outside
- *     world.
- *
- * The implementation runs the expression inside a `Function` constructor with the
- * arguments shadowing every dangerous global. It's not a hard security boundary
- * (a determined attacker who can write workflow expressions can probably do more
- * harm via the agent prompt anyway), but it catches accidents and obvious abuse.
- *
- * For untrusted user code, the proper sandbox lives in the node_worker skill
- * runtime (isolated-vm). Transform/filter expressions are operator-written and
- * trust-equivalent to agent prompts.
+ * Expressions receive only JSON-cloned `input` and `ctx` values. Evaluation
+ * runs in a fresh VM realm with string/WASM code generation disabled, which
+ * prevents constructor-chain escapes from obtaining Node globals.
  */
 
-// Globals we shadow by passing them as `undefined` parameters. NOTE: strict
-// mode forbids `eval` and `arguments` as parameter names, so those two are
-// covered by the static guard regex (BLOCKED_PATTERNS) only.
-const BLOCKED_GLOBALS: ReadonlyArray<string> = [
-  'globalThis',
-  'global',
-  'self',
-  'window',
-  'process',
-  'require',
-  'module',
-  'exports',
-  '__dirname',
-  '__filename',
-  'setTimeout',
-  'setInterval',
-  'setImmediate',
-  'clearTimeout',
-  'clearInterval',
-  'clearImmediate',
-  'queueMicrotask',
-  'fetch',
-  'XMLHttpRequest',
-  'WebSocket',
-];
+import { createContext, Script } from 'node:vm';
+
+const DEFAULT_EVALUATION_TIMEOUT_MS = 5_000;
+const MAX_EVALUATION_TIMEOUT_MS = 30_000;
+const INPUT_BYTES_PER_EXTRA_SECOND = 64 * 1024;
+const EXPRESSION_CHARS_PER_EXTRA_SECOND = 4_000;
 
 const BLOCKED_PATTERNS: ReadonlyArray<RegExp> = [
   /\bimport\s*\(/,
@@ -60,7 +27,6 @@ const BLOCKED_PATTERNS: ReadonlyArray<RegExp> = [
   /\bconstructor\s*\./,
 ];
 
-/** Throws on syntactically dangerous expressions. */
 function staticGuard(expression: string): void {
   for (const pattern of BLOCKED_PATTERNS) {
     if (pattern.test(expression)) {
@@ -74,33 +40,117 @@ export interface SafeExpressionContext {
   ctx?: Record<string, unknown>;
 }
 
-/**
- * Evaluate a JS expression in a constrained scope.
- *
- * Throws a tagged Error on syntax errors or runtime errors. Callers should catch
- * and route through the engine's error-edge logic.
- */
+export interface SafeExpressionOptions {
+  /** Hard execution deadline. Clamped to protect the API process. */
+  timeoutMs?: number;
+}
+
 export function evaluateExpression<T = unknown>(
   expression: string,
   args: SafeExpressionContext,
+  options: SafeExpressionOptions = {},
 ): T {
   staticGuard(expression);
-  // Build a parameter list that shadows every dangerous global with `undefined`.
-  const params = ['input', 'ctx', ...BLOCKED_GLOBALS];
-  // `"use strict"` + `return (...)` so the expression must evaluate to a value.
-  // Wrapped in (…) so object literals like `({ a: 1 })` work without needing `()` from the user.
-  const body = `"use strict"; return (${expression});`;
-  let fn: (...rest: unknown[]) => T;
+
+  let serializedArgs: string;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    fn = new Function(...params, body) as (...rest: unknown[]) => T;
+    serializedArgs = JSON.stringify([args.input, args.ctx ?? {}]);
   } catch (err) {
-    throw new Error(`expression parse failed: ${(err as Error).message}`);
+    throw new Error(`expression input serialization failed: ${(err as Error).message}`);
   }
-  return fn(args.input, args.ctx ?? {}, ...new Array(BLOCKED_GLOBALS.length).fill(undefined));
+  const timeoutMs = resolveEvaluationTimeout(expression, serializedArgs, options.timeoutMs);
+
+  const context = createContext(Object.create(null), {
+    name: 'agentis-safe-expression',
+    codeGeneration: { strings: false, wasm: false },
+  });
+
+  try {
+    new Script(`
+      const [input, ctx] = JSON.parse(${JSON.stringify(serializedArgs)});
+      const $input = input;
+      const $json = input;
+      const $ctx = ctx;
+      const nodes = ctx.nodes || {};
+      const trigger = ctx.trigger || {};
+      const scratchpad = ctx.scratchpad || {};
+      const store = ctx.store || {};
+      const workspace = ctx.workspace || {};
+      const run = ctx.run || {};
+      const loop = ctx.loop || undefined;
+      const $nodes = ctx.nodes || {};
+      const $trigger = ctx.trigger || {};
+      const $scratchpad = ctx.scratchpad || {};
+      const $store = ctx.store || {};
+      const $workspace = ctx.workspace || {};
+      const $run = ctx.run || {};
+      const $loop = ctx.loop || undefined;
+    `).runInContext(context, {
+      timeout: timeoutMs,
+    });
+    const serializedResult = runExpressionScript(context, expression, timeoutMs);
+    return (serializedResult === undefined ? undefined : JSON.parse(serializedResult)) as T;
+  } catch (err) {
+    throw new Error(`expression evaluation failed: ${(err as Error).message}`);
+  }
 }
 
-/** Boolean form: any truthy result counts as pass. */
-export function evaluateBooleanExpression(expression: string, args: SafeExpressionContext): boolean {
-  return Boolean(evaluateExpression(expression, args));
+/**
+ * Run the user expression and return its JSON-serialized result.
+ *
+ * Accepts BOTH supported forms so synthesized workflows actually run — not only
+ * the trivial single-expression case:
+ *   - a single expression:        `({ to: input.email })`
+ *   - a function body / statements: `const x = input.email; return { to: x };`
+ *
+ * We try the single-expression form first (the historical, fast path); if that
+ * is a SyntaxError (e.g. it used `return` / declarations / multiple statements)
+ * we re-run it as a function body. Security is unchanged: the same fresh VM
+ * realm (codeGeneration disabled, no Node globals) and static guard apply to
+ * both forms — "statement vs expression" was never the sandbox boundary.
+ */
+function runExpressionScript(
+  context: ReturnType<typeof createContext>,
+  expression: string,
+  timeoutMs: number,
+): string | undefined {
+  try {
+    return new Script(`JSON.stringify((${expression}))`).runInContext(context, {
+      timeout: timeoutMs,
+    }) as string | undefined;
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      return new Script(`JSON.stringify((function () { ${expression} })())`).runInContext(context, {
+        timeout: timeoutMs,
+      }) as string | undefined;
+    }
+    throw err;
+  }
+}
+
+/** Boolean form: any truthy JSON result counts as pass. */
+export function evaluateBooleanExpression(
+  expression: string,
+  args: SafeExpressionContext,
+  options: SafeExpressionOptions = {},
+): boolean {
+  return Boolean(evaluateExpression(expression, args, options));
+}
+
+function resolveEvaluationTimeout(
+  expression: string,
+  serializedArgs: string,
+  requestedTimeoutMs?: number,
+): number {
+  if (requestedTimeoutMs !== undefined) {
+    return clampTimeout(requestedTimeoutMs);
+  }
+  const inputHeadroom = Math.ceil(serializedArgs.length / INPUT_BYTES_PER_EXTRA_SECOND) * 1_000;
+  const expressionHeadroom = Math.ceil(expression.length / EXPRESSION_CHARS_PER_EXTRA_SECOND) * 1_000;
+  return clampTimeout(DEFAULT_EVALUATION_TIMEOUT_MS + inputHeadroom + expressionHeadroom);
+}
+
+function clampTimeout(timeoutMs: number): number {
+  if (!Number.isFinite(timeoutMs)) return DEFAULT_EVALUATION_TIMEOUT_MS;
+  return Math.max(1, Math.min(Math.floor(timeoutMs), MAX_EVALUATION_TIMEOUT_MS));
 }

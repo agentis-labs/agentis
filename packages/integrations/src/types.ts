@@ -9,7 +9,17 @@ export interface ConnectorExecuteOptions {
 export interface ConnectorModule {
   service: string;
   operations: readonly string[];
+  operationContracts?: Record<string, ConnectorOperationContract>;
   execute(opts: ConnectorExecuteOptions): Promise<Record<string, unknown>>;
+}
+
+export interface ConnectorOperationContract {
+  /** Canonical fields this operation requires. */
+  required?: readonly string[];
+  /** At least one field from each group must be present. */
+  requiredAny?: ReadonlyArray<readonly string[]>;
+  /** Canonical field -> accepted aliases. Explicit canonical values still win. */
+  aliases?: Record<string, readonly string[]>;
 }
 
 export type IntegrationAuthType = 'none' | 'api_key' | 'bearer' | 'basic' | 'oauth2';
@@ -39,6 +49,7 @@ export interface IntegrationManifest {
   category: string;
   description: string;
   operations: string[];
+  operationContracts?: Record<string, ConnectorOperationContract>;
   operationSpecs?: IntegrationOperationSpec[];
   auth?: IntegrationAuthConfig;
   credentialSchema: Record<string, unknown>;

@@ -47,6 +47,16 @@ describe('AgentToolRuntime', () => {
     expect((ok.result as { value: { doubled: number } }).value.doubled).toBe(42);
 
     const blocked = await tools.execute(WS, 'run_code', { expression: 'process.env' });
+    const constructorEscape = await tools.execute(WS, 'run_code', {
+      expression: 'typeof input["con" + "structor"]["con" + "structor"]("return pro" + "cess")()',
+      input: {},
+    });
+    const neverReturns = await tools.execute(WS, 'run_code', {
+      expression: '(() => { for (;;) {} })()',
+    });
+    expect(constructorEscape.ok).toBe(false);
+    expect(neverReturns.ok).toBe(false);
+    expect(neverReturns.error).toMatch(/timed out/i);
     expect(blocked.ok).toBe(false); // process is shadowed → throws
   });
 

@@ -49,13 +49,23 @@ describe('buildWorkspaceInventory', () => {
 });
 
 describe('classifyIntent', () => {
-  it('classifies a morning digest as orchestrated cron with missing gmail credential', async () => {
+  it('classifies a morning digest as orchestrated cron with missing agentmail credential', async () => {
     const inv = await buildWorkspaceInventory({ db: ctx.db }, ctx.workspace.id);
     const c = classifyIntent('Every morning gather the latest AI articles from tech sites, summarize each, and email me a digest.', inv);
     expect(c.triggerType).toBe('cron');
-    expect(c.requiredIntegrations).toContain('gmail');
-    expect(c.missingCredentials).toContain('gmail'); // no credential configured
+    // Generic "email/digest" routes to AgentMail (agent-native default); explicit "gmail" still routes to Gmail.
+    expect(c.requiredIntegrations).toContain('agentmail');
+    expect(c.missingCredentials).toContain('agentmail'); // no credential configured
     expect(['orchestrated', 'enterprise']).toContain(c.archetype);
+  });
+
+  it('classifies an always-on website watcher as a persistent listener', async () => {
+    const inv = await buildWorkspaceInventory({ db: ctx.db }, ctx.workspace.id);
+    const c = classifyIntent(
+      'Create an extension that constantly watches a website for new AI posts and email me immediately. Run 24/7.',
+      inv,
+    );
+    expect(c.triggerType).toBe('persistent_listener');
   });
 
   it('escalates a multi-source ensemble request to enterprise', async () => {
@@ -79,9 +89,9 @@ describe('planWorkflow', () => {
     const plan = planWorkflow(desc, classifyIntent(desc, inv));
     const names = plan.phases.map((p) => p.name);
     expect(names).toEqual(expect.arrayContaining(['Gather Sources', 'Analyze & Score', 'Draft Output', 'Deliver']));
-    expect(plan.missingDependencies).toContain('gmail');
+    expect(plan.missingDependencies).toContain('agentmail');
     expect(plan.phases.find((p) => p.name === 'Gather Sources')!.agentRole).toBe('researcher');
-    expect(plan.question).toMatch(/gmail/);
+    expect(plan.question).toMatch(/agentmail/);
   });
 });
 
@@ -149,6 +159,22 @@ describe('preflightAndEnrich', () => {
     const mismatch = res.warnings.find((w) => w.code === 'CAPABILITY_MISMATCH');
     expect(mismatch).toBeTruthy();
     expect(mismatch!.message).toMatch(/analyst|coder/);
+  });
+
+  it('flags agent_task nodes that bury source work inside language work', async () => {
+    const inv = await buildWorkspaceInventory({ db: ctx.db }, ctx.workspace.id);
+    const graph = base(
+      [
+        { id: 'T', type: 'trigger', title: 'M', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Fetch and summarize stories', position: { x: 200, y: 0 }, config: { kind: 'agent_task', agentRole: 'researcher', capabilityTags: [], prompt: 'Scrape Hacker News and summarize the top 3 AI stories.', inputKeys: [], outputKeys: [] } },
+        { id: 'R', type: 'return_output', title: 'Out', position: { x: 400, y: 0 }, config: { kind: 'return_output', renderAs: 'json' } },
+      ],
+      [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'R' }],
+    );
+    const res = preflightAndEnrich(graph, inv);
+    const grammar = res.warnings.find((w) => w.code === 'GRAMMAR_VIOLATION');
+    expect(grammar).toBeTruthy();
+    expect(grammar!.message).toMatch(/Rule 1/);
   });
 
   it('buildTeamRoster lists cast roles with offline status + fallback', async () => {

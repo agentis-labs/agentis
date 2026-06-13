@@ -78,7 +78,7 @@ export function scanArtifactBytes(buf: Buffer, label: string): ScanResult {
 }
 
 /**
- * Throws `SKILL_REGISTRY_SCAN_BLOCKED` when any rule has severity `block`.
+ * Throws `EXTENSION_REGISTRY_SCAN_BLOCKED` when any rule has severity `block`.
  * Warnings are returned to the caller so the route handler can include
  * them in the install response and surface them in the dashboard
  * permission summary.
@@ -87,8 +87,8 @@ export function assertNoBlockingFindings(result: ScanResult): ScanFinding[] {
   const blockers = result.findings.filter((f) => f.severity === 'block');
   if (blockers.length > 0) {
     throw new AgentisError(
-      'SKILL_REGISTRY_SCAN_BLOCKED',
-      `Skill registry install blocked by security scan: ${blockers.map((b) => b.rule).join(', ')}`,
+      'EXTENSION_REGISTRY_SCAN_BLOCKED',
+      `Extension registry install blocked by security scan: ${blockers.map((b) => b.rule).join(', ')}`,
     );
   }
   return result.findings.filter((f) => f.severity === 'warn');

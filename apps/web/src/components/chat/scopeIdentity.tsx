@@ -5,7 +5,6 @@ export type ChatScopeRole = 'orchestrator' | 'manager' | 'worker';
 export interface ChatScopeIdentityInput {
   name: string;
   role: ChatScopeRole;
-  spaceName?: string | null;
 }
 
 export function formatChatScopeName(scope: ChatScopeIdentityInput): string {
@@ -24,11 +23,7 @@ export function formatChatScopeDescriptor(
     const trimmedWorkspaceName = workspaceName?.trim();
     return trimmedWorkspaceName ? `${trimmedWorkspaceName} Orchestrator` : 'Orchestrator';
   }
-  if (scope.role === 'manager') {
-    const trimmedSpaceName = scope.spaceName?.trim();
-    return trimmedSpaceName ? `${trimmedSpaceName} Manager` : 'Manager';
-  }
-  return 'Worker';
+  return scope.role === 'manager' ? 'Manager' : 'Worker';
 }
 
 export function formatChatScopePlaceholder(name: string, hasPendingApproval = false): string {

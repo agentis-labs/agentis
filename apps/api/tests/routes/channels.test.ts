@@ -228,9 +228,9 @@ describe('DELETE /v1/channels/:id', () => {
 });
 
 describe('GET /v1/channels/:id/webhook-info', () => {
-  it('returns the inbound URL and the secret to the authenticated operator', async () => {
+  it('returns the inbound URL without re-disclosing the one-time secret', async () => {
     const agentId = seedAgent();
-    const { connection, webhookSecret } = bridge.create({
+    const { connection } = bridge.create({
       workspaceId: ctx.workspace.id,
       ambientId: null,
       userId: ctx.user.id,
@@ -244,7 +244,7 @@ describe('GET /v1/channels/:id/webhook-info', () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.webhookSecret).toBe(webhookSecret);
+    expect(body.webhookSecret).toBeUndefined();
     expect(body.webhookUrl).toContain(connection.id);
   });
 });

@@ -43,7 +43,7 @@ interface AgentRow {
 interface WorkflowRow {
   id: string;
   title: string;
-  summary?: string | null;
+  description?: string | null;
   updatedAt: string;
 }
 
@@ -342,7 +342,7 @@ export function TeamPage() {
         <section className="mt-6 rounded-lg border border-line bg-surface p-4">
           <div className="mb-3 text-sm font-medium text-text-primary">Team Workflows</div>
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {detail.workflows.map((workflow) => <Link key={workflow.id} to={`/workflows/${workflow.id}`} className="rounded-md border border-line bg-canvas p-3 text-xs hover:border-accent/50"><div className="font-medium text-text-primary">{workflow.title}</div><p className="mt-1 line-clamp-2 text-text-muted">{workflow.summary || 'Workflow canvas'}</p></Link>)}
+            {detail.workflows.map((workflow) => <Link key={workflow.id} to={`/workflows/${workflow.id}`} className="rounded-md border border-line bg-canvas p-3 text-xs hover:border-accent/50"><div className="font-medium text-text-primary">{workflow.title}</div><p className="mt-1 line-clamp-2 text-text-muted">{workflow.description || 'Workflow canvas'}</p></Link>)}
             {detail.workflows.length === 0 && <div className="text-xs text-text-muted">No workflows scoped to this team.</div>}
           </div>
         </section>

@@ -46,6 +46,24 @@ describe('runSqliteMigrations', () => {
     }
   });
 
+  it('recovers when an additive migration already changed the schema but was not recorded', () => {
+    const path = tempDbPath();
+    const sqlite = new Database(path);
+    try {
+      runSqliteMigrations(sqlite);
+      sqlite.prepare('DELETE FROM schema_migrations WHERE version = ?').run(52);
+
+      const result = runSqliteMigrations(sqlite);
+
+      expect(result.applied.map((migration) => migration.version)).toEqual([52]);
+      expect(
+        sqlite.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(52),
+      ).toBeDefined();
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('backfills version 1 when an old database has core tables but no schema_migrations', () => {
     // Simulate a database initialised by a pre-runner build: tables exist,
     // schema_migrations does not.
@@ -97,9 +115,16 @@ INSERT INTO schema_migrations (version, name) VALUES (1, 'init'), (2, 'company_o
       ).toBeUndefined();
 
       const result = runSqliteMigrations(sqlite);
+      // agent_memories was created at v39 then retired at v51 — both apply, and
+      // the table is gone afterward (agent-private memory moved to
+      // memory_episodes, scope_id = agentId).
       expect(result.applied.map((migration) => migration.name)).toContain('agent_memories');
+      expect(result.applied.map((migration) => migration.name)).toContain('retire_agent_memories');
       expect(
         sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memories'`).get(),
+      ).toBeUndefined();
+      expect(
+        sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memory_episodes'`).get(),
       ).toBeDefined();
     } finally {
       sqlite.close();
@@ -158,8 +183,8 @@ CREATE TABLE workflows (
 );
 `);
     legacy
-      .prepare('INSERT INTO workflows (id, workspace_id, user_id, title, graph, concurrency_overflow) VALUES (?,?,?,?,?,?)')
-      .run('wf-legacy', 'ws-1', 'user-1', 'Legacy WF', '{}', 'queue');
+      .prepare('INSERT INTO workflows (id, workspace_id, user_id, title, summary, intended_behavior, graph, concurrency_overflow) VALUES (?,?,?,?,?,?,?,?)')
+      .run('wf-legacy', 'ws-1', 'user-1', 'Legacy WF', 'Legacy summary', 'Legacy intent', '{}', 'queue');
     // Confirm the legacy constraint actually bites when the column is omitted.
     expect(() =>
       legacy
@@ -180,8 +205,13 @@ CREATE TABLE workflows (
       expect(col?.dflt_value?.replace(/'/g, '')).toBe('queue');
 
       // Legacy row survives the rebuild.
-      const legacyRow = sqlite.prepare("SELECT concurrency_overflow AS v FROM workflows WHERE id = 'wf-legacy'").get() as { v: string };
+      const legacyRow = sqlite.prepare("SELECT concurrency_overflow AS v, description AS d FROM workflows WHERE id = 'wf-legacy'").get() as { v: string; d: string };
       expect(legacyRow.v).toBe('queue');
+      expect(legacyRow.d).toBe('Legacy intent');
+      const migratedColumns = sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{ name: string }>;
+      expect(migratedColumns.map((column) => column.name)).toContain('description');
+      expect(migratedColumns.map((column) => column.name)).not.toContain('summary');
+      expect(migratedColumns.map((column) => column.name)).not.toContain('intended_behavior');
 
       // Inserting WITHOUT the column now succeeds and defaults to 'queue'
       // (FK off to isolate the column behaviour from parent-row requirements).
@@ -191,6 +221,57 @@ CREATE TABLE workflows (
         .run('wf-new', 'ws-1', 'user-1', 'New WF', '{}');
       const newRow = sqlite.prepare("SELECT concurrency_overflow AS v FROM workflows WHERE id = 'wf-new'").get() as { v: string };
       expect(newRow.v).toBe('queue');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('reconciles legacy spaces columns to the current schema', () => {
+    const path = tempDbPath();
+    const legacy = new Database(path);
+    try {
+      legacy.exec(EMBEDDED_INIT_SQL);
+      legacy.exec(`
+CREATE TABLE spaces (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  user_id      TEXT NOT NULL,
+  name         TEXT NOT NULL,
+  color        TEXT,
+  icon_glyph   TEXT,
+  team_id      TEXT,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT INTO spaces (id, workspace_id, user_id, name, color, icon_glyph, team_id)
+VALUES ('space-1', 'ws-1', 'user-1', 'Revenue Ops', '#123456', 'R', 'team-1');
+`);
+    } finally {
+      legacy.close();
+    }
+
+    const { sqlite } = openSqlite({ path });
+    try {
+      const columns = sqlite.prepare("PRAGMA table_info('spaces')").all() as Array<{ name: string }>;
+      const names = columns.map((column) => column.name);
+      expect(names).toContain('slug');
+      expect(names).toContain('description');
+      expect(names).toContain('color_hex');
+      expect(names).toContain('icon_emoji');
+      expect(names).toContain('manager_id');
+      const agentColumns = sqlite.prepare("PRAGMA table_info('agents')").all() as Array<{ name: string }>;
+      const workflowColumns = sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{ name: string }>;
+      expect(agentColumns.map((column) => column.name)).toContain('space_id');
+      expect(workflowColumns.map((column) => column.name)).toContain('space_id');
+
+      const row = sqlite.prepare("SELECT slug, color_hex AS colorHex, icon_emoji AS iconEmoji FROM spaces WHERE id = 'space-1'").get() as {
+        slug: string;
+        colorHex: string;
+        iconEmoji: string;
+      };
+      expect(row.slug).toBe('revenue-ops');
+      expect(row.colorHex).toBe('#123456');
+      expect(row.iconEmoji).toBe('R');
     } finally {
       sqlite.close();
     }

@@ -1,7 +1,7 @@
 /**
  * AgentLibraryService — Principle #11: "an agent is a file, not a record."
  *
- * Mirrors `SkillLibraryService` for agents. Platform specialists are exported to
+ * Mirrors `ExtensionLibraryService` for agents. Platform specialists are exported to
  * `agents/platform/<role>.md` (read-only defaults); operators add `agents/custom/*.md`
  * and marketplace installs land in `agents/community/`. The creation engine reads
  * these so a workspace's *trained* specialists (or custom roles like
@@ -11,7 +11,7 @@
  * filesystem defines what they *are*.
  */
 
-import { SPECIALIST_AGENTS, ROLE_TOOLS, type AgentRole } from '@agentis/core';
+import { SPECIALIST_AGENTS, ROLE_TOOLS, roleTools, type AgentRole } from '@agentis/core';
 import type { WorkspaceVolumeService } from './workspaceVolume.js';
 
 const AGENTS_DIR = 'agents';
@@ -23,12 +23,35 @@ export interface AgentDefinition {
   tools: string[];
   capabilityTags: string[];
   colorHex?: string;
+  avatarGlyph?: string;
+  description?: string;
   body: string;
-  source: 'platform' | 'custom' | 'community';
+  source: 'platform' | 'custom' | 'community' | 'generated';
 }
+
+/** On-disk source folders, in resolution order (later overrides earlier). */
+const SOURCES = ['platform', 'community', 'custom', 'generated'] as const;
+type LibrarySource = (typeof SOURCES)[number];
 
 export class AgentLibraryService {
   constructor(private readonly volume: WorkspaceVolumeService) {}
+
+  /**
+   * Synchronous role→definition cache, warmed by `list()` and by writes. The
+   * engine resolves specialist roles synchronously at dispatch, so it can only
+   * consult this cache; a cold miss falls back to a synthesized generic
+   * specialist (see `SpecialistAgentService.defForRole`).
+   */
+  readonly #cache = new Map<string, AgentDefinition>();
+
+  #cacheKey(workspaceId: string, role: string): string {
+    return `${workspaceId}:${role}`;
+  }
+
+  /** Read a cached definition for a role without touching the volume. */
+  getByRoleSync(workspaceId: string, role: string): AgentDefinition | null {
+    return this.#cache.get(this.#cacheKey(workspaceId, role)) ?? null;
+  }
 
   /** Export the platform specialists to `agents/platform/<role>.md` (idempotent). */
   async ensurePlatformAgents(workspaceId: string): Promise<void> {
@@ -36,23 +59,27 @@ export class AgentLibraryService {
       const rel = `${AGENTS_DIR}/platform/${s.role}.md`;
       if (!(await this.volume.exists(workspaceId, rel))) {
         await this.volume.write(workspaceId, rel, serialize({
-          name: s.name, role: s.role, model: s.defaultModel, tools: ROLE_TOOLS[s.role],
+          name: s.name, role: s.role, model: s.defaultModel, tools: roleTools(s.role),
           capabilityTags: s.capabilityTags, colorHex: s.colorHex, body: s.systemPrompt, source: 'platform',
         }));
       }
     }
   }
 
-  /** Read every agent `.md` across platform/custom/community. */
+  /** Read every agent `.md` across platform/community/custom/generated. */
   async list(workspaceId: string): Promise<AgentDefinition[]> {
     await this.ensurePlatformAgents(workspaceId);
     const out: AgentDefinition[] = [];
-    for (const source of ['platform', 'custom', 'community'] as const) {
+    for (const source of SOURCES) {
       const entries = await this.volume.list(workspaceId, `${AGENTS_DIR}/${source}`);
       for (const e of entries) {
         if (e.kind !== 'file' || !e.name.endsWith('.md')) continue;
         const raw = await this.volume.read(workspaceId, `${AGENTS_DIR}/${source}/${e.name}`);
-        if (raw != null) out.push(parse(raw, e.name.replace(/\.md$/, ''), source));
+        if (raw != null) {
+          const def = parse(raw, e.name.replace(/\.md$/, ''), source);
+          out.push(def);
+          this.#cache.set(this.#cacheKey(workspaceId, def.role), def);
+        }
       }
     }
     return out;
@@ -66,9 +93,24 @@ export class AgentLibraryService {
       .map((a) => ({ role: a.role, tools: a.tools, defaultModel: a.model, name: a.name }));
   }
 
-  /** Write/overwrite a custom agent definition. */
+  /** Write/overwrite a human-authored custom agent definition. */
   async writeCustom(workspaceId: string, def: Omit<AgentDefinition, 'source'>): Promise<void> {
-    await this.volume.write(workspaceId, `${AGENTS_DIR}/custom/${def.role}.md`, serialize({ ...def, source: 'custom' }));
+    await this.#write(workspaceId, 'custom', def);
+  }
+
+  /**
+   * Write/overwrite an AI-generated specialist definition (`agents/generated/`).
+   * Kept distinct from `custom` so the UI can flag generated specialists as
+   * needing review before broad trust.
+   */
+  async writeGenerated(workspaceId: string, def: Omit<AgentDefinition, 'source'>): Promise<void> {
+    await this.#write(workspaceId, 'generated', def);
+  }
+
+  async #write(workspaceId: string, source: LibrarySource, def: Omit<AgentDefinition, 'source'>): Promise<void> {
+    const full: AgentDefinition = { ...def, source };
+    await this.volume.write(workspaceId, `${AGENTS_DIR}/${source}/${def.role}.md`, serialize(full));
+    this.#cache.set(this.#cacheKey(workspaceId, def.role), full);
   }
 }
 
@@ -81,6 +123,8 @@ function serialize(def: AgentDefinition): string {
     `tools: [${def.tools.join(', ')}]`,
     `capabilityTags: [${def.capabilityTags.join(', ')}]`,
     ...(def.colorHex ? [`colorHex: "${def.colorHex}"`] : []),
+    ...(def.avatarGlyph ? [`avatarGlyph: "${def.avatarGlyph}"`] : []),
+    ...(def.description ? [`description: ${def.description.replace(/\n/g, ' ')}`] : []),
     '---',
     '',
     def.body.trim(),
@@ -89,7 +133,8 @@ function serialize(def: AgentDefinition): string {
 }
 
 function parse(raw: string, fallbackRole: string, source: AgentDefinition['source']): AgentDefinition {
-  let name = fallbackRole, role = fallbackRole, model = 'gpt-4o-mini', colorHex: string | undefined;
+  let name = fallbackRole, role = fallbackRole, model = 'gpt-4o-mini';
+  let colorHex: string | undefined, avatarGlyph: string | undefined, description: string | undefined;
   let tools: string[] = [], capabilityTags: string[] = [], body = raw;
   const fm = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
   if (fm) {
@@ -102,11 +147,13 @@ function parse(raw: string, fallbackRole: string, source: AgentDefinition['sourc
       else if (k === 'role') role = v!.trim();
       else if (k === 'model') model = v!.trim();
       else if (k === 'colorHex') colorHex = v!.replace(/['"]/g, '').trim();
+      else if (k === 'avatarGlyph') avatarGlyph = v!.replace(/['"]/g, '').trim();
+      else if (k === 'description') description = v!.trim();
       else if (k === 'tools') tools = list(v!);
       else if (k === 'capabilityTags') capabilityTags = list(v!);
     }
   }
-  return { name, role, model, tools, capabilityTags, colorHex, body: body.trim(), source };
+  return { name, role, model, tools, capabilityTags, colorHex, avatarGlyph, description, body: body.trim(), source };
 }
 
 function list(v: string): string[] {

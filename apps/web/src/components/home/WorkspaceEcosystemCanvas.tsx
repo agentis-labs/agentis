@@ -5,8 +5,10 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type SetStateAction,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -26,10 +28,27 @@ import {
   ShieldCheck,
   Workflow,
   X,
+  Square,
+  Wrench,
+  Loader2,
+  Zap,
+  RefreshCw,
+  Sparkles,
+  Activity as ActivityIcon,
+  MessageSquare,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
+import { useRunActivity } from '../../lib/useRunActivity';
+import {
+  useWorkspaceActivity,
+  useLiveNodeIds,
+  workspaceRequestStatus,
+  isWorkActivity,
+  type WorkspaceRequestStatus,
+} from '../../lib/useWorkspaceActivity';
+import type { RealtimeActivity } from '../../lib/realtimeActivity';
 import type {
   WorkspaceActiveRun,
   WorkspaceAgent,
@@ -42,7 +61,6 @@ import type {
 import { useChatPanelStore, type ChatPanelState } from '../chat/ChatPanelStore';
 import { AgentCreateWizard } from '../agents/AgentCreateWizard';
 import { captureFlip, type FlipSnapshot } from '../shared/flip';
-import { AgentLiveFeed } from './AgentLiveFeed';
 import { CanvasActivityPopover } from './CanvasActivityPopover';
 import { CanvasApprovalNodeBadge } from './CanvasApprovalNode';
 import { CanvasBackground, type CanvasBackgroundHandle } from './CanvasBackground';
@@ -60,6 +78,7 @@ import type {
   EdgeAnimation,
   FleetCounts,
   HomeKnowledgeBase,
+  HomeSpace,
   HomeWorkflow,
   Vec2,
 } from './homeCanvasTypes';
@@ -111,11 +130,19 @@ interface CanvasBounds {
   height: number;
 }
 
+interface TriagePanelFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 type EntrancePhase = 'idle' | 'background' | 'orchestrator' | 'managers' | 'workers' | 'resources' | 'complete';
 
 const EMPTY_DATA: EcosystemData = {
   workflows: [],
   knowledgeBases: [],
+  spaces: [],
   loading: true,
 };
 const EMPTY_APPROVALS: WorkspaceApproval[] = [];
@@ -142,7 +169,7 @@ const ECOSYSTEM_REFRESH_EVENTS = [
 ] as const;
 
 const NODE = {
-  orchestrator: { width: 292, height: 110 },
+  orchestrator: { width: 252, height: 88 },
   manager: { width: 224, height: 84 },
   worker: { width: 178, height: 66 },
   workflow: { width: 196, height: 68 },
@@ -154,6 +181,15 @@ const NODE = {
 
 const VIEWPORT_MIN = 0.36;
 const VIEWPORT_MAX = 2.25;
+const TRIAGE_PANEL_MARGIN = 12;
+const TRIAGE_PANEL_MIN_WIDTH = 296;
+const TRIAGE_PANEL_MIN_HEIGHT = 272;
+const TRIAGE_PANEL_DEFAULT_FRAME: TriagePanelFrame = {
+  x: 14,
+  y: 14,
+  width: 332,
+  height: 286,
+};
 
 export function WorkspaceEcosystemCanvas({
   agents,
@@ -176,6 +212,7 @@ export function WorkspaceEcosystemCanvas({
   const wheelCommitRef = useRef<number | null>(null);
   const initialCenteredRef = useRef(false);
   const userMovedRef = useRef(false);
+  const responsiveFitKeyRef = useRef('');
   const entranceTimersRef = useRef<number[]>([]);
   const svgLayerRef = useRef<SVGGElement | null>(null);
   const nodeLayerRef = useRef<HTMLDivElement | null>(null);
@@ -187,6 +224,9 @@ export function WorkspaceEcosystemCanvas({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [triageOpen, setTriageOpen] = useState(false);
+  /** Domains the operator expanded past their one-band idle cap ("+N more"). */
+  const [expandedDomains, setExpandedDomains] = useState<ReadonlySet<string>>(new Set<string>());
+  const [triageFrame, setTriageFrame] = useState<TriagePanelFrame>(() => ({ ...TRIAGE_PANEL_DEFAULT_FRAME }));
   const [isPanning, setIsPanning] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -197,13 +237,15 @@ export function WorkspaceEcosystemCanvas({
 
   const refresh = useCallback(async () => {
     setData((current) => ({ ...current, loading: true }));
-    const [workflowsRes, knowledgeRes] = await Promise.allSettled([
+    const [workflowsRes, knowledgeRes, spacesRes] = await Promise.allSettled([
       api<{ workflows: HomeWorkflow[] }>('/v1/workflows'),
       api<{ knowledgeBases: HomeKnowledgeBase[] }>('/v1/knowledge-bases'),
+      api<{ data: HomeSpace[] }>('/v1/spaces'),
     ]);
     setData({
       workflows: workflowsRes.status === 'fulfilled' ? workflowsRes.value.workflows ?? [] : [],
       knowledgeBases: knowledgeRes.status === 'fulfilled' ? knowledgeRes.value.knowledgeBases ?? [] : [],
+      spaces: spacesRes.status === 'fulfilled' ? spacesRes.value.data ?? [] : [],
       loading: false,
     });
   }, []);
@@ -281,8 +323,8 @@ export function WorkspaceEcosystemCanvas({
   );
 
   const model = useMemo(
-    () => buildCanvasModel(canvasData, agents, activeRuns, canvasArtifacts, approvals, failedRuns, virtualSize),
-    [canvasData, agents, activeRuns, canvasArtifacts, approvals, failedRuns, virtualSize],
+    () => buildCanvasModel(canvasData, agents, activeRuns, canvasArtifacts, approvals, failedRuns, virtualSize, selectedNodeId, expandedDomains),
+    [canvasData, agents, activeRuns, canvasArtifacts, approvals, failedRuns, selectedNodeId, virtualSize, expandedDomains],
   );
   const contentBounds = useMemo(() => computeCanvasContentBounds(model.nodes), [model.nodes]);
 
@@ -290,10 +332,69 @@ export function WorkspaceEcosystemCanvas({
     () => model.nodes.find((node) => node.id === selectedNodeId) ?? null,
     [model.nodes, selectedNodeId],
   );
+
+  // Workspace-wide live activity spine — powers Mission Control's stream and the
+  // canvas's "orchestrator is working right now" liveness (nodes/edges pulse).
+  const activeRunIds = useMemo(
+    () => activeRuns.filter(isActiveRun).map((run) => run.id),
+    [activeRuns],
+  );
+  const nodeTitleFor = useCallback(
+    (id: string) => model.nodes.find((n) => n.id === `workflow-${id}` || n.id === id)?.title,
+    [model.nodes],
+  );
+  const workspaceActivity = useWorkspaceActivity(activeRunIds, { nodeTitle: nodeTitleFor });
+  const requestStatus = useMemo(() => workspaceRequestStatus(workspaceActivity), [workspaceActivity]);
+  const liveIds = useLiveNodeIds(workspaceActivity);
+
+  // Canvas node ids currently working (agent-/workflow- prefixed), plus the
+  // orchestrator while it processes a request — drives node/edge pulse.
+  const liveNodeIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of liveIds.agentIds) set.add(`agent-${a}`);
+    for (const w of liveIds.workflowIds) set.add(`workflow-${w}`);
+    if (requestStatus.busy && model.orchestratorId) set.add(model.orchestratorId);
+    return set;
+  }, [liveIds, requestStatus.busy, model.orchestratorId]);
+
+  // nodeId → its current step/thought, for the on-canvas live caption.
+  // Work events only (runs/nodes/tools) — ambient agent chatter (status pings,
+  // chat-memory capture) must never caption a node.
+  const liveCaptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of workspaceActivity) {
+      if (!isWorkActivity(item)) continue;
+      const text = item.detail || item.title;
+      if (!text) continue;
+      if (item.agentId) { const k = `agent-${item.agentId}`; if (!map.has(k)) map.set(k, text); }
+      if (item.workflowId) { const k = `workflow-${item.workflowId}`; if (!map.has(k)) map.set(k, text); }
+    }
+    if (requestStatus.busy && model.orchestratorId && requestStatus.label && !map.has(model.orchestratorId)) {
+      map.set(model.orchestratorId, requestStatus.label);
+    }
+    return map;
+  }, [workspaceActivity, requestStatus.busy, requestStatus.label, model.orchestratorId]);
+
+  // Select a workflow's canvas node (opens its detail card) — used by Mission
+  // Control's failed/active rows so triage stays on the canvas.
+  const selectWorkflowNode = useCallback((workflowId: string) => {
+    setSelectedNodeId(`workflow-${workflowId}`);
+  }, []);
+
+  // When the orchestrator/agents start working on a request, surface Mission
+  // Control automatically (open-only; never force-closes what the user opened).
+  const wasBusyRef = useRef(false);
+  useEffect(() => {
+    if (requestStatus.busy && !wasBusyRef.current) setTriageOpen(true);
+    wasBusyRef.current = requestStatus.busy;
+  }, [requestStatus.busy]);
   const hoveredNode = useMemo(
     () => model.nodes.find((node) => node.id === hoveredNodeId) ?? null,
     [model.nodes, hoveredNodeId],
   );
+  const orchestratorNode = model.orchestratorId
+    ? model.nodes.find((node) => node.id === model.orchestratorId) ?? null
+    : null;
   const nodeMap = useMemo(() => new Map(model.nodes.map((node) => [node.id, node])), [model.nodes]);
   const focusedNodeIds = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -324,16 +425,22 @@ export function WorkspaceEcosystemCanvas({
   }, [model.nodes, selectedNodeId]);
 
   useEffect(() => {
-    if (initialCenteredRef.current && userMovedRef.current) return;
+    const fitKey = [
+      Math.round(containerSize.width),
+      Math.round(containerSize.height),
+      chatState,
+      Math.round(dockedWidth),
+      model.nodes.length,
+    ].join(':');
+    const responsiveLayoutChanged = responsiveFitKeyRef.current !== fitKey;
+    if (initialCenteredRef.current && userMovedRef.current && !responsiveLayoutChanged) return;
     if (containerSize.width <= 0 || model.nodes.length === 0) return;
-    const next = computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth);
+    const next = computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth, orchestratorNode);
     setViewport(next);
+    responsiveFitKeyRef.current = fitKey;
     initialCenteredRef.current = true;
-  }, [chatState, containerSize, contentBounds, dockedWidth, model.nodes.length]);
+  }, [chatState, containerSize, contentBounds, dockedWidth, model.nodes.length, orchestratorNode]);
 
-  const orchestratorNode = model.orchestratorId
-    ? model.nodes.find((node) => node.id === model.orchestratorId) ?? null
-    : null;
   const orchestratorScreen = orchestratorNode ? canvasToScreen(orchestratorNode, viewport) : null;
   const hoverScreen = hoveredNode ? canvasToScreen(hoveredNode, viewport) : null;
   const loading = (data.loading || snapshotLoading) && model.nodes.every((node) => node.ghost);
@@ -446,8 +553,8 @@ export function WorkspaceEcosystemCanvas({
   const resetViewport = useCallback(() => {
     userMovedRef.current = false;
     setSelectedNodeId(null);
-    animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth), 340);
-  }, [chatState, containerSize, contentBounds, dockedWidth]);
+    animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth, orchestratorNode), 340);
+  }, [chatState, containerSize, contentBounds, dockedWidth, orchestratorNode]);
 
   const toggleFullscreen = useCallback(async () => {
     if (isFullscreen || document.fullscreenElement) {
@@ -468,10 +575,10 @@ export function WorkspaceEcosystemCanvas({
     if (!isFullscreen) return;
     userMovedRef.current = false;
     const timer = window.setTimeout(() => {
-      animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth), 280);
+      animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth, orchestratorNode), 280);
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [isFullscreen, chatState, containerSize, contentBounds, dockedWidth]);
+  }, [isFullscreen, chatState, containerSize, contentBounds, dockedWidth, orchestratorNode]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -659,6 +766,17 @@ export function WorkspaceEcosystemCanvas({
   }
 
   function handleNodeClick(node: CanvasNode) {
+    // "+N more" domain expander: toggle the band open/closed in place.
+    if (node.id.startsWith('workflow-more:')) {
+      const groupKey = decodeURIComponent(node.id.slice('workflow-more:'.length));
+      setExpandedDomains((current) => {
+        const next = new Set(current);
+        if (next.has(groupKey)) next.delete(groupKey);
+        else next.add(groupKey);
+        return next;
+      });
+      return;
+    }
     if (node.ghost && node.role) {
       const el = document.querySelector<HTMLElement>(`[data-node-id="${node.id}"]`);
       setCreatePreset({ role: node.role, flipFrom: captureFlip(el), lock: true });
@@ -714,13 +832,17 @@ export function WorkspaceEcosystemCanvas({
             const to = nodeMap.get(edge.to);
             if (!from || !to) return null;
             const path = edgePath(from, to, edge.type);
-            const animation = computeEdgeAnimation(edge.activeRunCount, edge.type);
+            // An edge animates only when its TARGET is doing real work — the
+            // orchestrator is `from` on every command edge, so keying off the
+            // source would light the whole tree whenever it's merely chatting.
+            const liveEdge = liveNodeIds.has(edge.to) && edge.to !== model.orchestratorId;
+            const animation = computeEdgeAnimation(Math.max(edge.activeRunCount, liveEdge ? 1 : 0), edge.type);
             const focused = !focusedNodeIds || (focusedNodeIds.has(edge.from) && focusedNodeIds.has(edge.to));
             const revealed = phaseReached(entrancePhase, edgeRevealPhase(edge, nodeMap));
             return (
               <g key={edge.id} className={clsx(focused ? undefined : 'opacity-[0.14]', !revealed && 'invisible')}>
                 <path
-                  className={clsx('home-edge-enter', edge.busy && edge.type === 'command' && 'home-command-edge-busy')}
+                  className={clsx('home-edge-enter', (edge.busy || liveEdge) && edge.type === 'command' && 'home-command-edge-busy')}
                   d={path}
                   fill="none"
                   stroke={animation.strokeColor}
@@ -768,6 +890,8 @@ export function WorkspaceEcosystemCanvas({
             revealed={phaseReached(entrancePhase, nodeRevealPhase(node))}
             selected={selectedNodeId === node.id}
             dimmed={Boolean(focusedNodeIds && !focusedNodeIds.has(node.id))}
+            live={liveNodeIds.has(node.id)}
+            liveCaption={liveCaptions.get(node.id)}
             onClick={() => handleNodeClick(node)}
             onOpen={() => !node.ghost && node.route && nav(node.route)}
             onHover={() => setHoveredNodeId(node.id)}
@@ -785,14 +909,6 @@ export function WorkspaceEcosystemCanvas({
       {agents.length === 0 && !loading && (
         <GhostEmptyState onCreateOrchestrator={() => setCreatePreset({ role: 'orchestrator', flipFrom: null, lock: false })} />
       )}
-
-      <AgentLiveFeed
-        agents={agents}
-        activeRuns={activeRuns}
-        approvals={approvals}
-        onRefresh={refresh}
-        onSelectNode={setSelectedNodeId}
-      />
 
       {chatState !== 'docked' && (
         <CanvasComposerOverlay
@@ -820,7 +936,14 @@ export function WorkspaceEcosystemCanvas({
         open={triageOpen}
         activeRuns={activeRuns.filter(isActiveRun)}
         approvals={approvals}
+        failedRuns={failedRuns}
+        activity={workspaceActivity}
+        requestStatus={requestStatus}
+        frame={triageFrame}
+        onFrameChange={setTriageFrame}
+        containerSize={containerSize}
         onClose={() => setTriageOpen(false)}
+        onSelectWorkflow={(workflowId) => selectWorkflowNode(workflowId)}
         onNavigate={(route) => {
           setTriageOpen(false);
           nav(route);
@@ -828,14 +951,18 @@ export function WorkspaceEcosystemCanvas({
         onRefresh={refresh}
       />
 
-      <CanvasHudBar
-        counts={fleetCounts}
-        connected={fleet?.gateways.connected ? fleet.gateways.connected > 0 : true}
-        isFullscreen={isFullscreen}
-        onOpenTriage={() => setTriageOpen(true)}
-        onToggleFullscreen={() => void toggleFullscreen()}
-        onResetView={resetViewport}
-      />
+      {/* The HUD controls a populated canvas; in the ghost empty state (no agents)
+          there's nothing to triage, reset, or expand — keep it clean. */}
+      {agents.length > 0 && (
+        <CanvasHudBar
+          counts={fleetCounts}
+          connected={fleet?.gateways.connected ? fleet.gateways.connected > 0 : true}
+          isFullscreen={isFullscreen}
+          onOpenTriage={() => setTriageOpen(true)}
+          onToggleFullscreen={() => void toggleFullscreen()}
+          onResetView={resetViewport}
+        />
+      )}
 
       <AgentCreateWizard
         open={Boolean(createPreset)}
@@ -870,6 +997,8 @@ export function buildCanvasModel(
   approvals: WorkspaceApproval[],
   failedRuns: WorkspaceFailedRun[],
   canvasSize: VirtualCanvasSize,
+  expandedNodeId: string | null = null,
+  expandedDomains: ReadonlySet<string> = new Set<string>(),
 ): CanvasModel {
   const nodes: CanvasNode[] = [];
   const edges: CanvasEdge[] = [];
@@ -880,15 +1009,12 @@ export function buildCanvasModel(
   for (const agent of agents) if (isWorkingAgent(agent)) workingAgentIds.add(agent.id);
 
   const roles = classifyAgents(agents);
-  const managerCount = Math.max(roles.managers.length, agents.length === 0 ? 2 : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0);
-  const workerCount = Math.max(roles.workers.length, agents.length === 0 ? 4 : roles.workers.length === 0 ? Math.max(2, roles.managers.length) : 0);
-  const workerSize = computeWorkerNodeSize(workerCount);
-  const workerColumns = computeWorkerColumns(workerCount);
-  const workerRows = Math.max(1, Math.ceil(workerCount / Math.max(1, workerColumns)));
+  const spaces = data.spaces ?? [];
+  const plannedSpaceCount = Math.max(2, spaces.length);
+  const managerCount = Math.max(roles.managers.length, agents.length === 0 ? plannedSpaceCount : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0);
   const managerPositions = distributeRow(managerCount, canvasSize.width, 350, NODE.manager.width);
-  const workerPositions = distributeLayer(workerCount, canvasSize.width, 530, workerSize.width, workerSize.height + 42, workerColumns);
-  const resourceStartY = 530 + workerRows * (workerSize.height + 42) + 68;
   const availableCommandSourceIds = new Set<string>();
+  const spaceSourceIds = new Map<string, string>();
 
   const orchestratorId = roles.orchestrator ? `agent-${roles.orchestrator.id}` : 'ghost-orchestrator';
   if (roles.orchestrator) {
@@ -904,31 +1030,50 @@ export function buildCanvasModel(
     const node = agentNode(agent, 'manager', pos, workingAgentIds, approvals, activeRuns);
     nodes.push(node);
     managerNodeIds.push(node.id);
+    if (node.spaceId) spaceSourceIds.set(node.spaceId, node.id);
     if (availableAgentIds.has(agent.id)) availableCommandSourceIds.add(node.id);
     edges.push(commandEdge(orchestratorId, node.id, workingAgentIds.has(agent.id) && availableCommandSourceIds.has(orchestratorId)));
   });
   for (let index = roles.managers.length; index < managerCount; index += 1) {
     const id = `ghost-manager-${index}`;
     const pos = managerPositions[index] ?? { x: canvasSize.width / 2, y: 350 };
-    nodes.push(ghostNode(id, 'manager', index === 0 ? 'Manager layer' : `Manager ${index + 1}`, 'assign a team or domain', pos, NODE.manager));
+    const space = spaces[index - roles.managers.length] ?? null;
+    const ghost = ghostNode(
+      id,
+      'manager',
+      space ? `${space.name} manager` : index === 0 ? 'Manager layer' : `Manager ${index + 1}`,
+      space ? 'domain owner' : 'assign a team or domain',
+      pos,
+      NODE.manager,
+    );
+    ghost.spaceId = space?.id ?? null;
+    ghost.spaceName = space?.name ?? null;
+    ghost.accent = space?.colorHex ?? ghost.accent;
+    nodes.push(ghost);
     managerNodeIds.push(id);
+    if (space) spaceSourceIds.set(space.id, id);
     edges.push(commandEdge(orchestratorId, id, false));
   }
 
-  roles.workers.forEach((agent, index) => {
+  const expandedManagerId = expandedNodeId && managerNodeIds.includes(expandedNodeId) ? expandedNodeId : null;
+  const visibleWorkers = expandedManagerId
+    ? roles.workers.filter((agent, index) => findParentManager(agent, managerNodeIds, roles.managers, index) === expandedManagerId)
+    : [];
+  const workerCount = visibleWorkers.length;
+  const workerSize = computeWorkerNodeSize(workerCount);
+  const workerColumns = computeWorkerColumns(workerCount);
+  const workerRows = workerCount > 0 ? Math.ceil(workerCount / Math.max(1, workerColumns)) : 0;
+  const workerPositions = workerCount > 0 ? distributeLayer(workerCount, canvasSize.width, 530, workerSize.width, workerSize.height + 42, workerColumns) : [];
+  const resourceStartY = workerRows > 0 ? 530 + workerRows * (workerSize.height + 42) + 68 : 520;
+
+  visibleWorkers.forEach((agent, index) => {
     const pos = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
     const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, activeRuns, workerSize);
     nodes.push(node);
-    const parentId = findParentManager(agent, managerNodeIds, roles.managers, index) ?? orchestratorId;
+    const parentId = expandedManagerId ?? findParentManager(agent, managerNodeIds, roles.managers, index) ?? orchestratorId;
     if (workingAgentIds.has(agent.id)) managerActiveWorkers.set(parentId, (managerActiveWorkers.get(parentId) ?? 0) + 1);
     edges.push(commandEdge(parentId, node.id, workingAgentIds.has(agent.id) && availableCommandSourceIds.has(parentId)));
   });
-  for (let index = roles.workers.length; index < workerCount; index += 1) {
-    const id = `ghost-worker-${index}`;
-    const pos = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
-    nodes.push(ghostNode(id, 'worker', `Worker ${index + 1}`, 'ready for a task agent', pos, workerSize));
-    edges.push(commandEdge(managerNodeIds[index % Math.max(1, managerNodeIds.length)] ?? orchestratorId, id, false));
-  }
 
   for (const edge of edges) {
     if (edge.type === 'command' && edge.from === orchestratorId && edge.active && (managerActiveWorkers.get(edge.to) ?? 0) >= 2) {
@@ -936,7 +1081,22 @@ export function buildCanvasModel(
     }
   }
 
-  const resourceNodes = buildResourceNodes(data, activeRuns, artifacts, approvals, failedRuns, canvasSize, activeWorkflowIds, resourceStartY);
+  const sourceXById = new Map(nodes.map((node) => [node.id, node.x]));
+  const sourceNodeById = new Map(nodes.map((node) => [node.id, node]));
+  const resourceNodes = buildResourceNodes(
+    data,
+    activeRuns,
+    artifacts,
+    approvals,
+    failedRuns,
+    canvasSize,
+    activeWorkflowIds,
+    resourceStartY,
+    spaceSourceIds,
+    sourceXById,
+    sourceNodeById,
+    expandedDomains,
+  );
   nodes.push(...resourceNodes);
   for (const resource of resourceNodes) {
     for (const from of resolveResourceSourceIds(resource, nodes, orchestratorId)) {
@@ -987,6 +1147,8 @@ function CanvasNodeCard({
   revealed,
   selected,
   dimmed,
+  live = false,
+  liveCaption,
   onClick,
   onOpen,
   onHover,
@@ -998,6 +1160,10 @@ function CanvasNodeCard({
   revealed: boolean;
   selected: boolean;
   dimmed: boolean;
+  /** True while this node is emitting live activity (chat-driven work, not just formal runs). */
+  live?: boolean;
+  /** The node's current step/thought, from the workspace activity spine. */
+  liveCaption?: string;
   onClick: () => void;
   onOpen: () => void;
   onHover: () => void;
@@ -1006,6 +1172,8 @@ function CanvasNodeCard({
   const elapsed = node.startedAt ? formatElapsed(node.startedAt, now) : null;
   const isAgentNode = node.kind === 'orchestrator' || node.kind === 'manager' || node.kind === 'worker';
   const isOperationalWarning = Boolean(node.outOfCredits || node.warn);
+  // Liveness = a formal active run OR live workspace activity for this node.
+  const isLive = Boolean(node.active) || live;
   const compact = node.height <= 60 || node.kind === 'artifact';
   const showSubtitle = !compact || node.kind !== 'worker';
   const titleClass = node.kind === 'orchestrator'
@@ -1055,16 +1223,27 @@ function CanvasNodeCard({
           ? 'border-warn bg-warn/5 shadow-[0_0_12px_rgba(245,158,11,0.25)]'
           : node.warn
             ? 'border-warn/40 bg-warn-soft'
-            : node.active
+            : isLive
               ? 'border-accent/35 bg-accent-soft'
               : node.ghost
                 ? 'border-dashed border-line bg-surface/45 text-text-muted'
                 : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
+        isLive && !node.warn && !node.outOfCredits && 'home-orchestrator-aura',
         selected && 'ring-2 ring-violet-300/55',
+        // Visual hierarchy at scale: idle workflows recede so the ones that are
+        // running or failing carry the eye. (Focus-dimming below still wins.)
+        node.kind === 'workflow' && !isLive && !node.warn && !node.ghost && !selected && 'opacity-75 saturate-[0.85]',
         dimmed && 'opacity-[0.32] saturate-[0.6]',
       )}
       style={{ ...style, visibility: revealed ? 'visible' : 'hidden' }}
     >
+      {node.spaceId && node.accent && !node.ghost && (
+        <span
+          aria-hidden="true"
+          className="absolute inset-x-4 top-0 h-px rounded-full opacity-80"
+          style={{ background: `linear-gradient(90deg, transparent, ${node.accent}, transparent)` }}
+        />
+      )}
       <div className={clsx('flex h-full items-center', compact ? 'gap-2' : 'gap-3')}>
         <span
           className={clsx(
@@ -1074,7 +1253,7 @@ function CanvasNodeCard({
               ? 'border-warn/50 bg-warn/10 text-warn shadow-[0_0_8px_rgba(245,158,11,0.2)]'
               : node.warn
                 ? 'border-warn/35 bg-warn-soft text-warn'
-                : node.active
+                : isLive
                   ? 'border-accent/35 bg-accent-soft text-accent'
                   : node.ghost
                     ? 'border-line bg-canvas/50 text-text-muted'
@@ -1089,11 +1268,11 @@ function CanvasNodeCard({
               aria-label={`${node.title} ${statusLabelText}`}
               title={`${node.title} ${statusLabelText}`}
               className={clsx(
-                'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-canvas',
+                'absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full border border-canvas',
                 node.online
                   ? 'bg-success shadow-[0_0_12px_rgba(74,222,128,0.75)]'
                   : 'bg-text-muted',
-                node.active && 'animate-pulse-dot',
+                isLive && 'animate-pulse-dot',
               )}
             >
               <span className="sr-only">{node.title} {statusLabelText}</span>
@@ -1118,7 +1297,124 @@ function CanvasNodeCard({
           {elapsed && <span className="mt-1 block text-[10px] font-semibold text-accent">{elapsed}</span>}
         </span>
       </div>
+      <CanvasNodeThought node={node} isAgentNode={isAgentNode} isLive={isLive} liveCaption={liveCaption} />
     </button>
+  );
+}
+
+/**
+ * Always-on "thought bubble" under an actively-working agent node: its current
+ * tool call or latest streamed reasoning, so the canvas shows what each agent is
+ * thinking right now without hovering or opening a panel. Pointer-transparent and
+ * decorative; fed by the node's live fields (no extra subscription).
+ */
+function CanvasNodeThought({
+  node,
+  isAgentNode,
+  isLive,
+  liveCaption,
+}: {
+  node: CanvasNode;
+  isAgentNode: boolean;
+  isLive: boolean;
+  liveCaption?: string;
+}) {
+  if (!isLive) return null;
+  // Prefer the node's own live fields (agent runtime); fall back to the
+  // workspace activity caption (chat-driven orchestrator/workflow work).
+  const thought = node.currentTool ?? node.outputLines?.at(-1) ?? node.currentTask ?? liveCaption;
+  if (!thought) return null;
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute left-1/2 top-[calc(100%+7px)] z-30 w-[190px] -translate-x-1/2 animate-in fade-in slide-in-from-top-1 rounded-lg border border-accent/25 bg-canvas/92 px-2 py-1.5 shadow-floating backdrop-blur-md duration-200"
+    >
+      <span className="flex items-start gap-1.5">
+        <span className="mt-[3px] h-1 w-1 shrink-0 animate-pulse rounded-full bg-accent" />
+        <span className="block max-h-8 overflow-hidden font-mono text-[9.5px] leading-snug text-text-secondary">
+          {node.currentTool ? `↳ ${node.currentTool}` : thought}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/** Tone → text color for the live activity stream. */
+const ACTIVITY_TONE_CLASS: Record<RealtimeActivity['tone'], string> = {
+  accent: 'text-accent',
+  success: 'text-emerald-400',
+  warn: 'text-warn',
+  danger: 'text-danger',
+  muted: 'text-text-muted',
+};
+
+function activityIcon(kind: RealtimeActivity['kind']) {
+  switch (kind) {
+    case 'tool': return <Wrench size={11} />;
+    case 'message': return <MessageSquare size={11} />;
+    case 'agent': return <Sparkles size={11} />;
+    case 'approval': return <AlertTriangle size={11} />;
+    case 'run':
+    case 'node':
+    case 'progress':
+    default: return <ActivityIcon size={11} />;
+  }
+}
+
+/**
+ * The live mission-control stream — every meaningful thing happening across the
+ * workspace right now: the orchestrator's thinking, tool calls, run/node
+ * transitions, agent messages. This is what turns Mission Control from a static
+ * failed-runs list into "watch the work happen." Newest-first, auto-scrolls.
+ */
+function LiveActivityStream({
+  activity,
+  onSelectWorkflow,
+}: {
+  activity: RealtimeActivity[];
+  onSelectWorkflow: (workflowId: string) => void;
+}) {
+  const items = activity.slice(0, 40);
+  return (
+    <section className="mb-5">
+      <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
+        </span>
+        Live activity
+      </div>
+      <div className="space-y-1 rounded-card border border-line bg-canvas/45 p-2">
+        {items.map((item) => {
+          const clickable = Boolean(item.workflowId);
+          const Wrapper: 'button' | 'div' = clickable ? 'button' : 'div';
+          return (
+            <Wrapper
+              key={item.id}
+              {...(clickable
+                ? { type: 'button' as const, onClick: () => onSelectWorkflow(item.workflowId!) }
+                : {})}
+              className={clsx(
+                'flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left',
+                clickable && 'hover:bg-surface-2',
+              )}
+            >
+              <span className={clsx('mt-0.5 shrink-0', ACTIVITY_TONE_CLASS[item.tone])}>
+                {activityIcon(item.kind)}
+              </span>
+              <span className="min-w-0 flex-1 leading-snug">
+                <span className="truncate text-[12px] text-text-primary">
+                  {item.agentName ? `${item.agentName} · ` : ''}{item.title}
+                </span>
+                {item.detail && item.detail !== item.title && (
+                  <span className="mt-0.5 block line-clamp-2 font-mono text-[11px] text-text-secondary">{item.detail}</span>
+                )}
+              </span>
+            </Wrapper>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -1126,19 +1422,64 @@ function CanvasTriagePanel({
   open,
   activeRuns,
   approvals,
+  failedRuns,
+  activity,
+  requestStatus,
+  frame,
+  onFrameChange,
+  containerSize,
   onClose,
+  onSelectWorkflow,
   onNavigate,
   onRefresh,
 }: {
   open: boolean;
   activeRuns: WorkspaceActiveRun[];
   approvals: WorkspaceApproval[];
+  failedRuns: WorkspaceFailedRun[];
+  activity: RealtimeActivity[];
+  requestStatus: WorkspaceRequestStatus;
+  frame: TriagePanelFrame;
+  onFrameChange: Dispatch<SetStateAction<TriagePanelFrame>>;
+  containerSize: VirtualCanvasSize;
   onClose: () => void;
+  onSelectWorkflow: (workflowId: string) => void;
   onNavigate: (route: string) => void;
   onRefresh: () => void;
 }) {
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    handle: HTMLElement;
+  } | null>(null);
+  const resizeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originWidth: number;
+    originHeight: number;
+    handle: HTMLElement;
+  } | null>(null);
+
+  useEffect(() => {
+    onFrameChange((current) => {
+      const next = clampTriagePanelFrame(current, containerSize);
+      return triageFramesEqual(current, next) ? current : next;
+    });
+  }, [containerSize, onFrameChange]);
+
+  useEffect(() => () => {
+    stopDrag();
+    stopResize();
+  }, []);
+
   if (!open) return null;
-  const hasLiveTriage = activeRuns.length > 0 || approvals.length > 0;
+  const hasLiveTriage = activeRuns.length > 0 || approvals.length > 0 || failedRuns.length > 0;
+  const showStream = activity.length > 0;
+  const showBeacon = hasLiveTriage || requestStatus.busy || showStream;
 
   async function resolveApproval(approval: WorkspaceApproval, decision: 'approve' | 'reject') {
     await api(`/v1/approvals/${approval.id}/resolve`, {
@@ -1148,33 +1489,187 @@ function CanvasTriagePanel({
     onRefresh();
   }
 
+  function stopDrag(pointerId?: number) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    window.removeEventListener('pointermove', handleWindowDragMove);
+    window.removeEventListener('pointerup', handleWindowDragUp);
+    window.removeEventListener('pointercancel', handleWindowDragCancel);
+    window.removeEventListener('blur', handleWindowDragBlur);
+    if (pointerId != null) {
+      try { drag.handle.releasePointerCapture(pointerId); } catch { /* already released */ }
+    }
+    dragRef.current = null;
+  }
+
+  function stopResize(pointerId?: number) {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    window.removeEventListener('pointermove', handleWindowResizeMove);
+    window.removeEventListener('pointerup', handleWindowResizeUp);
+    window.removeEventListener('pointercancel', handleWindowResizeCancel);
+    window.removeEventListener('blur', handleWindowResizeBlur);
+    if (pointerId != null) {
+      try { resize.handle.releasePointerCapture(pointerId); } catch { /* already released */ }
+    }
+    resizeRef.current = null;
+  }
+
+  function handleWindowDragMove(event: PointerEvent) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    onFrameChange((current) => clampTriagePanelFrame({
+      ...current,
+      x: drag.originX + (event.clientX - drag.startX),
+      y: drag.originY + (event.clientY - drag.startY),
+    }, containerSize));
+  }
+
+  function handleWindowDragUp(event: PointerEvent) {
+    stopDrag(event.pointerId);
+  }
+
+  function handleWindowDragCancel(event: PointerEvent) {
+    stopDrag(event.pointerId);
+  }
+
+  function handleWindowDragBlur() {
+    const drag = dragRef.current;
+    if (!drag) return;
+    stopDrag(drag.pointerId);
+  }
+
+  function handleWindowResizeMove(event: PointerEvent) {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    onFrameChange((current) => clampTriagePanelFrame({
+      ...current,
+      width: resize.originWidth + (event.clientX - resize.startX),
+      height: resize.originHeight + (event.clientY - resize.startY),
+    }, containerSize));
+  }
+
+  function handleWindowResizeUp(event: PointerEvent) {
+    stopResize(event.pointerId);
+  }
+
+  function handleWindowResizeCancel(event: PointerEvent) {
+    stopResize(event.pointerId);
+  }
+
+  function handleWindowResizeBlur() {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    stopResize(resize.pointerId);
+  }
+
+  function handleHeaderPointerDown(event: ReactPointerEvent<HTMLElement>) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('button, a, input, select, textarea')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: frame.x,
+      originY: frame.y,
+      handle,
+    };
+    window.addEventListener('pointermove', handleWindowDragMove, { passive: false });
+    window.addEventListener('pointerup', handleWindowDragUp);
+    window.addEventListener('pointercancel', handleWindowDragCancel);
+    window.addEventListener('blur', handleWindowDragBlur);
+    try { handle.setPointerCapture(event.pointerId); } catch { /* unavailable */ }
+  }
+
+  function handleResizePointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget;
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originWidth: frame.width,
+      originHeight: frame.height,
+      handle,
+    };
+    window.addEventListener('pointermove', handleWindowResizeMove, { passive: false });
+    window.addEventListener('pointerup', handleWindowResizeUp);
+    window.addEventListener('pointercancel', handleWindowResizeCancel);
+    window.addEventListener('blur', handleWindowResizeBlur);
+    try { handle.setPointerCapture(event.pointerId); } catch { /* unavailable */ }
+  }
+
   return (
-    <div data-canvas-control className="absolute bottom-20 right-4 z-50 w-[min(420px,calc(100%-2rem))] rounded-2xl border border-line bg-surface/96 shadow-2xl backdrop-blur-xl" role="dialog" aria-label="Workspace triage">
-      <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
-        <div>
-          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">Workspace triage</div>
-          <h2 className="mt-1 text-heading text-text-primary">Live action queue</h2>
+    <div
+      data-canvas-control
+      role="dialog"
+      aria-label="Workspace triage"
+      className="absolute z-50 flex flex-col rounded-2xl border border-line bg-surface/96 shadow-2xl backdrop-blur-xl"
+      style={{
+        left: frame.x,
+        top: frame.y,
+        width: frame.width,
+        height: frame.height,
+        maxWidth: containerSize.width - TRIAGE_PANEL_MARGIN * 2,
+        maxHeight: containerSize.height - TRIAGE_PANEL_MARGIN * 2,
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <header
+        className="flex items-center justify-between gap-3 border-b border-line px-4 py-3 cursor-grab active:cursor-grabbing"
+        onPointerDown={handleHeaderPointerDown}
+      >
+        <div className="flex min-w-0 items-center gap-2.5">
+          {showBeacon && (
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+            </span>
+          )}
+          <div className="min-w-0">
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent">Mission Control</div>
+            <h2 className="mt-0.5 truncate text-heading text-text-primary">
+              {requestStatus.busy
+                ? 'Working…'
+                : activeRuns.length > 0
+                  ? `${activeRuns.length} agent run${activeRuns.length === 1 ? '' : 's'} live`
+                  : 'Live workspace'}
+            </h2>
+            {requestStatus.busy && requestStatus.label && (
+              <div className="mt-0.5 truncate text-[11px] text-text-secondary">{requestStatus.label}</div>
+            )}
+          </div>
         </div>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close triage"
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"
         >
-          <X size={15} />
+          <X size={14} />
         </button>
       </header>
 
-      <div className="max-h-[420px] overflow-y-auto px-4 py-4">
-        {!hasLiveTriage && (
-          <div className="rounded-card border border-line bg-canvas/45 px-4 py-5 text-center">
+      <div className={clsx('min-h-0 flex-1 px-4 py-4', hasLiveTriage || showStream ? 'overflow-y-auto' : 'overflow-hidden')}>
+        {!hasLiveTriage && !showStream && (
+          <div className="flex h-full flex-col items-center justify-center rounded-card border border-line bg-canvas/45 px-4 py-4 text-center">
             <CheckCircle2 size={28} className="mx-auto text-accent" />
             <div className="mt-3 text-subheading text-text-primary">Nothing needs live triage.</div>
             <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
-              No runs are executing and there are no pending approvals. Failed runs and viewed alerts stay in Notifications.
+              No runs are executing and there are no pending approvals. Send a request and watch the work stream here.
             </p>
           </div>
         )}
+
+        {showStream && <LiveActivityStream activity={activity} onSelectWorkflow={onSelectWorkflow} />}
 
         {activeRuns.length > 0 && (
           <section className="space-y-2">
@@ -1183,15 +1678,7 @@ function CanvasTriagePanel({
               Running now
             </div>
             {activeRuns.map((run) => (
-              <button
-                key={run.id}
-                type="button"
-                onClick={() => onNavigate(`/runs/${run.id}`)}
-                className="block w-full rounded-card border border-line bg-canvas/45 px-3 py-2 text-left hover:border-line-strong hover:bg-surface-2"
-              >
-                <div className="truncate text-[13px] font-medium text-text-primary">{run.workflowName}</div>
-                <div className="mt-0.5 truncate text-[11px] text-text-muted">{activeRunSubtitle(run)}</div>
-              </button>
+              <TriageRunRow key={run.id} run={run} onOpen={() => onNavigate(`/runs/${run.id}`)} />
             ))}
           </section>
         )}
@@ -1226,9 +1713,79 @@ function CanvasTriagePanel({
             ))}
           </section>
         )}
+
+        {failedRuns.length > 0 && (
+          <section className={clsx('space-y-2', (activeRuns.length > 0 || approvals.length > 0) && 'mt-5')}>
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+              <AlertTriangle size={13} className="text-danger" />
+              Failed workflows
+            </div>
+            {failedRuns.map((run) => (
+              <div
+                key={run.id}
+                className="rounded-card border border-danger/20 bg-danger-soft/50 px-3 py-2 hover:border-danger/40 hover:bg-danger-soft"
+              >
+                <button
+                  type="button"
+                  onClick={() => (run.workflowId ? onSelectWorkflow(run.workflowId) : onNavigate('/history?tab=runs'))}
+                  className="block w-full text-left"
+                  title="Inspect this workflow on the canvas"
+                >
+                  <div className="truncate text-[13px] font-medium text-text-primary">{run.workflowName}</div>
+                  <div className="mt-0.5 truncate text-[11px] text-text-muted">
+                    {run.failedNode ? `Failed at ${run.failedNode}` : 'Needs operator review'}
+                  </div>
+                </button>
+                <div className="mt-2 flex gap-2">
+                  {run.workflowId && (
+                    <button
+                      type="button"
+                      onClick={() => { void api(`/v1/workflows/${run.workflowId}/run`, { method: 'POST' }).catch(() => undefined).finally(onRefresh); }}
+                      className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                    >
+                      <RefreshCw size={11} /> Retry
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onNavigate(`/runs/${run.id}`)}
+                    className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+                  >
+                    Details
+                  </button>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
       </div>
+      <button
+        type="button"
+        aria-label="Resize triage panel"
+        title="Resize triage panel"
+        className="absolute bottom-1.5 right-1.5 flex h-4 w-4 items-end justify-end rounded-sm text-text-muted/80 hover:bg-surface-2 hover:text-text-primary cursor-se-resize"
+        onPointerDown={handleResizePointerDown}
+      >
+        <span className="pointer-events-none block h-2.5 w-2.5 border-b border-r border-current" />
+      </button>
     </div>
   );
+}
+
+function clampTriagePanelFrame(frame: TriagePanelFrame, containerSize: VirtualCanvasSize): TriagePanelFrame {
+  const maxWidth = Math.max(TRIAGE_PANEL_MIN_WIDTH, containerSize.width - TRIAGE_PANEL_MARGIN * 2);
+  const maxHeight = Math.max(TRIAGE_PANEL_MIN_HEIGHT, containerSize.height - TRIAGE_PANEL_MARGIN * 2);
+  const width = clamp(frame.width, TRIAGE_PANEL_MIN_WIDTH, maxWidth);
+  const height = clamp(frame.height, TRIAGE_PANEL_MIN_HEIGHT, maxHeight);
+  const maxX = Math.max(TRIAGE_PANEL_MARGIN, containerSize.width - width - TRIAGE_PANEL_MARGIN);
+  const maxY = Math.max(TRIAGE_PANEL_MARGIN, containerSize.height - height - TRIAGE_PANEL_MARGIN);
+  const x = clamp(frame.x, TRIAGE_PANEL_MARGIN, maxX);
+  const y = clamp(frame.y, TRIAGE_PANEL_MARGIN, maxY);
+  return { ...frame, x, y, width, height };
+}
+
+function triageFramesEqual(a: TriagePanelFrame, b: TriagePanelFrame): boolean {
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
 
 function GhostEmptyState({ onCreateOrchestrator }: { onCreateOrchestrator: () => void }) {
@@ -1290,12 +1847,12 @@ function computeVirtualCanvasSize(
   const workerRows = Math.max(1, Math.ceil(workerCount / Math.max(1, workerColumns)));
   const width = Math.max(
     containerSize.width,
-    1180,
+    1040,
     managerCount * (NODE.manager.width + 62) + 320,
     Math.min(workerCount, workerColumns) * (workerSize.width + 48) + 320,
-    Math.min(resources, 8) * 220 + 260,
+    Math.min(resources, 4) * 220 + 260,
   );
-  const resourceRows = Math.max(1, Math.ceil(Math.max(resources, 4) / Math.max(4, Math.floor(width / 220))));
+  const resourceRows = Math.max(1, Math.ceil(Math.max(resources, 3) / Math.max(3, Math.floor(width / 260))));
   const resourceStartY = 530 + workerRows * (workerSize.height + 42) + 68;
   const height = Math.max(containerSize.height, 780, resourceStartY + resourceRows * 112, activeRuns.length > 4 ? 900 : 780);
   return { width, height };
@@ -1325,28 +1882,27 @@ function computeCanvasContentBounds(nodes: CanvasNode[]): CanvasBounds {
   };
 }
 
-function computeViewportInsets(containerSize: VirtualCanvasSize, chatState: ChatPanelState = 'hidden', dockedWidth = 0): CanvasInsets {
+function computeViewportInsets(containerSize: VirtualCanvasSize, chatState: ChatPanelState = 'hidden', _dockedWidth = 0): CanvasInsets {
   const baseSideInset = clamp(containerSize.width * 0.035, 24, 52);
-  const dockedChatInset = chatState === 'docked'
-    ? Math.min(containerSize.width * 0.44, dockedWidth + 32)
-    : 0;
   return {
     top: clamp(containerSize.height * (chatState === 'docked' ? 0.14 : 0.16), 96, 138),
-    right: baseSideInset + dockedChatInset,
+    right: baseSideInset,
     bottom: clamp(containerSize.height * 0.14, 96, 126),
     left: baseSideInset,
   };
 }
 
-function computeHomeViewport(containerSize: VirtualCanvasSize, bounds: CanvasBounds, chatState: ChatPanelState = 'hidden', dockedWidth = 0): CanvasViewport {
+function computeHomeViewport(containerSize: VirtualCanvasSize, bounds: CanvasBounds, chatState: ChatPanelState = 'hidden', dockedWidth = 0, anchor?: Vec2 | null): CanvasViewport {
   const insets = computeViewportInsets(containerSize, chatState, dockedWidth);
   const safeWidth = Math.max(1, containerSize.width - insets.left - insets.right);
   const safeHeight = Math.max(1, containerSize.height - insets.top - insets.bottom);
   const zoom = clamp(Math.min(safeWidth / bounds.width, safeHeight / bounds.height, 1) * 0.98, VIEWPORT_MIN, 1);
+  const safeCenterX = insets.left + safeWidth / 2;
+  const anchorX = anchor?.x ?? bounds.left + bounds.width / 2;
   return {
     zoom,
     pan: {
-      x: insets.left + (safeWidth - bounds.width * zoom) / 2 - bounds.left * zoom,
+      x: safeCenterX - anchorX * zoom,
       y: insets.top + (safeHeight - bounds.height * zoom) / 2 - bounds.top * zoom,
     },
   };
@@ -1381,6 +1937,9 @@ function agentNode(
   const approval = approvals.find((item) => item.agentName === agent.name);
   const size = sizeOverride ?? (role === 'orchestrator' ? NODE.orchestrator : role === 'manager' ? NODE.manager : NODE.worker);
   const status = statusLabel(agent.status, active ? 'working' : online ? 'online' : 'idle');
+  const spaceName = stringField(record, ['spaceName', 'spaceTag']);
+  const managerLabel = spaceName ? `${labelize(spaceName)} manager` : 'manager';
+  const domainAccent = stringField(record, ['spaceColorHex', 'domainColor', 'colorHex']);
   const monthlyBudgetCents = agent.monthlyBudgetCents;
   const currentMonthSpendCents = agent.currentMonthSpendCents;
   const outOfCredits = monthlyBudgetCents !== undefined && monthlyBudgetCents !== null && currentMonthSpendCents !== undefined && currentMonthSpendCents >= monthlyBudgetCents;
@@ -1398,12 +1957,14 @@ function agentNode(
     kind: role,
     tier: role === 'orchestrator' ? 0 : role === 'manager' ? 1 : 2,
     title: agent.name,
-    subtitle: role === 'orchestrator' ? `orchestrator - ${status}` : role === 'manager' ? `manager - ${status}` : `worker - ${status}`,
+    subtitle: role === 'orchestrator' ? `orchestrator - ${status}` : role === 'manager' ? `${managerLabel} - ${status}` : `worker - ${status}`,
     x: pos.x,
     y: pos.y,
     width: size.width,
     height: size.height,
     role,
+    spaceId: stringField(record, ['spaceId']) ?? null,
+    spaceName: spaceName ?? null,
     active,
     online,
     warn: Boolean(approval) || agent.status === 'error' || agent.status === 'offline' || outOfCredits,
@@ -1411,7 +1972,9 @@ function agentNode(
     status: agent.status,
     operationalState,
     route: `/agents/${agent.id}`,
-    accent: stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? '#a78bfa' : undefined),
+    accent: role === 'manager'
+      ? domainAccent ?? '#06b6d4'
+      : stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? '#a78bfa' : undefined),
     imageUrl: imageFromRecord(record, ['avatarUrl', 'avatarDataUrl', 'imageUrl', 'imageDataUrl', 'iconUrl', 'photoUrl', 'pictureUrl']),
     icon: role === 'orchestrator' ? <BrainCircuit size={20} /> : role === 'manager' ? <ShieldCheck size={18} /> : <Bot size={18} />,
     currentTask: activeRun?.currentStep ?? stringField(record, ['currentTask', 'currentTaskId']),
@@ -1422,6 +1985,7 @@ function agentNode(
       stringField(record, ['description']),
       activeRun?.workflowName ? `Run: ${activeRun.workflowName}` : undefined,
       activeRun?.currentStep ? `Step: ${activeRun.currentStep}` : undefined,
+      role === 'manager' && spaceName ? `Domain: ${labelize(spaceName)}` : undefined,
       stringField(record, ['runtimeModel']) ? `Model: ${stringField(record, ['runtimeModel'])}` : undefined,
       stringField(record, ['adapterType']) ? `Adapter: ${stringField(record, ['adapterType'])}` : undefined,
       approval ? 'Approval pending' : undefined,
@@ -1470,34 +2034,177 @@ function buildResourceNodes(
   canvasSize: VirtualCanvasSize,
   activeWorkflowIds: Set<string>,
   resourceStartY: number,
+  spaceSourceIds: Map<string, string>,
+  sourceXById: Map<string, number>,
+  sourceNodeById: Map<string, CanvasNode>,
+  expandedDomains: ReadonlySet<string> = new Set<string>(),
 ): CanvasNode[] {
   const resources: CanvasNode[] = [];
   const workflowPositions = new Map<string, Vec2>();
+  const workflowDomainById = new Map<string, { spaceId?: string | null; spaceName?: string | null; accent?: string }>();
   const workflowArtifactIndex = new Map<string, number>();
   const artifactCountsByWorkflow = countArtifactsByWorkflow(artifacts);
-  const columns = Math.max(3, Math.floor(canvasSize.width / 240));
-  const positions = (index: number): Vec2 => {
-    const col = index % columns;
-    const row = Math.floor(index / columns);
+  const resourceCountEstimate = Math.max(
+    data.workflows.length + data.knowledgeBases.length + artifacts.length + approvals.length,
+    3,
+  );
+  const columns = Math.max(1, Math.min(resourceCountEstimate, Math.max(3, Math.floor(canvasSize.width / 250))));
+  const anchoredSlots = new Map<string, number>();
+  const gridPosAt = (row: number, col: number): Vec2 => {
     const margin = 120;
     const available = canvasSize.width - margin * 2;
-    const x = columns === 1 ? canvasSize.width / 2 : margin + (available * col) / Math.max(1, columns - 1);
+    const gridWidth = Math.min(available, Math.max(1, columns - 1) * 260);
+    const start = canvasSize.width / 2 - gridWidth / 2;
+    const x = columns === 1 ? canvasSize.width / 2 : start + (gridWidth * col) / Math.max(1, columns - 1);
     return { x, y: resourceStartY + row * 104 };
+  };
+  const positions = (index: number): Vec2 => gridPosAt(Math.floor(index / columns), index % columns);
+  const anchoredPosition = (sourceId: string): Vec2 => {
+    const slot = anchoredSlots.get(sourceId) ?? 0;
+    anchoredSlots.set(sourceId, slot + 1);
+    const row = Math.floor(slot / 3);
+    const col = slot % 3;
+    const offsets = [0, -190, 190];
+    const sourceX = sourceXById.get(sourceId) ?? canvasSize.width / 2;
+    return {
+      x: clamp(sourceX + (offsets[col] ?? 0), 130, canvasSize.width - 130),
+      y: resourceStartY + row * 104,
+    };
   };
 
   let index = 0;
-  for (const workflow of [...data.workflows].sort((a, b) => workflowLabel(a).localeCompare(workflowLabel(b)))) {
+
+  // ── Phase 1: resolve each workflow's domain + state (no placement yet) ──
+  interface WorkflowEntry {
+    workflow: HomeWorkflow;
+    wfLabel: string;
+    run: WorkspaceActiveRun | undefined;
+    connectedAgentIds: string[] | undefined;
+    workflowSpaceId: string | null;
+    workflowSpaceName: string | null;
+    workflowAccent: string | undefined;
+    anchoredSourceId: string | undefined;
+    failed: WorkspaceFailedRun | undefined;
+    groupKey: string;
+    /** 0 = needs attention (failed), 1 = active/running, 2 = idle — floats problems up. */
+    statePriority: number;
+  }
+  const entries: WorkflowEntry[] = data.workflows.map((workflow) => {
     const run = activeRuns.find((item) => item.workflowId === workflow.id);
     const wfLabel = workflowLabel(workflow);
-    const pos = positions(index++);
-    const failed = failedRuns.find((item) => item.workflowName === wfLabel);
     let connectedAgentIds = run?.agents?.map((agent) => `agent-${agent.id}`);
-    if ((!connectedAgentIds || connectedAgentIds.length === 0) && run && workflow?.graph?.nodes) {
-      const workflowAgentIds = workflow.graph.nodes
+    if ((!connectedAgentIds || connectedAgentIds.length === 0) && workflow?.graph?.nodes) {
+      connectedAgentIds = workflow.graph.nodes
         .filter((node: any) => node.config?.kind === 'agent_task' && node.config?.agentId)
         .map((node: any) => `agent-${node.config.agentId}`);
-      connectedAgentIds = workflowAgentIds;
     }
+    if ((!connectedAgentIds || connectedAgentIds.length === 0) && workflow.spaceId) {
+      const sourceId = spaceSourceIds.get(workflow.spaceId);
+      if (sourceId) connectedAgentIds = [sourceId];
+    }
+    let workflowSpaceId = workflow.spaceId ?? null;
+    let workflowSpaceName: string | null = null;
+    let workflowAccent: string | undefined;
+    const linkedDomain = resolveDomainFromSources(connectedAgentIds, sourceNodeById);
+    if (!workflowSpaceId && linkedDomain.spaceId) workflowSpaceId = linkedDomain.spaceId;
+    if (linkedDomain.spaceName) workflowSpaceName = linkedDomain.spaceName;
+    if (linkedDomain.accent) workflowAccent = linkedDomain.accent;
+    if (workflowSpaceId) {
+      const sourceId = spaceSourceIds.get(workflowSpaceId);
+      if (sourceId && (!connectedAgentIds || connectedAgentIds.length === 0)) connectedAgentIds = [sourceId];
+      const sourceNode = sourceId ? sourceNodeById.get(sourceId) : undefined;
+      if (!workflowSpaceName) workflowSpaceName = sourceNode?.spaceName ?? null;
+      if (!workflowAccent) workflowAccent = sourceNode?.accent;
+    }
+    const anchoredSourceId = connectedAgentIds?.find((sourceId) => sourceXById.has(sourceId));
+    const failed = failedRuns.find((item) => item.workflowId === workflow.id || item.workflowName === wfLabel);
+    const isActive = Boolean(run) || activeWorkflowIds.has(workflow.id);
+    const statePriority = failed ? 0 : isActive ? 1 : 2;
+    const groupKey = workflowSpaceName ?? workflowSpaceId ?? '~ungrouped';
+    return { workflow, wfLabel, run, connectedAgentIds, workflowSpaceId, workflowSpaceName, workflowAccent, anchoredSourceId, failed, groupKey, statePriority };
+  });
+
+  // ── Phase 2: group non-anchored workflows into domain bands; within a band,
+  // order attention-first. Anchored workflows stay clustered under their source.
+  const banded = entries.filter((e) => !e.anchoredSourceId);
+  const groups = new Map<string, WorkflowEntry[]>();
+  for (const e of banded) {
+    const list = groups.get(e.groupKey) ?? [];
+    list.push(e);
+    groups.set(e.groupKey, list);
+  }
+  // Domains needing attention (or actively running) float to the top bands.
+  const orderedGroups = [...groups.entries()].sort((a, b) => {
+    const aBest = Math.min(...a[1].map((e) => e.statePriority));
+    const bBest = Math.min(...b[1].map((e) => e.statePriority));
+    return aBest - bBest || a[0].localeCompare(b[0]);
+  });
+  const bandPos = new Map<string, Vec2>();
+  const aggregators: CanvasNode[] = [];
+  const hiddenByGroup = new Map<string, WorkflowEntry[]>();
+  let bandRow = 0;
+  for (const [groupKey, groupEntries] of orderedGroups) {
+    groupEntries.sort((a, b) => a.statePriority - b.statePriority || a.wfLabel.localeCompare(b.wfLabel));
+    // Scale rule: an unexpanded domain shows at most ONE band row. Failed and
+    // active workflows always show; idle ones fill the remaining slots and the
+    // rest collapse behind a "+N idle" expander. Dozens of workflows stay one
+    // calm row per domain instead of a wall of cards.
+    const expanded = expandedDomains.has(groupKey);
+    const overflows = groupEntries.length > columns;
+    const visibleBudget = !overflows ? groupEntries.length : expanded ? groupEntries.length : columns - 1;
+    const visible = groupEntries.slice(0, visibleBudget);
+    const hidden = groupEntries.slice(visibleBudget);
+    if (hidden.length > 0) hiddenByGroup.set(groupKey, hidden);
+
+    let col = 0;
+    for (const e of visible) {
+      bandPos.set(e.workflow.id, gridPosAt(bandRow, col));
+      col += 1;
+      if (col >= columns) { col = 0; bandRow += 1; }
+    }
+    if (overflows) {
+      // The expander persists in both states so the band can collapse again.
+      const pos = gridPosAt(bandRow, col);
+      const domainLabel = groupKey === '~ungrouped' ? 'workspace' : groupKey;
+      aggregators.push({
+        id: `workflow-more:${encodeURIComponent(groupKey)}`,
+        kind: 'workflow',
+        tier: 3,
+        title: expanded ? 'Show less' : `+${hidden.length} more`,
+        subtitle: expanded ? `collapse ${domainLabel}` : `idle in ${domainLabel}`,
+        x: pos.x,
+        y: pos.y,
+        width: NODE.workflow.width,
+        height: NODE.workflow.height,
+        ghost: true,
+        tooltipLines: compactStrings([
+          expanded
+            ? 'Collapse this domain back to one row.'
+            : `${hidden.length} idle workflow${hidden.length === 1 ? '' : 's'} collapsed.`,
+          ...hidden.slice(0, 6).map((h) => `· ${h.wfLabel}`),
+          hidden.length > 6 ? `· …and ${hidden.length - 6} more` : undefined,
+        ]),
+      });
+      col += 1;
+      if (col >= columns) { col = 0; bandRow += 1; }
+    }
+    if (col !== 0) bandRow += 1; // each domain starts a fresh band
+  }
+  // Knowledge/artifacts continue on the row after the workflow bands.
+  index = bandRow * columns;
+
+  // ── Phase 3: emit nodes (anchored first, then the banded order) ──
+  const placementOrder = [
+    ...entries.filter((e) => e.anchoredSourceId),
+    ...orderedGroups.flatMap(([groupKey, groupEntries]) => {
+      const hidden = hiddenByGroup.get(groupKey);
+      return hidden ? groupEntries.filter((e) => !hidden.includes(e)) : groupEntries;
+    }),
+  ];
+  resources.push(...aggregators);
+  for (const e of placementOrder) {
+    const { workflow, wfLabel, run, connectedAgentIds, workflowSpaceId, workflowSpaceName, workflowAccent, anchoredSourceId, failed } = e;
+    const pos = anchoredSourceId ? anchoredPosition(anchoredSourceId) : bandPos.get(workflow.id) ?? positions(index++);
     resources.push({
       id: `workflow-${workflow.id}`,
       kind: 'workflow',
@@ -1508,9 +2215,12 @@ function buildResourceNodes(
       y: pos.y,
       width: NODE.workflow.width,
       height: NODE.workflow.height,
+      spaceId: workflowSpaceId,
+      spaceName: workflowSpaceName,
       active: Boolean(run) || activeWorkflowIds.has(workflow.id),
       warn: Boolean(failed),
       route: `/workflows/${workflow.id}`,
+      accent: workflowAccent,
       imageUrl: workflowImageUrl(workflow),
       icon: <Workflow size={17} />,
       progress: runProgress(run),
@@ -1518,12 +2228,14 @@ function buildResourceNodes(
       artifactCount: artifactCountsByWorkflow.get(workflow.id) ?? 0,
       tooltipLines: compactStrings([
         `Status: ${run ? activeRunSubtitle(run) : statusLabel(workflow.status, 'idle')}`,
+        workflowSpaceName ? `Domain: ${workflowSpaceName}` : undefined,
         run?.currentStep ? `Step: ${run.currentStep}` : undefined,
         failed?.failedNode ? `Failed at: ${failed.failedNode}` : undefined,
       ]),
       workflow,
       connectedAgentIds,
     });
+    workflowDomainById.set(workflow.id, { spaceId: workflowSpaceId, spaceName: workflowSpaceName, accent: workflowAccent });
     workflowPositions.set(workflow.id, pos);
   }
 
@@ -1551,6 +2263,11 @@ function buildResourceNodes(
   for (const artifact of artifacts) {
     const workflowId = artifact.workflowId ?? null;
     const workflowPos = workflowId ? workflowPositions.get(workflowId) : undefined;
+    const workflowDomain = workflowId ? workflowDomainById.get(workflowId) : undefined;
+    const artifactDomain = workflowDomain ?? resolveDomainFromSources(
+      artifact.agentId ? [`agent-${artifact.agentId}`] : undefined,
+      sourceNodeById,
+    );
     const localIndex = workflowId ? workflowArtifactIndex.get(workflowId) ?? 0 : 0;
     if (workflowId) workflowArtifactIndex.set(workflowId, localIndex + 1);
     const pos = workflowPos
@@ -1566,12 +2283,16 @@ function buildResourceNodes(
       y: pos.y,
       width: NODE.artifact.width,
       height: NODE.artifact.height,
+      spaceId: artifactDomain.spaceId ?? null,
+      spaceName: artifactDomain.spaceName ?? null,
       active: false,
       route: '/artifacts',
+      accent: artifactDomain.accent,
       imageUrl: artifactImageUrl(artifact),
       icon: artifact.kind === 'data' || artifact.type === 'data' ? <Database size={17} /> : artifact.kind === 'code' || artifact.type === 'code' ? <Boxes size={17} /> : <Layers size={17} />,
       tooltipLines: compactStrings([
         `Type: ${artifact.kind ?? artifact.type ?? 'artifact'}`,
+        artifactDomain.spaceName ? `Domain: ${artifactDomain.spaceName}` : undefined,
         artifact.agent ? `Agent: ${artifact.agent}` : undefined,
         artifact.workflowId ? `Workflow: ${artifact.workflowId}` : undefined,
       ]),
@@ -1581,6 +2302,11 @@ function buildResourceNodes(
   }
 
   for (const approval of approvals) {
+    const assignee = approval.agentName
+      ? Array.from(sourceNodeById.values()).find((node) => node.agent?.name === approval.agentName)
+      : undefined;
+    const connectedAgentIds = assignee ? [assignee.id] : undefined;
+    const approvalDomain = resolveDomainFromSources(connectedAgentIds, sourceNodeById);
     const pos = positions(index++);
     resources.push({
       id: `approval-${approval.id}`,
@@ -1592,16 +2318,25 @@ function buildResourceNodes(
       y: pos.y,
       width: NODE.approval.width,
       height: NODE.approval.height,
+      spaceId: approvalDomain.spaceId ?? null,
+      spaceName: approvalDomain.spaceName ?? null,
       active: false,
       warn: true,
       route: '/history?tab=runs',
+      accent: approvalDomain.accent,
       icon: <CanvasApprovalNodeBadge />,
-      tooltipLines: compactStrings([approval.summary, approval.runId ? `Run: ${approval.runId}` : undefined]),
+      tooltipLines: compactStrings([
+        approvalDomain.spaceName ? `Domain: ${approvalDomain.spaceName}` : undefined,
+        approval.summary,
+        approval.runId ? `Run: ${approval.runId}` : undefined,
+      ]),
       approval,
+      connectedAgentIds,
     });
   }
 
   if (resources.length === 0) {
+    const defaultSourceId = spaceSourceIds.values().next().value as string | undefined;
     const ghostKinds = [
       ['Resource layer', 'apps, workflows, knowledge, outputs', <FileText size={16} />],
       ['Knowledge', 'workspace memory appears here', <BookOpen size={16} />],
@@ -1623,6 +2358,10 @@ function buildResourceNodes(
         icon,
         route: '/workflows',
         tooltipLines: ['Planned resource node'],
+        spaceId: defaultSourceId ? sourceNodeById.get(defaultSourceId)?.spaceId ?? null : null,
+        spaceName: defaultSourceId ? sourceNodeById.get(defaultSourceId)?.spaceName ?? null : null,
+        accent: defaultSourceId ? sourceNodeById.get(defaultSourceId)?.accent : undefined,
+        connectedAgentIds: defaultSourceId ? [defaultSourceId] : undefined,
       });
     });
   }
@@ -1644,7 +2383,11 @@ function shouldRevealKnowledgeNodes(selectedNodeId: string | null, agents: Works
   if (!selectedNodeId.startsWith('agent-')) return false;
   const agentId = selectedNodeId.slice('agent-'.length);
   const agent = agents.find((item) => item.id === agentId);
-  return Boolean(agent && normalizeRole(agent) === 'orchestrator');
+  const role = agent ? normalizeRole(agent) : null;
+  // Authority tiers (orchestrator + managers) own shared workspace memory, so
+  // selecting either reveals the knowledge layer — and it persists as you drill
+  // down the chain of command. Workers don't surface workspace-wide knowledge.
+  return role === 'orchestrator' || role === 'manager';
 }
 
 function countArtifactsByWorkflow(artifacts: WorkspaceArtifact[]): Map<string, number> {
@@ -1739,11 +2482,28 @@ function resolveResourceSourceIds(resource: CanvasNode, nodes: CanvasNode[], orc
 
 function pickBestAgentSource(candidates: string[], byId: Map<string, CanvasNode>): string | null {
   if (candidates.length === 0) return null;
-  return candidates.find((id) => byId.get(id)?.kind === 'manager')
-    ?? candidates.find((id) => byId.get(id)?.kind === 'worker')
-    ?? candidates.find((id) => byId.get(id)?.kind === 'orchestrator')
+  return candidates.find((id) => byId.get(id)?.kind === 'manager' || byId.get(id)?.role === 'manager')
+    ?? candidates.find((id) => byId.get(id)?.kind === 'worker' || byId.get(id)?.role === 'worker')
+    ?? candidates.find((id) => byId.get(id)?.kind === 'orchestrator' || byId.get(id)?.role === 'orchestrator')
     ?? candidates[0]
     ?? null;
+}
+
+function resolveDomainFromSources(
+  candidateIds: string[] | undefined,
+  sourceNodeById: Map<string, CanvasNode>,
+): { spaceId?: string | null; spaceName?: string | null; accent?: string } {
+  const sourceNodes = (candidateIds ?? [])
+    .map((id) => sourceNodeById.get(id))
+    .filter((node): node is CanvasNode => Boolean(node));
+  const domainNode = sourceNodes.find((node) => node.role === 'manager' && node.spaceId)
+    ?? sourceNodes.find((node) => node.spaceId);
+  if (!domainNode) return {};
+  return {
+    spaceId: domainNode.spaceId ?? null,
+    spaceName: domainNode.spaceName ?? null,
+    accent: domainNode.accent,
+  };
 }
 
 function nodeRevealPhase(node: CanvasNode): EntrancePhase {
@@ -1819,6 +2579,157 @@ function activeRunSubtitle(run: WorkspaceActiveRun): string {
   return 'running now';
 }
 
+/**
+ * Mission-Control triage row: not a title — the live agent reasoning / current
+ * step / progress for one active run, streamed via the activity spine. This is
+ * the "see what's happening" surface the triage card was supposed to be.
+ */
+/**
+ * Mission-Control run card: an immersive, alive view of one running workflow —
+ * pulsing live beacon, elapsed + step progress, the agent currently working, and a
+ * scrolling LIVE REASONING TERMINAL streaming the agent's thoughts and tool calls
+ * as they happen. Click to open the full run; Stop to halt it. Fed by the
+ * socket-independent run activity stream.
+ */
+function TriageRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => void }) {
+  const feed = useRunActivity(run.id, { cap: 40 });
+  const [stopping, setStopping] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const termRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const progress =
+    feed.find((a) => a.progress)?.progress ??
+    (run.totalSteps ? { completed: run.stepIndex ?? 0, total: run.totalSteps } : undefined);
+  const pct = progress && progress.total > 0 ? Math.min(100, (progress.completed / progress.total) * 100) : null;
+  const agentName = feed.find((a) => a.agentName)?.agentName;
+  const nodeTitle = feed.find((a) => a.nodeTitle)?.nodeTitle;
+  // Live terminal: the most recent meaningful steps, oldest→newest (terminal order).
+  const lines = feed
+    .filter((a) => a.kind === 'message' || a.kind === 'tool' || a.kind === 'agent' || a.kind === 'node')
+    .slice(0, 6)
+    .reverse();
+  const elapsed = run.startedAt ? formatElapsed(run.startedAt, now) : null;
+
+  useEffect(() => {
+    termRef.current?.scrollTo({ top: termRef.current.scrollHeight, behavior: 'smooth' });
+  }, [feed.length]);
+
+  async function stop(event: { stopPropagation: () => void }) {
+    event.stopPropagation();
+    if (stopping) return;
+    setStopping(true);
+    try { await api(`/v1/runs/${run.id}/cancel`, { method: 'POST' }); } catch { /* surfaced via realtime */ }
+    finally { setStopping(false); }
+  }
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}
+      className="group cursor-pointer overflow-hidden rounded-xl border border-accent/25 bg-gradient-to-b from-surface/70 to-canvas/55 shadow-[0_0_22px_rgba(74,222,128,0.06)] transition hover:border-accent/45 hover:shadow-[0_0_30px_rgba(74,222,128,0.12)]"
+    >
+      {/* Header: live beacon + name + elapsed/steps + stop */}
+      <div className="flex items-center gap-2.5 px-3 pt-2.5 pb-2">
+        <span className="relative flex h-2.5 w-2.5 shrink-0">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60" />
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-semibold text-text-primary">{run.workflowName}</div>
+          <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+            {elapsed && <span className="font-mono tabular-nums">{elapsed}</span>}
+            {progress && (
+              <>
+                {elapsed && <span className="opacity-50">·</span>}
+                <span className="font-mono tabular-nums">{progress.completed}/{progress.total} steps</span>
+              </>
+            )}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={stop}
+          disabled={stopping}
+          aria-label="Stop run"
+          title="Stop run"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted opacity-0 transition hover:bg-danger-soft hover:text-danger group-hover:opacity-100 disabled:opacity-40"
+        >
+          <Square size={11} />
+        </button>
+      </div>
+
+      {/* Glowing progress rail */}
+      <div className="h-[3px] w-full bg-line/50">
+        <div
+          className="h-full bg-accent shadow-[0_0_8px_rgba(74,222,128,0.6)] transition-all duration-700"
+          style={{ width: pct != null ? `${pct}%` : '0%' }}
+        />
+      </div>
+
+      {/* Who's working now */}
+      {(agentName || nodeTitle) && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5">
+          {agentName && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent/12 px-1.5 py-0.5 text-[9px] font-semibold text-accent">
+              <Bot size={9} /> {agentName}
+            </span>
+          )}
+          {nodeTitle && <span className="min-w-0 truncate text-[10.5px] text-text-secondary">{nodeTitle}</span>}
+        </div>
+      )}
+
+      {/* LIVE reasoning terminal */}
+      <div
+        ref={termRef}
+        className="max-h-[112px] overflow-y-auto border-t border-white/5 bg-black/30 px-3 py-2"
+        style={{ scrollbarWidth: 'none' }}
+      >
+        {lines.length === 0 ? (
+          <div className="flex items-center gap-1.5 font-mono text-[10px] text-text-muted">
+            <Loader2 size={10} className="animate-spin text-accent" /> awaiting the agent’s first move…
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {lines.map((item, idx) => (
+              <div
+                key={item.id}
+                className={clsx(
+                  'flex items-start gap-1.5 font-mono text-[10px] leading-relaxed animate-in fade-in slide-in-from-bottom-1 duration-200',
+                  idx === lines.length - 1 ? 'text-text-secondary' : 'text-text-muted/65',
+                )}
+              >
+                <span className="mt-[1px] shrink-0"><ActivityGlyph kind={item.kind} /></span>
+                <span className="min-w-0 flex-1 break-words line-clamp-2">
+                  {item.agentName ? <span className="text-accent/80">{item.agentName}: </span> : null}
+                  {item.detail}
+                </span>
+                {idx === lines.length - 1 && (
+                  <span className="ml-0.5 mt-[3px] inline-block h-2.5 w-1 shrink-0 animate-pulse rounded-sm bg-accent/70" />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Kind → glyph for the live reasoning terminal. */
+function ActivityGlyph({ kind }: { kind: string }) {
+  if (kind === 'tool') return <Wrench size={10} className="text-sky-400" />;
+  if (kind === 'node') return <Workflow size={10} className="text-violet-400" />;
+  if (kind === 'run') return <Zap size={10} className="text-amber-400" />;
+  return <BrainCircuit size={10} className="text-accent" />;
+}
+
 function isActiveRun(run: WorkspaceActiveRun): boolean {
   return run.status.toLowerCase() === 'running';
 }
@@ -1836,6 +2747,12 @@ function startOfLocalDayMs(): number {
 function statusLabel(status: string | undefined, fallback: string): string {
   if (!status) return fallback;
   return status.replace(/_/g, ' ');
+}
+
+function labelize(value: string): string {
+  return value
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function normalizeRole(agent: WorkspaceAgent): string {

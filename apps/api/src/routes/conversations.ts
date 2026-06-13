@@ -19,7 +19,17 @@ import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS, type ChatDelta, type ChatTurnContext, type ViewportContext } from '@agentis/core';
+import {
+  AgentisError,
+  CONSTANTS,
+  REALTIME_EVENTS,
+  REALTIME_ROOMS,
+  type ChatDelta,
+  type ChatFinishReason,
+  type ChatTurnContext,
+  type ChatTurnTrace,
+  type ViewportContext,
+} from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -35,6 +45,7 @@ import type { EventBus } from '../event-bus.js';
 
 const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
+  clientTurnId: z.string().min(1).max(120).optional(),
   useViewportContext: z.boolean().optional().default(true),
   viewportOverride: z.object({
     surface: z.string().min(1),
@@ -58,6 +69,7 @@ const sendSchema = z.object({
 const confirmSchema = z.object({
   turnId: z.string().uuid(),
   confirmed: z.boolean(),
+  clientTurnId: z.string().min(1).max(120).optional(),
 });
 const editSchema = z.object({ text: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH) });
 
@@ -69,6 +81,23 @@ type ConversationRouteDeps = {
   logger: Logger;
   viewportStore?: ViewportStore;
   bus: EventBus;
+  memoryCapture?: {
+    captureTurn(args: {
+      workspaceId: string;
+      conversationId: string;
+      userId: string;
+      agentId: string;
+      userDisplayName?: string | null;
+      userMessage: string;
+      assistantMessage?: string | null;
+      finishReason?: string | null;
+    }): Promise<{
+      peerUpdateJobIds: string[];
+      promotedSessionMoments: number;
+      workspaceMemoryIds: string[];
+      sessionMomentId: string | null;
+    }>;
+  };
 };
 
 type AgentRow = typeof schema.agents.$inferSelect;
@@ -85,9 +114,14 @@ interface PersistedToolCallData {
 }
 
 interface StreamedChatMetadata {
+  turn: ChatTurnTrace;
   thinking: string;
+  activity: Array<Extract<ChatDelta, { type: 'activity' }>>;
   toolCalls: PersistedToolCallData[];
   toolStartedAt: Map<string, number>;
+  workflowId: string | null;
+  runId: string | null;
+  runTitle: string | null;
   confirmation: (Omit<Extract<ChatDelta, { type: 'confirmation_required' }>, 'type'> & { status: 'pending' }) | null;
 }
 
@@ -372,6 +406,175 @@ async function relayOpenClaw(
   }
 }
 
+type ChatSseStream = {
+  writeSSE(args: { event?: string; data: string }): Promise<void>;
+};
+
+function createChatActivity(args: {
+  clientTurnId?: string;
+  agentId?: string;
+  workflowId?: string;
+  phase: Extract<ChatDelta, { type: 'activity' }>['phase'];
+  status?: Extract<ChatDelta, { type: 'activity' }>['status'];
+  label: string;
+  detail?: string;
+  suffix?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+}): Extract<ChatDelta, { type: 'activity' }> {
+  const stable = args.suffix ?? `${args.phase}-${Date.now()}`;
+  return {
+    type: 'activity',
+    id: `activity-${args.clientTurnId ?? 'turn'}-${stable}`,
+    phase: args.phase,
+    status: args.status ?? 'running',
+    label: args.label,
+    ...(args.detail ? { detail: args.detail } : {}),
+    startedAt: args.startedAt ?? new Date().toISOString(),
+    ...(args.completedAt ? { completedAt: args.completedAt } : {}),
+    ...(args.durationMs !== undefined ? { durationMs: args.durationMs } : {}),
+    ...(args.workflowId ? { workflowId: args.workflowId } : {}),
+    ...(args.agentId ? { agentId: args.agentId } : {}),
+    ...(args.clientTurnId ? { clientTurnId: args.clientTurnId } : {}),
+  };
+}
+
+async function writeChatDelta(
+  stream: ChatSseStream,
+  deps: ConversationRouteDeps,
+  ws: ReturnType<typeof getWorkspace>,
+  agentId: string,
+  conversationId: string,
+  clientTurnId: string,
+  delta: ChatDelta,
+  streamedMetadata: StreamedChatMetadata,
+): Promise<void> {
+  captureChatDeltaMetadata(streamedMetadata, delta);
+  await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
+  publishChatDelta(deps, ws, agentId, conversationId, clientTurnId, delta);
+}
+
+function publishChatDelta(
+  deps: ConversationRouteDeps,
+  ws: ReturnType<typeof getWorkspace>,
+  agentId: string,
+  conversationId: string,
+  clientTurnId: string,
+  delta: ChatDelta,
+): void {
+  const room = REALTIME_ROOMS.workspace(ws.workspaceId);
+  if (delta.type === 'activity') {
+    deps.bus.publish(room, REALTIME_EVENTS.AGENT_WORK_STEP, {
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      agentId,
+      conversationId,
+      clientTurnId,
+      workflowId: delta.workflowId,
+      runId: delta.runId,
+      nodeId: delta.nodeId,
+      phase: delta.status === 'error' ? 'fail' : delta.status === 'success' ? 'complete' : delta.phase,
+      description: [delta.label, delta.detail].filter(Boolean).join(' - '),
+      at: delta.startedAt ?? new Date().toISOString(),
+    });
+    return;
+  }
+  if (delta.type === 'tool_call') {
+    deps.bus.publish(room, REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL, {
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      agentId,
+      conversationId,
+      clientTurnId,
+      tool: delta.name,
+      args: delta.args,
+      at: new Date().toISOString(),
+    });
+    deps.bus.publish(room, REALTIME_EVENTS.AGENT_WORK_STEP, {
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      agentId,
+      conversationId,
+      clientTurnId,
+      phase: 'tool',
+      description: `Calling ${delta.name}`,
+      at: new Date().toISOString(),
+    });
+    return;
+  }
+  if (delta.type === 'tool_result') {
+    deps.bus.publish(room, REALTIME_EVENTS.AGENT_WORK_STEP, {
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      agentId,
+      conversationId,
+      clientTurnId,
+      phase: delta.error ? 'fail' : 'complete',
+      description: delta.error ? `${delta.name} failed: ${delta.error}` : `${delta.name} completed`,
+      at: new Date().toISOString(),
+    });
+  }
+}
+
+async function* withChatHeartbeats(
+  source: AsyncIterable<ChatDelta>,
+  args: { clientTurnId: string; agentId: string; workflowId?: string },
+): AsyncIterable<ChatDelta> {
+  const iterator = source[Symbol.asyncIterator]();
+  const startedAt = Date.now();
+  let nextHeartbeatAt = 15_000;
+  let next = iterator.next();
+
+  while (true) {
+    const waitMs = Math.max(0, startedAt + nextHeartbeatAt - Date.now());
+    const raced = await Promise.race([
+      next.then((result) => ({ kind: 'delta' as const, result })),
+      delay(waitMs).then(() => ({ kind: 'heartbeat' as const, threshold: nextHeartbeatAt })),
+    ]);
+
+    if (raced.kind === 'heartbeat') {
+      yield createChatActivity({
+        clientTurnId: args.clientTurnId,
+        agentId: args.agentId,
+        workflowId: args.workflowId,
+        phase: 'waiting',
+        label: 'Waiting for runtime',
+        detail: `Still working after ${Math.round(raced.threshold / 1000)}s.`,
+        suffix: `waiting-${raced.threshold}`,
+      });
+      nextHeartbeatAt = raced.threshold < 60_000
+        ? 60_000
+        : raced.threshold < 120_000
+          ? 120_000
+          : raced.threshold + 60_000;
+      continue;
+    }
+
+    if (raced.result.done) return;
+    yield raced.result.value;
+    while (Date.now() - startedAt >= nextHeartbeatAt) {
+      nextHeartbeatAt = nextHeartbeatAt < 60_000
+        ? 60_000
+        : nextHeartbeatAt < 120_000
+          ? 120_000
+          : nextHeartbeatAt + 60_000;
+    }
+    next = iterator.next();
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function workflowIdFromViewport(viewport: ViewportContext | null | undefined): string | undefined {
+  if (!viewport) return undefined;
+  if (viewport.resourceKind === 'workflow' && viewport.resourceId) return viewport.resourceId;
+  if (typeof viewport.metadata?.workflowId === 'string') return viewport.metadata.workflowId;
+  return undefined;
+}
+
 function findWorkspaceOrchestrator(db: AgentisSqliteDb, workspaceId: string): AgentRow | null {
   return db
     .select()
@@ -398,6 +601,7 @@ async function sendConversationMessage(
   agentId: string,
 ) {
   const body = sendSchema.parse(await c.req.json());
+  const clientTurnId = body.clientTurnId ?? randomUUID();
   const conversationId = c.req.query('conversationId') || null;
   const conversation = conversationId
     ? deps.conversations.getById(ws.workspaceId, conversationId)
@@ -412,19 +616,35 @@ async function sendConversationMessage(
     conversationId: conversation.id,
     operatorId: ws.user.id,
     body: body.body,
+    metadata: { clientTurnId },
   });
   const reg = deps.adapters.get(agentId);
 
   const acceptsSSE = c.req.header('accept')?.includes('text/event-stream');
   if (acceptsSSE) {
     return streamSSE(c, async (stream) => {
+      const turnStartedAtMs = Date.now();
+      const turnStartedAt = new Date(turnStartedAtMs).toISOString();
       let finalText = '';
-      let wroteDoneDelta = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
       let adapterError: string | null = null;
-      const streamedMetadata = createStreamedChatMetadata();
+      const streamedMetadata = createStreamedChatMetadata(clientTurnId, turnStartedAt);
+      const viewportOverride = body.viewportOverride as ViewportContext | null | undefined;
+      const activeViewport = body.useViewportContext
+        ? viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
+        : viewportOverride ?? null;
+      const viewportWorkflowId = workflowIdFromViewport(activeViewport);
+      await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
+        clientTurnId,
+        agentId,
+        workflowId: viewportWorkflowId,
+        phase: 'received',
+        label: 'Request received',
+        detail: 'The agent accepted the chat turn.',
+        suffix: 'received',
+        startedAt: turnStartedAt,
+      }), streamedMetadata);
       if (reg?.adapter?.chat) {
-        const viewportOverride = body.viewportOverride as ViewportContext | null | undefined;
         const history = deps.conversations
           .messages(conversation.id, 20)
           .slice(0, -1)
@@ -438,56 +658,106 @@ async function sendConversationMessage(
           agentId,
           userId: ws.user.id,
           conversationId: conversation.id,
+          clientTurnId,
           maxTurns: 8,
-          viewport: body.useViewportContext
-            ? viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
-            : viewportOverride ?? null,
+          viewport: activeViewport,
+          // Cancel the whole turn (chat loop + model-backed tools like workflow
+          // synthesis) when the operator disconnects the SSE stream, so we stop
+          // spending model credits on a turn nobody is listening to.
+          signal: c.req.raw.signal,
         };
-        for await (const delta of ChatSessionExecutor.turn(reg.adapter, history, body.body, turnContext)) {
+        for await (const delta of withChatHeartbeats(
+          ChatSessionExecutor.turn(reg.adapter, history, body.body, turnContext),
+          { clientTurnId, agentId, workflowId: viewportWorkflowId },
+        )) {
           if (isAdapterErrorDelta(delta)) {
+            if (delta.error.startsWith('canceled:')) {
+              finishReason = 'max_turns';
+              finalText = 'Stopped by operator.';
+              break;
+            }
             adapterError = delta.error;
             continue;
           }
-          captureChatDeltaMetadata(streamedMetadata, delta);
-          await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
-          if (delta.type === 'text') finalText += delta.delta;
           if (delta.type === 'done') {
             finishReason = delta.finishReason;
-            wroteDoneDelta = true;
             break;
           }
+          await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, delta, streamedMetadata);
+          if (delta.type === 'text') finalText += delta.delta;
         }
       } else {
-        if (reg?.adapter instanceof OpenClawAdapter) {
-          await relayOpenClaw(deps, reg.adapter, conversation.mirroredSessionId ?? undefined, body.body, agentId);
+        // Every V1 harness adapter (OpenClaw, Hermes, Codex, Cursor, Claude Code,
+        // HTTP) now implements `chat()`, so this is reached only by an adapter that
+        // genuinely cannot chat. Surface the adapter's own reason, not boilerplate.
+        const limitation = reg?.adapter?.capabilities?.().limitations?.[0];
+        finalText = limitation
+          ?? 'This agent is not connected to an interactive chat harness yet. Configure a V1 harness, then try again.';
+        finishReason = 'error';
+        adapterError = finalText;
+        await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, {
+          type: 'activity',
+          id: `activity-${clientTurnId}-no-chat`,
+          phase: 'error',
+          status: 'error',
+          label: 'Interactive chat unavailable',
+          detail: finalText,
+          clientTurnId,
+          agentId,
+        }, streamedMetadata);
+        await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, { type: 'text', delta: finalText }, streamedMetadata);
+      }
+
+      if (!finalText.trim() && !streamedMetadata.confirmation) {
+        if (finishReason === 'error') {
+          finalText = relevantTurnError(streamedMetadata, adapterError);
         } else {
-          finalText = 'This agent is not connected to an interactive chat harness yet. Configure a V1 harness, then try again.';
-          await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'text', delta: finalText }) });
+          finishReason = 'error';
+          finalText = 'The runtime completed without returning an answer. The turn was stopped so you can retry without wondering whether it is still running.';
         }
       }
 
-      if (!wroteDoneDelta) {
-        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'done', finishReason }) });
-      }
+      const turnCompletedAt = new Date().toISOString();
+      const durationMs = Math.max(0, Date.now() - turnStartedAtMs);
+      finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
+      const failed = streamedMetadata.turn.status === 'failed';
+      const stopped = streamedMetadata.turn.status === 'stopped';
+      await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
+        clientTurnId,
+        agentId,
+        workflowId: streamedMetadata.workflowId ?? viewportWorkflowId,
+        phase: failed ? 'error' : 'complete',
+        status: failed ? 'error' : 'success',
+        label: failed ? 'Response failed' : stopped ? 'Stopped before completion' : 'Response ready',
+        detail: failed ? finalText : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
+        suffix: 'terminal',
+        startedAt: turnCompletedAt,
+        completedAt: turnCompletedAt,
+        durationMs,
+      }), streamedMetadata);
 
-      if (finishReason === 'error') {
+      if (failed) {
         await stream.writeSSE({
           event: 'error',
           data: JSON.stringify({
             code: 'ADAPTER_CHAT_FAILED',
-            message: adapterError ?? 'The agent runtime failed before it could complete the chat turn.',
+            message: finalText,
           }),
         });
       }
 
-      if (finishReason !== 'error' && (finalText.trim() || streamedMetadata.confirmation)) {
+      const hasContentToSave = finalText.trim() || streamedMetadata.confirmation || failed;
+      if (hasContentToSave) {
+        const bodyToSave = finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required';
+
         const persisted = deps.conversations.appendMirrored({
           workspaceId: ws.workspaceId,
           conversationId: conversation.id,
           sessionMessageId: `chat_${randomUUID()}`,
           authorType: 'agent',
-          body: finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required',
-          metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata),
+          body: bodyToSave,
+          deliveryStatus: failed ? 'failed' : 'delivered',
+          metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata, clientTurnId),
         });
         await stream.writeSSE({
           event: 'message',
@@ -501,6 +771,45 @@ async function sendConversationMessage(
           }),
         });
       }
+      const capture = await deps.memoryCapture?.captureTurn({
+        workspaceId: ws.workspaceId,
+        conversationId: conversation.id,
+        userId: ws.user.id,
+        agentId,
+        userDisplayName: ws.user.displayName,
+        userMessage: body.body,
+        assistantMessage: finalText.trim() || null,
+        finishReason,
+      });
+      // Surface the post-turn "learning" so the small background spend (peer-profile
+      // embeddings + cognitive promotion LLM passes) is never a mystery charge after
+      // the turn looks done. Only emitted when real background work was actually
+      // enqueued — routine turns stay silent.
+      if (
+        capture &&
+        (capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
+      ) {
+        deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          agentId,
+          conversationId: conversation.id,
+          clientTurnId,
+          phase: 'complete',
+          description: 'Learning from this conversation (updating memory in the background)',
+          at: new Date().toISOString(),
+        });
+      }
+      await writeChatDelta(
+        stream,
+        deps,
+        ws,
+        agentId,
+        conversation.id,
+        clientTurnId,
+        { type: 'done', finishReason },
+        streamedMetadata,
+      );
       await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
     });
   }
@@ -574,49 +883,87 @@ async function confirmConversationAction(
   const acceptsSSE = c.req.header('accept')?.includes('text/event-stream');
   if (acceptsSSE) {
     return streamSSE(c, async (stream) => {
+      const clientTurnId = body.clientTurnId ?? randomUUID();
+      const turnStartedAtMs = Date.now();
+      const turnStartedAt = new Date(turnStartedAtMs).toISOString();
       let finalText = '';
-      let wroteDoneDelta = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
       let adapterError: string | null = null;
-      const streamedMetadata = createStreamedChatMetadata();
+      const streamedMetadata = createStreamedChatMetadata(clientTurnId, turnStartedAt);
+      await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
+        clientTurnId,
+        agentId,
+        phase: 'received',
+        label: body.confirmed ? 'Approval received' : 'Cancellation received',
+        detail: body.confirmed ? 'Resuming the paused action.' : 'Stopping the paused action.',
+        suffix: 'received',
+        startedAt: turnStartedAt,
+      }), streamedMetadata);
       for await (const delta of ChatSessionExecutor.confirm(reg.adapter, body.turnId, body.confirmed, {
         workspaceId: ws.workspaceId,
         userId: ws.user.id,
         conversationId: conversation.id,
+        signal: c.req.raw.signal,
       })) {
         if (isAdapterErrorDelta(delta)) {
           adapterError = delta.error;
           continue;
         }
-        captureChatDeltaMetadata(streamedMetadata, delta);
-        await stream.writeSSE({ event: 'delta', data: JSON.stringify(delta) });
-        if (delta.type === 'text') finalText += delta.delta;
         if (delta.type === 'done') {
           finishReason = delta.finishReason;
-          wroteDoneDelta = true;
           break;
         }
+        await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, delta, streamedMetadata);
+        if (delta.type === 'text') finalText += delta.delta;
       }
-      if (!wroteDoneDelta) {
-        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'done', finishReason }) });
+
+      if (!finalText.trim() && !streamedMetadata.confirmation) {
+        if (finishReason === 'error') {
+          finalText = relevantTurnError(streamedMetadata, adapterError);
+        } else {
+          finishReason = 'error';
+          finalText = 'The runtime completed the confirmation without returning an answer.';
+        }
       }
-      if (finishReason === 'error') {
+
+      const turnCompletedAt = new Date().toISOString();
+      const durationMs = Math.max(0, Date.now() - turnStartedAtMs);
+      finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
+      const failed = streamedMetadata.turn.status === 'failed';
+      await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
+        clientTurnId,
+        agentId,
+        phase: failed ? 'error' : 'complete',
+        status: failed ? 'error' : 'success',
+        label: failed ? 'Action failed' : 'Action complete',
+        detail: failed ? finalText : 'The confirmation turn finished.',
+        suffix: 'terminal',
+        startedAt: turnCompletedAt,
+        completedAt: turnCompletedAt,
+        durationMs,
+      }), streamedMetadata);
+
+      if (failed) {
         await stream.writeSSE({
           event: 'error',
           data: JSON.stringify({
             code: 'ADAPTER_CHAT_FAILED',
-            message: adapterError ?? 'The agent runtime failed before it could complete the confirmation.',
+            message: finalText,
           }),
         });
       }
-      if (finishReason !== 'error' && (finalText.trim() || streamedMetadata.confirmation)) {
+      const hasContentToSave = finalText.trim() || streamedMetadata.confirmation || failed;
+      if (hasContentToSave) {
+        const bodyToSave = finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required';
+
         const persisted = deps.conversations.appendMirrored({
           workspaceId: ws.workspaceId,
           conversationId: conversation.id,
           sessionMessageId: `chat_${randomUUID()}`,
           authorType: 'agent',
-          body: finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required',
-          metadata: buildPersistedChatMetadata('chat_confirmation', streamedMetadata),
+          body: bodyToSave,
+          deliveryStatus: failed ? 'failed' : 'delivered',
+          metadata: buildPersistedChatMetadata('chat_confirmation', streamedMetadata, clientTurnId),
         });
         await stream.writeSSE({
           event: 'message',
@@ -630,6 +977,16 @@ async function confirmConversationAction(
           }),
         });
       }
+      await writeChatDelta(
+        stream,
+        deps,
+        ws,
+        agentId,
+        conversation.id,
+        clientTurnId,
+        { type: 'done', finishReason },
+        streamedMetadata,
+      );
       await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
     });
   }
@@ -641,6 +998,7 @@ async function confirmConversationAction(
     workspaceId: ws.workspaceId,
     userId: ws.user.id,
     conversationId: conversation.id,
+    signal: c.req.raw.signal,
   })) {
     deltas.push(delta);
     if (delta.type === 'text') finalText += delta.delta;
@@ -666,16 +1024,64 @@ function isAdapterErrorDelta(delta: ChatDelta): delta is Extract<ChatDelta, { ty
     && delta.error.trim().length > 0;
 }
 
-function createStreamedChatMetadata(): StreamedChatMetadata {
+function createStreamedChatMetadata(
+  clientTurnId: string = randomUUID(),
+  startedAt = new Date().toISOString(),
+): StreamedChatMetadata {
   return {
+    turn: {
+      clientTurnId,
+      startedAt,
+      status: 'running',
+    },
     thinking: '',
+    activity: [],
     toolCalls: [],
     toolStartedAt: new Map(),
+    workflowId: null,
+    runId: null,
+    runTitle: null,
     confirmation: null,
   };
 }
 
+function finalizeTurnTrace(
+  state: StreamedChatMetadata,
+  finishReason: ChatFinishReason,
+  completedAt: string,
+  durationMs: number,
+): void {
+  state.turn = {
+    ...state.turn,
+    completedAt,
+    durationMs,
+    finishReason,
+    status: finishReason === 'error'
+      ? 'failed'
+      : finishReason === 'max_turns' || finishReason === 'length'
+        ? 'stopped'
+        : 'completed',
+  };
+}
+
+function relevantTurnError(state: StreamedChatMetadata, adapterError: string | null): string {
+  const toolError = [...state.toolCalls]
+    .reverse()
+    .find((call) => call.status === 'error' && call.name !== 'adapter.chat')
+    ?.error
+    ?.trim();
+  return toolError
+    || adapterError?.trim()
+    || 'The agent runtime failed before it could complete the chat turn.';
+}
+
 function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta): void {
+  if (delta.type === 'activity') {
+    state.activity = [...state.activity.filter((entry) => entry.id !== delta.id), delta].slice(-80);
+    if (delta.workflowId) state.workflowId = delta.workflowId;
+    if (delta.runId) state.runId = delta.runId;
+    return;
+  }
   if (delta.type === 'thinking') {
     state.thinking += delta.delta;
     return;
@@ -709,6 +1115,12 @@ function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta)
         durationMs,
       },
     ];
+    const build = workflowBuildMetadataFromResult(delta.result);
+    if (build) {
+      state.workflowId = build.workflowId;
+      state.runId = build.runId;
+      state.runTitle = build.title ?? state.runTitle;
+    }
     return;
   }
   if (delta.type === 'confirmation_required') {
@@ -729,11 +1141,30 @@ function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta)
 function buildPersistedChatMetadata(
   source: 'chat_loop' | 'chat_confirmation',
   state: StreamedChatMetadata,
+  clientTurnId?: string | null,
 ): Record<string, unknown> {
   return {
     source,
+    ...(clientTurnId ? { clientTurnId } : {}),
+    turn: state.turn,
     ...(state.thinking.trim() ? { thinking: state.thinking } : {}),
+    ...(state.activity.length > 0 ? { activity: state.activity } : {}),
     ...(state.toolCalls.length > 0 ? { toolCalls: state.toolCalls } : {}),
+    ...(state.workflowId ? { workflowId: state.workflowId } : {}),
+    ...(state.runId ? { runId: state.runId } : {}),
+    ...(state.runTitle ? { runTitle: state.runTitle } : {}),
     ...(state.confirmation ? { confirmation: state.confirmation } : {}),
+  };
+}
+
+function workflowBuildMetadataFromResult(result: unknown): { workflowId: string; runId: string; title?: string } | null {
+  if (!result || typeof result !== 'object') return null;
+  const value = result as { workflowId?: unknown; runId?: unknown; title?: unknown };
+  if (typeof value.workflowId !== 'string' || !value.workflowId.trim()) return null;
+  if (typeof value.runId !== 'string' || !value.runId.trim()) return null;
+  return {
+    workflowId: value.workflowId,
+    runId: value.runId,
+    ...(typeof value.title === 'string' && value.title.trim() ? { title: value.title.trim() } : {}),
   };
 }

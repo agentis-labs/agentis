@@ -251,7 +251,7 @@ Runtime     Playbook    Mission     Deploy
 │  ADAPTER                                                         │
 │  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐    │
 │  │ openclaw   │ │ hermes     │ │ local      │ │ claude     │    │
-│  │ Gateway    │ │ Hosted API │ │ Ollama/LM  │ │ Local CLI  │    │
+│  │ Gateway    │ │ Hosted API │ │ Local LM  │ │ Local CLI  │    │
 │  │ native     │ │ compatible │ │ Studio     │ │ coding     │    │
 │  └────────────┘ └────────────┘ └────────────┘ └────────────┘    │
 │  ┌────────────┐ ┌────────────┐                                  │

@@ -18,7 +18,7 @@ const runSchema = z.object({
 
 const promoteSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
-  summary: z.string().max(2000).nullable().optional(),
+  description: z.string().max(8000).nullable().optional(),
 });
 
 export function buildEphemeralRoutes(deps: {
@@ -54,7 +54,7 @@ export function buildEphemeralRoutes(deps: {
       userId: ws.user.id,
       runId: c.req.param('runId'),
       title: body.title,
-      summary: body.summary,
+      description: body.description,
     });
     return c.json({ workflow }, 201);
   });

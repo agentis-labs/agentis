@@ -27,7 +27,7 @@ test('palette finds an agent created via API', async ({ page, request }) => {
   await waitForShell(page);
   await request.post('/v1/agents', {
     headers: auth.h,
-    data: { name: 'PaletteHermes', adapterType: 'http', capabilityTags: ['probe'], config: { url: 'http://127.0.0.1:9' } },
+    data: { name: 'PaletteHermes', adapterType: 'http', capabilityTags: ['probe'], config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' } },
   });
   await page.keyboard.press('Control+K');
   await page.getByPlaceholder(/Search workflows, agents, gateways, runs, approvals/i).fill('Palette');
@@ -39,7 +39,7 @@ test('Enter on a palette hit navigates to its href', async ({ page, request }) =
   await waitForShell(page);
   const created = await (await request.post('/v1/agents', {
     headers: auth.h,
-    data: { name: 'PaletteNav', adapterType: 'http', capabilityTags: [], config: { url: 'http://127.0.0.1:9' } },
+    data: { name: 'PaletteNav', adapterType: 'http', capabilityTags: [], config: { baseUrl: 'http://127.0.0.1', dispatchPath: '/dispatch' } },
   })).json();
 
   await page.keyboard.press('Control+K');

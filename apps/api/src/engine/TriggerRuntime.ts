@@ -17,7 +17,7 @@
  */
 
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { CONSTANTS, AgentisError, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -28,6 +28,9 @@ import type { WorkflowEngine } from './WorkflowEngine.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { type JobQueueBackend, shouldQueueWorkflowRun } from '../services/jobQueue.js';
 import { buildInitialRunState } from './initialRunState.js';
+import { ListenerRuntime } from './ListenerRuntime.js';
+import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
+import { hashWorkflowGraph } from '../services/graphHash.js';
 
 interface CronLib {
   schedule(expression: string, callback: () => void, options?: { scheduled?: boolean; timezone?: string }): {
@@ -65,6 +68,12 @@ export interface TriggerRuntimeDeps {
    * are enqueued (and survive a server restart) instead of dispatched inline.
    */
   jobQueue?: JobQueueBackend;
+  /**
+   * Listener Runtime (persistent_listener v2). When wired, triggers whose
+   * config is a ListenerConfig (source/predicate/firePolicy) are routed here
+   * instead of the legacy adapter `createPersistentListener` path.
+   */
+  listenerRuntime?: ListenerRuntime;
 }
 
 export class TriggerRuntime {
@@ -107,7 +116,8 @@ export class TriggerRuntime {
   }
 
   async #activateCron(t: ActiveTrigger): Promise<void> {
-    const expression = String((t.config as { expression?: string }).expression ?? '');
+    const cfg = t.config as { expression?: string; timezone?: string };
+    const expression = String(cfg.expression ?? '');
     if (!expression) throw new AgentisError('TRIGGER_INVALID_CONFIG', 'cron trigger requires `expression`');
     const loaded = await loadCron();
     if (loaded.kind === 'unavailable') {
@@ -118,16 +128,36 @@ export class TriggerRuntime {
     if (!cron.validate(expression)) {
       throw new AgentisError('TRIGGER_INVALID_CONFIG', `invalid cron expression: ${expression}`);
     }
+    // The cron expression is authored in a fixed zone (UTC by convention, or the
+    // explicit `config.timezone`). Pass it to node-cron so the schedule fires at
+    // the intended wall-clock time regardless of the SERVER's local timezone —
+    // otherwise a `5 18 * * *` ("18:05 UTC") would fire at 18:05 server-local.
+    const timezone = cfg.timezone && cfg.timezone.trim() ? cfg.timezone.trim() : 'UTC';
     const job = cron.schedule(expression, () => {
       void this.fire({ trigger: t, payload: { firedAt: new Date().toISOString() } }).catch((err) =>
         this.deps.logger.error('trigger.cron_fire_failed', { triggerId: t.triggerId, err: (err as Error).message }),
       );
-    });
+    }, { timezone });
     job.start();
     this.deps.registry.activate(t, async () => job.stop());
   }
 
+  /** Expose the listener runtime so /v1/listeners routes can read health, pause, fire-now. */
+  get listeners(): ListenerRuntime | undefined {
+    return this.deps.listenerRuntime;
+  }
+
   async #activatePersistentListener(t: ActiveTrigger): Promise<void> {
+    // New path: a ListenerConfig (declares a `source`) routes to ListenerRuntime.
+    if (this.deps.listenerRuntime && ListenerRuntime.handles(t.config)) {
+      const lr = this.deps.listenerRuntime;
+      await lr.activate(t);
+      this.deps.registry.activate(t, async () => {
+        await lr.deactivate(t.triggerId);
+      });
+      return;
+    }
+    // Legacy path: adapter-coupled listener ({ agentId }).
     const agentId = String((t.config as { agentId?: string }).agentId ?? '');
     if (!agentId) throw new AgentisError('TRIGGER_INVALID_CONFIG', 'persistent_listener requires agentId');
     const reg = this.deps.adapters.get(agentId);
@@ -170,7 +200,7 @@ export class TriggerRuntime {
   }
 
   /**
-   * Start a workflow run directly. Used by triggers, the App API surface, and
+   * Start a workflow run directly. Used by triggers, API callers, and
    * the webhook receiver — every entry point converges here so run creation
    * stays uniform.
    */
@@ -194,7 +224,29 @@ export class TriggerRuntime {
       .where(eq(schema.workflows.id, args.workflowId))
       .get();
     if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${args.workflowId} missing`);
-    const graph = workflow.graph as WorkflowGraph;
+    // Converge the stored graph on fire, mirroring the API `/run` path. The
+    // engine's `startRun` already normalizes for runtime correctness, but it only
+    // writes a per-run `graphSnapshot` — it never heals the canonical
+    // `workflows.graph`. Without this, a workflow whose synthesized config was
+    // repaired (e.g. an `operationId` rewritten to what the connector supports, a
+    // legacy router condition) keeps the stale draft in the DB forever, so the
+    // canvas/exports show a graph that differs from what every scheduled/webhook
+    // run actually executes. Normalize here to detect the repairs and persist them.
+    const normalized = normalizeWorkflowGraph(this.deps.db, args.workspaceId, workflow.graph as WorkflowGraph);
+    const graph = normalized.graph;
+    if (normalized.repairs.length > 0) {
+      try {
+        this.deps.db
+          .update(schema.workflows)
+          .set({ graph, contentHash: hashWorkflowGraph(graph), updatedAt: new Date().toISOString() })
+          .where(eq(schema.workflows.id, workflow.id))
+          .run();
+      } catch (err) {
+        // Healing the stored row is best-effort — the run still uses the
+        // normalized graph in memory regardless.
+        this.deps.logger.warn('trigger.graph_heal_failed', { workflowId: workflow.id, err: (err as Error).message });
+      }
+    }
     const runId = randomUUID();
     const initialState = buildInitialRunState({
       runId,
@@ -276,14 +328,36 @@ export class TriggerRuntime {
     }
     if (!ok) throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', 'invalid HMAC');
 
-    // Idempotency dedup.
-    const existing = this.deps.db
+    const findDelivery = () => this.deps.db
       .select()
       .from(schema.webhookDeliveries)
-      .where(eq(schema.webhookDeliveries.deliveryId, args.deliveryId))
+      .where(and(
+        eq(schema.webhookDeliveries.triggerId, args.triggerId),
+        eq(schema.webhookDeliveries.deliveryId, args.deliveryId),
+      ))
       .get();
+    const existing = findDelivery();
     if (existing) {
       return { runId: existing.responseRunId ?? '', idempotent: true };
+    }
+
+    const reservationId = randomUUID();
+    try {
+      this.deps.db
+        .insert(schema.webhookDeliveries)
+        .values({
+          id: reservationId,
+          triggerId: trigger.id,
+          workspaceId: trigger.workspaceId,
+          deliveryId: args.deliveryId,
+          status: 'processing',
+          responseRunId: null,
+        })
+        .run();
+    } catch (err) {
+      const raced = findDelivery();
+      if (raced) return { runId: raced.responseRunId ?? '', idempotent: true };
+      throw err;
     }
 
     const t: ActiveTrigger = {
@@ -301,18 +375,17 @@ export class TriggerRuntime {
     } catch {
       payload = { raw: args.rawBody };
     }
-    const result = await this.fire({ trigger: t, payload });
-    this.deps.db
-      .insert(schema.webhookDeliveries)
-      .values({
-        id: randomUUID(),
-        triggerId: trigger.id,
-        workspaceId: trigger.workspaceId,
-        deliveryId: args.deliveryId,
-        status: 'accepted',
-        responseRunId: result.runId,
-      })
-      .run();
-    return { runId: result.runId, idempotent: false };
+    try {
+      const result = await this.fire({ trigger: t, payload });
+      this.deps.db
+        .update(schema.webhookDeliveries)
+        .set({ status: 'accepted', responseRunId: result.runId })
+        .where(eq(schema.webhookDeliveries.id, reservationId))
+        .run();
+      return { runId: result.runId, idempotent: false };
+    } catch (err) {
+      this.deps.db.delete(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.id, reservationId)).run();
+      throw err;
+    }
   }
 }

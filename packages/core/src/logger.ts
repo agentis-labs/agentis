@@ -1,6 +1,6 @@
 /**
  * Logger interface — V1-SPEC §3.3 lives in @agentis/core so packages
- * (adapters, skills, db) can depend on it without pulling apps/api.
+ * (adapters, extensions, db) can depend on it without pulling apps/api.
  *
  * The interface is what consumers code against. The concrete `createLogger`
  * implementation stays in apps/api (process-owned: writes to stdout, picks

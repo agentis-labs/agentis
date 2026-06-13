@@ -1,15 +1,15 @@
-# Agentis — Platform Vision & Technical North Star
+ï»¿# Agentis â€” Platform Vision & Technical North Star
 
-> **This document is the strategic vision artifact — the full-scope architecture of what Agentis will become.** It is NOT the immediate buildable V1 spec. It exists to align investors, collaborators, and future contributors on the complete platform picture.
+> **This document is the strategic vision artifact â€” the full-scope architecture of what Agentis will become.** It is NOT the immediate buildable V1 spec. It exists to align investors, collaborators, and future contributors on the complete platform picture.
 >
 > The real buildable V1 spec lives in `V1-SPEC.md` (to be written after the research phase). That spec will be a strict subset of this vision, focused on the minimum viable product that proves the "n8n for agents" thesis.
 
-<!-- Original full platform specification merged here. Sections 0–13 + Future Roadmap (Sections 14–22) -->
+<!-- Original full platform specification merged here. Sections 0â€“13 + Future Roadmap (Sections 14â€“22) -->
 
-**Document Status:** VISION — informs design decisions; not a build checklist  
+**Document Status:** VISION â€” informs design decisions; not a build checklist  
 **Spec Version:** 2.0.0  
 **Date:** April 21, 2026  
-**Contains:** Full platform architecture (§0–§13) + Post-V1 Roadmap (§14–§22)
+**Contains:** Full platform architecture (Â§0â€“Â§13) + Post-V1 Roadmap (Â§14â€“Â§22)
 
 ---
 
@@ -18,7 +18,7 @@
 Before reading any section, internalize these rules. They are constraints on both the spec itself and every implementation artifact generated from it.
 
 1. **Every interface is complete.** `[key: string]: unknown` is only permitted with an explicit comment explaining why. Every field is named, typed, and documented.
-2. **Every timeout is justified.** Not just stated — the reasoning appears inline.
+2. **Every timeout is justified.** Not just stated â€” the reasoning appears inline.
 3. **Every index has a named query.** If the query it serves cannot be stated, the index is deleted.
 4. **Every external call has a timeout, retry count, and circuit breaker.** No call is fire-and-forget.
 5. **No magic numbers.** Every threshold is a named constant with rationale in the Glossary.
@@ -27,18 +27,18 @@ Before reading any section, internalize these rules. They are constraints on bot
 
 ---
 
-## Section 0 — Document Header & Contract Block
+## Section 0 â€” Document Header & Contract Block
 
 ### 0.1 Reading Order
 
 Read this document in the following order for maximum context coherence when generating implementation code:
 
 ```
-Glossary (§0.5) ? System Boundaries (§1.3) ? Architecture Overview (§2) ?
-Data Layer (Part 2, §4) ? Core Services (§3) ? API Contracts (Part 2, §5) ?
-Real-Time Events (Part 2, §6) ? Frontend (Part 2, §7) ?
-Security (Part 3, §8) ? Infrastructure (Part 3, §9) ? Error Handling (Part 3, §10) ?
-Observability (Part 3, §11) ? Testing (Part 3, §12) ? Scope Boundaries (Part 3, §13)
+Glossary (Â§0.5) ? System Boundaries (Â§1.3) ? Architecture Overview (Â§2) ?
+Data Layer (Part 2, Â§4) ? Core Services (Â§3) ? API Contracts (Part 2, Â§5) ?
+Real-Time Events (Part 2, Â§6) ? Frontend (Part 2, Â§7) ?
+Security (Part 3, Â§8) ? Infrastructure (Part 3, Â§9) ? Error Handling (Part 3, Â§10) ?
+Observability (Part 3, Â§11) ? Testing (Part 3, Â§12) ? Scope Boundaries (Part 3, Â§13)
 ```
 
 **Rationale:** The data layer defines what exists. Services define what transforms it. APIs define how it is accessed. Frontend defines how it is displayed. Security, infrastructure, and testing are constraints applied to the complete system.
@@ -50,7 +50,7 @@ A section is production-ready when:
 - Every state machine has every transition enumerated
 - Every service has a named failure behavior for every dependency failure
 - Every external call has timeout + retry + circuit breaker specified
-- The corresponding test contracts in §12 cover the section's behavior
+- The corresponding test contracts in Â§12 cover the section's behavior
 - An implementation agent can write code from the section without asking a clarifying question
 
 ### 0.3 Architectural Decision Record (ADR) Log
@@ -58,19 +58,19 @@ A section is production-ready when:
 | ID | Decision | Rationale | Alternatives Rejected |
 |---|---|---|---|
 | ADR-001 | TypeScript over Python | npm ecosystem, runs everywhere (CLI, browser, edge), largest developer audience | Python: ML-native but wrong audience for a platform product |
-| ADR-002 | Hono over Express/Fastify | Fastest Node.js HTTP framework, runs on edge runtimes, first-class TypeScript | Express: no native TS; Fastify: heavier plugin model |
+| ADR-002 | Hono over Express/Fastify | Fastest Node.js HTTP framework, runs on edge runtimes, first-class TypeScript | Express: no native TS; Fastify: heavier extension model |
 | ADR-003 | React Flow over custom canvas | Purpose-built for node graphs, handles virtualization, active maintenance | Three.js: 3D overkill for V1; D3: too low-level, no React integration |
 | ADR-004 | PostgreSQL + pgvector over separate vector DB | Single database reduces operational complexity; pgvector performance adequate at V1 scale (<1M embeddings) | Pinecone: vendor lock-in; Weaviate: separate service overhead |
 | ADR-005 | Redis for scratchpad over SQLite | Mission scratchpad requires sub-millisecond read/write with pub/sub for change events; SQLite cannot publish changes | SQLite: no native pub/sub; Kafka: overkill for V1 |
 | ADR-006 | Event-sourced ledger over mutable state | Enables timeline scrubbing, audit trails, and crash recovery without additional infrastructure | Mutable state: no history, no replay, no recovery |
-| ADR-007 | `isolated-vm` V8 isolate for `node_worker` skills; Docker sandbox for Skill registry-installed (`docker_sandbox`) skills | Docker per execution has 2–5 s cold start unacceptable for local skills; `isolated-vm` provides a real V8 heap boundary (<50 ms cold start) with no shared memory and no access to the host module graph — far stronger than `vm.createContext`. Skill registry-installed third-party skills require a harder OS-level boundary: Docker containers with read-only filesystems, CPU/memory caps, and network namespace restriction to declared `allowedDomains`. Container warming pool targets <200 ms warm latency. | Workers + `vm.createContext` only: not a real security boundary — shared process heap, monkey-patched fetch bypassable; Firecracker: correct for hosted untrusted execution but requires Linux KVM hypervisor, not portable to macOS or Windows dev machines in V1 |
+| ADR-007 | `isolated-vm` V8 isolate for `node_worker` skills; Docker sandbox for Skill registry-installed (`docker_sandbox`) skills | Docker per execution has 2â€“5 s cold start unacceptable for local skills; `isolated-vm` provides a real V8 heap boundary (<50 ms cold start) with no shared memory and no access to the host module graph â€” far stronger than `vm.createContext`. Skill registry-installed third-party skills require a harder OS-level boundary: Docker containers with read-only filesystems, CPU/memory caps, and network namespace restriction to declared `allowedDomains`. Container warming pool targets <200 ms warm latency. | Workers + `vm.createContext` only: not a real security boundary â€” shared process heap, monkey-patched fetch bypassable; Firecracker: correct for hosted untrusted execution but requires Linux KVM hypervisor, not portable to macOS or Windows dev machines in V1 |
 | ADR-008 | IVFFlat over HNSW for pgvector | At V1 scale (<100K embeddings), IVFFlat `lists=100` has equivalent recall to HNSW with simpler maintenance; HNSW promoted in V2 when index exceeds 500K vectors | HNSW: better at scale, more complex maintenance |
 | ADR-009 | BullMQ over raw Redis queues | Background jobs (skill repair, embedding pipeline, ELO updates) need retry logic, dead-letter queues, and concurrency control; BullMQ provides this on top of existing Redis | Raw Redis: no retry, no DLQ; RabbitMQ/SQS: separate service |
 | ADR-010 | Railway for initial infra over AWS | Railway reduces ops burden to near-zero for V1; AWS promoted when enterprise customers require VPC isolation | AWS: correct long-term, wrong short-term ops complexity |
 | ADR-011 | Drizzle ORM over Prisma | Drizzle: SQL-first, no runtime code generation, better TypeScript inference, works in edge environments | Prisma: heavier runtime, query engine sidecar |
 | ADR-012 | Cursor-based pagination over offset | Offset pagination breaks on concurrent inserts; cursor-based is stable for real-time data | Offset: simple but incorrect for live mission feeds |
-| ADR-013 | HNSW promoted in V2 | See ADR-008; flagged here for V2 migration planning | — |
-| ADR-014 | V1: `isolated-vm` isolates for `node_worker` + Docker sandbox for `docker_sandbox` (Skill registry skills) ? Firecracker (V3) | `isolated-vm` + Docker covers V1 threat model: operator-installed local skills get a real V8 heap boundary; Skill registry-installed third-party skills get Docker OS-level containment. Firecracker (Linux KVM microVMs) is promoted in V3 when Nexseed operates a hosted/metered execution environment where fully untrusted paid code runs on shared infrastructure — Docker is not sufficient there. | Workers only: not a real security boundary; Firecracker in V1: requires Linux KVM, not portable to macOS/Windows dev machines |
+| ADR-013 | HNSW promoted in V2 | See ADR-008; flagged here for V2 migration planning | â€” |
+| ADR-014 | V1: `isolated-vm` isolates for `node_worker` + Docker sandbox for `docker_sandbox` (Skill registry skills) ? Firecracker (V3) | `isolated-vm` + Docker covers V1 threat model: operator-installed local skills get a real V8 heap boundary; Skill registry-installed third-party skills get Docker OS-level containment. Firecracker (Linux KVM microVMs) is promoted in V3 when Nexseed operates a hosted/metered execution environment where fully untrusted paid code runs on shared infrastructure â€” Docker is not sufficient there. | Workers only: not a real security boundary; Firecracker in V1: requires Linux KVM, not portable to macOS/Windows dev machines |
 | ADR-015 | ELO K=32 as routing signal | Standard chess K-factor; provides meaningful signal after ~20 games per capability tag without over-indexing on early outliers | K=16: too slow to respond to quality changes; K=64: too volatile |
 | ADR-016 | Planner always uses `PLANNER_MODEL` env var | Decouples planning quality from per-user LLM config; ensures consistent DAG quality regardless of user's chosen model | Per-user planner model: quality variance makes coordinator behavior unpredictable |
 | ADR-017 | Motion One (`@motionone/dom`) over Framer Motion for FLIP animations | Motion One is 2KB vs Framer Motion's 31KB; provides an imperative `animate()` API ideal for FLIP that works outside React's component tree without requiring component lifecycle involvement | Framer Motion: larger bundle; layout animations require React component lifecycle wrapping; CSS transitions only: insufficient control for the multi-step FLIP orchestration needed in KanbanCardAnimator |
@@ -94,7 +94,7 @@ export const CONSTANTS = {
   EPISODIC_MEMORY_INJECTION_LIMIT: 10,   // Max recent episodes injected per step
   // Rationale: Last 10 covers one full typical mission phase without context saturation
 
-  STM_TTL_SECONDS: 86400,                // 24 hours — short-term memory session TTL
+  STM_TTL_SECONDS: 86400,                // 24 hours â€” short-term memory session TTL
   // Rationale: 24h covers multi-day work sessions; longer risks stale context injection
   
   EPISODE_IMPORTANCE_DEFAULT: 0.5,       // Default importance for new memory episodes
@@ -125,18 +125,18 @@ export const CONSTANTS = {
   CIRCUIT_BREAKER_HALF_OPEN_DELAY_SECONDS: 30, // Time before half-open probe
 
   // Timeouts (all in milliseconds)
-  SKILL_EXECUTION_TIMEOUT_MS: 30_000,   // 30s — default skill execution timeout
+  SKILL_EXECUTION_TIMEOUT_MS: 30_000,   // 30s â€” default skill execution timeout
   // Rationale: 95th percentile of all web scraping + API calls; skills declaring longer must be explicit
   
-  SKILL_EXECUTION_MAX_TIMEOUT_MS: 300_000, // 5 min — hard cap regardless of skill declaration
-  PLANNING_LLM_TIMEOUT_MS: 60_000,      // 60s — Planner LLM call
-  // Rationale: DAG generation for complex 20-task missions takes 30–45s on Opus; 60s is safe ceiling
+  SKILL_EXECUTION_MAX_TIMEOUT_MS: 300_000, // 5 min â€” hard cap regardless of skill declaration
+  PLANNING_LLM_TIMEOUT_MS: 60_000,      // 60s â€” Planner LLM call
+  // Rationale: DAG generation for complex 20-task missions takes 30â€“45s on Opus; 60s is safe ceiling
   
-  REPAIR_AGENT_TIMEOUT_MS: 120_000,     // 2 min — Repair agent cycle
-  AGENT_TASK_RESPONSE_TIMEOUT_MS: 300_000, // 5 min — framework adapter waits this long for agent
-  CHECKPOINT_APPROVAL_TIMEOUT_MS: 86_400_000, // 24h — auto-continues if no human action
+  REPAIR_AGENT_TIMEOUT_MS: 120_000,     // 2 min â€” Repair agent cycle
+  AGENT_TASK_RESPONSE_TIMEOUT_MS: 300_000, // 5 min â€” framework adapter waits this long for agent
+  CHECKPOINT_APPROVAL_TIMEOUT_MS: 86_400_000, // 24h â€” auto-continues if no human action
   ADAPTER_HEALTH_CHECK_INTERVAL_MS: 15_000,   // 15s cadence for adapter health checks
-  AGENT_HEARTBEAT_INTERVAL_MS: 15_000,        // 15s — agent heartbeat emission interval
+  AGENT_HEARTBEAT_INTERVAL_MS: 15_000,        // 15s â€” agent heartbeat emission interval
 
   // Rate Limiting
   RATE_LIMIT_WINDOW_MS: 60_000,         // 1 minute sliding window
@@ -145,7 +145,7 @@ export const CONSTANTS = {
 
   // Missions
   // Self-hosted note: all mission limits below are DEFAULT values enforced by the API out of the box.
-  // Operators can override every limit via env vars (documented in §9.7). There are no hosted-tier
+  // Operators can override every limit via env vars (documented in Â§9.7). There are no hosted-tier
   // gates. The defaults reflect stable starting points, not commercial restrictions.
   MAX_CONCURRENT_MISSIONS_PER_USER: 10, // Default; override with MAX_CONCURRENT_MISSIONS_PER_USER env var
   MAX_TASKS_PER_MISSION: 100,           // Default; override with MAX_TASKS_PER_MISSION env var. Protects Coordinator memory on small VMs.
@@ -175,15 +175,15 @@ export const CONSTANTS = {
   SKILL_BUNDLE_MAX_SIZE_BYTES: 52_428_800, // 50MB hard cap on uploaded skill bundles
   SKILL_MAX_NPM_DEPENDENCIES: 20,          // Max npm packages declared in skill manifest
 
-  // Living UI — Agent Presence & Animation
+  // Living UI â€” Agent Presence & Animation
   PRESENCE_EVENT_TTL_MS: 5_000,
   // Rationale: 5s is long enough to absorb network jitter; short enough that stale ghost overlays never linger after an agent stops working
 
   PRESENCE_EVENT_THROTTLE_MS: 50,
-  // Rationale: 50ms = 20 Hz max per agent — matches the threshold of smooth perceived motion; beyond 20 Hz the difference is imperceptible and wastes WS bandwidth
+  // Rationale: 50ms = 20 Hz max per agent â€” matches the threshold of smooth perceived motion; beyond 20 Hz the difference is imperceptible and wastes WS bandwidth
 
   SCRATCHPAD_WRITE_CHUNK_SIZE: 10,
-  // Rationale: 10 chars ˜ 33ms at 300 wpm reading speed; chunks feel genuinely live without flooding the WebSocket bus
+  // Rationale: 10 chars Ëœ 33ms at 300 wpm reading speed; chunks feel genuinely live without flooding the WebSocket bus
 
   PRESENCE_MAX_AGENTS_VISIBLE: 8,
   // Rationale: Beyond 8 simultaneous overlay indicators on one surface, visual noise outweighs informational value; matches AGENT_COLOR_PALETTE length
@@ -195,20 +195,20 @@ export const CONSTANTS = {
   // Rationale: 350ms is within the "felt instant" perceptual window (<400ms); longer reads as sluggish for card movement that users did not initiate
 
   TYPEWRITER_CHAR_DELAY_MS: 28,
-  // Rationale: 28ms ˜ 35 chars/sec ˜ fast human typing speed; feels genuinely live without becoming unreadable
+  // Rationale: 28ms Ëœ 35 chars/sec Ëœ fast human typing speed; feels genuinely live without becoming unreadable
 
   PRESENCE_BATCH_WINDOW_MS: 16,
   // Rationale: 16ms = 1 frame at 60 Hz; all presence events arriving within one frame are batched and applied together in a single DOM mutation pass, preventing mid-frame layout queries
 
   AGENT_COLOR_PALETTE: [
-    '#6366f1', // indigo   — slot 0
-    '#f59e0b', // amber    — slot 1
-    '#10b981', // emerald  — slot 2
-    '#ef4444', // red      — slot 3
-    '#8b5cf6', // violet   — slot 4
-    '#06b6d4', // cyan     — slot 5
-    '#f97316', // orange   — slot 6
-    '#84cc16', // lime     — slot 7
+    '#6366f1', // indigo   â€” slot 0
+    '#f59e0b', // amber    â€” slot 1
+    '#10b981', // emerald  â€” slot 2
+    '#ef4444', // red      â€” slot 3
+    '#8b5cf6', // violet   â€” slot 4
+    '#06b6d4', // cyan     â€” slot 5
+    '#f97316', // orange   â€” slot 6
+    '#84cc16', // lime     â€” slot 7
   ] as const,
   // Rationale: 8 perceptually distinct colors that pass WCAG AA contrast against the dark base (--color-canvas: #0a0b0e);
   // agent color is assigned as AGENT_COLOR_PALETTE[agentIndex % PRESENCE_MAX_AGENTS_VISIBLE]
@@ -219,7 +219,7 @@ export const CONSTANTS = {
   // -- Replanning -------------------------------------------------------------------------------
   MAX_REPLAN_ATTEMPTS: 3,
   // Rationale: Three replanning cycles cover the great majority of transient task failures without
-  // allowing runaway LLM spend. After 3, the mission terminates with FAILED — the user must review
+  // allowing runaway LLM spend. After 3, the mission terminates with FAILED â€” the user must review
   // what caused repeated downstream failures before retrying.
 
   // -- Ledger -----------------------------------------------------------------------------------
@@ -248,7 +248,7 @@ export const CONSTANTS = {
 
   // -- Skill registry Integration --------------------------------------------------------------------------
   SKILL_REGISTRY_TIMEOUT_MS: 10_000,                // 10 seconds
-  // Rationale: Skill registry calls are non-critical read operations; 10 s is 3× typical response
+  // Rationale: Skill registry calls are non-critical read operations; 10 s is 3Ã— typical response
   // time and fast enough that the UI shows a meaningful "Skill registry unavailable" state promptly.
   HUB_API_RETRY_COUNT: 2,
   // Rationale: Two retries handle transient Skill registry network blips without blocking the UI for > 30 s.
@@ -265,18 +265,18 @@ export const CONSTANTS = {
   // saturate a 4-vCPU Railway instance without exceeding memory budget.
   EMBEDDING_WORKER_CONCURRENCY: 5,
   // Rationale: Limited by OpenAI Embeddings API rate limit (3000 req/min on tier 1);
-  // 5 workers at ~10 req/job = 50 req/s = 3000 req/min — exactly at rate limit ceiling.
+  // 5 workers at ~10 req/job = 50 req/s = 3000 req/min â€” exactly at rate limit ceiling.
   ELO_WORKER_CONCURRENCY: 10,
   // Rationale: ELO updates are fully idempotent by task_id; high concurrency is safe.
 
   // -- Auth -------------------------------------------------------------------------------------
   BCRYPT_COST: 12,
-  // Rationale: Cost 12 produces ~300 ms hash time on a 2-vCPU cloud instance — expensive enough
+  // Rationale: Cost 12 produces ~300 ms hash time on a 2-vCPU cloud instance â€” expensive enough
   // to make offline dictionary attacks impractical, cheap enough to not block API response.
   PASSWORD_MIN_LENGTH: 12,
   PASSWORD_MAX_LENGTH: 128,
   // Rationale: Length is the strongest single predictor of password entropy. No forced complexity
-  // requirements in V1 — length requirements alone deter brute-force attacks; additional complexity
+  // requirements in V1 â€” length requirements alone deter brute-force attacks; additional complexity
   // rules reduce entropy by encouraging predictable substitutions.
 
   // -- Miscellaneous -----------------------------------------------------------------------------
@@ -291,17 +291,17 @@ export const CONSTANTS = {
 
 ### 0.5 Glossary
 
-Every domain term used in this document. No synonym is used — one term per concept.
+Every domain term used in this document. No synonym is used â€” one term per concept.
 
 | Term | Definition |
 |---|---|
-| **Mission** | A goal object with natural language intent, constraints, budget, and a success condition. The top-level unit of work. Not a script — it is a live execution graph. |
+| **Mission** | A goal object with natural language intent, constraints, budget, and a success condition. The top-level unit of work. Not a script â€” it is a live execution graph. |
 | **Task** | A single atomic unit of work within a Mission. Assigned to one Agent. Mapped to one Skill. Has typed inputs and outputs. |
 | **DAG** | Directed Acyclic Graph. The execution plan for a Mission. Nodes are Tasks; edges are dependencies with optional conditions. Generated by the Planner, executed by the Coordinator. |
 | **Skill** | A local executable capability registered inside Agentis. In V1 it consists of TypeScript code plus a semantic wrapper and health metadata that let the platform route it, observe it, and repair it safely. |
 | **Living Skill** | A Skill whose wrapper adds intent contracts, health telemetry, and repair metadata so Agentis can detect breakage, reason about failures, and surface fixes. The Living layer is a reliability wrapper around a capability, not a competing agent framework or runtime. |
 | **Agent** | An autonomous process running on a supported framework (OpenClaw, CrewAI, etc.). Registered in Agentis, assigned Tasks by the Coordinator, reports events back via its Adapter. |
-| **Adapter** | A stateless translator between Agentis's normalized protocol and a specific agent framework's native API. Never holds state — all state lives in core services. |
+| **Adapter** | A stateless translator between Agentis's normalized protocol and a specific agent framework's native API. Never holds state â€” all state lives in core services. |
 | **Coordinator** | The stateful Agentis service responsible for Mission lifecycle: planning, task routing, replanning, checkpoint management, and event emission. |
 | **Planner** | A single LLM call (using `PLANNER_MODEL`) that decomposes a Mission goal into a typed Task DAG. Invoked exactly once per Mission (or once per replan). |
 | **Scratchpad** | A mission-scoped key-value store (Redis) that is the only communication channel between Agents in the same Mission. All inter-agent data flows through it. |
@@ -317,24 +317,24 @@ Every domain term used in this document. No synonym is used — one term per conce
 | **Semantic Memory** | pgvector-backed embeddings of LTM episode summaries. Enables similarity search for context injection. |
 | **Agent Package** | A versioned, forkable, one-click-deployable configuration unit that bundles a framework + capability tags + required skills + memory config. In V1 public packages are published on Skill registry and imported into a self-hosted Agentis deployment on demand. |
 | **Mission Template** | A versioned, forkable mission plan with variable substitution. Users fill in {{variables}} and click "Fork & Run" to immediately launch a mission. Public templates live on Skill registry; imported copies execute locally inside Agentis. |
-| **Activity Graph** | A 365-day contribution heatmap on a user's Skill registry profile. Counts missions run, skills executed, agents deployed, and patches submitted per day — the Agentis equivalent of GitHub's contribution graph. |
+| **Activity Graph** | A 365-day contribution heatmap on a user's Skill registry profile. Counts missions run, skills executed, agents deployed, and patches submitted per day â€” the Agentis equivalent of GitHub's contribution graph. |
 | **Agent Presence** | The ephemeral state of which element an agent is currently focused on. Never persisted to the Ledger. Conveyed via `agent.presence.*` WebSocket events with TTL `PRESENCE_EVENT_TTL_MS`. |
-| **Focus Overlay** | An absolutely-positioned colored ring that appears on a task node, Kanban card, or scratchpad entry when an agent is actively processing it. Rendered by `AgentFocusOverlayManager` using direct DOM mutations — no React re-renders. |
-| **FLIP Animation** | First–Last–Invert–Play. The technique used to animate Kanban card movement between columns without triggering layout recalculation. Records element position before and after a DOM update, then plays back an inverted `transform` to zero — compositor-only. |
+| **Focus Overlay** | An absolutely-positioned colored ring that appears on a task node, Kanban card, or scratchpad entry when an agent is actively processing it. Rendered by `AgentFocusOverlayManager` using direct DOM mutations â€” no React re-renders. |
+| **FLIP Animation** | Firstâ€“Lastâ€“Invertâ€“Play. The technique used to animate Kanban card movement between columns without triggering layout recalculation. Records element position before and after a DOM update, then plays back an inverted `transform` to zero â€” compositor-only. |
 | **Typewriter Effect** | Character-by-character reveal of scratchpad content as an agent writes it, powered by `agent.scratchpad.writing` chunk events and CSS `transform`/`opacity` keyframe animations on individual character `<span>` elements. |
 | **Thinking Pulse** | A radiating concentric-ring SVG animation applied to an agent's constellation node when it emits `agent.presence.thinking`. Signals that the agent is in a multi-step reasoning loop. Clears on the next `task.assigned` or `task.completed`. |
 | **Live Activity Stream** | A fixed, collapsible ticker on the mission detail page showing the last `LIVE_ACTIVITY_MAX_ENTRIES` agent actions in real time, derived from presence events and filtered ledger events. Distinct from the full persistent `EventFeed`. |
-| **Presence Slot** | A stable 0–7 index assigned to each agent on first appearance in a browser session. Determines the agent's color from `AGENT_COLOR_PALETTE` across all presence surfaces. |
+| **Presence Slot** | A stable 0â€“7 index assigned to each agent on first appearance in a browser session. Determines the agent's color from `AGENT_COLOR_PALETTE` across all presence surfaces. |
 
 ---
 
-## Section 1 — Product Identity & System Boundaries
+## Section 1 â€” Product Identity & System Boundaries
 
 ### 1.1 What Agentis Is and Is Not
 
 **Agentis is** a self-hosted operating environment for multi-agent systems. It provides coordination, memory, observability, recovery, and execution hygiene that no individual agent framework provides. It is framework-agnostic by design: OpenClaw, CrewAI, LangGraph, AutoGen, Claude SDK, and generic HTTP agents are all first-class citizens. Agentis is the layer above frameworks, never a replacement for them.
 
-**Agentis is not** an agent framework. It does not replace OpenClaw or CrewAI. It does not generate code, browse the web, or write files on its own — those are Agent capabilities. Agentis orchestrates Agents that do those things, provides the environment they operate in, and makes their work observable, recoverable, and steerable.
+**Agentis is not** an agent framework. It does not replace OpenClaw or CrewAI. It does not generate code, browse the web, or write files on its own â€” those are Agent capabilities. Agentis orchestrates Agents that do those things, provides the environment they operate in, and makes their work observable, recoverable, and steerable.
 
 **Agentis is not** a hosted cloud control plane in V1. There is no Nexseed-managed Agentis cloud, no centralized SaaS workspace, and no hosted execution tier in the launch release. Every V1 deployment is installed and operated on the user's own infrastructure.
 
@@ -342,7 +342,7 @@ Every domain term used in this document. No synonym is used — one term per conce
 
 ### 1.2 User Archetypes & Mental Models
 
-These are mental models — the cognitive frameworks users bring to the product — not marketing personas.
+These are mental models â€” the cognitive frameworks users bring to the product â€” not marketing personas.
 
 **The Agent Operator**  
 Mental model: "I have agents running. I need to see what they're doing, know when they fail, and be able to steer them without killing everything."  
@@ -368,34 +368,34 @@ Primary surface: API + Adapters. Primary pain: every framework is a silo; switch
 
 ```
 +-----------------------------------------------------------------+
-¦                         AGENTIS BOUNDARY                        ¦
-¦                                                                 ¦
-¦  +----------+  +----------+  +----------+  +---------------+  ¦
-¦  ¦Coordinator¦  ¦Memory OS ¦  ¦  Ledger  ¦  ¦ Skill Registry¦  ¦
-¦  +----------+  +----------+  +----------+  +---------------+  ¦
-¦  +----------+  +----------+  +----------+  +---------------+  ¦
-¦  ¦Scratchpad¦  ¦ Trigger  ¦  ¦Skill     ¦  ¦  API Gateway  ¦  ¦
-¦  ¦ (Redis)  ¦  ¦Scheduler ¦  ¦Runtime   ¦  ¦  + WS Server  ¦  ¦
-¦  +----------+  +----------+  +----------+  +---------------+  ¦
-¦  +----------------------------------------------------------+  ¦
-¦  ¦               Framework Adapter Layer                    ¦  ¦
-¦  ¦  OpenClaw ¦ CrewAI ¦ LangGraph ¦ AutoGen ¦ Generic HTTP  ¦  ¦
-¦  +----------------------------------------------------------+  ¦
+Â¦                         AGENTIS BOUNDARY                        Â¦
+Â¦                                                                 Â¦
+Â¦  +----------+  +----------+  +----------+  +---------------+  Â¦
+Â¦  Â¦CoordinatorÂ¦  Â¦Memory OS Â¦  Â¦  Ledger  Â¦  Â¦ Skill RegistryÂ¦  Â¦
+Â¦  +----------+  +----------+  +----------+  +---------------+  Â¦
+Â¦  +----------+  +----------+  +----------+  +---------------+  Â¦
+Â¦  Â¦ScratchpadÂ¦  Â¦ Trigger  Â¦  Â¦Skill     Â¦  Â¦  API Gateway  Â¦  Â¦
+Â¦  Â¦ (Redis)  Â¦  Â¦Scheduler Â¦  Â¦Runtime   Â¦  Â¦  + WS Server  Â¦  Â¦
+Â¦  +----------+  +----------+  +----------+  +---------------+  Â¦
+Â¦  +----------------------------------------------------------+  Â¦
+Â¦  Â¦               Framework Adapter Layer                    Â¦  Â¦
+Â¦  Â¦  OpenClaw Â¦ CrewAI Â¦ LangGraph Â¦ AutoGen Â¦ Generic HTTP  Â¦  Â¦
+Â¦  +----------------------------------------------------------+  Â¦
 +-----------------------------------------------------------------+
-                            ¦ Adapters cross this boundary
+                            Â¦ Adapters cross this boundary
       +---------------+--------------------------------------------+
-      ¦               ¦                     ¦                      ¦
+      Â¦               Â¦                     Â¦                      Â¦
   +-----?------+  +-----?--------+  +--------?--------+  +----------?---------+
-  ¦  External  ¦  ¦   External   ¦  ¦    External     ¦  ¦      External      ¦
-  ¦Agent Runtm ¦  ¦ LLM Provider ¦  ¦  User Infra     ¦  ¦   Skill registry      ¦
-  ¦(OpenClaw   ¦  ¦(Anthropic,   ¦  ¦ (their DB, CRM, ¦  ¦ clawhub.ai     ¦
-  ¦ process)   ¦  ¦ OpenAI, etc) ¦  ¦  filesystem)    ¦  ¦ public registry/API ¦
+  Â¦  External  Â¦  Â¦   External   Â¦  Â¦    External     Â¦  Â¦      External      Â¦
+  Â¦Agent Runtm Â¦  Â¦ LLM Provider Â¦  Â¦  User Infra     Â¦  Â¦   Skill registry      Â¦
+  Â¦(OpenClaw   Â¦  Â¦(Anthropic,   Â¦  Â¦ (their DB, CRM, Â¦  Â¦ clawhub.ai     Â¦
+  Â¦ process)   Â¦  Â¦ OpenAI, etc) Â¦  Â¦  filesystem)    Â¦  Â¦ public registry/API Â¦
   +------------+  +--------------+  +-----------------+  +--------------------+
 ```
 
 **Inside Agentis boundary:** All services, all databases, all queues, the Dashboard frontend, API Gateway, WebSocket server, Skill sandboxes, Repair Agent process, and the local import/install workflows.
 
-**Always external:** Agent runtime processes (OpenClaw runs on user's machine or their infra), LLM API providers (Anthropic, OpenAI, Gemini, Ollama — Agentis only calls these for planning and repair; agents call them for execution), user's own infrastructure that agents may access during skill execution, and Skill registry (`clawhub.ai`), which owns public registry data, profiles, launches, contributions, and optional paid listings.
+**Always external:** Agent runtime processes (OpenClaw runs on user's machine or their infra), LLM API providers (Anthropic, OpenAI, Gemini, OpenAI-compatible local provider â€” Agentis only calls these for planning and repair; agents call them for execution), user's own infrastructure that agents may access during skill execution, and Skill registry (`clawhub.ai`), which owns public registry data, profiles, launches, contributions, and optional paid listings.
 
 ### 1.4 Non-Goals (Hard Constraints)
 
@@ -487,7 +487,7 @@ interface HubApiCallConfig {
 
 ---
 
-## Section 2 — Architecture Overview
+## Section 2 â€” Architecture Overview
 
 ### 2.1 Full System Diagram
 
@@ -498,7 +498,7 @@ graph TB
     end
 
     subgraph "Edge / Gateway"
-        GW[API Gateway\nHono · Node.js]
+        GW[API Gateway\nHono Â· Node.js]
         WS[WebSocket Server\nSocket.io]
         RL[Rate Limiter\nRedis sliding window]
         AUTH[Auth Middleware\nJWT RS256]
@@ -522,13 +522,13 @@ graph TB
 
     subgraph "Data Layer"
         PG[(PostgreSQL\n+ pgvector)]
-        REDIS[(Redis\nScratchpad · Cache · Queues)]
+        REDIS[(Redis\nScratchpad Â· Cache Â· Queues)]
         R2[Cloudflare R2\nSkill Artifacts]
     end
 
     subgraph "External"
-        LLM[LLM APIs\nAnthropic · OpenAI · etc]
-        AGENTS[Agent Runtimes\nOpenClaw · CrewAI · etc]
+        LLM[LLM APIs\nAnthropic Â· OpenAI Â· etc]
+        AGENTS[Agent Runtimes\nOpenClaw Â· CrewAI Â· etc]
     end
 
     UI -->|HTTPS| GW
@@ -553,7 +553,7 @@ graph TB
     HEALTH -.->|async queue| REDIS
 ```
 
-### 2.2 Data Flow Narrative — "Run Mission" End-to-End
+### 2.2 Data Flow Narrative â€” "Run Mission" End-to-End
 
 This prose describes every service touched from the moment a user clicks "Run Mission" to final output. Every service is named.
 
@@ -561,7 +561,7 @@ This prose describes every service touched from the moment a user clicks "Run Mi
 
 2. **Mission row created** in PostgreSQL (`missions` table, status: `CREATED`). The Execution Ledger emits `mission.created` event to the BullMQ Ledger queue. Ledger worker persists the event and broadcasts it via Socket.io to all clients subscribed to `mission:{id}`.
 
-3. **Coordinator picks up the mission.** The mission row transition to `PLANNING` is written to PostgreSQL and emitted via Ledger. Coordinator calls the **Planner** — one LLM call to `PLANNER_MODEL` with a structured prompt containing: goal, constraints, budget, available Skills (from Skill Registry, filtered by health > `SKILL_HEALTH_REPAIR_THRESHOLD`), registered Agents with their capability tags and ELO scores, and injected Memory context (if the user has prior episodic/semantic memories relevant to the goal).
+3. **Coordinator picks up the mission.** The mission row transition to `PLANNING` is written to PostgreSQL and emitted via Ledger. Coordinator calls the **Planner** â€” one LLM call to `PLANNER_MODEL` with a structured prompt containing: goal, constraints, budget, available Skills (from Skill Registry, filtered by health > `SKILL_HEALTH_REPAIR_THRESHOLD`), registered Agents with their capability tags and ELO scores, and injected Memory context (if the user has prior episodic/semantic memories relevant to the goal).
 
 4. **Planner returns a Task DAG.** Coordinator validates the DAG against a Zod schema. DAG cycle detection runs (topological sort). If cycles exist, planning fails with `PLANNING_CYCLE_DETECTED` error; mission marked `FAILED`. If valid, `plan` column is written to the mission row.
 
@@ -573,7 +573,7 @@ This prose describes every service touched from the moment a user clicks "Run Mi
 
 8. **Task completion received.** Coordinator receives normalized task output via Adapter event handler. Output is validated against the Skill's `output_schema`. Ledger emits `task.completed`. ELO scores updated asynchronously (BullMQ job). Scratchpad updated with task output if the skill declared a scratchpad write key.
 
-9. **DAG advancement.** Coordinator evaluates all edges from the completed task. For conditional edges (`condition` field), the condition expression is evaluated safely against the task output (no `eval()` — see §3.1.4). Tasks whose dependencies are all satisfied are queued for routing. Parallel tasks are dispatched concurrently (bounded by `MAX_CONCURRENT_TASKS_PER_MISSION`).
+9. **DAG advancement.** Coordinator evaluates all edges from the completed task. For conditional edges (`condition` field), the condition expression is evaluated safely against the task output (no `eval()` â€” see Â§3.1.4). Tasks whose dependencies are all satisfied are queued for routing. Parallel tasks are dispatched concurrently (bounded by `MAX_CONCURRENT_TASKS_PER_MISSION`).
 
 10. **Checkpoint reached** (if configured after this task). Mission status ? `CHECKPOINT_PENDING`. Socket.io emits `checkpoint.reached` event with structured summary. The Dashboard shows a blocking approval UI. A BullMQ delayed job is scheduled for `CHECKPOINT_APPROVAL_TIMEOUT_MS` to auto-continue if no human action. Human approves ? mission resumes. Human rejects ? mission cancelled.
 
@@ -625,7 +625,7 @@ This defines what fails independently vs. what cascades.
 
 ---
 
-## Section 3 — Core Services
+## Section 3 â€” Core Services
 
 ### 3.1 MAS Coordinator
 
@@ -661,7 +661,7 @@ interface ICoordinator {
 
 #### Dependencies
 
-**Calls:** Planner (LLM API), Framework Adapter Layer, Memory OS (read only — context injection), Skill Registry (read only — capability lookup), Execution Ledger (write only — event emission), Scratchpad (read/write), Circuit Breaker Registry.
+**Calls:** Planner (LLM API), Framework Adapter Layer, Memory OS (read only â€” context injection), Skill Registry (read only â€” capability lookup), Execution Ledger (write only â€” event emission), Scratchpad (read/write), Circuit Breaker Registry.
 
 **Must never call:** Database directly for reads (all DB reads go through repository layer), WebSocket server directly (all WS emissions go through Ledger ? WS fan-out).
 
@@ -671,31 +671,31 @@ interface ICoordinator {
 
 ```
                     +--------------+
-                    ¦   CREATED    ¦
+                    Â¦   CREATED    Â¦
                     +--------------+
-                           ¦ createMission()
+                           Â¦ createMission()
                     +------?-------+
-                    ¦   PLANNING   ¦?----------------------+
-                    +--------------+                       ¦ replanMission() 
-             success ¦     ¦ failure                       ¦ (on task failure)
+                    Â¦   PLANNING   Â¦?----------------------+
+                    +--------------+                       Â¦ replanMission() 
+             success Â¦     Â¦ failure                       Â¦ (on task failure)
                     +?------------+  +-----------------------+
-                    ¦   RUNNING   ¦  ¦        FAILED          ¦
+                    Â¦   RUNNING   Â¦  Â¦        FAILED          Â¦
                     +-------------+  +------------------------+
-       all tasks done ¦   ¦ checkpoint reached
+       all tasks done Â¦   Â¦ checkpoint reached
                     +-?----------------+
-                    ¦CHECKPOINT_PENDING ¦
+                    Â¦CHECKPOINT_PENDING Â¦
                     +------------------+
-              approve ¦    ¦ reject
+              approve Â¦    Â¦ reject
                     +-?-------+  +----------------+
-                    ¦ RUNNING  ¦  ¦   CANCELLED    ¦
+                    Â¦ RUNNING  Â¦  Â¦   CANCELLED    Â¦
                     +----------+  +----------------+
-         all done ¦      ¦ pauseMission()
+         all done Â¦      Â¦ pauseMission()
                 +-?------------+
-                ¦   PAUSED     ¦
+                Â¦   PAUSED     Â¦
                 +--------------+
-           resume ¦
+           resume Â¦
                 +-?------------+
-                ¦  COMPLETED   ¦
+                Â¦  COMPLETED   Â¦
                 +--------------+
 ```
 
@@ -707,7 +707,7 @@ Guards:
 
 #### 3.1.1 Planner Contract
 
-The Planner is invoked as a single structured LLM call. It is not an agentic loop — it is one request, one response, validated by Zod.
+The Planner is invoked as a single structured LLM call. It is not an agentic loop â€” it is one request, one response, validated by Zod.
 
 ```typescript
 interface PlannerSystemPrompt {
@@ -753,14 +753,14 @@ interface PlannerOutput {
   dag: Array<{
     from: string;                      // taskId
     to: string;                        // taskId
-    condition?: string;                // SAFE expression — see §3.1.4
+    condition?: string;                // SAFE expression â€” see Â§3.1.4
   }>;
   checkpointSuggestions: Array<{
     afterTaskId: string;
     reason: string;
   }>;
   estimatedTotalCostUsd: number;
-  plannerReasoning: string;           // One paragraph — stored for debugging, not shown to agents
+  plannerReasoning: string;           // One paragraph â€” stored for debugging, not shown to agents
 }
 ```
 
@@ -785,7 +785,7 @@ Tasks with no unresolved dependencies are dispatched in parallel, bounded by `MA
 1. Load mission tasks. Compute `completedIds` (status `completed` or `skipped`).
 2. Count currently `running` tasks. Compute `slotsAvailable = MAX_CONCURRENT_TASKS_PER_MISSION - runningCount`.
 3. If `slotsAvailable = 0` ? return (no work to do this cycle).
-4. Filter `pending` tasks whose every upstream dependency is in `completedIds` AND every conditional edge from those dependencies evaluates true (see §3.1.4).
+4. Filter `pending` tasks whose every upstream dependency is in `completedIds` AND every conditional edge from those dependencies evaluates true (see Â§3.1.4).
 5. Dispatch up to `slotsAvailable` of those ready tasks via `dispatchTask`.
 
 #### 3.1.4 Conditional Edge Evaluation (No eval())
@@ -843,12 +843,12 @@ When a human injects a constraint via `POST /missions/:id/constraints`:
 | `filter` | Injected into next agent prompt cycle | Included in NormalizedTask.constraints |
 | `exclude` | Injected into next agent prompt cycle | Included in NormalizedTask.constraints |
 | `require_approval` | Adds a checkpoint after current task | Adds a checkpoint before dispatch |
-| `budget` | Coordinator enforces immediately — tasks pause if budget exceeded | Included in NormalizedTask budget |
+| `budget` | Coordinator enforces immediately â€” tasks pause if budget exceeded | Included in NormalizedTask budget |
 | `prioritize` | Injected into next agent prompt cycle | Included in NormalizedTask.constraints |
 
-#### 3.1.7 ELO Rating System — Full Algorithm
+#### 3.1.7 ELO Rating System â€” Full Algorithm
 
-Agent capability scores are maintained as ELO ratings, one score per `(agentId, capabilityTag)` pair. Updates are enqueued as BullMQ jobs (`elo-update` queue) on every task completion — never on the hot path.
+Agent capability scores are maintained as ELO ratings, one score per `(agentId, capabilityTag)` pair. Updates are enqueued as BullMQ jobs (`elo-update` queue) on every task completion â€” never on the hot path.
 
 ```typescript
 interface EloUpdateJobPayload {
@@ -891,7 +891,7 @@ where $K = $ `ELO_K_FACTOR = 32`, actual = 1 (win) or 0 (loss). New score = max(
 #### Scaling Characteristics
 
 - **Stateful.** Cannot scale horizontally in V1 without distributed lock coordination. Single Coordinator instance per deployment.
-- **Bottleneck:** The Coordinator's in-memory DAG state. At 10 active missions × 20 tasks = 200 task objects in memory. Well within Node.js heap for V1.
+- **Bottleneck:** The Coordinator's in-memory DAG state. At 10 active missions Ã— 20 tasks = 200 task objects in memory. Well within Node.js heap for V1.
 - **V2 path:** Coordinator state can be moved entirely to Redis (Coordinator becomes stateless), enabling horizontal scaling. Event-sourced design makes this migration non-breaking.
 
 #### Performance Budget
@@ -926,8 +926,8 @@ interface IScratchpad {
     key: string,
     value: unknown,
     writtenBy: string,            // agentId
-    schema?: JSONSchema,          // Optional — validated before write
-    expectedVersion?: number,     // Optimistic lock — write fails if version mismatch
+    schema?: JSONSchema,          // Optional â€” validated before write
+    expectedVersion?: number,     // Optimistic lock â€” write fails if version mismatch
   ): Promise<ScratchpadEntry>;
   delete(missionId: string, key: string): Promise<void>;
   getTotalSizeBytes(missionId: string): Promise<number>;
@@ -945,9 +945,9 @@ Two agents writing the same key simultaneously is handled via optimistic concurr
    - If `currentVersion !== expectedVersion` ? DISCARD ? return `ScratchpadConflictError`.
    - MULTI: update the data hash, bump the version in the metadata hash, increment the size counter, PUBLISH the change event to the mission's pub/sub channel. EXEC.
 3. If the WATCH fires (another writer won the race), return `ScratchpadConflictError` with the current value. The caller re-reads and retries.
-4. Framework adapters handle `ScratchpadConflictError` by retrying the read–compute–write cycle up to 3 times before surfacing it as a task error.
+4. Framework adapters handle `ScratchpadConflictError` by retrying the readâ€“computeâ€“write cycle up to 3 times before surfacing it as a task error.
 
-**Read access rules:** Any Agent registered to a Mission can read ALL keys in that Mission's scratchpad. Agents are not restricted to keys they wrote. This is intentional — the scratchpad is a shared mission context, not a private channel.
+**Read access rules:** Any Agent registered to a Mission can read ALL keys in that Mission's scratchpad. Agents are not restricted to keys they wrote. This is intentional â€” the scratchpad is a shared mission context, not a private channel.
 
 #### Schema Enforcement
 
@@ -957,14 +957,14 @@ If a `schema` field is provided on write, the value is validated against it usin
 
 - Max total scratchpad size per mission: `SCRATCHPAD_MAX_SIZE_BYTES` (10MB).
 - Size is tracked via an approximate byte counter in Redis (incremented on write, decremented on delete).
-- When total size exceeds limit: write returns `ScratchpadSizeExceededError`. No automatic eviction — the agent must explicitly delete old keys.
+- When total size exceeds limit: write returns `ScratchpadSizeExceededError`. No automatic eviction â€” the agent must explicitly delete old keys.
 - Rationale: Silent eviction would corrupt agent context. Explicit errors force agents to manage their own scratchpad budget.
 
 #### Dependencies
 Calls: Redis only.  
 Must never call: PostgreSQL (no persistence in the hot path), Coordinator, Ledger directly.
 
-The Scratchpad publishes change events to a Redis pub/sub channel. The WebSocket server subscribes and fans them out to dashboard clients. This is a pub/sub relationship — Scratchpad does not know about WebSocket.
+The Scratchpad publishes change events to a Redis pub/sub channel. The WebSocket server subscribes and fans them out to dashboard clients. This is a pub/sub relationship â€” Scratchpad does not know about WebSocket.
 
 #### Failure Behavior
 If Redis is unavailable: All writes return `ScratchpadUnavailableError`. Coordinator degrades to DB-backed fallback (task outputs stored directly in `tasks.output`). A health check job retries Redis connection every 5 seconds.
@@ -995,18 +995,18 @@ Provide three-tier persistent memory (STM, LTM, Semantic) for Agents across sess
 
 ```typescript
 interface IMemoryOS {
-  // STM — called during active agent sessions
+  // STM â€” called during active agent sessions
   writeSTM(userId: string, agentId: string, sessionId: string, entry: STMEntry): Promise<void>;
   readSTM(userId: string, agentId: string, sessionId: string): Promise<STMEntry[]>;
   
-  // LTM — called on session end and mission completion
+  // LTM â€” called on session end and mission completion
   flushSTMToLTM(userId: string, agentId: string, sessionId: string): Promise<void>;
   writeEpisode(episode: CreateEpisodeInput): Promise<Episode>;
   
-  // Context injection — called by Coordinator before each task dispatch
+  // Context injection â€” called by Coordinator before each task dispatch
   buildContext(params: ContextBuildParams): Promise<InjectedContext>;
   
-  // Semantic search — internal, called by buildContext
+  // Semantic search â€” internal, called by buildContext
   semanticSearch(query: string, userId: string, limit: number): Promise<Episode[]>;
 }
 
@@ -1032,7 +1032,7 @@ interface InjectedContext {
 
 "Session end" is defined as **any of the following events**, whichever occurs first:
 - Agent deregisters from Agentis (`DELETE /agents/:id`)
-- Agent heartbeat timeout: no heartbeat received for `AGENT_HEARTBEAT_INTERVAL_MS × 3 = 45s`
+- Agent heartbeat timeout: no heartbeat received for `AGENT_HEARTBEAT_INTERVAL_MS Ã— 3 = 45s`
 - Task completion: Agent completes all assigned tasks for the session
 - Explicit session end: Agent sends `POST /sessions/:id/end`
 - Mission completion or failure: All agents in a mission have STM flushed automatically
@@ -1046,7 +1046,7 @@ Embedding is asynchronous. It never blocks a write to LTM.
 1. `writeEpisode` writes to PostgreSQL and enqueues an `embed-episode:{episodeId}` BullMQ job.
 2. The Embedding Pipeline worker dequeues the job, calls the embedding API (`text-embedding-3-small` via OpenAI by default, configurable via `EMBEDDING_MODEL` env var).
 3. Embedding is written to `memory_embeddings` table.
-4. If the embedding API is unavailable: job retries with exponential backoff (3 retries over 5 minutes). If all retries fail, the job goes to the Dead Letter Queue. The Episode remains in LTM without an embedding — semantic search will miss it until the embedding is eventually computed.
+4. If the embedding API is unavailable: job retries with exponential backoff (3 retries over 5 minutes). If all retries fail, the job goes to the Dead Letter Queue. The Episode remains in LTM without an embedding â€” semantic search will miss it until the embedding is eventually computed.
 
 **Embedding model abstraction:**
 ```typescript
@@ -1055,12 +1055,12 @@ interface IEmbeddingProvider {
   readonly dimensions: number;
   readonly model: string;
 }
-// Implementations: OpenAIEmbeddingProvider, OllamaEmbeddingProvider (local fallback)
+// Implementations: OpenAIEmbeddingProvider, OpenAIEmbeddingProvider (local fallback)
 ```
 
 #### Importance Scoring (Precisely Defined)
 
-`importance` (0–1) is computed deterministically at episode write time — no LLM call.
+`importance` (0â€“1) is computed deterministically at episode write time â€” no LLM call.
 
 **Formula (clamped to [0, 1]):**
 
@@ -1090,7 +1090,7 @@ Context injection must not overflow the agent's context window. `MEMORY_TOKEN_BU
 
 Every query in the Memory OS is **always** scoped by `userId`. This is enforced at two levels:
 1. Application layer: all repository methods require `userId` as a parameter.
-2. Database layer: PostgreSQL Row Level Security on `memory_episodes` and `memory_embeddings` (see §4.1) — a SQL injection bypassing the ORM still cannot retrieve another user's memories.
+2. Database layer: PostgreSQL Row Level Security on `memory_episodes` and `memory_embeddings` (see Â§4.1) â€” a SQL injection bypassing the ORM still cannot retrieve another user's memories.
 
 #### Failure Behavior
 
@@ -1157,10 +1157,10 @@ Sequence numbers are generated using a Redis `INCR` command: `INCR ledger:seq:{m
 When a WebSocket client reconnects with `{ type: "resume", lastSequence: N }`:
 
 1. Server queries `SELECT * FROM execution_events WHERE mission_id = ? AND sequence_num > N ORDER BY sequence_num ASC LIMIT 500`.
-2. Events are delivered in `sequence_num` order — guaranteed because the DB query uses `ORDER BY sequence_num ASC`.
-3. If events were written out of order (impossible in normal operation — sequence is generated before DB write — but possible during DB retry): the `ORDER BY` ensures correct delivery order regardless of insertion order.
+2. Events are delivered in `sequence_num` order â€” guaranteed because the DB query uses `ORDER BY sequence_num ASC`.
+3. If events were written out of order (impossible in normal operation â€” sequence is generated before DB write â€” but possible during DB retry): the `ORDER BY` ensures correct delivery order regardless of insertion order.
 
-**Out-of-order write prevention:** The sequence number is obtained from Redis `INCR` synchronously before the `INSERT`. The sequence is part of the INSERT statement. If two concurrent emits race, the higher sequence number will insert after the lower — PostgreSQL's MVCC ensures this. The unique index on `(mission_id, sequence_num)` prevents duplicates.
+**Out-of-order write prevention:** The sequence number is obtained from Redis `INCR` synchronously before the `INSERT`. The sequence is part of the INSERT statement. If two concurrent emits race, the higher sequence number will insert after the lower â€” PostgreSQL's MVCC ensures this. The unique index on `(mission_id, sequence_num)` prevents duplicates.
 
 #### Compaction Strategy (For Timeline Scrubbing at Scale)
 
@@ -1242,29 +1242,29 @@ interface SkillDependencies {
 // Cache TTL: Indefinite (cleared on skill version publish)
 ```
 
-**Security:** `npm ci` runs with `--ignore-scripts` to prevent postinstall execution. Only packages in the skill's declared `dependencies` are installed — no devDependencies.
+**Security:** `npm ci` runs with `--ignore-scripts` to prevent postinstall execution. Only packages in the skill's declared `dependencies` are installed â€” no devDependencies.
 
-#### Skill Sandboxing — Exact API Surface
+#### Skill Sandboxing â€” Exact API Surface
 
-Skills execute in a Node.js Worker thread. The Worker receives the serialized `SkillInput` and `SkillContext` (without the raw Redis/PG clients — these are replaced with safe proxy objects). The following Node.js built-ins are explicitly blocked via `vm.createContext` restrictions:
+Skills execute in a Node.js Worker thread. The Worker receives the serialized `SkillInput` and `SkillContext` (without the raw Redis/PG clients â€” these are replaced with safe proxy objects). The following Node.js built-ins are explicitly blocked via `vm.createContext` restrictions:
 
 **Blocked (explicitly):**
-- `child_process` — no subprocess execution
-- `fs` — no file system access
-- `net`, `dgram` — no raw socket access
-- `cluster` — no process forking
-- `worker_threads` — no nested workers
-- `v8` — no heap inspection
-- `process.env` — no environment variable access (credential theft vector)
-- `process.exit` — no process termination
+- `child_process` â€” no subprocess execution
+- `fs` â€” no file system access
+- `net`, `dgram` â€” no raw socket access
+- `cluster` â€” no process forking
+- `worker_threads` â€” no nested workers
+- `v8` â€” no heap inspection
+- `process.env` â€” no environment variable access (credential theft vector)
+- `process.exit` â€” no process termination
 
 **Allowed (explicitly):**
-- `fetch` — HTTP requests (filtered through domain allowlist from skill manifest)
-- `crypto` — for hashing and UUID generation
-- `URL`, `URLSearchParams` — URL parsing
-- `Buffer`, `TextEncoder`, `TextDecoder` — binary data
-- `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` — timing (bounded by `AbortSignal`)
-- `JSON`, `Math`, `Date` — standard globals
+- `fetch` â€” HTTP requests (filtered through domain allowlist from skill manifest)
+- `crypto` â€” for hashing and UUID generation
+- `URL`, `URLSearchParams` â€” URL parsing
+- `Buffer`, `TextEncoder`, `TextDecoder` â€” binary data
+- `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` â€” timing (bounded by `AbortSignal`)
+- `JSON`, `Math`, `Date` â€” standard globals
 
 **Network domain allowlist enforcement:**
 ```typescript
@@ -1279,7 +1279,7 @@ globalThis.fetch = async (url: string | Request, init?: RequestInit) => {
 };
 ```
 
-#### Repair Agent — Full Specification
+#### Repair Agent â€” Full Specification
 
 The Repair Agent is a BullMQ worker that executes a structured LLM call (not an agentic loop).
 
@@ -1301,7 +1301,7 @@ interface RepairAgentInput {
 
 interface RepairAgentOutput {
   patch: string;                     // Unified diff format (diff -u)
-  confidence: number;                // 0–1; must be >= SKILL_REPAIR_CONFIDENCE_MIN to auto-submit
+  confidence: number;                // 0â€“1; must be >= SKILL_REPAIR_CONFIDENCE_MIN to auto-submit
   explanation: string;               // Human-readable explanation of the fix
   newDependencies?: Record<string, string>; // If the repair requires new npm deps
 }
@@ -1317,7 +1317,7 @@ interface RepairAgentOutput {
 **Patch application process:**
 1. Repair Agent outputs a unified diff.
 2. The diff is applied to the skill bundle in a temporary directory using the `diff` npm package (safe, no shell exec).
-3. The patched code runs the skill's own test suite (if declared in manifest — optional in V1).
+3. The patched code runs the skill's own test suite (if declared in manifest â€” optional in V1).
 4. If `confidence >= SKILL_REPAIR_CONFIDENCE_MIN` AND local review quorum is met: patch auto-applied, version bumped (patch version), new bundle uploaded to R2, `artifact_hash` updated.
 5. If confidence < threshold: patch is submitted for local human review inside the self-hosted deployment.
 
@@ -1326,7 +1326,7 @@ interface RepairAgentOutput {
 `findByCapabilities(tags, healthMin)` is the Coordinator's task-routing query. It returns active skills whose `capability_tags` array overlaps with the requested tags and whose `health_score >= healthMin`.
 
 ```sql
--- Uses GIN index on capability_tags (defined in §4.1)
+-- Uses GIN index on capability_tags (defined in Â§4.1)
 -- The && operator = array overlap (any of the requested tags match)
 WHERE capability_tags && $tags
   AND health_score >= $healthMin
@@ -1335,7 +1335,7 @@ ORDER BY health_score DESC
 LIMIT 10
 ```
 
-For free-text capability search in the local registry, full-text search on `name`, `description`, and `intent` fields uses the `tsvector` index defined in §4.1. Public discovery happens on Skill registry, not inside the self-hosted database.
+For free-text capability search in the local registry, full-text search on `name`, `description`, and `intent` fields uses the `tsvector` index defined in Â§4.1. Public discovery happens on Skill registry, not inside the self-hosted database.
 
 #### Health Score Computation Algorithm
 
@@ -1344,11 +1344,11 @@ For free-text capability search in the local registry, full-text search on `name
 **Formula:** `score = successes / (successes + failures + timeouts)` over the last `HEALTH_SCORE_WINDOW_DAYS = 7` days.
 
 - **Minimum executions gate:** If `total < HEALTH_SCORE_MIN_EXECUTIONS = 5` in the window, the score is not updated (insufficient signal). The skill keeps its previous score.
-- Timeouts count as failures — the skill could not fulfil its contract.
+- Timeouts count as failures â€” the skill could not fulfil its contract.
 
 Signature: `computeHealthScore(skillId, windowDays, minExecutions): HealthScoreResult | null`
 
-**Health transition rules (enforced by Health Monitor, §3.7):**
+**Health transition rules (enforced by Health Monitor, Â§3.7):**
 
 | Computed score | Previous status | Action |
 |---|---|---|
@@ -1382,16 +1382,16 @@ Signature: `computeHealthScore(skillId, windowDays, minExecutions): HealthScoreR
 ### 3.6 Framework Adapter Layer
 
 #### Single Responsibility
-Translate between Agentis's normalized protocol and a specific agent framework's native communication protocol. Stateless — holds no mission or task state.
+Translate between Agentis's normalized protocol and a specific agent framework's native communication protocol. Stateless â€” holds no mission or task state.
 
 #### State Owned
 None. All state lives in the Coordinator and Ledger.
 
-#### Agentis Agent Protocol — Full Specification
+#### Agentis Agent Protocol â€” Full Specification
 
 Any agent runtime can integrate with Agentis by implementing three HTTP endpoints. This is the `generic` adapter contract.
 
-**POST /agentis/task** — Deliver a task to the agent
+**POST /agentis/task** â€” Deliver a task to the agent
 
 Request:
 ```typescript
@@ -1433,7 +1433,7 @@ interface TaskRejectedResponse {
 }
 ```
 
-**POST /agentis/event** — Agent emits events to Agentis
+**POST /agentis/event** â€” Agent emits events to Agentis
 
 Request:
 ```typescript
@@ -1450,14 +1450,14 @@ interface AgentEventRequest {
     | 'scratchpad.write_request';   // Agent requests Coordinator to write to scratchpad
   payload: Record<string, unknown>;
   timestamp: string;                // ISO 8601
-  confidence?: number;             // 0–1, agent's self-reported confidence
-  contextUtilization?: number;     // 0–1, fraction of context window used
+  confidence?: number;             // 0â€“1, agent's self-reported confidence
+  contextUtilization?: number;     // 0â€“1, fraction of context window used
 }
 ```
 
-Response: 204 No Content (always — fire and forget from agent's perspective).
+Response: 204 No Content (always â€” fire and forget from agent's perspective).
 
-**GET /agentis/status** — Health and capability info
+**GET /agentis/status** â€” Health and capability info
 
 Response:
 ```typescript
@@ -1491,7 +1491,7 @@ The Agent Protocol does not guarantee in-order event delivery (HTTP is request-r
 - Ledger sequence numbers are generated at event *receipt* time (not agent emission time).
 - Events that arrive out of chronological order (by agent `timestamp`) are recorded in receipt order.
 - The `timestamp` field in event payload is stored and shown in the timeline as the agent's claimed time.
-- For the purpose of mission state machine transitions, only `task.completed` and `task.failed` events are state-changing — and these are guaranteed to be emitted exactly once per task by the adapter.
+- For the purpose of mission state machine transitions, only `task.completed` and `task.failed` events are state-changing â€” and these are guaranteed to be emitted exactly once per task by the adapter.
 
 #### Adapter Health Check Cadence
 
@@ -1524,7 +1524,7 @@ Failure thresholds:
 ### 3.7 Health Monitor Service
 
 #### Single Responsibility
-Compute rolling health scores for all active skills and trigger the Repair Agent when scores drop below thresholds. Never executes skills or modifies mission state — it is a read-observe-enqueue loop only.
+Compute rolling health scores for all active skills and trigger the Repair Agent when scores drop below thresholds. Never executes skills or modifies mission state â€” it is a read-observe-enqueue loop only.
 
 #### State Owned
 None beyond what it writes to `skills.health_score` and `skills.status`. All source data is read from `skill_execution_logs`.
@@ -1548,9 +1548,9 @@ interface HealthMonitorJobResult {
 
 For each skill with `status IN ('active', 'repairing')`:
 
-1. Call `computeHealthScore({ skillId, windowDays: HEALTH_SCORE_WINDOW_DAYS, minExecutions: HEALTH_SCORE_MIN_EXECUTIONS })` (defined in §3.5).
-2. If result is `null` (< 5 executions): **skip** — do not modify the skill's score or status.
-3. Apply health transition rules from §3.5 table:
+1. Call `computeHealthScore({ skillId, windowDays: HEALTH_SCORE_WINDOW_DAYS, minExecutions: HEALTH_SCORE_MIN_EXECUTIONS })` (defined in Â§3.5).
+2. If result is `null` (< 5 executions): **skip** â€” do not modify the skill's score or status.
+3. Apply health transition rules from Â§3.5 table:
    - Score `>= 0.7` + status `repairing` ? status ? `active`; score updated.
    - Score `< 0.7` + status `active` ? status ? `repairing`; score updated; enqueue `repair-agent` job with `{ skillId, failureSamples: last10FailureLogs }`.
    - Score `< 0.5` + status `repairing` + no pending repair job in queue ? status ? `broken`; score updated; fire `skill_broken_without_repair` Axiom alert.
@@ -1589,7 +1589,7 @@ Before enqueuing a repair job, the Health Monitor checks for an existing pending
 
 | Failure | Response |
 |---|---|
-| PostgreSQL unavailable during sweep | Entire job fails; BullMQ retries with backoff; alert fired if job fails 3× |
+| PostgreSQL unavailable during sweep | Entire job fails; BullMQ retries with backoff; alert fired if job fails 3Ã— |
 | `computeHealthScore` throws for one skill | That skill is skipped; sweep continues; error logged |
 | Repair Agent queue full (> 100 pending jobs) | Log `repair_queue_saturated` warning; skip enqueueing (skill stays in `repairing`); alert fired |
 | BullMQ repeatable job scheduler crash | Railway restarts the API server; repeatable job re-registers on startup |
@@ -1598,27 +1598,27 @@ Before enqueuing a repair job, the Health Monitor checks for an existing pending
 
 | Operation | Max Latency |
 |---|---|
-| Full health pass (1000 active skills) | < 5 s (10ms DB read × 1000 serialized; can be batched in V2) |
+| Full health pass (1000 active skills) | < 5 s (10ms DB read Ã— 1000 serialized; can be batched in V2) |
 | Single skill health check (cold) | < 20ms |
 | Repair job enqueue | < 10ms |
 
 ---
 
-*End of Part 1 — Sections 0 through 3.*  
-*Continues below: Data Layer (§4), API Contracts (§5), Real-Time Events (§6), Frontend (§7).*
+*End of Part 1 â€” Sections 0 through 3.*  
+*Continues below: Data Layer (Â§4), API Contracts (Â§5), Real-Time Events (Â§6), Frontend (Â§7).*
 
 ___________________________//______________________________
-# Agentis — Full Platform Specification (Part 2 of 3)
-<!-- Sections 4–7: Data Layer, API Contracts, Real-Time Events, Frontend -->
+# Agentis â€” Full Platform Specification (Part 2 of 3)
+<!-- Sections 4â€“7: Data Layer, API Contracts, Real-Time Events, Frontend -->
 
-**Reads after:** Part 1 above (Sections 0–3)  
-**Continues below:** Part 3 (Sections 8–13: Security, Infrastructure, Error Handling, Observability, Testing, Scope)  
+**Reads after:** Part 1 above (Sections 0â€“3)  
+**Continues below:** Part 3 (Sections 8â€“13: Security, Infrastructure, Error Handling, Observability, Testing, Scope)  
 **Spec Version:** 2.0.0  
 **Date:** April 21, 2026
 
 ---
 
-## Section 4 — Data Layer
+## Section 4 â€” Data Layer
 
 ### 4.1 PostgreSQL Schema (Complete)
 
@@ -1659,7 +1659,7 @@ CREATE UNIQUE INDEX users_username_idx ON users (username);
 
 #### Table: `projects`
 
-Projects are named, colored workspaces that group missions and agents under a shared context. They are lightweight — one row per project, no execution logic. Memory is namespaced per project so agents accumulate domain knowledge across missions within the same project.
+Projects are named, colored workspaces that group missions and agents under a shared context. They are lightweight â€” one row per project, no execution logic. Memory is namespaced per project so agents accumulate domain knowledge across missions within the same project.
 
 **Design decision:** Projects are NOT Notion-style "spaces" with separate interfaces. They are organizational scopes with view presets (saved JSON config) that remap terminology and pre-configure the dashboard layout. The underlying UI is identical; only presentation differs per project type.
 
@@ -1725,7 +1725,7 @@ CREATE TABLE project_members (
   project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role        TEXT NOT NULL CHECK (role IN ('editor', 'viewer')),
-  -- 'owner' is not stored here — it is projects.owner_id. Only collaborators are members.
+  -- 'owner' is not stored here â€” it is projects.owner_id. Only collaborators are members.
   invited_by  UUID NOT NULL REFERENCES users(id),
   joined_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, user_id)
@@ -1742,7 +1742,7 @@ CREATE POLICY project_members_read ON project_members FOR SELECT
         AND p.owner_id = current_setting('app.current_user_id')::uuid
     )
   );
--- Only project owner can add/remove members (via API — not direct table write).
+-- Only project owner can add/remove members (via API â€” not direct table write).
 CREATE POLICY project_members_owner_write ON project_members FOR ALL
   USING (
     EXISTS (
@@ -1976,7 +1976,7 @@ CREATE POLICY execution_events_owner_access ON execution_events
 CREATE INDEX execution_events_timeline_idx ON execution_events (mission_id, sequence_num ASC);
 -- Query: reconnect replay from lastSequence
 CREATE INDEX execution_events_replay_idx ON execution_events (mission_id, sequence_num)
-  WHERE sequence_num > 0;  -- Partial index — all rows qualify, used as hint for planner
+  WHERE sequence_num > 0;  -- Partial index â€” all rows qualify, used as hint for planner
 -- Query: filter by event type (e.g., show only task.completed events)
 CREATE INDEX execution_events_type_idx ON execution_events (mission_id, event_type, sequence_num ASC);
 ```
@@ -2081,7 +2081,7 @@ CREATE INDEX skills_capability_routing_idx ON skills USING GIN (capability_tags)
 CREATE INDEX skills_search_idx ON skills USING GIN (search_vector);
 -- Query: local registry listing by install count / health
 CREATE INDEX skills_registry_browse_idx ON skills (install_count DESC, health_score DESC) WHERE is_public = true AND status = 'active';
--- Query: health monitor — find skills needing repair
+-- Query: health monitor â€” find skills needing repair
 CREATE INDEX skills_health_monitor_idx ON skills (health_score ASC, status) WHERE status IN ('active', 'repairing');
 ```
 
@@ -2420,7 +2420,7 @@ CREATE INDEX imported_template_runs_template_idx ON imported_template_runs (impo
 
 ### 4.2 Redis Key Naming Convention, TTL Policy & Data Structure
 
-All keys follow the pattern: `{service}:{entity}:{id}:{field}` — colon-separated, no slashes.
+All keys follow the pattern: `{service}:{entity}:{id}:{field}` â€” colon-separated, no slashes.
 
 | Key Pattern | Data Type | TTL | Purpose |
 |---|---|---|---|
@@ -2429,28 +2429,28 @@ All keys follow the pattern: `{service}:{entity}:{id}:{field}` — colon-separated
 | `scratchpad:{missionId}:data:{key}` | String | Mission TTL + 7 days | Scratchpad value |
 | `scratchpad:{missionId}:meta:{key}` | String | Mission TTL + 7 days | Version + author metadata |
 | `scratchpad:{missionId}:size` | String | Mission TTL + 7 days | Approximate byte counter |
-| `scratchpad:{missionId}:pub` | — | — | Pub/Sub channel name (not a stored key) |
+| `scratchpad:{missionId}:pub` | â€” | â€” | Pub/Sub channel name (not a stored key) |
 | `ledger:seq:{missionId}` | String (counter) | Mission TTL + 30 days | Monotonic sequence counter |
-| `agent:status:{agentId}` | Hash | `ADAPTER_HEALTH_CHECK_INTERVAL_MS × 4 = 60s` | Cached agent status |
+| `agent:status:{agentId}` | Hash | `ADAPTER_HEALTH_CHECK_INTERVAL_MS Ã— 4 = 60s` | Cached agent status |
 | `ratelimit:{userId}:sliding` | Sorted Set | `RATE_LIMIT_WINDOW_MS` (60s) | Sliding window rate limit |
 | `ratelimit:ip:{ip}:sliding` | Sorted Set | `RATE_LIMIT_WINDOW_MS` | Anon IP rate limit |
 | `circuit:{target}:state` | String | None (explicit deletion) | Circuit breaker state (CLOSED/OPEN/HALF_OPEN) |
 | `circuit:{target}:failures` | String (counter) | `CIRCUIT_BREAKER_WINDOW_SECONDS` (60s) | Failure count in window |
 | `job:idempotency:{key}` | String | 86400s (24h) | Idempotency key dedup |
 | `mission:lock:{missionId}` | String | 30s (auto-expire) | Coordinator advisory lock |
-| `embed:queue` | — | — | BullMQ queue (managed by BullMQ) |
-| `repair:queue` | — | — | BullMQ queue |
-| `health:queue` | — | — | BullMQ queue |
-| `ledger:queue` | — | — | BullMQ queue |
-| `hub:import:{hubEntryId}:{userId}:{version}` | String | None (explicit deletion) | Import dedup flag — prevents duplicate installs of the same Skill registry release |
-| `hub:template:run:{templateId}:{userId}:{idempotencyKey}` | String | 300s | Imported-template run idempotency key — prevents duplicate missions if the user double-clicks "Run Template" |
+| `embed:queue` | â€” | â€” | BullMQ queue (managed by BullMQ) |
+| `repair:queue` | â€” | â€” | BullMQ queue |
+| `health:queue` | â€” | â€” | BullMQ queue |
+| `ledger:queue` | â€” | â€” | BullMQ queue |
+| `hub:import:{hubEntryId}:{userId}:{version}` | String | None (explicit deletion) | Import dedup flag â€” prevents duplicate installs of the same Skill registry release |
+| `hub:template:run:{templateId}:{userId}:{idempotencyKey}` | String | 300s | Imported-template run idempotency key â€” prevents duplicate missions if the user double-clicks "Run Template" |
 | `hub:registry:entry:{entryId}` | String (JSON) | 300s (5 min) | Cached Skill registry entry metadata used by the in-app Skill registry panel |
 | `hub:launches:feed` | String (JSON) | 300s (5 min) | Cached Skill registry launches/changelog feed for the dashboard Skill registry panel |
 
 **Redis memory budget estimate (V1, 100 active missions):**
-- 100 scratchpads × 10MB = 1GB max (worst case; typical 100KB each = 10MB)
-- STM: 1000 active agents × 50KB = 50MB
-- Rate limit sets: 10K active users × 1KB = 10MB
+- 100 scratchpads Ã— 10MB = 1GB max (worst case; typical 100KB each = 10MB)
+- STM: 1000 active agents Ã— 50KB = 50MB
+- Rate limit sets: 10K active users Ã— 1KB = 10MB
 - Sequence counters + circuit breakers: negligible
 - BullMQ job data: ~5MB for 1000 queued jobs
 - **Target: 4GB Redis instance (Upstash Pro)**
@@ -2494,10 +2494,10 @@ interface SkillManifest {
 
 **CDN strategy:**
 - R2 objects are served via Cloudflare CDN using the R2 public bucket domain.
-- Skill bundles are immutable per version — content-addressable by version string.
+- Skill bundles are immutable per version â€” content-addressable by version string.
 - CDN cache is set to `Cache-Control: public, max-age=31536000, immutable`.
 - On skill publish: new version creates a new object; no cache invalidation needed.
-- Artifact hash is verified by the Skill Runtime on every load — CDN tampering is detectable.
+- Artifact hash is verified by the Skill Runtime on every load â€” CDN tampering is detectable.
 
 **Access control:**
 - Bundles are served via pre-signed URLs for private skills (5-minute expiry).
@@ -2506,7 +2506,7 @@ interface SkillManifest {
 
 ---
 
-## Section 5 — API Contracts
+## Section 5 â€” API Contracts
 
 All endpoints are prefixed with `/v1`. OpenAPI 3.1 spec is the source of truth and is generated from Zod schemas using `@asteasolutions/zod-to-openapi`. The generated spec is served at `/v1/openapi.json`.
 
@@ -2522,7 +2522,7 @@ Self-hosted Agentis does **not** expose OAuth flows. GitHub / Google / any other
 
 Unauthenticated endpoints: `/v1/openapi.json`, `/v1/health`, `/v1/ready`, `/v1/auth/bootstrap`, `/v1/auth/register`, `/v1/auth/login`, `/v1/auth/refresh`, `/.well-known/jwks.json`.
 
-**`GET /.well-known/jwks.json`** — Returns the RS256 public key set in JWK format so external agents and framework adapters can verify Agentis-issued JWTs independently without calling the auth service on every request. Response is `Cache-Control: public, max-age=3600`. Key format follows RFC 7517.
+**`GET /.well-known/jwks.json`** â€” Returns the RS256 public key set in JWK format so external agents and framework adapters can verify Agentis-issued JWTs independently without calling the auth service on every request. Response is `Cache-Control: public, max-age=3600`. Key format follows RFC 7517.
 
 #### 5.1.1 Local Auth Endpoints
 
@@ -2533,7 +2533,7 @@ Unauthenticated endpoints: `/v1/openapi.json`, `/v1/health`, `/v1/ready`, `/v1/a
 interface BootstrapRequest {
   email: string;
   username: string;
-  password: string;                // 12–128 chars
+  password: string;                // 12â€“128 chars
   displayName: string;
 }
 // Response: 201 { data: AuthSession }
@@ -2544,15 +2544,15 @@ interface BootstrapRequest {
 interface RegisterRequest {
   email: string;
   username: string;
-  password: string;                // PASSWORD_MIN_LENGTH–PASSWORD_MAX_LENGTH chars (12–128)
+  password: string;                // PASSWORD_MIN_LENGTHâ€“PASSWORD_MAX_LENGTH chars (12â€“128)
   displayName: string;
 }
 // Response: 201 { data: AuthSession }
 
-// Password rules (enforced at API layer — Zod refinement — and surfaced in UI):
-// • Minimum PASSWORD_MIN_LENGTH = 12 characters
-// • Maximum PASSWORD_MAX_LENGTH = 128 characters
-// • No mandatory complexity pattern (uppercase / digit / symbol) in V1.
+// Password rules (enforced at API layer â€” Zod refinement â€” and surfaced in UI):
+// â€¢ Minimum PASSWORD_MIN_LENGTH = 12 characters
+// â€¢ Maximum PASSWORD_MAX_LENGTH = 128 characters
+// â€¢ No mandatory complexity pattern (uppercase / digit / symbol) in V1.
 // Rationale: Length alone is the strongest entropy driver. Forced complexity patterns
 // predictably degrade to "Password1!" substitutions. Passphrases of 12+ chars are
 // preferred and are not penalised by complexity rules.
@@ -2603,7 +2603,7 @@ interface ApiSuccess<T> {
 // Error
 interface ApiError {
   error: {
-    code: string;                    // Named error code from error registry (§10.1 in Part 3)
+    code: string;                    // Named error code from error registry (Â§10.1 in Part 3)
     message: string;                 // Human-readable; safe to show in UI
     requestId: string;               // UUID; correlates to logs and traces
     details?: Record<string, unknown>;
@@ -2650,7 +2650,7 @@ Required on: `POST /missions`, `POST /skills`, and `POST /hub/imports`.
 // POST /v1/missions
 // Idempotency-Key required
 interface CreateMissionRequest {
-  goal: string;                      // 1–2000 characters
+  goal: string;                      // 1â€“2000 characters
   constraints?: string[];            // Max 20 items; each max 500 chars
   budget?: {
     maxUsd?: number;                 // Max spend; null = no limit
@@ -2736,7 +2736,7 @@ interface RegisterAgentRequest {
   metadata?: Record<string, string>; // Max 10 keys; each value max 200 chars
 }
 // Response: 201 { data: Agent & { apiKey: string } }
-// apiKey is shown ONCE — it is the raw value before hashing. Not stored in plaintext.
+// apiKey is shown ONCE â€” it is the raw value before hashing. Not stored in plaintext.
 
 // GET /v1/agents
 // Response: 200 { data: Agent[] }
@@ -2762,9 +2762,9 @@ interface RegisterAgentRequest {
 
 // POST /v1/agents/:id/rotate-key
 // Generates a new API key for the agent. The previous key is invalidated immediately on success.
-// Use this when the existing key is suspected to be compromised (see §8.5 Key Rotation).
+// Use this when the existing key is suspected to be compromised (see Â§8.5 Key Rotation).
 // Response: 200 { data: { apiKey: string } }
-// The new apiKey is shown ONCE — it is the raw value before hashing. Store it securely immediately.
+// The new apiKey is shown ONCE â€” it is the raw value before hashing. Store it securely immediately.
 // Error: 404 AGENT_NOT_FOUND if agent does not belong to the authenticated user
 ```
 
@@ -2864,7 +2864,7 @@ interface CreateTriggerRequest {
 // Applicable only to webhook-type triggers.
 // Generates a new HMAC secret. The previous secret is invalidated immediately on success.
 // Response: 200 { data: { webhookSecret: string } }
-// The new webhookSecret is shown ONCE — it is the raw value before AES-256-GCM encryption.
+// The new webhookSecret is shown ONCE â€” it is the raw value before AES-256-GCM encryption.
 // Update the secret in your webhook sender before this response is dismissed.
 // Error: 409 if trigger is not of type 'webhook'
 // Error: 404 RESOURCE_NOT_FOUND if trigger does not belong to the authenticated user
@@ -2967,9 +2967,9 @@ Projects are the organizational scope layer. They group missions, agents, and me
 // Create a new project. Generates memory_namespace = "{userId}:{newProjectId}".
 // view_preset is auto-populated from project type defaults if not provided.
 interface CreateProjectRequest {
-  name:         string;                                    // 1–80 chars
+  name:         string;                                    // 1â€“80 chars
   description?: string;                                   // max 500 chars
-  slug:         string;                                   // URL-safe, unique per user; 2–40 chars, /^[a-z0-9-]+$/
+  slug:         string;                                   // URL-safe, unique per user; 2â€“40 chars, /^[a-z0-9-]+$/
   type:         'sales' | 'engineering' | 'research' | 'ops' | 'custom';
   colorAccent?: string;                                   // Hex color; default per type
   viewPreset?:  Partial<ProjectViewPreset>;               // Overrides type defaults
@@ -3052,7 +3052,7 @@ For long-running operations that return a job reference instead of an immediate 
 interface JobStatusResponse {
   jobId: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
-  progress?: number;               // 0–100
+  progress?: number;               // 0â€“100
   result?: unknown;                // Present when status = 'completed'
   error?: { code: string; message: string };
   createdAt: string;
@@ -3081,10 +3081,10 @@ interface OutboundWebhookPayload {
 
 // Signature header on every delivery:
 // X-Agentis-Signature: sha256={hmac_sha256_hex(webhookSecret, rawBody)}
-// Constant-time comparison enforced on receipt — see §8.3 in Part 3
+// Constant-time comparison enforced on receipt â€” see Â§8.3 in Part 3
 ```
 
-**Retry policy:** Exponential backoff — 5s, 30s, 2m, 10m, 1h. After `WEBHOOK_MAX_RETRY_ATTEMPTS` (5) failed attempts, webhook delivery is marked `failed` and a `webhook.delivery_failed` WS event is emitted to the owner's active dashboard session.
+**Retry policy:** Exponential backoff â€” 5s, 30s, 2m, 10m, 1h. After `WEBHOOK_MAX_RETRY_ATTEMPTS` (5) failed attempts, webhook delivery is marked `failed` and a `webhook.delivery_failed` WS event is emitted to the owner's active dashboard session.
 
 **Webhook delivery audit:**
 
@@ -3124,7 +3124,7 @@ All endpoints in this section require `role = 'admin'` on the authenticated user
 
 // POST /v1/admin/missions/:id/force-fail
 // Forces a stuck mission to FAILED status. Use ONLY for missions stuck in PLANNING or RUNNING
-// where normal recovery mechanisms have failed (see §9.8 Runbook).
+// where normal recovery mechanisms have failed (see Â§9.8 Runbook).
 // A required reason is written to the Ledger as a system event.
 interface AdminForceFailRequest {
   reason: string;                  // Min 10 chars; stored in ledger for audit trail
@@ -3185,7 +3185,7 @@ interface AdminStats {
 
 // POST /v1/admin/queues/:queueName/dlq/requeue-all
 // Re-queues all jobs from the named DLQ back into the primary queue.
-// Use with caution — verify the root cause is resolved before requeueing.
+// Use with caution â€” verify the root cause is resolved before requeueing.
 // Body: { confirm: true }   // Explicit confirmation field required
 // Response: 202 { data: { requeuedCount: number } }
 // Valid queueNames: 'embedding-pipeline', 'repair-agent', 'elo-update', 'ledger-events', 'webhook-deliveries'
@@ -3193,7 +3193,7 @@ interface AdminStats {
 
 ---
 
-## Section 6 — Real-Time Events
+## Section 6 â€” Real-Time Events
 
 ### 6.1 WebSocket Connection Lifecycle
 
@@ -3412,7 +3412,7 @@ Full `EventType` enum and payload schemas:
 // payload: { patchId: string, skillId: string, skillSlug: string, newVersion: string }
 // Emitted when a local patch is applied to an installed skill
 
-// --- Agent Presence (ephemeral — NOT persisted to the Ledger; TTL: PRESENCE_EVENT_TTL_MS) ---
+// --- Agent Presence (ephemeral â€” NOT persisted to the Ledger; TTL: PRESENCE_EVENT_TTL_MS) ---
 // Presence events flow through the same WebSocket channel but are excluded from the Ledger
 // write path. They carry no sequenceNum. The client's usePresenceStore handles them
 // via a separate reducer branch that never touches useMissionStore.
@@ -3492,31 +3492,31 @@ Fan-out architecture: Ledger emits to a Redis pub/sub channel ? WebSocket server
 
 ---
 
-## Section 7 — Frontend Architecture
+## Section 7 â€” Frontend Architecture
 
 ### 7.1 Technology Stack
 
 - **Framework:** Next.js 15 (App Router)
 - **UI Components:** React 19 with Server Components for static pages, Client Components for interactive surfaces
 - **State:** Zustand (global mission/agent state), TanStack Query v5 (server data fetching/caching), `useState` (local component state only)
-- **Mission Canvas:** React Flow v12 — DAG task graph on mission detail
-- **Agent Constellation:** Custom SVG/Canvas renderer (adapted from ChristianAlmurr/openclaw-dashboard's spatial graph component) — spatially positions live agents as pulsing nodes with force-directed layout; used on the mission detail war-room view and the agents overview page. This is the only piece extracted from community repos; no dependency on their data layer.
+- **Mission Canvas:** React Flow v12 â€” DAG task graph on mission detail
+- **Agent Constellation:** Custom SVG/Canvas renderer (adapted from ChristianAlmurr/openclaw-dashboard's spatial graph component) â€” spatially positions live agents as pulsing nodes with force-directed layout; used on the mission detail war-room view and the agents overview page. This is the only piece extracted from community repos; no dependency on their data layer.
 - **Styling:** Tailwind CSS v4 + shadcn/ui component library
-- **Design language:** Solid dark surface — minimalist tool aesthetic with near-black layered surfaces, 1px low-opacity borders, large border radius, and a single green primary accent. No frosted glass, no decorative gradients. Every surface earns its place. Reference: the guiding screenshot in `/docs/design-reference.png`.
+- **Design language:** Solid dark surface â€” minimalist tool aesthetic with near-black layered surfaces, 1px low-opacity borders, large border radius, and a single green primary accent. No frosted glass, no decorative gradients. Every surface earns its place. Reference: the guiding screenshot in `/docs/design-reference.png`.
 - **Charts:** Recharts (ELO history, cost over time, skill health history)
-- **Command Palette:** `cmdk` library — global `Cmd+K` / `Ctrl+K` search across missions, agents, skills, and packages; powered by client-side Fuse.js fuzzy search over cached TanStack Query data
-- **In-browser terminal:** `xterm.js` + `@xterm/addon-fit` — embedded read-only terminal pane on mission detail for raw agent stdout streaming via WebSocket; power-user escape hatch for openclaw CLI output
+- **Command Palette:** `cmdk` library â€” global `Cmd+K` / `Ctrl+K` search across missions, agents, skills, and packages; powered by client-side Fuse.js fuzzy search over cached TanStack Query data
+- **In-browser terminal:** `xterm.js` + `@xterm/addon-fit` â€” embedded read-only terminal pane on mission detail for raw agent stdout streaming via WebSocket; power-user escape hatch for openclaw CLI output
 - **Forms:** React Hook Form + Zod (client-side validation matching server schemas)
 - **WebSocket:** Socket.io client (auto-reconnect, `lastSequence` tracking)
-- **FLIP Animations:** `@motionone/dom` (~2KB gzip) — imperative `animate()` API for `KanbanCardAnimator`; operates outside React's component tree for zero-reconciler-overhead card movement (see ADR-017)
+- **FLIP Animations:** `@motionone/dom` (~2KB gzip) â€” imperative `animate()` API for `KanbanCardAnimator`; operates outside React's component tree for zero-reconciler-overhead card movement (see ADR-017)
 
-#### 7.1.1 Design System — Reference Sources
+#### 7.1.1 Design System â€” Reference Sources
 
 The following community repo components informed V1 interaction patterns. No code was forked; all components are re-implemented to fit the V1 data model and the solid-dark design language.
 
 | Source | What was studied | What we implement |
 |---|---|---|
-| `ChristianAlmurr/openclaw-dashboard` | Constellation graph (force-directed spatial agent layout) | `AgentConstellation` component; interaction model only — visual treatment rewritten to solid-dark tokens |
+| `ChristianAlmurr/openclaw-dashboard` | Constellation graph (force-directed spatial agent layout) | `AgentConstellation` component; interaction model only â€” visual treatment rewritten to solid-dark tokens |
 | `abhi1693/openclaw-mission-control` | Kanban mission queue, `Cmd+K` semantic search, in-browser terminal pane, notification channels integration | `MissionKanban`, `CommandPalette`, `TerminalPane`, `ChannelNotifier` |
 | `builderz-labs/mission-control` | Token cost dashboard, skill trust scoring display, 4-layer eval framework visualization | `CostBreakdownPanel`, `SkillTrustBadge`, `SkillEvalSummary` |
 
@@ -3546,7 +3546,7 @@ All design decisions are expressed as CSS custom properties in `globals.css` and
   --color-text-tertiary:  #4a4b55;  /* placeholder, divider labels      */
   --color-text-disabled:  #333440;  /* disabled controls                */
 
-  /* -- Accent — green (primary CTA, success, running state) --------- */
+  /* -- Accent â€” green (primary CTA, success, running state) --------- */
   --color-accent:        #22c55e;  /* "Publish", "Run", active status   */
   --color-accent-hover:  #16a34a;  /* hover state                       */
   --color-accent-dim:    rgba(34, 197, 94, 0.12);  /* tinted bg, badges */
@@ -3578,7 +3578,7 @@ All design decisions are expressed as CSS custom properties in `globals.css` and
 }
 ```
 
-##### Shadows (elevation model — compositor-only, no blur where avoidable)
+##### Shadows (elevation model â€” compositor-only, no blur where avoidable)
 
 ```css
 :root {
@@ -3608,19 +3608,19 @@ All design decisions are expressed as CSS custom properties in `globals.css` and
   --font-sans: 'Geist', system-ui, sans-serif;
   --font-mono: 'Geist Mono', 'Fira Code', monospace;
 
-  /* Scale (rem) — base 14px (not 16px — tool aesthetic is compact) */
-  --text-xs:   0.6875rem;  /* 11px — timestamps, metadata             */
-  --text-sm:   0.8125rem;  /* 13px — labels, node subtitles, captions */
-  --text-base: 0.875rem;   /* 14px — body copy, button text           */
-  --text-md:   1rem;       /* 16px — section headers                  */
-  --text-lg:   1.125rem;   /* 18px — page titles                      */
+  /* Scale (rem) â€” base 14px (not 16px â€” tool aesthetic is compact) */
+  --text-xs:   0.6875rem;  /* 11px â€” timestamps, metadata             */
+  --text-sm:   0.8125rem;  /* 13px â€” labels, node subtitles, captions */
+  --text-base: 0.875rem;   /* 14px â€” body copy, button text           */
+  --text-md:   1rem;       /* 16px â€” section headers                  */
+  --text-lg:   1.125rem;   /* 18px â€” page titles                      */
 
   /* Weight */
   --font-normal:  400;
   --font-medium:  500;
   --font-semibold: 600;
 
-  /* Letter spacing — tool UIs benefit from tighter tracking */
+  /* Letter spacing â€” tool UIs benefit from tighter tracking */
   --tracking-tight:  -0.01em;
   --tracking-normal:  0em;
   --tracking-wide:    0.03em;  /* uppercase labels only */
@@ -3693,7 +3693,7 @@ These rules are non-negotiable. Every component must conform or require an ADR e
 | Shadow (selected) | `var(--shadow-node-active)` |
 | Width | `200px` fixed |
 | Height | `44px` fixed (no wrapping) |
-| App icon | 24×24px circle, colored per integration, `border-radius: var(--radius-full)` |
+| App icon | 24Ã—24px circle, colored per integration, `border-radius: var(--radius-full)` |
 | Title | `var(--text-sm)`, `var(--font-medium)`, `--color-text-primary` |
 | Subtitle | `var(--text-xs)`, `--color-text-secondary` |
 | Port (connection dot) | 8px circle, `--color-border-strong`, centered vertically on left/right edge |
@@ -3702,8 +3702,8 @@ These rules are non-negotiable. Every component must conform or require an ADR e
 
 | Property | Value |
 |---|---|
-| Stroke | `var(--color-edge-default)` — 1.5px |
-| Stroke (running / active) | `var(--color-edge-active)` — 1.5px |
+| Stroke | `var(--color-edge-default)` â€” 1.5px |
+| Stroke (running / active) | `var(--color-edge-active)` â€” 1.5px |
 | Type | Bezier curve via React Flow `default` edge type |
 | Arrowhead | Minimal filled triangle, 6px, same color as stroke |
 | No labels on default edges | Labels only on `ConditionEdge` conditional branches |
@@ -3714,7 +3714,7 @@ These rules are non-negotiable. Every component must conform or require an ADR e
 |---|---|
 | Background color | `var(--color-canvas)` |
 | Pattern | React Flow `<Background variant="dots">` with `color="var(--color-canvas-dot)"`, `gap={24}`, `size={1.5}` |
-| No grid lines | Dots only — grid lines add visual noise |
+| No grid lines | Dots only â€” grid lines add visual noise |
 
 ##### Cards (Mission, Agent, Skill)
 
@@ -3731,10 +3731,10 @@ These rules are non-negotiable. Every component must conform or require an ADR e
 
 | Property | Value |
 |---|---|
-| Width | `48px` — icon rail only; no text labels |
+| Width | `48px` â€” icon rail only; no text labels |
 | Background | `--color-surface-0` |
 | Border-right | `1px solid var(--color-border)` |
-| Nav icons | 28×28px circles, `--color-surface-2` bg, icon in `--color-text-secondary` |
+| Nav icons | 28Ã—28px circles, `--color-surface-2` bg, icon in `--color-text-secondary` |
 | Active nav icon | `--color-accent-dim` bg, icon in `--color-accent` |
 | Tooltip on hover | Text label appears as floating tooltip to the right (not inline) |
 | Agent status pills | 8px colored circles below nav icons; color from status semantic palette |
@@ -3779,7 +3779,7 @@ Colors map: `running` ? accent green, `draft` ? status blue, `checkpoint` ? stat
 | Border | `1px solid var(--color-border)` |
 | Border radius | `var(--radius-lg)` on all corners (floating) or left-side only (slide-over) |
 | Shadow | `var(--shadow-panel)` |
-| No blur/backdrop-filter | Never `backdrop-filter: blur(...)` — performance and visual complexity cost not justified |
+| No blur/backdrop-filter | Never `backdrop-filter: blur(...)` â€” performance and visual complexity cost not justified |
 
 ##### Modal / Command Palette
 
@@ -3794,147 +3794,147 @@ Colors map: `running` ? accent green, `draft` ? status blue, `checkpoint` ? stat
 
 ##### Icon Treatment
 
-Integration and app icons (Google Drive, Claude, etc.) are rendered as 24×24px circles with a solid background color specific to the integration (not from the global palette — each integration has a fixed brand color). The icon SVG is white or light-colored on the colored circle. This matches the node design in the reference screenshot.
+Integration and app icons (Google Drive, Claude, etc.) are rendered as 24Ã—24px circles with a solid background color specific to the integration (not from the global palette â€” each integration has a fixed brand color). The icon SVG is white or light-colored on the colored circle. This matches the node design in the reference screenshot.
 
 ### 7.2 Full Component Tree
 
 ```
 app/
-+-- layout.tsx                         [Server] Root layout — auth check, providers
++-- layout.tsx                         [Server] Root layout â€” auth check, providers
 +-- (auth)/
-¦   +-- bootstrap/page.tsx            [Server] First-user bootstrap page (admin account creation)
-¦   +-- login/page.tsx                [Server] Local credential login page
+Â¦   +-- bootstrap/page.tsx            [Server] First-user bootstrap page (admin account creation)
+Â¦   +-- login/page.tsx                [Server] Local credential login page
 +-- (dashboard)/
-¦   +-- layout.tsx                     [Client] DashboardLayout
-¦   ¦   +-- Sidebar                    [Client] Nav + project switcher + agent status pills
-¦   ¦   ¦   +-- ProjectSwitcher        [Client] Dropdown list of user's projects; "New project" CTA
-¦   ¦   ¦   ¦       Active project sets color_accent on sidebar header and page accent
-¦   ¦   ¦   ¦       Selecting a project scopes the mission list + agent list to that project
-¦   ¦   ¦   +-- AgentStatusPills       [Client] Live status dots for registered agents
-¦   ¦   +-- WebSocketProvider         [Client] Socket.io connection manager
-¦   +-- page.tsx                       [Server] Home ? redirect to /missions
-¦   +-- projects/
-¦   ¦   +-- page.tsx                   [Server] ProjectListPage — SSR
-¦   ¦   ¦   +-- ProjectGrid           [Client] Cards: name, type badge, mission count, color accent, member avatars
-¦   ¦   +-- new/page.tsx              [Client] ProjectCreatePage
-¦   ¦   ¦   +-- ProjectCreateForm     [Client]
-¦   ¦   ¦           +-- Type selector (sales/engineering/research/ops/custom) with preset preview
-¦   ¦   ¦           +-- Name + slug input (slug auto-generated from name, editable)
-¦   ¦   ¦           +-- Color accent picker (preset colors per type + custom hex)
-¦   ¦   ¦           +-- Kanban column name overrides (pre-filled from type defaults, editable)
-¦   ¦   +-- [slugOrId]/
-¦   ¦       +-- page.tsx              [Server] ProjectDetailPage — scoped mission list
-¦   ¦       ¦   +-- ProjectHeader     [Client] Name, type badge, color accent, mission count, member avatars, settings link
-¦   ¦       ¦   +-- MissionViewToggle [Client] List ? Kanban (column names from project view_preset)
-¦   ¦       ¦   +-- MissionList       [Client] Filtered to this project only
-¦   ¦       ¦   +-- ProjectAgentList  [Client] Agents scoped to this project
-¦   ¦       +-- settings/page.tsx     [Client] ProjectSettingsPage
-¦   ¦           +-- ProjectSettingsForm [Client] Name, description, color accent, kanban column rename
-¦   ¦           +-- MemberList         [Client] Member rows with role badge; remove button
-¦   ¦           +-- InviteMemberForm   [Client] Username input + role selector; POST /projects/:id/members
-¦   +-- missions/
-¦   ¦   +-- page.tsx                   [Server] MissionListPage — SSR initial data
-¦   ¦   ¦   +-- MissionList           [Client] Infinite scroll, live status badges
-¦   ¦   ¦       +-- MissionCard       [Client] Status, cost, duration, actions
-¦   ¦   +-- new/page.tsx              [Client] MissionCreatePage
-¦   ¦   ¦   +-- MissionGoalInput      [Client] Textarea with constraint builder
-¦   ¦   ¦   +-- BudgetConfigPanel     [Client] Max cost/duration sliders
-¦   ¦   ¦   +-- CheckpointBuilder     [Client] Add/remove checkpoint configs
-¦   ¦   ¦   +-- AgentSelector         [Client] Multi-select from registered agents
-¦   ¦   +-- [id]/
-¦   ¦       +-- page.tsx              [Server] MissionDetailPage — SSR snapshot
-¦   ¦       ¦   +-- MissionHeader     [Client] Status badge, cost meter, actions bar
-¦   ¦       ¦   +-- MissionCanvas     [Client] React Flow DAG — primary surface
-¦   ¦       ¦   ¦   +-- TaskNode      [Client] Animated status ring, agent avatar
-¦   ¦       ¦   ¦   +-- ConditionEdge [Client] Labeled conditional arrows
-¦   ¦       ¦   ¦   +-- CanvasControls [Client] Fit view, minimap, zoom
-¦   ¦       ¦   +-- AgentConstellation [Client] Force-directed spatial graph of active agents
-¦   ¦       ¦   ¦       Each agent = pulsing SVG node; edges = live task data flows
-¦   ¦       ¦   ¦       Glass panel overlay; click agent node to open AgentDetailPage slide-over
-¦   ¦       ¦   ¦       Sits above MissionCanvas in a toggle (Canvas ? Constellation view)
-¦   ¦       ¦   ¦       Source: ChristianAlmurr/openclaw-dashboard constellation component
-¦   ¦       ¦   +-- TerminalPane      [Client] xterm.js pane — streams raw agent stdout via WS
-¦   ¦       ¦   ¦       Collapsed by default; expand via keyboard shortcut ` (backtick)
-¦   ¦       ¦   ¦       Read-only; shows openclaw CLI output for power users
-¦   ¦       ¦   ¦       Source inspiration: abhi1693/openclaw-mission-control in-browser terminal
-¦   ¦       ¦   +-- CostBreakdownPanel [Client] Per-skill, per-agent cost breakdown table
-¦   ¦       ¦   ¦       Columns: skill name, executions, avg latency, total cost
-¦   ¦       ¦   ¦       Source inspiration: builderz-labs/mission-control token cost dashboard
-¦   ¦       ¦   +-- ScratchpadPanel  [Client] Live key-value viewer, version history
-¦   ¦       ¦   +-- EventFeed        [Client] Chronological ledger event list
-¦   ¦       ¦   ¦   +-- EventRow     [Client] Expandable event detail
-¦   ¦       ¦   +-- CheckpointModal  [Client] Blocking approval dialog
-¦   ¦       ¦   +-- ConstraintInjector [Client] Slide-over panel
-¦   ¦       ¦   +-- CostMeter        [Client] Real-time cost accumulation bar (header summary)
-¦   ¦       +-- timeline/page.tsx    [Client] TimelineScrubPage — read-only replay
+Â¦   +-- layout.tsx                     [Client] DashboardLayout
+Â¦   Â¦   +-- Sidebar                    [Client] Nav + project switcher + agent status pills
+Â¦   Â¦   Â¦   +-- ProjectSwitcher        [Client] Dropdown list of user's projects; "New project" CTA
+Â¦   Â¦   Â¦   Â¦       Active project sets color_accent on sidebar header and page accent
+Â¦   Â¦   Â¦   Â¦       Selecting a project scopes the mission list + agent list to that project
+Â¦   Â¦   Â¦   +-- AgentStatusPills       [Client] Live status dots for registered agents
+Â¦   Â¦   +-- WebSocketProvider         [Client] Socket.io connection manager
+Â¦   +-- page.tsx                       [Server] Home ? redirect to /missions
+Â¦   +-- projects/
+Â¦   Â¦   +-- page.tsx                   [Server] ProjectListPage â€” SSR
+Â¦   Â¦   Â¦   +-- ProjectGrid           [Client] Cards: name, type badge, mission count, color accent, member avatars
+Â¦   Â¦   +-- new/page.tsx              [Client] ProjectCreatePage
+Â¦   Â¦   Â¦   +-- ProjectCreateForm     [Client]
+Â¦   Â¦   Â¦           +-- Type selector (sales/engineering/research/ops/custom) with preset preview
+Â¦   Â¦   Â¦           +-- Name + slug input (slug auto-generated from name, editable)
+Â¦   Â¦   Â¦           +-- Color accent picker (preset colors per type + custom hex)
+Â¦   Â¦   Â¦           +-- Kanban column name overrides (pre-filled from type defaults, editable)
+Â¦   Â¦   +-- [slugOrId]/
+Â¦   Â¦       +-- page.tsx              [Server] ProjectDetailPage â€” scoped mission list
+Â¦   Â¦       Â¦   +-- ProjectHeader     [Client] Name, type badge, color accent, mission count, member avatars, settings link
+Â¦   Â¦       Â¦   +-- MissionViewToggle [Client] List ? Kanban (column names from project view_preset)
+Â¦   Â¦       Â¦   +-- MissionList       [Client] Filtered to this project only
+Â¦   Â¦       Â¦   +-- ProjectAgentList  [Client] Agents scoped to this project
+Â¦   Â¦       +-- settings/page.tsx     [Client] ProjectSettingsPage
+Â¦   Â¦           +-- ProjectSettingsForm [Client] Name, description, color accent, kanban column rename
+Â¦   Â¦           +-- MemberList         [Client] Member rows with role badge; remove button
+Â¦   Â¦           +-- InviteMemberForm   [Client] Username input + role selector; POST /projects/:id/members
+Â¦   +-- missions/
+Â¦   Â¦   +-- page.tsx                   [Server] MissionListPage â€” SSR initial data
+Â¦   Â¦   Â¦   +-- MissionList           [Client] Infinite scroll, live status badges
+Â¦   Â¦   Â¦       +-- MissionCard       [Client] Status, cost, duration, actions
+Â¦   Â¦   +-- new/page.tsx              [Client] MissionCreatePage
+Â¦   Â¦   Â¦   +-- MissionGoalInput      [Client] Textarea with constraint builder
+Â¦   Â¦   Â¦   +-- BudgetConfigPanel     [Client] Max cost/duration sliders
+Â¦   Â¦   Â¦   +-- CheckpointBuilder     [Client] Add/remove checkpoint configs
+Â¦   Â¦   Â¦   +-- AgentSelector         [Client] Multi-select from registered agents
+Â¦   Â¦   +-- [id]/
+Â¦   Â¦       +-- page.tsx              [Server] MissionDetailPage â€” SSR snapshot
+Â¦   Â¦       Â¦   +-- MissionHeader     [Client] Status badge, cost meter, actions bar
+Â¦   Â¦       Â¦   +-- MissionCanvas     [Client] React Flow DAG â€” primary surface
+Â¦   Â¦       Â¦   Â¦   +-- TaskNode      [Client] Animated status ring, agent avatar
+Â¦   Â¦       Â¦   Â¦   +-- ConditionEdge [Client] Labeled conditional arrows
+Â¦   Â¦       Â¦   Â¦   +-- CanvasControls [Client] Fit view, minimap, zoom
+Â¦   Â¦       Â¦   +-- AgentConstellation [Client] Force-directed spatial graph of active agents
+Â¦   Â¦       Â¦   Â¦       Each agent = pulsing SVG node; edges = live task data flows
+Â¦   Â¦       Â¦   Â¦       Glass panel overlay; click agent node to open AgentDetailPage slide-over
+Â¦   Â¦       Â¦   Â¦       Sits above MissionCanvas in a toggle (Canvas ? Constellation view)
+Â¦   Â¦       Â¦   Â¦       Source: ChristianAlmurr/openclaw-dashboard constellation component
+Â¦   Â¦       Â¦   +-- TerminalPane      [Client] xterm.js pane â€” streams raw agent stdout via WS
+Â¦   Â¦       Â¦   Â¦       Collapsed by default; expand via keyboard shortcut ` (backtick)
+Â¦   Â¦       Â¦   Â¦       Read-only; shows openclaw CLI output for power users
+Â¦   Â¦       Â¦   Â¦       Source inspiration: abhi1693/openclaw-mission-control in-browser terminal
+Â¦   Â¦       Â¦   +-- CostBreakdownPanel [Client] Per-skill, per-agent cost breakdown table
+Â¦   Â¦       Â¦   Â¦       Columns: skill name, executions, avg latency, total cost
+Â¦   Â¦       Â¦   Â¦       Source inspiration: builderz-labs/mission-control token cost dashboard
+Â¦   Â¦       Â¦   +-- ScratchpadPanel  [Client] Live key-value viewer, version history
+Â¦   Â¦       Â¦   +-- EventFeed        [Client] Chronological ledger event list
+Â¦   Â¦       Â¦   Â¦   +-- EventRow     [Client] Expandable event detail
+Â¦   Â¦       Â¦   +-- CheckpointModal  [Client] Blocking approval dialog
+Â¦   Â¦       Â¦   +-- ConstraintInjector [Client] Slide-over panel
+Â¦   Â¦       Â¦   +-- CostMeter        [Client] Real-time cost accumulation bar (header summary)
+Â¦   Â¦       +-- timeline/page.tsx    [Client] TimelineScrubPage â€” read-only replay
 +-- agents/
-¦   +-- page.tsx                      [Server] AgentListPage
-¦   ¦   +-- AgentViewToggle          [Client] Grid ? Constellation toggle
-¦   ¦   +-- AgentGrid               [Client] Status indicators, ELO pills (grid view)
-¦   ¦   +-- AgentConstellation      [Client] Force-directed global agent map (constellation view)
-¦   ¦           Shows all registered agents; node size = total missions run; color = current status
-¦   ¦           Source: ChristianAlmurr/openclaw-dashboard constellation graph
-¦   +-- register/page.tsx            [Client] AgentRegisterPage
-¦   ¦   +-- AgentRegisterForm        [Client] Framework selector, capability tag input
-¦   +-- [id]/
-¦       +-- page.tsx                 [Server] AgentDetailPage
-¦           +-- AgentHealthCard      [Client] Status, uptime, context utilization gauge
-¦           +-- EloHistoryChart      [Client] Recharts line chart per capability tag
-¦           +-- AgentMemoryHealth    [Client] STM utilization ring, LTM episode count, last flush time
-¦                   Source inspiration: ChristianAlmurr memory health AI analysis panel
+Â¦   +-- page.tsx                      [Server] AgentListPage
+Â¦   Â¦   +-- AgentViewToggle          [Client] Grid ? Constellation toggle
+Â¦   Â¦   +-- AgentGrid               [Client] Status indicators, ELO pills (grid view)
+Â¦   Â¦   +-- AgentConstellation      [Client] Force-directed global agent map (constellation view)
+Â¦   Â¦           Shows all registered agents; node size = total missions run; color = current status
+Â¦   Â¦           Source: ChristianAlmurr/openclaw-dashboard constellation graph
+Â¦   +-- register/page.tsx            [Client] AgentRegisterPage
+Â¦   Â¦   +-- AgentRegisterForm        [Client] Framework selector, capability tag input
+Â¦   +-- [id]/
+Â¦       +-- page.tsx                 [Server] AgentDetailPage
+Â¦           +-- AgentHealthCard      [Client] Status, uptime, context utilization gauge
+Â¦           +-- EloHistoryChart      [Client] Recharts line chart per capability tag
+Â¦           +-- AgentMemoryHealth    [Client] STM utilization ring, LTM episode count, last flush time
+Â¦                   Source inspiration: ChristianAlmurr memory health AI analysis panel
 +-- skills/
-¦   +-- page.tsx                     [Server] SkillRegistryPage — SSR listing of locally installed skills
-¦   ¦   +-- SkillGrid               [Client] Filter bar, health rings, source badges, patch/import status
-¦   +-- new/page.tsx                [Client] SkillRegisterPage
-¦   ¦   +-- SkillRegisterForm       [Client] Manifest editor, local bundle upload, optional Skill registry source metadata
-¦   +-- [id]/
-¦       +-- page.tsx                [Server] SkillDetailPage
-¦           +-- SkillHealthGauge    [Client] Health score with history
-¦           +-- SkillSourcePanel    [Client] Local vs Skill registry-origin metadata, imported release hash, allowed domains
-¦           +-- SkillEvalSummary    [Client] 4-metric eval display: reliability · documentation · performance · repairability
-¦           ¦       Scores are derived from local execution telemetry; community review lives on Skill registry
-¦           +-- PatchList           [Client] Pending local patches, apply buttons
-¦           +-- SkillRepairStatus   [Client] Repair agent status if active
+Â¦   +-- page.tsx                     [Server] SkillRegistryPage â€” SSR listing of locally installed skills
+Â¦   Â¦   +-- SkillGrid               [Client] Filter bar, health rings, source badges, patch/import status
+Â¦   +-- new/page.tsx                [Client] SkillRegisterPage
+Â¦   Â¦   +-- SkillRegisterForm       [Client] Manifest editor, local bundle upload, optional Skill registry source metadata
+Â¦   +-- [id]/
+Â¦       +-- page.tsx                [Server] SkillDetailPage
+Â¦           +-- SkillHealthGauge    [Client] Health score with history
+Â¦           +-- SkillSourcePanel    [Client] Local vs Skill registry-origin metadata, imported release hash, allowed domains
+Â¦           +-- SkillEvalSummary    [Client] 4-metric eval display: reliability Â· documentation Â· performance Â· repairability
+Â¦           Â¦       Scores are derived from local execution telemetry; community review lives on Skill registry
+Â¦           +-- PatchList           [Client] Pending local patches, apply buttons
+Â¦           +-- SkillRepairStatus   [Client] Repair agent status if active
 +-- hub/
-¦   +-- page.tsx                    [Server] HubPanelPage — shell for direct read-only calls to clawhub.ai/api/v1
-¦   ¦   +-- HubSearchShell         [Client] Search/filter UI for skills, agent configs, mission templates, packages
-¦   ¦   +-- LaunchesFeed           [Client] Agentis release announcements from Skill registry
-¦   ¦   +-- HubWriteCtas           [Client] Publish/Contribute buttons that deep-link to clawhub.ai
-¦   +-- imports/
-¦       +-- page.tsx               [Server] HubImportListPage — imported Skill registry content in this deployment
-¦       +-- [id]/page.tsx          [Server] HubImportDetailPage
-¦           +-- ImportedComponentsList [Client] Materialized skills/configs/templates from this import
-¦           +-- DeployAgentConfigModal [Client] Deploy imported config as a local agent
-¦           +-- RunImportedTemplateModal [Client] Variable substitution form for imported templates
+Â¦   +-- page.tsx                    [Server] HubPanelPage â€” shell for direct read-only calls to clawhub.ai/api/v1
+Â¦   Â¦   +-- HubSearchShell         [Client] Search/filter UI for skills, agent configs, mission templates, packages
+Â¦   Â¦   +-- LaunchesFeed           [Client] Agentis release announcements from Skill registry
+Â¦   Â¦   +-- HubWriteCtas           [Client] Publish/Contribute buttons that deep-link to clawhub.ai
+Â¦   +-- imports/
+Â¦       +-- page.tsx               [Server] HubImportListPage â€” imported Skill registry content in this deployment
+Â¦       +-- [id]/page.tsx          [Server] HubImportDetailPage
+Â¦           +-- ImportedComponentsList [Client] Materialized skills/configs/templates from this import
+Â¦           +-- DeployAgentConfigModal [Client] Deploy imported config as a local agent
+Â¦           +-- RunImportedTemplateModal [Client] Variable substitution form for imported templates
 +-- triggers/
-¦   +-- page.tsx                    [Server] TriggerListPage
-¦   +-- new/page.tsx               [Client] TriggerCreatePage
+Â¦   +-- page.tsx                    [Server] TriggerListPage
+Â¦   +-- new/page.tsx               [Client] TriggerCreatePage
 +-- settings/
     +-- notifications/page.tsx     [Client] NotificationSettingsPage
-        +-- ChannelNotifier         [Client] Connect Telegram bot · Discord webhook · WhatsApp (Twilio)
+        +-- ChannelNotifier         [Client] Connect Telegram bot Â· Discord webhook Â· WhatsApp (Twilio)
                 User saves channel config; API stores encrypted webhook URL in user settings
                 Platform sends mission.completed / mission.failed / checkpoint.reached events to channels
                 Source inspiration: abhi1693/openclaw-mission-control channels integration (TG/Discord/WA)
 ```
 
-#### 7.2.1 Global Shell — CommandPalette
+#### 7.2.1 Global Shell â€” CommandPalette
 
 The `CommandPalette` component mounts once in `DashboardLayout` and is accessible from **any page** via `Cmd+K` (macOS) / `Ctrl+K` (Windows/Linux).
 
 ```
-CommandPalette   [Client] cmdk-powered — renders as a full-screen modal overlay
-+-- Search input — Fuse.js fuzzy search over:
-¦   +-- All missions (id, goal excerpt, status)
-¦   +-- All agents (name, framework, status)
-¦   +-- All skills (name, slug, capability tags)
-¦   +-- Imported agent configs (name, slug)
-¦   +-- Imported templates (name, slug)
+CommandPalette   [Client] cmdk-powered â€” renders as a full-screen modal overlay
++-- Search input â€” Fuse.js fuzzy search over:
+Â¦   +-- All missions (id, goal excerpt, status)
+Â¦   +-- All agents (name, framework, status)
+Â¦   +-- All skills (name, slug, capability tags)
+Â¦   +-- Imported agent configs (name, slug)
+Â¦   +-- Imported templates (name, slug)
 +-- Recent items section (localStorage, last 10 visited)
 +-- Action shortcuts:
-¦   +-- "New mission" ? /missions/new
-¦   +-- "Register agent" ? /agents/register
-¦   +-- "Add local skill" ? /skills/new
-¦   +-- "Browse Skill registry" ? /hub
+Â¦   +-- "New mission" ? /missions/new
+Â¦   +-- "Register agent" ? /agents/register
+Â¦   +-- "Add local skill" ? /skills/new
+Â¦   +-- "Browse Skill registry" ? /hub
 +-- Keyboard navigation: ?? arrows, Enter to select, Esc to close
 ```
 
@@ -4033,7 +4033,7 @@ function applyEvent(state: MissionStore, event: BaseEvent & { payload: unknown }
       const p = payload as ScratchpadWrittenPayload;
       const current = state.scratchpad[missionId] ?? [];
       const updated = current.filter(e => e.key !== p.key);
-      // Value not in event payload — UI shows key + metadata; fetches full value via REST on demand
+      // Value not in event payload â€” UI shows key + metadata; fetches full value via REST on demand
       return {
         ...state,
         scratchpad: { ...state.scratchpad, [missionId]: [...updated, p as unknown as ScratchpadEntry] },
@@ -4066,12 +4066,12 @@ Optimistic updates are applied for user-initiated actions that have high success
 **Rollback implementation:** TanStack Query's `onMutate`/`onError` pattern with `queryClient.setQueryData` to apply the optimistic value and `queryClient.invalidateQueries` on error to refetch the authoritative server state.
 
 **Optimistic updates are NOT applied for:**
-- `createMission` — planning takes up to 60s; UI shows a progress state instead
-- `publishSkill` — async job; UI shows job status tracker
+- `createMission` â€” planning takes up to 60s; UI shows a progress state instead
+- `publishSkill` â€” async job; UI shows job status tracker
 
 ### 7.6 React Flow Virtualization
 
-The Mission Canvas can display up to `MAX_TASKS_PER_MISSION = 100` nodes. React Flow handles virtualization natively — only visible nodes are rendered to DOM. Additional settings:
+The Mission Canvas can display up to `MAX_TASKS_PER_MISSION = 100` nodes. React Flow handles virtualization natively â€” only visible nodes are rendered to DOM. Additional settings:
 
 ```typescript
 const canvasProps: ReactFlowProps = {
@@ -4126,7 +4126,7 @@ DashboardLayout
 - All interactive elements have `aria-label` or associated `<label>`.
 - `TaskNode` in React Flow: `role="button"` with `aria-label="Task: {name}, status: {status}"`.
 - `CheckpointModal`: `role="dialog"`, `aria-modal="true"`, focus trapped on open, ESC closes (with confirmation).
-- Status badges: never convey status by color alone — always include text label.
+- Status badges: never convey status by color alone â€” always include text label.
 - Live event feed: `aria-live="polite"` on the event list region; new events announced to screen readers.
 - Keyboard navigation: all actions accessible via keyboard. Canvas supports arrow-key pan and +/- zoom.
 - Color contrast: all text elements meet WCAG 2.1 AA (4.5:1 for normal text, 3:1 for large text).
@@ -4134,7 +4134,7 @@ DashboardLayout
 
 ### 7.9 Agent Presence & Living UI Architecture
 
-**Goal:** Every action an agent takes — focusing on a task, moving a Kanban card, writing to the scratchpad, entering a reasoning loop — is immediately visible to the user as a fluid, physical animation. The UI must feel genuinely alive. A user watching the mission detail page should have an instinctive "the agents are really working" reaction within three seconds of opening it.
+**Goal:** Every action an agent takes â€” focusing on a task, moving a Kanban card, writing to the scratchpad, entering a reasoning loop â€” is immediately visible to the user as a fluid, physical animation. The UI must feel genuinely alive. A user watching the mission detail page should have an instinctive "the agents are really working" reaction within three seconds of opening it.
 
 **Engineering constraint:** This richness must be cost-free from a main-thread perspective. Every Living UI update is compositor-only (`transform` + `opacity` only). No layout properties are animated. No React re-renders are triggered by presence cursor movement. The 16ms frame budget is inviolable.
 
@@ -4142,22 +4142,22 @@ DashboardLayout
 
 ```
 WebSocket presence events
-        ¦
+        Â¦
         ?
-usePresenceStore (Zustand — shallow equality, isolated from useMissionStore)
-        ¦
+usePresenceStore (Zustand â€” shallow equality, isolated from useMissionStore)
+        Â¦
         +--- PresenceGarbageCollector  (queueMicrotask loop; clears TTL-expired entries)
-        ¦
-        +--- AgentFocusOverlayManager  (useRef + direct DOM style.transform — NO React re-renders)
-        ¦         ¦
-        ¦         +-- RAF batch (PRESENCE_BATCH_WINDOW_MS = 16ms window)
-        ¦
-        +--- KanbanCardAnimator        (FLIP via @motionone/dom — triggered by task status change)
-        ¦
+        Â¦
+        +--- AgentFocusOverlayManager  (useRef + direct DOM style.transform â€” NO React re-renders)
+        Â¦         Â¦
+        Â¦         +-- RAF batch (PRESENCE_BATCH_WINDOW_MS = 16ms window)
+        Â¦
+        +--- KanbanCardAnimator        (FLIP via @motionone/dom â€” triggered by task status change)
+        Â¦
         +--- ScratchpadLiveWriter      (chunk queue ? RAF typewriter reveal)
-        ¦
+        Â¦
         +--- ReactFlowPresenceLayer    (SVG glow overlay injected via React Flow's onNodeMouseEnter API)
-        ¦
+        Â¦
         +--- AgentThinkingPulse        (CSS animation class toggled on Constellation node)
 ```
 
@@ -4172,7 +4172,7 @@ interface AgentPresence {
   agentId: string;
   agentName: string;
   color: string;                  // From AGENT_COLOR_PALETTE[slotIndex]
-  slotIndex: number;              // 0–7; determines color and z-index
+  slotIndex: number;              // 0â€“7; determines color and z-index
   targetType: 'task' | 'card' | 'scratchpad_key' | 'node';
   targetId: string;
   action: string;                 // e.g. "researching", "writing to scratchpad"
@@ -4217,12 +4217,12 @@ interface PresenceStore {
 }
 ```
 
-**Slot assignment:** When an agent is first seen in a presence event, it is assigned the next available `slotIndex` (0–7, wrapping). The slot persists for the duration of the browser session. This ensures an agent always has the same color across all surfaces (overlay, constellation node, Kanban card chip, thinking indicator).
+**Slot assignment:** When an agent is first seen in a presence event, it is assigned the next available `slotIndex` (0â€“7, wrapping). The slot persists for the duration of the browser session. This ensures an agent always has the same color across all surfaces (overlay, constellation node, Kanban card chip, thinking indicator).
 
 **Garbage collection:**
 
 ```typescript
-// PresenceGarbageCollector — runs on queueMicrotask, never blocks main thread
+// PresenceGarbageCollector â€” runs on queueMicrotask, never blocks main thread
 function scheduleGC(store: PresenceStore): void {
   queueMicrotask(() => {
     const now = performance.now();
@@ -4233,7 +4233,7 @@ function scheduleGC(store: PresenceStore): void {
     if (expired.length > 0) {
       expired.forEach(key => store.expireOverlay(key));
     }
-    // Reschedule; runs every ~16ms (˜ 1 frame) without blocking
+    // Reschedule; runs every ~16ms (Ëœ 1 frame) without blocking
     requestAnimationFrame(() => scheduleGC(store));
   });
 }
@@ -4243,14 +4243,14 @@ function scheduleGC(store: PresenceStore): void {
 
 The core "ghost presence" effect. When `agent.presence.focus` arrives, a colored glow ring appears on the target element. Agent identity chip (name + action verb + skill icon) is shown above the ring.
 
-**Architecture:** Overlays are absolutely-positioned `<div>` elements injected into a `#presence-overlay-root` portal at the root of `DashboardLayout`. Positions are set via `element.style.transform` + `element.style.width/height` measured from the target element's `getBoundingClientRect`. All position writes happen in a single RAF batch per `PRESENCE_BATCH_WINDOW_MS` window — never inside a React re-render.
+**Architecture:** Overlays are absolutely-positioned `<div>` elements injected into a `#presence-overlay-root` portal at the root of `DashboardLayout`. Positions are set via `element.style.transform` + `element.style.width/height` measured from the target element's `getBoundingClientRect`. All position writes happen in a single RAF batch per `PRESENCE_BATCH_WINDOW_MS` window â€” never inside a React re-render.
 
-**Target discovery:** Every focusable element (TaskNode, MissionCard, ScratchpadEntry, Kanban card) renders `data-presence-id={id}`. The overlay manager queries `document.querySelector('[data-presence-id="{id}"]')` — the only DOM hook. No class or component selectors.
+**Target discovery:** Every focusable element (TaskNode, MissionCard, ScratchpadEntry, Kanban card) renders `data-presence-id={id}`. The overlay manager queries `document.querySelector('[data-presence-id="{id}"]')` â€” the only DOM hook. No class or component selectors.
 
 **CSS contracts for the overlay (what the implementation must produce):**
 
 ```css
-/* Overlay ring — compositor-only (transform + opacity) */
+/* Overlay ring â€” compositor-only (transform + opacity) */
 .agent-focus-overlay {
   position: absolute; pointer-events: none;
   border-radius: var(--radius-lg);
@@ -4277,7 +4277,7 @@ The core "ghost presence" effect. When `agent.presence.focus` arrives, a colored
 
 **Lifecycle:** On focus event ? mount div ? set `--agent-color` ? position via `getBoundingClientRect` ? add `.visible` on next RAF tick. On blur / TTL expiry ? remove `.visible` ? wait for `transitionend` ? unmount div.
 
-#### 7.9.4 KanbanCardAnimator — FLIP for Agent-Driven Card Movement
+#### 7.9.4 KanbanCardAnimator â€” FLIP for Agent-Driven Card Movement
 
 When an agent changes a task's status, the Kanban card physically animates to the new column (not a sudden DOM swap). Users see the agent "picking up and moving" the card.
 
@@ -4293,14 +4293,14 @@ When an agent changes a task's status, the Kanban card physically animates to th
 7. Skip animation entirely if `deltaX === 0 && deltaY === 0` (no column change).
 8. `prefers-reduced-motion` guard: if `matchMedia('(prefers-reduced-motion: reduce)').matches`, skip all animation and let the card appear in the new column instantly.
 
-#### 7.9.5 ScratchpadLiveWriter — Typewriter Effect
+#### 7.9.5 ScratchpadLiveWriter â€” Typewriter Effect
 
 When `agent.scratchpad.writing` events arrive, the ScratchpadPanel shows characters appearing sequentially, simulating live typing.
 
 **Architecture:**
 1. `usePresenceStore.scratchpadQueue` is drained on every RAF frame.
-2. Each chunk's characters are appended to a DOM ref — never to React state.
-3. Each character is a `<span>` with a staggered CSS `animation-delay` of `charIndex × TYPEWRITER_CHAR_DELAY_MS` ms.
+2. Each chunk's characters are appended to a DOM ref â€” never to React state.
+3. Each character is a `<span>` with a staggered CSS `animation-delay` of `charIndex Ã— TYPEWRITER_CHAR_DELAY_MS` ms.
 4. Only `isFinal: true` triggers a React state update (transitions from "streaming" to "committed").
 
 **CSS contract for character reveal:**
@@ -4317,7 +4317,7 @@ When `agent.scratchpad.writing` events arrive, the ScratchpadPanel shows charact
 
 `aria-live="polite"` on the container element ensures screen readers announce the completed text without reading every character.
 
-#### 7.9.6 AgentThinkingPulse — Constellation Node Reasoning State
+#### 7.9.6 AgentThinkingPulse â€” Constellation Node Reasoning State
 
 When `agent.presence.thinking` arrives, the agent's constellation node enters a "reasoning" state: concentric rings pulse outward.
 
@@ -4344,11 +4344,11 @@ When `agent.presence.thinking` arrives, the agent's constellation node enters a 
 
 **Clearing the thinking state:** Triggered by any of: `task.assigned`, `task.completed`, `task.failed`, `agent.presence.blur`.
 
-#### 7.9.7 ReactFlowPresenceLayer — Node Glow on Agent Focus
+#### 7.9.7 ReactFlowPresenceLayer â€” Node Glow on Agent Focus
 
 When an agent focuses a React Flow task node, the node receives a pulsing glow at the agent's color.
 
-**State:** `TaskNode` reads two Zustand selectors (shallow equality): `isFocused: boolean` and `agentColor: string | undefined`. Re-renders only when focus status changes — never when cursor position changes.
+**State:** `TaskNode` reads two Zustand selectors (shallow equality): `isFocused: boolean` and `agentColor: string | undefined`. Re-renders only when focus status changes â€” never when cursor position changes.
 
 **CSS contract:**
 ```css
@@ -4363,11 +4363,11 @@ When an agent focuses a React Flow task node, the node receives a pulsing glow a
 }
 ```
 
-`--presence-color` is set via `element.style.setProperty` in the same RAF batch as the overlay manager — no React re-render for color updates. The `data-agent-focused` attribute is the only React-driven toggle.
+`--presence-color` is set via `element.style.setProperty` in the same RAF batch as the overlay manager â€” no React re-render for color updates. The `data-agent-focused` attribute is the only React-driven toggle.
 
-#### 7.9.8 LiveActivityStream — The "Mission Heartbeat" Feed
+#### 7.9.8 LiveActivityStream â€” The "Mission Heartbeat" Feed
 
-A dedicated `LiveActivityStream` component on the mission detail page shows the last `LIVE_ACTIVITY_MAX_ENTRIES` agent actions as a real-time ticker. This is distinct from the `EventFeed` (which shows the full ledger history). The activity stream shows only presence-derived events — it reads from `usePresenceStore`, not the ledger.
+A dedicated `LiveActivityStream` component on the mission detail page shows the last `LIVE_ACTIVITY_MAX_ENTRIES` agent actions as a real-time ticker. This is distinct from the `EventFeed` (which shows the full ledger history). The activity stream shows only presence-derived events â€” it reads from `usePresenceStore`, not the ledger.
 
 ```typescript
 // New constant:
@@ -4377,20 +4377,20 @@ LIVE_ACTIVITY_MAX_ENTRIES: 7,
 
 ```
 LiveActivityStream  [Client]  position: fixed bottom-right on mission detail (collapsible)
-+-- Each entry: agent color dot · agent name · action phrase · target name · elapsed time
-¦   Example rows:
-¦   ? ARIA  is researching  "competitor pricing pages"  (just now)
-¦   ? KIRA  wrote 340 chars  to scratchpad / analysis   (5s ago)
-¦   ? ARIA  completed task   "Scrape LinkedIn profiles"  (12s ago)
-¦   ? VELA  is reasoning     "choosing between 3 approaches"  (just now)
++-- Each entry: agent color dot Â· agent name Â· action phrase Â· target name Â· elapsed time
+Â¦   Example rows:
+Â¦   ? ARIA  is researching  "competitor pricing pages"  (just now)
+Â¦   ? KIRA  wrote 340 chars  to scratchpad / analysis   (5s ago)
+Â¦   ? ARIA  completed task   "Scrape LinkedIn profiles"  (12s ago)
+Â¦   ? VELA  is reasoning     "choosing between 3 approaches"  (just now)
 +-- Animation: new entries slide in from bottom (transform: translateY ? 0, opacity 0 ? 1, 200ms)
               old entries slide up and fade out (transform: translateY(-100%), opacity ? 0, 150ms)
 ```
 
 **Populating the stream:** The `LiveActivityStream` subscribes to three sources:
-1. `usePresenceStore.focusOverlays` — "is {action}" lines (present tense, ongoing)
-2. `usePresenceStore.scratchpadQueue` final chunks — "wrote N chars to scratchpad/{key}"
-3. `useMissionStore.activeEvents` filtered to `task.completed` and `task.failed` — "completed/failed task {name}"
+1. `usePresenceStore.focusOverlays` â€” "is {action}" lines (present tense, ongoing)
+2. `usePresenceStore.scratchpadQueue` final chunks â€” "wrote N chars to scratchpad/{key}"
+3. `useMissionStore.activeEvents` filtered to `task.completed` and `task.failed` â€” "completed/failed task {name}"
 
 All three are read with shallow equality. New entries are prepended to a local `useRef` buffer (never React state) and flushed to the DOM in the RAF loop. Only the entry count change triggers React state (to update the visible list length).
 
@@ -4414,11 +4414,11 @@ All three are read with shallow equality. New entries are prepended to a local `
 |---|---|---|---|
 | `@motionone/dom` | ^10.x | ~2 KB | FLIP animation for KanbanCardAnimator (see ADR-017); the only addition to the production bundle |
 
-No other new dependencies. All other Living UI features use CSS, the Web Animations API, `requestAnimationFrame`, `queueMicrotask`, and `element.style` — all browser-native with zero bundle cost.
+No other new dependencies. All other Living UI features use CSS, the Web Animations API, `requestAnimationFrame`, `queueMicrotask`, and `element.style` â€” all browser-native with zero bundle cost.
 
 #### 7.9.11 Component Tree Additions
 
-The following components are added to the §7.2 tree under `(dashboard)/layout.tsx`:
+The following components are added to the Â§7.2 tree under `(dashboard)/layout.tsx`:
 
 ```
 DashboardLayout
@@ -4442,28 +4442,28 @@ MissionDetailPage
 |---|---|
 | **Agent Presence** | The ephemeral state of which element an agent is currently focused on. Never persisted. Conveyed via `agent.presence.*` WebSocket events with TTL `PRESENCE_EVENT_TTL_MS`. |
 | **Focus Overlay** | An absolutely-positioned colored ring that appears on a task node, Kanban card, or scratchpad entry when an agent is actively processing it. Rendered by `AgentFocusOverlayManager` using direct DOM mutations. |
-| **FLIP Animation** | First–Last–Invert–Play. The technique used to animate Kanban card movement between columns. Records element position before and after a DOM update, then applies an inverted transform that plays back to zero — all compositor-only. |
+| **FLIP Animation** | Firstâ€“Lastâ€“Invertâ€“Play. The technique used to animate Kanban card movement between columns. Records element position before and after a DOM update, then applies an inverted transform that plays back to zero â€” all compositor-only. |
 | **Typewriter Effect** | The character-by-character reveal of scratchpad content as an agent writes it, powered by `agent.scratchpad.writing` chunk events and CSS `transform`/`opacity` keyframe animations. |
 | **Thinking Pulse** | A radiating concentric-ring SVG animation applied to an agent's constellation node when it emits `agent.presence.thinking`. Signals that the agent is in a multi-step reasoning loop. |
 | **Live Activity Stream** | A fixed, collapsible ticker on the mission detail page showing the last 7 agent actions in real time, derived from presence events and filtered ledger events. Distinct from the full `EventFeed`. |
-| **Presence Slot** | A stable 0–7 index assigned to each agent on first appearance. Determines the agent's color from `AGENT_COLOR_PALETTE` for all presence surfaces (overlay, chip, constellation glow, Kanban chip). |
+| **Presence Slot** | A stable 0â€“7 index assigned to each agent on first appearance. Determines the agent's color from `AGENT_COLOR_PALETTE` for all presence surfaces (overlay, chip, constellation glow, Kanban chip). |
 
 ---
 
-*End of Part 2 — Sections 4 through 7.*  
-*Continues below: Auth & Security (§8), Infrastructure (§9), Error Handling (§10), Observability (§11), Testing (§12), Scope (§13).*
+*End of Part 2 â€” Sections 4 through 7.*  
+*Continues below: Auth & Security (Â§8), Infrastructure (Â§9), Error Handling (Â§10), Observability (Â§11), Testing (Â§12), Scope (Â§13).*
 
 ________________________________//__________________________________
-# Agentis — Full Platform Specification (Part 3 of 3)
-<!-- Sections 8–13: Auth & Security, Infrastructure, Error Handling, Observability, Testing, Scope -->
+# Agentis â€” Full Platform Specification (Part 3 of 3)
+<!-- Sections 8â€“13: Auth & Security, Infrastructure, Error Handling, Observability, Testing, Scope -->
 
-**Reads after:** Part 1 (Sections 0–3), Part 2 (Sections 4–7)  
+**Reads after:** Part 1 (Sections 0â€“3), Part 2 (Sections 4â€“7)  
 **Spec Version:** 2.0.0  
 **Date:** April 21, 2026
 
 ---
 
-## Section 8 — Auth & Security
+## Section 8 â€” Auth & Security
 
 ### 8.1 Threat Model
 
@@ -4472,12 +4472,12 @@ The following threats are explicitly modeled and mitigated in V1. Any threat not
 | Threat | Vector | Mitigation |
 |---|---|---|
 | Unauthorized mission access | Stolen JWT | RS256 signing (asymmetric); 1-hour expiry; refresh token rotation |
-| Cross-user data access | API parameter manipulation | PostgreSQL RLS on all tables (see §4.1); `userId` always from JWT, never from request body |
-| Skill code injection | Malicious skill bundle | Worker thread sandbox; blocked Node.js built-ins (see §8.2); network allowlist per skill |
+| Cross-user data access | API parameter manipulation | PostgreSQL RLS on all tables (see Â§4.1); `userId` always from JWT, never from request body |
+| Skill code injection | Malicious skill bundle | Worker thread sandbox; blocked Node.js built-ins (see Â§8.2); network allowlist per skill |
 | Secret theft via skill execution | `process.env` access in skill | `process.env` blocked in Worker thread context |
 | Credential theft via skill code | Arbitrary HTTP calls | Network domain allowlist per skill manifest; no wildcard `*` domains in V1 |
 | Webhook replay attack | Replaying captured webhook body | HMAC-SHA256 signature verification + timestamp freshness check (reject if > 5 minutes old) |
-| Webhook signature bypass | Timing attack on string comparison | Constant-time comparison (see §8.3) |
+| Webhook signature bypass | Timing attack on string comparison | Constant-time comparison (see Â§8.3) |
 | Credential stuffing against local auth | Repeated username/password attempts | Rate limiting on `/v1/auth/login`, bcrypt password verification, and uniform auth error responses |
 | Malicious Skill registry artifact import | Tampered manifest or mismatched bundle hash | SHA-256 verification on every imported artifact before local registration |
 | Agent impersonation | Forged `agentId` in inbound events | Every inbound event validated against `api_key_hash`; agent API key is bcrypt-hashed |
@@ -4506,7 +4506,7 @@ const BLOCKED_MODULES = [
   'fs',                // No filesystem access
   'fs/promises',       // No async filesystem access
   'net',               // No raw TCP sockets
-  'os',                // No OS info (hostname, user, memory) — information disclosure
+  'os',                // No OS info (hostname, user, memory) â€” information disclosure
   'readline',          // No stdin reading
   'repl',              // No REPL access
   'tty',               // No TTY manipulation
@@ -4560,13 +4560,13 @@ V1 has three roles per resource. Roles are scoped to the resource, not the platf
 | Role | Who Has It | Permissions |
 |---|---|---|
 | `owner` | The user who created the resource (mission, agent, skill, trigger) | Full CRUD; can transfer ownership (V2) |
-| `operator` | (V2 feature — not in V1) | — |
+| `operator` | (V2 feature â€” not in V1) | â€” |
 | `viewer` | Public (for public skills only) | Read-only on public resources |
 | `admin` | Platform admin (set via `users.role = 'admin'`) | Bypasses RLS; can access all resources |
 
 **V1 simplification:** There is no resource-level role sharing in V1. Every resource is private to its owner except public skills, which are readable by all authenticated users in the local deployment. Public profiles and social signals live on Skill registry, not in the self-hosted app. Sharing/collaboration is a V2 feature.
 
-**RBAC enforcement:** At the API layer, every endpoint handler calls `assertOwnership(resourceType, resourceId, userId)` before any mutation. On failure it throws `RESOURCE_NOT_FOUND` (404 not 403 — we do not confirm the resource exists to unauthorized callers). RLS provides a second enforcement layer at the database.
+**RBAC enforcement:** At the API layer, every endpoint handler calls `assertOwnership(resourceType, resourceId, userId)` before any mutation. On failure it throws `RESOURCE_NOT_FOUND` (404 not 403 â€” we do not confirm the resource exists to unauthorized callers). RLS provides a second enforcement layer at the database.
 
 ### 8.5 Secret Management
 
@@ -4581,42 +4581,42 @@ V1 has three roles per resource. Roles are scoped to the resource, not the platf
 | LLM API keys | Railway environment variable; never logged or traced | Manual; 90-day rotation reminder |
 | Anthropic/OpenAI keys | Railway environment variable | Manual rotation; never included in error messages or logs |
 
-**Secret logging rule:** All logging middleware strips fields matching: `/key|secret|token|password|authorization|credential/i` from log objects. This is enforced at the logger initialization level — not per-call-site.
+**Secret logging rule:** All logging middleware strips fields matching: `/key|secret|token|password|authorization|credential/i` from log objects. This is enforced at the logger initialization level â€” not per-call-site.
 
 ### 8.6 Input Validation Boundary
 
-All external input is validated with Zod at the API Gateway layer before reaching any service. This is the sole validation boundary — services do not re-validate what the gateway has already validated.
+All external input is validated with Zod at the API Gateway layer before reaching any service. This is the sole validation boundary â€” services do not re-validate what the gateway has already validated.
 
 Exception: Skill manifest validation on publish runs a second time inside the Skill Registry service, because the manifest is extracted from a tar.gz bundle (binary input) that is not validated by the Zod HTTP schema.
 
 ---
 
-## Section 9 — Infrastructure
+## Section 9 â€” Infrastructure
 
 ### 9.1 Service Topology (Railway V1)
 
 ```
 Railway Project: agentis-selfhosted-v1
 +-- Service: api              -- Hono API server + BullMQ workers (all in one process, V1)
-¦   +-- Build: Dockerfile (Node.js 22 LTS)
-¦   +-- Start: pnpm db:migrate && pnpm start
-¦   +-- Replicas: 1 (V1; horizontal scaling requires stateless Coordinator, V2)
-¦   +-- Healthcheck: GET /health ? 200
+Â¦   +-- Build: Dockerfile (Node.js 22 LTS)
+Â¦   +-- Start: pnpm db:migrate && pnpm start
+Â¦   +-- Replicas: 1 (V1; horizontal scaling requires stateless Coordinator, V2)
+Â¦   +-- Healthcheck: GET /health ? 200
 +-- Service: web              -- Next.js 15 dashboard
-¦   +-- Build: next build
-¦   +-- Start: next start
-¦   +-- Replicas: 1–3 (stateless; Railway auto-scales on CPU)
-¦   +-- Healthcheck: GET / ? 200
-+-- Plugin: postgresql        -- Supabase-managed PostgreSQL 16 + pgvector
-¦   +-- Connection: DATABASE_URL env var (Railway injects)
-+-- Plugin: redis             -- Upstash Redis (Railway skill registry)
-¦   +-- Connection: REDIS_URL env var
+Â¦   +-- Build: next build
+Â¦   +-- Start: next start
+Â¦   +-- Replicas: 1â€“3 (stateless; Railway auto-scales on CPU)
+Â¦   +-- Healthcheck: GET / ? 200
++-- Extension: postgresql        -- Supabase-managed PostgreSQL 16 + pgvector
+Â¦   +-- Connection: DATABASE_URL env var (Railway injects)
++-- Extension: redis             -- Upstash Redis (Railway skill registry)
+Â¦   +-- Connection: REDIS_URL env var
 +-- External: cloudflare-r2   -- Skill artifact storage (configured manually)
 ```
 
 ### 9.2 Service Startup Order
 
-Services have implicit dependencies. Railway does not enforce startup order — the API server must handle dependency unavailability gracefully at startup.
+Services have implicit dependencies. Railway does not enforce startup order â€” the API server must handle dependency unavailability gracefully at startup.
 
 ```
 PostgreSQL ? ready (Railway healthcheck ensures this before API starts, via release command)
@@ -4628,13 +4628,13 @@ Next.js web ? starts independently (API unavailability shows error state in UI, 
 
 **Startup failure behavior:**
 - If `pnpm db:migrate` fails: Railway release command fails, previous deployment stays active. No broken deployment reaches production.
-- If Redis is unavailable at startup: API starts in degraded mode (scratchpad, rate limiting, and queues unavailable). Health endpoint returns `{ status: "degraded", redis: false }`. Railway does not restart the service — degraded mode is intentional for partial Redis failures.
+- If Redis is unavailable at startup: API starts in degraded mode (scratchpad, rate limiting, and queues unavailable). Health endpoint returns `{ status: "degraded", redis: false }`. Railway does not restart the service â€” degraded mode is intentional for partial Redis failures.
 - If PostgreSQL is unavailable at startup: API refuses to start (migrations must succeed). Railway keeps previous deployment.
 
 ### 9.3 Health & Readiness Endpoints
 
 ```typescript
-// GET /health — liveness check
+// GET /health â€” liveness check
 // Used by Railway to restart unhealthy containers
 // Returns 200 if the process is alive and not deadlocked
 interface HealthResponse {
@@ -4647,9 +4647,9 @@ interface HealthResponse {
     bullmq: 'ok' | 'error';
   };
 }
-// Always returns 200 (even if degraded) — 503 would trigger Railway restart loop
+// Always returns 200 (even if degraded) â€” 503 would trigger Railway restart loop
 
-// GET /ready — readiness check
+// GET /ready â€” readiness check
 // Returns 200 only when the service is ready to handle production traffic
 // Returns 503 during: startup migration, warm-up, graceful shutdown
 interface ReadinessResponse {
@@ -4700,11 +4700,11 @@ process.on('SIGTERM', async () => {
 
 | Resource | V1 Spec | Rationale |
 |---|---|---|
-| API server RAM | 512MB | Node.js heap for 10 active missions × 20 tasks + BullMQ workers |
+| API server RAM | 512MB | Node.js heap for 10 active missions Ã— 20 tasks + BullMQ workers |
 | API server CPU | 1 vCPU | Single-threaded Node.js; Worker threads for skill execution add up to 10 threads |
 | PostgreSQL | Railway PostgreSQL Starter (1GB RAM, 10GB storage) | 14 tables; < 100K rows total at launch |
-| Redis (Upstash) | 256MB | Scratchpad + STM + queues; see §4.2 budget analysis |
-| R2 Storage | 10GB initial | ~200 skill bundles × 50MB max = 10GB |
+| Redis (Upstash) | 256MB | Scratchpad + STM + queues; see Â§4.2 budget analysis |
+| R2 Storage | 10GB initial | ~200 skill bundles Ã— 50MB max = 10GB |
 | Next.js web | 256MB, 1 vCPU per replica | Static pages are edge-cached; dynamic pages are server-rendered |
 
 **Scale trigger:** When any single metric exceeds 80% of capacity for > 24 hours, scale to the next tier. API server horizontal scaling requires V2 stateless Coordinator migration (ADR-006 V2 note).
@@ -4743,7 +4743,7 @@ PLANNER_MODEL=claude-opus-4-7
 REPAIR_MODEL=claude-sonnet-4-5
 EMBEDDING_MODEL=text-embedding-3-small
 ANTHROPIC_API_KEY=
-OPENAI_API_KEY=                  # For embeddings; optional if using Ollama
+OPENAI_API_KEY=                  # For embeddings; required for OpenAI embeddings
 
 # Storage
 CLOUDFLARE_R2_ACCOUNT_ID=
@@ -4768,38 +4768,38 @@ NEXT_PUBLIC_WS_URL=              # e.g., wss://agentis.internal
 WEBHOOK_ENCRYPTION_KEY=          # AES-256-GCM key for webhook secret encryption (32-byte hex)
 ```
 
-> **Note on self-signup:** Public registration is controlled by `AUTH_ALLOW_SELF_SIGNUP` (§9.7 above). There is no separate `ENABLE_PUBLIC_REGISTRATION` flag — that name was a legacy alias and has been removed. Use only `AUTH_ALLOW_SELF_SIGNUP`.
+> **Note on self-signup:** Public registration is controlled by `AUTH_ALLOW_SELF_SIGNUP` (Â§9.7 above). There is no separate `ENABLE_PUBLIC_REGISTRATION` flag â€” that name was a legacy alias and has been removed. Use only `AUTH_ALLOW_SELF_SIGNUP`.
 
 ### 9.8 Runbook Stubs
 
 These runbook stubs define the first-response action for each operational incident category. Each stub must be expanded into a full runbook before launch.
 
 **Runbook: Mission Stuck in PLANNING**
-- Check: `GET /v1/missions/:id` — is status `planning`?
+- Check: `GET /v1/missions/:id` â€” is status `planning`?
 - Check: Planner LLM API circuit breaker state in Redis (`circuit:anthropic:state`)
 - Check: Axiom logs for `planning_llm_timeout` events in last 30 minutes
 - Action: If circuit open, wait for half-open probe. If LLM API is up, manually reset circuit via admin API.
-- Action: If planning has been stuck > `PLANNING_LLM_TIMEOUT_MS` (60s), mission is in a broken state — call `POST /v1/admin/missions/:id/force-fail` with `{ reason: "Manual force-fail: mission stuck in PLANNING > 60s" }` (requires admin role; see §5.18).
+- Action: If planning has been stuck > `PLANNING_LLM_TIMEOUT_MS` (60s), mission is in a broken state â€” call `POST /v1/admin/missions/:id/force-fail` with `{ reason: "Manual force-fail: mission stuck in PLANNING > 60s" }` (requires admin role; see Â§5.18).
 
 **Runbook: Skill Health Score Degrading Cluster**
-- Check: `GET /v1/skills?sort=health&limit=20` — which skills are below `SKILL_HEALTH_REPAIR_THRESHOLD`?
+- Check: `GET /v1/skills?sort=health&limit=20` â€” which skills are below `SKILL_HEALTH_REPAIR_THRESHOLD`?
 - Check: BullMQ repair queue depth in Axiom dashboard
 - Check: Repair agent LLM circuit breaker state
 - Action: If repair queue backed up (> 50 jobs), check BullMQ worker concurrency. Increase `REPAIR_WORKER_CONCURRENCY` env var and redeploy.
 
 **Runbook: Redis Memory Pressure**
-- Check: Upstash Redis dashboard — memory utilization > 80%?
+- Check: Upstash Redis dashboard â€” memory utilization > 80%?
 - Check: Any runaway scratchpad (single mission scratchpad > 5MB): `redis-cli HLEN scratchpad:*`
 - Action: Identify the large scratchpad, notify the mission owner via admin notification, cancel the mission if the user cannot be reached.
 
 **Runbook: PostgreSQL Disk Full**
-- Alert: Triggered when disk > 80% (see §11.3)
-- Check: `skill_execution_logs` table — largest partition
+- Alert: Triggered when disk > 80% (see Â§11.3)
+- Check: `skill_execution_logs` table â€” largest partition
 - Action: Immediate: archive old partition to R2 and drop. Medium-term: increase Railway PostgreSQL plan.
 
 ---
 
-## Section 10 — Error Handling
+## Section 10 â€” Error Handling
 
 ### 10.1 Error Code Registry
 
@@ -4919,14 +4919,14 @@ Every mutating operation is idempotent at the appropriate level:
 | `createMission` | `Idempotency-Key` header ? Redis dedup (24h TTL) |
 | `publishSkill` | `Idempotency-Key` header ? Redis dedup (24h TTL) |
 | `emitLedgerEvent` | Unique constraint on `(mission_id, sequence_num)`; write is idempotent for same sequence |
-| `updateTaskStatus` | State machine guards — setting `completed ? completed` is a no-op |
-| `updateHealthScore` | Upsert with `ON CONFLICT DO UPDATE` — multiple writes safe |
+| `updateTaskStatus` | State machine guards â€” setting `completed ? completed` is a no-op |
+| `updateHealthScore` | Upsert with `ON CONFLICT DO UPDATE` â€” multiple writes safe |
 | `updateEloScore` | BullMQ job dedup by `task_id`; same task outcome processed exactly once |
 | `embedEpisode` | BullMQ job dedup by `episode_id`; duplicate jobs no-op if embedding already exists |
 | `applyPatch` | Patch status checked before application; `applied` status prevents re-application |
 | Webhook inbound | `webhook_deliveries` row created before processing; retry checks if row already `delivered` |
 
-### 10.3 Circuit Breaker — Full Specification
+### 10.3 Circuit Breaker â€” Full Specification
 
 Every external call (LLM APIs, framework adapter endpoints, Redis, PostgreSQL) is wrapped in a circuit breaker. State is stored in Redis so it survives process restarts.
 
@@ -4975,14 +4975,14 @@ Failed BullMQ jobs that exhaust all retries are moved to their respective DLQ.
 | `embedding-pipeline` | `embedding-pipeline-dlq` | > 100 jobs | Re-queue after verifying embedding API is healthy |
 | `repair-agent` | `repair-agent-dlq` | > 10 jobs | Check repair LLM circuit breaker; re-queue if circuit closed |
 | `elo-update` | `elo-update-dlq` | > 50 jobs | Re-queue; ELO updates are idempotent by task_id |
-| `ledger-events` | `ledger-events-dlq` | > 1 job | CRITICAL — investigate immediately; mission state may be inconsistent |
+| `ledger-events` | `ledger-events-dlq` | > 1 job | CRITICAL â€” investigate immediately; mission state may be inconsistent |
 | `webhook-deliveries` | `webhook-deliveries-dlq` | > 20 jobs | Notify user via in-app notification; do not auto-retry (user's endpoint may be permanently down) |
 
 **DLQ monitoring:** Axiom alert fires when any DLQ depth exceeds its threshold. Admin dashboard shows DLQ depths in real time.
 
 ### 10.5 Human Escalation Protocol
 
-The following events trigger a human escalation — not just a log entry.
+The following events trigger a human escalation â€” not just a log entry.
 
 | Trigger | Escalation Method | Response SLA |
 |---|---|---|
@@ -4997,7 +4997,7 @@ The following events trigger a human escalation — not just a log entry.
 
 ---
 
-## Section 11 — Observability
+## Section 11 â€” Observability
 
 ### 11.1 Trace Propagation
 
@@ -5082,8 +5082,8 @@ All alerts are defined in Axiom. Each alert has a named query, threshold, and fi
 | API Availability | `count(status<500) / count(requests)` (excl. /health) | 99.5% | 3.6 hours downtime |
 | Mission Planning Success Rate | `count(planning_completed) / count(planning_started)` | 95% | 5 out of 100 missions may fail planning |
 | Skill Execution Success Rate | `count(skill.execution_completed) / count(skill.execution_started)` | 90% | 10% failure rate acceptable (many are transient) |
-| WebSocket Event Delivery Latency | `p99(time from ledger.emit to ws.deliver)` | < 500ms | — |
-| Checkpoint Notification Latency | `p99(time from checkpoint.reached event to ws delivery)` | < 2s | — |
+| WebSocket Event Delivery Latency | `p99(time from ledger.emit to ws.deliver)` | < 500ms | â€” |
+| Checkpoint Notification Latency | `p99(time from checkpoint.reached event to ws delivery)` | < 2s | â€” |
 
 **Error budget policy:** If error budget for API Availability is consumed > 50% by the 15th of the month, freeze all non-critical feature work for the remainder of the month and focus on reliability.
 
@@ -5103,7 +5103,7 @@ The following Axiom dashboards must exist before launch:
 
 ---
 
-## Section 12 — Testing Strategy
+## Section 12 â€” Testing Strategy
 
 ### 12.1 Unit Test Contracts
 
@@ -5111,17 +5111,17 @@ Unit tests are for pure functions and service logic that can be tested without I
 
 **Coverage requirement:** 80% line coverage on `packages/core/**` and `packages/api/src/services/**`. Coverage is enforced in CI.
 
-Key behavioral contracts — each row defines a function and the behaviors that must be verified:
+Key behavioral contracts â€” each row defines a function and the behaviors that must be verified:
 
 | Service / Function | Behaviors to verify |
 |---|---|
-| `detectCycles` (§3.1.2) | Valid linear DAG (A?B?C) returns false; valid parallel DAG returns false; direct cycle (A?B?A) returns true; indirect cycle (A?B?C?A) returns true; single node with no edges returns false; disconnected components handled |
-| `evaluateCondition` (§3.1.4) | `output.score > 0.8` evaluates correctly; parse error fails-open (returns true); `eval()` attempt rejected by parser; nested path access works; string comparison works; logical AND works |
-| `Scratchpad.write` (§3.2) | Succeeds when `expectedVersion` matches; throws `ScratchpadConflictError` on version mismatch; throws `ScratchpadSizeExceededError` over budget; throws `ScratchpadSchemaError` on schema violation; version incremented on success |
-| `computeImportance` (§3.3) | Returns 0.5 for default action on running mission; 0.7 for outcome on completed mission; 0.85 for outcome + entities on completed mission; clamps to [0, 1]; decreases for failed missions |
-| `applyTokenBudget` (§3.3) | Semantic episodes prioritized over episodic when both types present; truncates when estimated tokens exceed `MEMORY_TOKEN_BUDGET`; returns empty arrays when all episodes exceed budget |
-| `verifyWebhookSignature` (§8.3) | Returns true for valid signature; false for invalid; false for stale timestamp (> 5 min); false for future timestamp (> 5 min); false for missing `sha256=` prefix; resistant to length-extension attacks (HMAC) |
-| `CircuitBreaker` (§10.3) | Starts CLOSED and allows calls; opens after `failureThreshold` failures in window; rejects calls immediately when OPEN; transitions to HALF_OPEN after delay; closes on successful probe in HALF_OPEN; re-opens on failure in HALF_OPEN |
+| `detectCycles` (Â§3.1.2) | Valid linear DAG (A?B?C) returns false; valid parallel DAG returns false; direct cycle (A?B?A) returns true; indirect cycle (A?B?C?A) returns true; single node with no edges returns false; disconnected components handled |
+| `evaluateCondition` (Â§3.1.4) | `output.score > 0.8` evaluates correctly; parse error fails-open (returns true); `eval()` attempt rejected by parser; nested path access works; string comparison works; logical AND works |
+| `Scratchpad.write` (Â§3.2) | Succeeds when `expectedVersion` matches; throws `ScratchpadConflictError` on version mismatch; throws `ScratchpadSizeExceededError` over budget; throws `ScratchpadSchemaError` on schema violation; version incremented on success |
+| `computeImportance` (Â§3.3) | Returns 0.5 for default action on running mission; 0.7 for outcome on completed mission; 0.85 for outcome + entities on completed mission; clamps to [0, 1]; decreases for failed missions |
+| `applyTokenBudget` (Â§3.3) | Semantic episodes prioritized over episodic when both types present; truncates when estimated tokens exceed `MEMORY_TOKEN_BUDGET`; returns empty arrays when all episodes exceed budget |
+| `verifyWebhookSignature` (Â§8.3) | Returns true for valid signature; false for invalid; false for stale timestamp (> 5 min); false for future timestamp (> 5 min); false for missing `sha256=` prefix; resistant to length-extension attacks (HMAC) |
+| `CircuitBreaker` (Â§10.3) | Starts CLOSED and allows calls; opens after `failureThreshold` failures in window; rejects calls immediately when OPEN; transitions to HALF_OPEN after delay; closes on successful probe in HALF_OPEN; re-opens on failure in HALF_OPEN |
 
 
 ### 12.2 Integration Test Boundaries
@@ -5172,10 +5172,10 @@ interface SkillHarnessTest {
 
 | Test name | Input intent | Expected outcome |
 |---|---|---|
-| `blocked_module_access` | Input references `require("child_process")` | `expectSuccess: false` — must throw `SKILL_SANDBOX_VIOLATION` |
-| `env_access_blocked` | Input references `process.env.DATABASE_URL` | `expectSuccess: false` — must throw `SKILL_SANDBOX_VIOLATION` |
-| `network_allowlist_enforced` | Skill declares `allowedDomains: ['example.com']`; input URL is `https://evil.com/steal` | `expectSuccess: false` — must throw `SKILL_NETWORK_VIOLATION` |
-| `timeout_enforced` | Input requests a delay of `SKILL_EXECUTION_MAX_TIMEOUT_MS + 1000` ms | `expectSuccess: false` — must throw `SKILL_EXECUTION_TIMEOUT` |
+| `blocked_module_access` | Input references `require("child_process")` | `expectSuccess: false` â€” must throw `SKILL_SANDBOX_VIOLATION` |
+| `env_access_blocked` | Input references `process.env.DATABASE_URL` | `expectSuccess: false` â€” must throw `SKILL_SANDBOX_VIOLATION` |
+| `network_allowlist_enforced` | Skill declares `allowedDomains: ['example.com']`; input URL is `https://evil.com/steal` | `expectSuccess: false` â€” must throw `SKILL_NETWORK_VIOLATION` |
+| `timeout_enforced` | Input requests a delay of `SKILL_EXECUTION_MAX_TIMEOUT_MS + 1000` ms | `expectSuccess: false` â€” must throw `SKILL_EXECUTION_TIMEOUT` |
 
 Skill authors may declare additional harness tests in their manifest under `harnessTests: SkillHarnessTest[]`. All declared tests are run on every publish and patch.
 
@@ -5195,41 +5195,41 @@ Load tests run weekly against staging (BullMQ jobs paused to prevent LLM API cos
 
 ---
 
-## Section 13 — Scope Boundaries
+## Section 13 â€” Scope Boundaries
 
 ### 13.1 V1 Default Limits(this is trash, we should eliminate - self hosted users with limits...)
 
-**Self-hosted principle:** All limits below are configurable via environment variables (documented in §9.7). They are defaults that protect the platform on modest infrastructure — not commercial gates. A self-hosted operator can raise or remove any of these defaults without restriction.
+**Self-hosted principle:** All limits below are configurable via environment variables (documented in Â§9.7). They are defaults that protect the platform on modest infrastructure â€” not commercial gates. A self-hosted operator can raise or remove any of these defaults without restriction.
 
 Limits marked **technical** exist because exceeding them degrades the platform architecturally (e.g. Coordinator memory, Node.js VM heap). Limits marked **default** are operational starting points with no technical floor.
 
 | Limit | Default Value | Config Env Var | Type | Enforcement Point |
 |---|---|---|---|---|
-| Tasks per mission | `MAX_TASKS_PER_MISSION = 100` | `MAX_TASKS_PER_MISSION` | technical | Coordinator — Zod validation of PlannerOutput |
+| Tasks per mission | `MAX_TASKS_PER_MISSION = 100` | `MAX_TASKS_PER_MISSION` | technical | Coordinator â€” Zod validation of PlannerOutput |
 | Concurrent missions per user | `MAX_CONCURRENT_MISSIONS_PER_USER = 10` | `MAX_CONCURRENT_MISSIONS_PER_USER` | default | API Gateway pre-flight |
 | Concurrent tasks per mission | `MAX_CONCURRENT_TASKS_PER_MISSION = 5` | `MAX_CONCURRENT_TASKS_PER_MISSION` | technical | Coordinator advanceDAG slot calculation |
 | Replanning attempts per mission | `MAX_REPLAN_ATTEMPTS = 3` | `MAX_REPLAN_ATTEMPTS` | default | Coordinator replan gate |
 | Scratchpad size per mission | `SCRATCHPAD_MAX_SIZE_BYTES = 10MB` | `SCRATCHPAD_MAX_SIZE_BYTES` | technical | Scratchpad write-time check |
 | Skill bundle size | 50MB | `SKILL_BUNDLE_MAX_SIZE_MB` | technical | API Gateway multipart upload limit |
 | Skill npm dependencies | 20 packages | `SKILL_MAX_NPM_DEPENDENCIES` | default | Manifest schema validation |
-| Agent capability tags | 20 tags | — | default | Agent registration schema |
-| Constraint string length | 500 characters | — | default | API schema validation |
-| Mission goal length | 2000 characters | — | default | API schema validation |
+| Agent capability tags | 20 tags | â€” | default | Agent registration schema |
+| Constraint string length | 500 characters | â€” | default | API schema validation |
+| Mission goal length | 2000 characters | â€” | default | API schema validation |
 | Memory injection token budget | `MEMORY_TOKEN_BUDGET = 2000` tokens | `MEMORY_TOKEN_BUDGET` | default | Memory OS token budget |
 | Skill execution timeout (max) | `SKILL_EXECUTION_MAX_TIMEOUT_MS = 300s` | `SKILL_EXECUTION_MAX_TIMEOUT_MS` | default | Skill Runtime AbortController |
 | Checkpoint approval window | `CHECKPOINT_APPROVAL_TIMEOUT_MS = 24h` | `CHECKPOINT_APPROVAL_TIMEOUT_MS` | default | Coordinator BullMQ delayed job |
 | Webhook delivery attempts | 5 | `WEBHOOK_MAX_RETRY_ATTEMPTS` | default | Webhook worker |
 | Patch expiry | `SKILL_PATCH_EXPIRY_DAYS = 30` | `SKILL_PATCH_EXPIRY_DAYS` | default | Patch expiry scheduler |
-| Agent package required skills | `MAX_AGENT_PACKAGE_SKILLS = 20` | — | default | Package publish schema |
-| Mission template variables | `MAX_TEMPLATE_VARIABLES = 20` | — | default | Template publish schema |
-| Template variable value length | `TEMPLATE_VARIABLE_MAX_LENGTH = 500` chars | — | default | Fork-and-run schema |
+| Agent package required skills | `MAX_AGENT_PACKAGE_SKILLS = 20` | â€” | default | Package publish schema |
+| Mission template variables | `MAX_TEMPLATE_VARIABLES = 20` | â€” | default | Template publish schema |
+| Template variable value length | `TEMPLATE_VARIABLE_MAX_LENGTH = 500` chars | â€” | default | Fork-and-run schema |
 | Projects per user | `MAX_PROJECTS_PER_USER = 20` | `MAX_PROJECTS_PER_USER` | default | API Gateway pre-flight |
 | Members per project | `MAX_PROJECT_MEMBERS = 25` | `MAX_PROJECT_MEMBERS` | default | API Gateway pre-flight |
-| Simultaneous agent presence overlays | `PRESENCE_MAX_AGENTS_VISIBLE = 8` | — | technical | usePresenceStore (drops events beyond slot 7) |
-| Presence event TTL | `PRESENCE_EVENT_TTL_MS = 5000ms` | — | default | PresenceGarbageCollector RAF loop |
-| Presence event server rate | `PRESENCE_EVENT_THROTTLE_MS = 50ms` | — | default | Coordinator WS emitter token-bucket |
+| Simultaneous agent presence overlays | `PRESENCE_MAX_AGENTS_VISIBLE = 8` | â€” | technical | usePresenceStore (drops events beyond slot 7) |
+| Presence event TTL | `PRESENCE_EVENT_TTL_MS = 5000ms` | â€” | default | PresenceGarbageCollector RAF loop |
+| Presence event server rate | `PRESENCE_EVENT_THROTTLE_MS = 50ms` | â€” | default | Coordinator WS emitter token-bucket |
 
-### 13.2 Decision Log — Deferred Features
+### 13.2 Decision Log â€” Deferred Features
 
 Every feature that was considered and deferred to V2+ is documented here with the signal required to promote it.
 
@@ -5241,8 +5241,8 @@ Every feature that was considered and deferred to V2+ is documented here with th
 | **Collaborative mission steering** | V2 | Single-user adequate for V1; requires distributed lock coordination | Users building teams that share missions |
 | **Real-time collaborative canvas editing** | V2 | Complex CRDT problem; not needed for solo use | Teams needing to annotate/steer missions simultaneously |
 | **Python skill runtime** | V2 | TypeScript covers the majority of agentic use cases; Python adds runtime isolation complexity | >30% of skill publish attempts are Python |
-| **Skill registry browse/import panel** | V1 ? | Public discovery is externalized to Skill registry while import/install is fully integrated in-app | — |
-| **Imported mission templates (run locally)** | V1 ? | Templates are discovered on Skill registry and executed locally after import | — |
+| **Skill registry browse/import panel** | V1 ? | Public discovery is externalized to Skill registry while import/install is fully integrated in-app | â€” |
+| **Imported mission templates (run locally)** | V1 ? | Templates are discovered on Skill registry and executed locally after import | â€” |
 | **LLM model inference (self-hosted)** | V5 | Requires GPU infrastructure, model licensing, and serving infrastructure | Revenue > $10M ARR |
 | **Horizontal Coordinator scaling** | V2 | Requires moving Coordinator state to Redis; architectural change | API server CPU consistently > 60% for > 1 week |
 | **HNSW pgvector index** | V2 | IVFFlat adequate for < 500K embeddings (see ADR-008) | Global embedding count exceeds 500K |
@@ -5257,7 +5257,7 @@ The following architectural changes are planned for V2. They are listed here so 
 
 1. **Stateless Coordinator:** Move all Coordinator in-memory state to Redis hashes. Coordinator becomes a BullMQ worker that can scale horizontally. The event-sourced design of V1 makes this a data migration, not a logic rewrite.
 
-2. **Skill Sandbox ? Firecracker microVMs:** Replace Worker threads with Firecracker microVM per skill execution. Requires a separate VM management service. V1 Worker thread design is contained in `packages/skill-runtime/` — no Coordinator changes needed.
+2. **Skill Sandbox ? Firecracker microVMs:** Replace Worker threads with Firecracker microVM per skill execution. Requires a separate VM management service. V1 Worker thread design is contained in `packages/skill-runtime/` â€” no Coordinator changes needed.
 
 3. **HNSW pgvector migration:** `DROP INDEX memory_embeddings_ivfflat_idx; CREATE INDEX ... USING hnsw ...`. Non-breaking. Application code is index-agnostic.
 
@@ -5267,20 +5267,20 @@ The following architectural changes are planned for V2. They are listed here so 
 
 ---
 
-*End of Part 3 — Sections 8 through 13.*
+*End of Part 3 â€” Sections 8 through 13.*
 
 **Complete Platform Architecture:**
-- Part 1: Sections 0–3 — Header, Product Identity, Architecture, Core Services
-- Part 2: Sections 4–7 — Data Layer, API Contracts, Real-Time Events, Frontend
-- Part 3: Sections 8–13 — Security, Infrastructure, Error Handling, Observability, Testing, Scope
-- Post-V1 Roadmap: Sections 14–22 — Community Scale, Agent Economy, Enterprise, Own LLM (see below)
+- Part 1: Sections 0â€“3 â€” Header, Product Identity, Architecture, Core Services
+- Part 2: Sections 4â€“7 â€” Data Layer, API Contracts, Real-Time Events, Frontend
+- Part 3: Sections 8â€“13 â€” Security, Infrastructure, Error Handling, Observability, Testing, Scope
+- Post-V1 Roadmap: Sections 14â€“22 â€” Community Scale, Agent Economy, Enterprise, Own LLM (see below)
 
 
 
 ---
 
 ________________________________//__________________________________
-# Agentis — Post-V1 Roadmap (Sections 14–22)
+# Agentis â€” Post-V1 Roadmap (Sections 14â€“22)
 <!-- Vision for V2 through V5: Community Scale, Agent Economy, Enterprise Grade, Own LLM -->
 
 **This section was originally `FUTURE-ROADMAP.md`. It is merged here as the horizon plan that the platform architecture above is designed to grow into.**
@@ -5291,10 +5291,10 @@ ________________________________//__________________________________
 
 1. [Roadmap Philosophy](#1-roadmap-philosophy)
 2. [Release Cadence](#2-release-cadence)
-3. [V2 — Community Scale (Months 2–4)](#3-v2--community-scale-months-24)
-4. [V3 — Agent Economy (Months 5–8)](#4-v3--agent-economy-months-58)
-5. [V4 — Enterprise Grade (Months 9–14)](#5-v4--enterprise-grade-months-914)
-6. [V5 — Own LLM (Months 15–24)](#6-v5--own-llm-months-1524)
+3. [V2 â€” Community Scale (Months 2â€“4)](#3-v2--community-scale-months-24)
+4. [V3 â€” Agent Economy (Months 5â€“8)](#4-v3--agent-economy-months-58)
+5. [V4 â€” Enterprise Grade (Months 9â€“14)](#5-v4--enterprise-grade-months-914)
+6. [V5 â€” Own LLM (Months 15â€“24)](#6-v5--own-llm-months-1524)
 7. [Architecture Evolution](#7-architecture-evolution)
 8. [Data Flywheel Strategy](#8-data-flywheel-strategy)
 9. [Open Questions & Implicit Risks](#9-open-questions--implicit-risks)
@@ -5316,16 +5316,16 @@ Three rules govern every decision on this roadmap:
 ## 2. Release Cadence
 
 ```
-V1 Launch      ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Weeks 1-6    Mission OS Dashboard + Full Skill registry (Skills, Agent Packages, Mission Templates) + GitHub-analog Community Profiles
-V2 Community   ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Months 2-4   Scale + collaborative features + Skill Review System + Dependency Graph
-V3 Economy     ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Months 5-8   Agent-as-Customer + cloud billing
-V4 Enterprise  ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Months 9-14  Private infra + compliance
-V5 Own LLM     ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Months 15-24 Data flywheel + model training
+V1 Launch      Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦ Weeks 1-6    Mission OS Dashboard + Full Skill registry (Skills, Agent Packages, Mission Templates) + GitHub-analog Community Profiles
+V2 Community   Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦ Months 2-4   Scale + collaborative features + Skill Review System + Dependency Graph
+V3 Economy     Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦ Months 5-8   Agent-as-Customer + cloud billing
+V4 Enterprise  Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦ Months 9-14  Private infra + compliance
+V5 Own LLM     Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦Â¦ Months 15-24 Data flywheel + model training
 ```
 
 ---
 
-## 3. V2 — Community Scale (Months 2–4)
+## 3. V2 â€” Community Scale (Months 2â€“4)
 
 ### Objective
 
@@ -5333,9 +5333,9 @@ Turn the V1 user base into a self-sustaining community that contributes, collabo
 
 ### ~~3.1 Collaborative Mission Templates~~ ? **Promoted to V1**
 
-> **Shipped in V1.** Mission Templates (fork-and-run skill registry units with `{{variable}}` substitution, contributor lists, version history, and anonymized run history) are fully specced and implemented in V1. See `docs/V1-SPEC.md` §4.1 (`mission_templates`, `template_contributors`, `template_forks` tables), §5.13 (API endpoints), and §7.2 (frontend routes).
+> **Shipped in V1.** Mission Templates (fork-and-run skill registry units with `{{variable}}` substitution, contributor lists, version history, and anonymized run history) are fully specced and implemented in V1. See `docs/V1-SPEC.md` Â§4.1 (`mission_templates`, `template_contributors`, `template_forks` tables), Â§5.13 (API endpoints), and Â§7.2 (frontend routes).
 >
-> The complete schema — including `avg_success_rate`, `recommended_packages`, fork tracking, and full-text search — ships in V1, not V2. This section is retained for historical context only.
+> The complete schema â€” including `avg_success_rate`, `recommended_packages`, fork tracking, and full-text search â€” ships in V1, not V2. This section is retained for historical context only.
 
 ### 3.2 Skill Review System
 
@@ -5379,9 +5379,9 @@ interface SkillDependency {
 
 ### 3.4 Agent ELO Leaderboard (Public) + ~~Agent Packages~~ ? **Agent Packages Promoted to V1**
 
-> **Agent Packages shipped in V1.** One-click-deployable, forkable agent configurations (framework + capability tags + required skills + memory config) are fully specced in V1. See `docs/V1-SPEC.md` §4.1 (`agent_packages`, `agent_package_installs` tables), §5.12 (API endpoints including `POST /v1/packages/:id/deploy`), and §7.2 (PackageGrid, DeployModal components).
+> **Agent Packages shipped in V1.** One-click-deployable, forkable agent configurations (framework + capability tags + required skills + memory config) are fully specced in V1. See `docs/V1-SPEC.md` Â§4.1 (`agent_packages`, `agent_package_installs` tables), Â§5.12 (API endpoints including `POST /v1/packages/:id/deploy`), and Â§7.2 (PackageGrid, DeployModal components).
 
-The public ELO leaderboard remains a V2 feature — V1 exposes ELO per agent on the community profile (`AgentEloGraph` component) but does not surface a global discovery leaderboard. V2 ships:
+The public ELO leaderboard remains a V2 feature â€” V1 exposes ELO per agent on the community profile (`AgentEloGraph` component) but does not surface a global discovery leaderboard. V2 ships:
 - "Top agents for web scraping this month"
 - "Most reliable agents for code generation"
 - Per-vertical rankings
@@ -5390,13 +5390,13 @@ This creates additional career signal on top of the install counts and activity 
 
 ### 3.5 Real-Time Mission Collaboration (View-Only V2, Edit in V3)
 
-Allow invited team members to watch a running mission in real-time — same canvas, same event stream, same scratchpad view. V2 is observer mode only. V3 adds collaborative steering (multiple humans can inject constraints and approve checkpoints).
+Allow invited team members to watch a running mission in real-time â€” same canvas, same event stream, same scratchpad view. V2 is observer mode only. V3 adds collaborative steering (multiple humans can inject constraints and approve checkpoints).
 
 **Implementation:** WebSocket room per mission. Room member list stored in Redis. Authorization check on join. Observer events are identical to owner events (same stream).
 
 ---
 
-## 4. V3 — Agent Economy (Months 5–8)
+## 4. V3 â€” Agent Economy (Months 5â€“8)
 
 ### Objective
 
@@ -5478,12 +5478,12 @@ interface SkillExecutionPricing {
 
 ```
 Free:         3 active agents, 10 missions/day, community skills only
-Developer:    $29/agent/month — unlimited missions, paid skills, priority execution
-Team:         $19/agent/month (>5 agents) — shared memory, team scratchpad
-Pro:          $49/agent/month — custom frameworks, priority support, advanced ELO
+Developer:    $29/agent/month â€” unlimited missions, paid skills, priority execution
+Team:         $19/agent/month (>5 agents) â€” shared memory, team scratchpad
+Pro:          $49/agent/month â€” custom frameworks, priority support, advanced ELO
 ```
 
-Note: These are elastic. An organization running 500 agents at $19/agent = $9,500/month — from one business deal. This is the TAM multiplication effect.
+Note: These are elastic. An organization running 500 agents at $19/agent = $9,500/month â€” from one business deal. This is the TAM multiplication effect.
 
 ### 4.4 Skill registry Revenue Distribution
 
@@ -5504,7 +5504,7 @@ Extends V2's view-only collaboration to full multi-human steering:
 
 ---
 
-## 5. V4 — Enterprise Grade (Months 9–14)
+## 5. V4 â€” Enterprise Grade (Months 9â€“14)
 
 ### Objective
 
@@ -5557,7 +5557,7 @@ CREATE TABLE private_skills (
 
 - **SOC 2 Type II** certification process begins at month 9
 - **HIPAA BAA** available for healthcare customers at month 12
-- **Immutable audit log** export: every API call, every constraint injection, every approval, every skill execution — exported as signed JSONL files
+- **Immutable audit log** export: every API call, every constraint injection, every approval, every skill execution â€” exported as signed JSONL files
 - **Data residency**: EU-isolated deployment for GDPR-compliant customers
 - **Mission replay**: Full mission replay from execution ledger for incident investigation
 
@@ -5571,7 +5571,7 @@ Team memory:      shared within a team (configurable group)
 Org memory:       shared across entire organization
 ```
 
-Org memory becomes the institutional knowledge base — every completed mission, every skill execution, every outcome. Over time this is more valuable than any individual agent's memory.
+Org memory becomes the institutional knowledge base â€” every completed mission, every skill execution, every outcome. Over time this is more valuable than any individual agent's memory.
 
 ### 5.5 SLA & Dedicated Infrastructure
 
@@ -5583,7 +5583,7 @@ Org memory becomes the institutional knowledge base — every completed mission, e
 
 ---
 
-## 6. V5 — Own LLM (Months 15–24)
+## 6. V5 â€” Own LLM (Months 15â€“24)
 
 ### Objective
 
@@ -5695,7 +5695,7 @@ Training pipeline (GPU cluster) ? Model evaluation ?
 Staged rollout ? Production serving (vLLM)
 ```
 
-Training pipeline is isolated from production. Training jobs never touch live customer data directly — they operate on exported, anonymized snapshots.
+Training pipeline is isolated from production. Training jobs never touch live customer data directly â€” they operate on exported, anonymized snapshots.
 
 ---
 
@@ -5773,7 +5773,7 @@ Worker thread isolation in Node.js is not perfect. A malicious skill could attem
 
 **Q2: Semantic search embedding provider lock-in**  
 V1 uses `text-embedding-3-small` (OpenAI). If OpenAI changes pricing or availability, semantic memory breaks. 
-- **Recommended decision:** Wrap embedding calls in an abstraction layer from V1. Maintain an embedding model config per user (default: OpenAI, optional: local Ollama embeddings). Never hard-code the model string.
+- **Recommended decision:** Wrap embedding calls in an abstraction layer from V1. Maintain an embedding model config per user (default: OpenAI, optional: OpenAI-compatible embeddings). Never hard-code the model string.
 
 **Q3: Shared scratchpad size limits**  
 A malicious or buggy skill could write unbounded data to the scratchpad, exhausting Redis memory.
@@ -5822,11 +5822,12 @@ If the roadmap executes as specified, by month 24 AgentOS is:
 - The operator of the only LLM trained end-to-end on agentic execution patterns
 - The infrastructure layer that every AI-native company and agent framework runs through
 
-The company at this point is no longer a developer tool company. It is the operating system of the agent economy — the same role Microsoft played for the PC era, the App Store played for mobile, and AWS played for cloud infrastructure.
+The company at this point is no longer a developer tool company. It is the operating system of the agent economy â€” the same role Microsoft played for the PC era, the App Store played for mobile, and AWS played for cloud infrastructure.
 
 The V5 mission is to make that position permanent before a well-funded competitor understands what they're competing with.
 
 ---
 
 *This roadmap is a living document. It is reviewed and updated at the start of each phase based on user feedback, market data, and technical learnings from the previous phase.*
+
 

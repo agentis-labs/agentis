@@ -11,8 +11,8 @@ import { Plus, Trash2 } from 'lucide-react';
  * COMPLETED_WITH_CONTRACT_VIOLATION when the shape doesn't match — operators
  * see the violation on the canvas instead of silently shipping bad data.
  *
- * Keep the shape stable: brain-apps' AppRuntimeContract reuses this same
- * WorkflowContract type for app outputs.
+ * Keep the shape stable: Brain runtime evaluation reuses this same
+ * WorkflowContract type for workflow outputs.
  */
 
 export interface ContractField {

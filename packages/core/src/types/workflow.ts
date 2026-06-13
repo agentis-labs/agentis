@@ -8,6 +8,8 @@
  */
 
 import type { AgentRole } from './specialist.js';
+import type { AgentRequirements } from './adapter.js';
+import type { ListenerConfig } from './listener.js';
 
 export type WorkflowNodeType =
   // Control flow
@@ -28,8 +30,11 @@ export type WorkflowNodeType =
   | 'scratchpad'
   // Intelligence — LLM-powered
   | 'agent_task'
-  | 'skill_task'
+  | 'agent_session'
+  | 'extension_task'
   | 'agent_swarm'
+  | 'dynamic_swarm'
+  | 'planner'
   | 'evaluator'
   | 'guardrails'
   // Knowledge & enrichment
@@ -88,8 +93,8 @@ export interface WorkflowEdge {
 
 /**
  * Declared contract for what a workflow accepts as trigger input or produces as final output.
- * Mirrors the shape brain-apps' `AppRuntimeContract` will reference — an "app" is, structurally,
- * a workflow with a named outputContract. Keep this shape stable.
+ * Mirrors the shape Brain runtime evaluation references for workflow
+ * inputs and outputs. Keep this shape stable.
  */
 export interface WorkflowContract {
   fields: Array<{
@@ -146,7 +151,8 @@ export interface WorkflowOutputConfig {
 export type WorkflowNodeConfig = (
   | TriggerNodeConfig
   | AgentTaskNodeConfig
-  | SkillTaskNodeConfig
+  | AgentSessionNodeConfig
+  | ExtensionTaskNodeConfig
   | KnowledgeNodeConfig
   | RouterNodeConfig
   | MergeNodeConfig
@@ -154,6 +160,8 @@ export type WorkflowNodeConfig = (
   | SubflowNodeConfig
   | ScratchpadNodeConfig
   | AgentSwarmNodeConfig
+  | DynamicSwarmNodeConfig
+  | PlannerNodeConfig
   | ArtifactCollectNodeConfig
   | WaitNodeConfig
   | TransformNodeConfig
@@ -180,6 +188,12 @@ export interface TriggerNodeConfig {
     | 'webhook'
     | 'persistent_listener';
   triggerId?: string;
+  /** Five-field cron expression authored on the canvas. */
+  schedule?: string;
+  /** IANA timezone used by node-cron. Defaults to UTC. */
+  timezone?: string;
+  /** Structured persistent-listener authoring config. */
+  listenerConfig?: ListenerConfig;
 }
 
 /**
@@ -203,12 +217,16 @@ export interface AgentTaskNodeConfig {
   agentRole?: AgentRole;
   agentPackageRef?: string;
   capabilityTags: string[];
+  /** Required runtime affordances used for capability-aware routing. */
+  requires?: AgentRequirements;
   prompt: string;
   inputKeys: string[];
   outputKeys: string[];
   retryPolicy?: AgentRetryPolicy;
-  /** Behavioral skill protocols (§2.5) injected into the prompt at dispatch. */
+  /** Legacy/operator-facing protocol hints preserved for imported graphs. Prefer `extensions` for new runtime behavior. */
   skills?: string[];
+  /** Optional behavioral protocol names injected into the prompt at dispatch. */
+  extensions?: string[];
   /** Per-node model override (does not change the agent's global config). */
   modelOverride?: string;
   /** One-sentence rationale for the chosen specialist role (shown in the inspector). */
@@ -221,6 +239,89 @@ export interface AgentTaskNodeConfig {
   useRoleTools?: boolean;
   /** Cap on tool-use loop steps when `useRoleTools` is set (default 6, max 12). */
   maxToolSteps?: number;
+  /**
+   * Memory write-policy override (Brain Memory Formation §4.1). Controls what
+   * this task may write to the Brain: `form` (may form durable memory),
+   * `episodic_only` (one decaying outcome marker), or `none`. When unset, the
+   * engine resolves a policy from the task's role and output shape.
+   */
+  memoryPolicy?: 'form' | 'episodic_only' | 'none';
+  /**
+   * Run this task as a persistent AgentSession (SMARTER-AGENTS-10X §VI) instead
+   * of a one-shot dispatch: working memory, suspend/wake yield points, and
+   * context compaction. Requires a configured session adapter. `agent_session`
+   * nodes are the explicit form; this flag is the compat bridge for existing
+   * `agent_task` nodes.
+   */
+  useSession?: boolean;
+}
+
+/**
+ * A persistent agent session node (SMARTER-AGENTS-10X §VI). The engine drives a
+ * thinking⇄doing loop with working memory and yield points (delegate, await
+ * event, sleep, request approval) until the agent calls `complete_task`. Between
+ * steps the session is a DB row, so a node can suspend for hours at zero cost.
+ */
+export interface AgentSessionNodeConfig {
+  kind: 'agent_session';
+  agentId?: string;
+  agentRole?: AgentRole;
+  /** The objective handed to the agent — seeds its `task` memory block. */
+  prompt: string;
+  /** Optional persona override; the specialist role's system prompt is used otherwise. */
+  persona?: string;
+  inputKeys: string[];
+  outputKeys: string[];
+  /** Hard cap on cognitive steps (engine-bounded regardless). */
+  maxSteps?: number;
+  capabilityTags: string[];
+  /** Required runtime affordances used for capability-aware routing. */
+  requires?: AgentRequirements;
+}
+
+/**
+ * Dynamic swarm (SMARTER-AGENTS-10X §VII). A planner agent decides the task list
+ * at runtime from a goal, then the engine fans those tasks out across worker
+ * agents — bounded by `maxTasks`/`maxParallel`. Unlike `agent_swarm`, the task
+ * set is not a static input array; it is synthesized per run.
+ */
+export interface DynamicSwarmNodeConfig {
+  kind: 'dynamic_swarm';
+  /** The objective the planner decomposes into parallel worker tasks. */
+  goal: string;
+  /** Worker specialist role applied to every synthesized task. */
+  agentRole?: AgentRole;
+  /** Planner specialist role that decides the task list (defaults to 'planner'). */
+  plannerRole?: AgentRole;
+  /** Hard cap on synthesized tasks (determinism cage). */
+  maxTasks: number;
+  maxParallel: number;
+  mergeStrategy: 'collect_all' | 'first_success' | 'majority_vote';
+  outputKey: string;
+  capabilityTags: string[];
+  /** Required runtime affordances applied to each worker session. */
+  requires?: AgentRequirements;
+}
+
+/**
+ * Planner node (SMARTER-AGENTS-10X §VII). A planner agent decomposes a goal into
+ * a subgraph of `agent_session` steps and splices them into the live run via a
+ * validated graph patch. The determinism cage bounds how many nodes one pass may
+ * add.
+ */
+export interface PlannerNodeConfig {
+  kind: 'planner';
+  /** The objective to decompose. */
+  goal: string;
+  /** Planner specialist role (defaults to 'planner'). */
+  agentRole?: AgentRole;
+  agentId?: string;
+  /** Worker role assigned to each synthesized plan step. */
+  workerRole?: AgentRole;
+  /** Max nodes the planner may add in one pass. */
+  maxNodes?: number;
+  inputKeys: string[];
+  outputKeys: string[];
 }
 
 /**
@@ -240,6 +341,8 @@ export interface AgentSwarmNodeConfig {
   agentId?: string;
   /** Optional specialist role; resolved to a workspace agent at dispatch (Layer 2). */
   agentRole?: AgentRole;
+  /** Required runtime affordances used when selecting the swarm worker agent. */
+  requires?: AgentRequirements;
   outputKey: string;
 }
 
@@ -262,11 +365,15 @@ export interface ArtifactCollectNodeConfig {
   requireApproval?: boolean;
 }
 
-export interface SkillTaskNodeConfig {
-  kind: 'skill_task';
-  skillId: string;
+export interface ExtensionTaskNodeConfig {
+  kind: 'extension_task';
+  extensionId?: string;
+  extensionSlug?: string;
+  operationName: string;
+  version?: string;
   inputMapping: Record<string, string>;
   outputMapping: Record<string, string>;
+  timeoutMs?: number;
 }
 
 export interface KnowledgeNodeConfig {
@@ -282,7 +389,7 @@ export interface KnowledgeNodeConfig {
 
 export interface RouterNodeConfig {
   kind: 'router';
-  routingMode: 'first_match' | 'all_matching' | 'llm_route';
+  routingMode: 'first_match' | 'all_matching' | 'llm_route' | 'space_route';
   branches: Array<{ branchId: string; label: string; condition: string }>;
 }
 
@@ -329,6 +436,8 @@ export interface TransformNodeConfig {
   expression: string;
   /** Optional key under which the result is also stored; otherwise the result is the whole output. */
   outputKey?: string;
+  /** Optional bounded execution deadline. The engine derives workload headroom when omitted. */
+  timeoutMs?: number;
 }
 
 /** Boolean gate. Truthy → `pass` handle; falsy → `skip` handle. */
@@ -338,6 +447,8 @@ export interface FilterNodeConfig {
   condition: string;
   passLabel?: string;
   skipLabel?: string;
+  /** Optional bounded execution deadline. The engine derives workload headroom when omitted. */
+  timeoutMs?: number;
 }
 
 /** Call a registered integration connector (Slack / Gmail / GitHub / Sheets / HTTP …). */
@@ -365,9 +476,9 @@ export interface HttpRequestNodeConfig {
   body?: string;
   auth?:
     | { type: 'none' }
-    | { type: 'bearer'; token: string }
-    | { type: 'api_key'; header: string; token: string }
-    | { type: 'basic'; username: string; password: string };
+    | { type: 'bearer'; credentialId: string }
+    | { type: 'api_key'; header: string; credentialId: string }
+    | { type: 'basic'; credentialId: string };
   /** Optional response extraction. */
   responseMapping?: {
     /** JSON-path-like dot notation (e.g. `data.items[0].id`). */
@@ -388,7 +499,7 @@ export interface HttpRequestNodeConfig {
  *
  * Distinct from `scratchpad` (run-scoped, disposed on completion). `workflow_store`
  * survives run boundaries — a daily workflow can accumulate state across 30+ runs.
- * Brain-apps will index these entries as structured facts; the schema carries
+ * The Brain will index these entries as structured facts; the schema carries
  * `workspaceId` to support that without later migration.
  */
 export interface WorkflowStoreNodeConfig {
@@ -590,6 +701,8 @@ export type WorkflowRunStatus =
   | 'COMPLETED'
   /** The graph ran to completion but the final output did not match the declared outputContract. */
   | 'COMPLETED_WITH_CONTRACT_VIOLATION'
+  /** The graph reached the end but a node errored (even if "handled" by an error edge) — NOT a clean success. Treated as a failure for surfacing + diagnosis. */
+  | 'COMPLETED_WITH_ERRORS'
   | 'FAILED'
   | 'CANCELLED';
 
@@ -622,6 +735,12 @@ export interface ReadyQueueItem {
   priority: number;
   insertedAt: string;
   inputData: Record<string, unknown>;
+  /**
+   * AEJ idempotency key (NATIVE-ADVANCEMENT Proposal 1). Set when a node is
+   * re-dispatched after crash recovery so dedup-capable handlers/connectors
+   * (e.g. an HTTP `Idempotency-Key` header) make the retry effectively once.
+   */
+  idempotencyKey?: string;
 }
 
 export interface WaitingInputBuffer {
@@ -637,7 +756,28 @@ export interface WorkflowNodeState {
   completedAt?: string;
   inputData?: Record<string, unknown>;
   outputData?: Record<string, unknown>;
+  /** Immutable presentation-safe snapshot of a message delivered by an integration. */
+  deliveryReceipt?: IntegrationDeliveryReceipt;
   error?: string;
+  /**
+   * Set when the node is PAUSED (status WAITING) on a recoverable infrastructure
+   * failure — e.g. the agent's model ran out of credits. Carries a plain-language
+   * reason; cleared on resume. Distinguishes an operator-actionable pause from a
+   * scheduled/approval WAITING.
+   */
+  blockedReason?: string;
+}
+
+export interface IntegrationDeliveryReceipt {
+  integrationId: string;
+  operationId: string;
+  recipient?: string;
+  subject?: string;
+  contentType: 'html' | 'markdown' | 'text';
+  content: string;
+  /** Plain-text alternative when the delivered content was rich text. */
+  text?: string;
+  capturedAt?: string;
 }
 
 export interface ActiveExecution {
@@ -645,7 +785,7 @@ export interface ActiveExecution {
   nodeId: string;
   executorType:
     | 'agent'
-    | 'skill'
+    | 'extension'
     | 'subflow'
     | 'router'
     | 'wait'
@@ -653,7 +793,8 @@ export interface ActiveExecution {
     | 'integration'
     | 'evaluator'
     | 'loop'
-    | 'browser';
+    | 'browser'
+    | 'session';
   executorRef: string;
   startedAt: string;
   heartbeatAt?: string;

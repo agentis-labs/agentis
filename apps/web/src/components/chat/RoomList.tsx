@@ -102,14 +102,6 @@ export function RoomList({ onSelect }: { onSelect: (t: Selected) => void }) {
         </Section>
       )}
 
-      <Section label="Broadcast">
-        <RoomRow
-          icon={<Megaphone size={14} className="text-text-muted" />}
-          name="Fleet broadcast"
-          meta="One message to every live agent"
-          onClick={() => onSelect({ kind: 'room', id: '__broadcast__', name: 'Fleet broadcast' })}
-        />
-      </Section>
 
       {rooms.length === 0 && agents.length === 0 && (
         <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">

@@ -11,6 +11,7 @@ import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, Pan
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
+import { safeResourceUrl } from '../workflows/OutputViewers';
 import type { Artifact, PanelState } from './types';
 
 interface Props {
@@ -179,20 +180,23 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
         <iframe
           title={artifact.title}
           srcDoc={artifact.content}
-          sandbox="allow-scripts"
+          sandbox=""
           className="h-full w-full border-0"
         />
       );
-    case 'image':
+    case 'image': {
+      const safeSrc = safeResourceUrl(artifact.content, ['data:image/']);
+      if (!safeSrc) return <div className="p-6 text-sm text-danger">Blocked unsafe image URL.</div>;
       return (
         <div className="flex h-full items-center justify-center p-4">
           <img
-            src={artifact.content}
+            src={safeSrc}
             alt={artifact.title}
             className="max-h-full max-w-full object-contain"
           />
         </div>
       );
+    }
     case 'code':
       return (
         <pre className="m-0 h-full overflow-auto bg-canvas p-4 font-mono text-[12px] leading-relaxed text-text">
