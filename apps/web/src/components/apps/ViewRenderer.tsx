@@ -13,7 +13,7 @@
  * to production — there is no separate "preview" render path to drift from.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Activity, AlertTriangle, Bot, Check, ChevronDown, ChevronUp, Copy, Loader2, Send, Trash2, Wrench } from 'lucide-react';
+import { Activity, AlertTriangle, Bot, Check, ChevronDown, ChevronUp, Code2, Copy, Download, ExternalLink, FileText, Globe2, Image as ImageIcon, Loader2, MapPin, MessageSquare, Send, Trash2, Wrench } from 'lucide-react';
 import clsx from 'clsx';
 import {
   APP_CLIENT_MESSAGE_SOURCE,
@@ -205,7 +205,15 @@ export function ViewRenderer({
       case 'Stack':
         return <div className="flex flex-col" style={{ gap: node.gap ?? 12 }}>{node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}</div>;
       case 'Row':
-        return <div className="flex flex-wrap items-start" style={{ gap: node.gap ?? 12 }}>{node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}</div>;
+        return (
+          <div className="flex flex-wrap items-stretch" style={{ gap: node.gap ?? 12 }}>
+            {node.children.map((c, i) => (
+              <div key={i} className="min-w-[180px]" style={{ flex: `${node.widths?.[i] ?? 1} 1 0` }}>
+                <ViewRenderer node={c} scope={scope} path={[...path, i]} />
+              </div>
+            ))}
+          </div>
+        );
       case 'Grid':
         return <div className="grid grid-cols-2 md:grid-cols-3" style={{ gap: node.gap ?? 12 }}>{node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}</div>;
       case 'Card':
@@ -255,6 +263,22 @@ export function ViewRenderer({
         return <ActivityStreamView node={node} />;
       case 'DataBoard':
         return <BoundBoard node={node} />;
+      case 'DocumentViewer':
+        return <DocumentViewerBlock node={node} />;
+      case 'MapView':
+        return <MapViewBlock node={node} scope={resolvedScope} />;
+      case 'StatusBoard':
+        return <StatusBoardBlock node={node} scope={resolvedScope} />;
+      case 'WebEmbed':
+        return <WebEmbedBlock node={node} />;
+      case 'Narrative':
+        return <NarrativeBlock node={node} />;
+      case 'ConversationThread':
+        return <ConversationThreadBlock node={node} />;
+      case 'CodeViewer':
+        return <CodeViewerBlock node={node} />;
+      case 'MediaGallery':
+        return <MediaGalleryBlock node={node} scope={resolvedScope} />;
       case 'CustomView':
         return <CustomViewFrame node={node} />;
       default:
@@ -366,6 +390,184 @@ function InlineTextEditor({
         heading ? 'text-[15px] font-semibold' : 'text-[13px] leading-relaxed',
       )}
     />
+  );
+}
+
+function PanelShell({ title, icon, children, action }: { title?: string; icon: ReactNode; children: ReactNode; action?: ReactNode }) {
+  return (
+    <div className="overflow-hidden rounded-card border border-line bg-surface shadow-card">
+      {(title || action) ? (
+        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+          <span className="text-accent">{icon}</span>
+          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text-primary">{title}</span>
+          {action}
+        </div>
+      ) : null}
+      <div className="p-3">{children}</div>
+    </div>
+  );
+}
+
+function DocumentViewerBlock({ node }: { node: Extract<ViewNode, { type: 'DocumentViewer' }> }) {
+  const href = `data:text/plain;charset=utf-8,${encodeURIComponent(node.content)}`;
+  return (
+    <PanelShell
+      title={node.title ?? 'Document'}
+      icon={<FileText size={14} />}
+      action={(
+        <a href={href} download={node.downloadName ?? 'document.txt'} className="inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:bg-canvas">
+          <Download size={12} /> Download
+        </a>
+      )}
+    >
+      <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-btn bg-canvas p-3 text-[12px] leading-relaxed text-text-secondary">
+        {node.content}
+      </pre>
+    </PanelShell>
+  );
+}
+
+function MapViewBlock({ node, scope }: { node: Extract<ViewNode, { type: 'MapView' }>; scope: ResolveScope }) {
+  const pins = node.pins ?? [];
+  return (
+    <PanelShell title={node.title ?? 'Map'} icon={<MapPin size={14} />}>
+      <div className="relative min-h-52 overflow-hidden rounded-btn border border-line bg-canvas">
+        <div className="absolute inset-0 opacity-70 [background-image:linear-gradient(var(--color-line)_1px,transparent_1px),linear-gradient(90deg,var(--color-line)_1px,transparent_1px)] [background-size:28px_28px]" />
+        <div className="relative flex min-h-52 flex-col justify-between p-3">
+          <div className="text-[12px] font-medium text-text-primary">{node.region ?? 'Global'}</div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {pins.length === 0 ? (
+              <div className="rounded-btn border border-line bg-surface/90 px-3 py-2 text-[12px] text-text-muted">No pins configured</div>
+            ) : pins.map((pin, index) => (
+              <div key={`${pin.label}-${index}`} className="rounded-btn border border-line bg-surface/90 px-3 py-2">
+                <div className="text-[12px] font-medium text-text-primary">{pin.label}</div>
+                <div className="text-[11px] text-text-muted">
+                  {pin.lat != null && pin.lng != null ? `${pin.lat}, ${pin.lng}` : 'Location'}
+                  {pin.value != null ? ` · ${String(resolveBindable(pin.value, scope) ?? '-')}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </PanelShell>
+  );
+}
+
+function StatusBoardBlock({ node, scope }: { node: Extract<ViewNode, { type: 'StatusBoard' }>; scope: ResolveScope }) {
+  return (
+    <PanelShell title={node.title ?? 'Status board'} icon={<Activity size={14} />}>
+      <div className="grid gap-2">
+        {node.items.map((item, index) => {
+          const status = String(resolveBindable(item.status, scope) ?? 'unknown');
+          const tone = /fail|error|down|risk/i.test(status) ? 'text-danger bg-danger-soft'
+            : /wait|warn|review|pending/i.test(status) ? 'text-warn bg-warn-soft'
+              : 'text-accent bg-accent-soft';
+          return (
+            <div key={`${item.label}-${index}`} className="flex items-center gap-3 rounded-btn border border-line bg-canvas px-3 py-2">
+              <span className={`h-2.5 w-2.5 rounded-full ${tone.split(' ')[1]}`} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[12px] font-medium text-text-primary">{item.label}</div>
+                {item.detail != null ? <div className="truncate text-[11px] text-text-muted">{String(resolveBindable(item.detail, scope) ?? '')}</div> : null}
+              </div>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${tone}`}>{status}</span>
+            </div>
+          );
+        })}
+      </div>
+    </PanelShell>
+  );
+}
+
+function safeEmbedUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function WebEmbedBlock({ node }: { node: Extract<ViewNode, { type: 'WebEmbed' }> }) {
+  const src = safeEmbedUrl(node.url);
+  return (
+    <PanelShell
+      title={node.title ?? 'Web embed'}
+      icon={<Globe2 size={14} />}
+      action={src ? <a href={src} target="_blank" rel="noreferrer" className="text-text-muted hover:text-text-primary"><ExternalLink size={13} /></a> : null}
+    >
+      {src ? (
+        <iframe title={node.title ?? 'Web embed'} src={src} sandbox="allow-scripts allow-forms allow-popups" className="w-full rounded-btn border border-line bg-white" style={{ height: node.height ?? 320 }} />
+      ) : (
+        <div className="rounded-btn border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-danger">Only HTTPS embeds are allowed.</div>
+      )}
+    </PanelShell>
+  );
+}
+
+function NarrativeBlock({ node }: { node: Extract<ViewNode, { type: 'Narrative' }> }) {
+  return (
+    <PanelShell title={node.title ?? 'Narrative'} icon={<FileText size={14} />}>
+      <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary">{node.value}</div>
+    </PanelShell>
+  );
+}
+
+function ConversationThreadBlock({ node }: { node: Extract<ViewNode, { type: 'ConversationThread' }> }) {
+  const messages = node.messages ?? [
+    { role: 'agent' as const, content: 'Ready to capture the next exchange.' },
+  ];
+  return (
+    <PanelShell title={node.title ?? 'Conversation'} icon={<MessageSquare size={14} />}>
+      <div className="flex max-h-96 flex-col gap-2 overflow-auto">
+        {messages.map((message, index) => (
+          <div key={index} className={clsx('max-w-[92%] rounded-card border border-line px-3 py-2 text-[12px]', message.role === 'user' ? 'ml-auto bg-accent-soft text-accent' : 'bg-canvas text-text-secondary')}>
+            <div className="mb-1 text-[10px] font-semibold uppercase text-text-muted">{message.role}</div>
+            <div className="whitespace-pre-wrap">{message.content}</div>
+          </div>
+        ))}
+      </div>
+    </PanelShell>
+  );
+}
+
+function CodeViewerBlock({ node }: { node: Extract<ViewNode, { type: 'CodeViewer' }> }) {
+  return (
+    <PanelShell title={node.title ?? 'Code'} icon={<Code2 size={14} />}>
+      <div className="mb-2 flex items-center justify-between text-[11px] text-text-muted">
+        <span>{node.language ?? 'text'}{node.diff ? ' · diff' : ''}</span>
+      </div>
+      <pre className="max-h-96 overflow-auto rounded-btn border border-line bg-canvas p-3 font-mono text-[12px] leading-relaxed text-text-secondary">
+        {node.code}
+      </pre>
+    </PanelShell>
+  );
+}
+
+function MediaGalleryBlock({ node, scope }: { node: Extract<ViewNode, { type: 'MediaGallery' }>; scope: ResolveScope }) {
+  return (
+    <PanelShell title={node.title ?? 'Media'} icon={<ImageIcon size={14} />}>
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+        {node.items.length === 0 ? (
+          <div className="col-span-full rounded-btn border border-line bg-canvas px-3 py-6 text-center text-[12px] text-text-muted">No media yet</div>
+        ) : node.items.map((item, index) => {
+          const src = String(resolveBindable(item.src, scope) ?? '');
+          const kind = item.kind ?? 'image';
+          return (
+            <figure key={`${src}-${index}`} className="overflow-hidden rounded-card border border-line bg-canvas">
+              {kind === 'image' ? (
+                <img src={src} alt={item.alt ?? ''} className="aspect-video w-full object-cover" />
+              ) : (
+                <a href={src} target="_blank" rel="noreferrer" className="flex aspect-video items-center justify-center text-text-muted hover:text-text-primary">
+                  <FileText size={22} />
+                </a>
+              )}
+              {item.caption ? <figcaption className="truncate px-2 py-1.5 text-[11px] text-text-muted">{item.caption}</figcaption> : null}
+            </figure>
+          );
+        })}
+      </div>
+    </PanelShell>
   );
 }
 

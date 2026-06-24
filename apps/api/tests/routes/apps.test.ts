@@ -260,6 +260,22 @@ describe('/v1/apps package install', () => {
     expect(response.status).toBe(404);
   });
 
+  it('deletes an existing surface and rejects a missing surface', async () => {
+    const appId = seedApp();
+    const first = await app().request(`/v1/apps/${appId}/surfaces/home`, {
+      method: 'DELETE',
+      headers: ctx.authHeaders,
+    });
+    expect(first.status).toBe(200);
+    expect(new AppSurfaceStore({ db: ctx.db }).list(ctx.workspace.id, appId)).toEqual([]);
+
+    const missing = await app().request(`/v1/apps/${appId}/surfaces/home`, {
+      method: 'DELETE',
+      headers: ctx.authHeaders,
+    });
+    expect(missing.status).toBe(404);
+  });
+
   it('public share query reads bound collections but rejects sibling ones', async () => {
     const store = new AppStore(ctx.db);
     const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Public Desk' }).id;

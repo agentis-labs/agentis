@@ -66,7 +66,8 @@ export const fieldSchema = z.object({
 // ── ViewNode (recursive) ────────────────────────────────────
 
 export type ViewNode =
-  | { type: 'Stack' | 'Row' | 'Grid'; gap?: number; children: ViewNode[] }
+  | { type: 'Stack'; gap?: number; children: ViewNode[] }
+  | { type: 'Row' | 'Grid'; gap?: number; widths?: number[]; children: ViewNode[] }
   | { type: 'Card' | 'Section'; title?: string; children: ViewNode[] }
   | { type: 'Text' | 'Heading' | 'Markdown'; value: string }
   | { type: 'Metric'; label: string; value: Bindable; delta?: Bindable }
@@ -85,6 +86,14 @@ export type ViewNode =
   | { type: 'ActivityStream'; title?: string; limit?: number }
   // A kanban board over a collection, grouped by a status/stage field — apps, not dashboards.
   | { type: 'DataBoard'; bind: DataBind; groupBy: string; titleField?: string }
+  | { type: 'DocumentViewer'; title?: string; content: string; format?: 'markdown' | 'plain' | 'json'; downloadName?: string }
+  | { type: 'MapView'; title?: string; region?: string; pins?: Array<{ label: string; lat?: number; lng?: number; value?: Bindable }> }
+  | { type: 'StatusBoard'; title?: string; items: Array<{ label: string; status: Bindable; detail?: Bindable }> }
+  | { type: 'WebEmbed'; title?: string; url: string; height?: number }
+  | { type: 'Narrative'; title?: string; value: string; tone?: 'brief' | 'detailed' | 'executive' }
+  | { type: 'ConversationThread'; title?: string; messages?: Array<{ role: 'user' | 'assistant' | 'agent' | 'system'; content: string }> }
+  | { type: 'CodeViewer'; title?: string; code: string; language?: string; diff?: boolean }
+  | { type: 'MediaGallery'; title?: string; items: Array<{ src: Bindable; alt?: string; caption?: string; kind?: 'image' | 'file' | 'video' }> }
   /**
    * Escape hatch (§4.5/§4.6) — agent-written HTML/JS rendered in a hardened,
    * null-origin sandboxed iframe. NO network egress (CSP connect-src 'none');
@@ -95,7 +104,8 @@ export type ViewNode =
 
 export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
   z.union([
-    z.object({ type: z.enum(['Stack', 'Row', 'Grid']), gap: z.number().optional(), children: z.array(viewNodeSchema) }),
+    z.object({ type: z.literal('Stack'), gap: z.number().optional(), children: z.array(viewNodeSchema) }),
+    z.object({ type: z.enum(['Row', 'Grid']), gap: z.number().optional(), widths: z.array(z.number().positive()).optional(), children: z.array(viewNodeSchema) }),
     z.object({ type: z.enum(['Card', 'Section']), title: z.string().optional(), children: z.array(viewNodeSchema) }),
     z.object({ type: z.enum(['Text', 'Heading', 'Markdown']), value: z.string() }),
     z.object({ type: z.literal('Metric'), label: z.string(), value: bindableSchema, delta: bindableSchema.optional() }),
@@ -110,6 +120,14 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     z.object({ type: z.literal('AgentConsole'), title: z.string().optional(), prompt: z.string().optional() }),
     z.object({ type: z.literal('ActivityStream'), title: z.string().optional(), limit: z.number().int().positive().max(100).optional() }),
     z.object({ type: z.literal('DataBoard'), bind: dataBindSchema, groupBy: z.string().min(1), titleField: z.string().optional() }),
+    z.object({ type: z.literal('DocumentViewer'), title: z.string().optional(), content: z.string(), format: z.enum(['markdown', 'plain', 'json']).optional(), downloadName: z.string().optional() }),
+    z.object({ type: z.literal('MapView'), title: z.string().optional(), region: z.string().optional(), pins: z.array(z.object({ label: z.string(), lat: z.number().optional(), lng: z.number().optional(), value: bindableSchema.optional() })).optional() }),
+    z.object({ type: z.literal('StatusBoard'), title: z.string().optional(), items: z.array(z.object({ label: z.string(), status: bindableSchema, detail: bindableSchema.optional() })) }),
+    z.object({ type: z.literal('WebEmbed'), title: z.string().optional(), url: z.string().url().refine((url) => url.startsWith('https://'), 'Web embeds require an HTTPS URL'), height: z.number().int().positive().max(2000).optional() }),
+    z.object({ type: z.literal('Narrative'), title: z.string().optional(), value: z.string(), tone: z.enum(['brief', 'detailed', 'executive']).optional() }),
+    z.object({ type: z.literal('ConversationThread'), title: z.string().optional(), messages: z.array(z.object({ role: z.enum(['user', 'assistant', 'agent', 'system']), content: z.string() })).optional() }),
+    z.object({ type: z.literal('CodeViewer'), title: z.string().optional(), code: z.string(), language: z.string().optional(), diff: z.boolean().optional() }),
+    z.object({ type: z.literal('MediaGallery'), title: z.string().optional(), items: z.array(z.object({ src: bindableSchema, alt: z.string().optional(), caption: z.string().optional(), kind: z.enum(['image', 'file', 'video']).optional() })) }),
     z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional() }),
   ]) as z.ZodType<ViewNode>,
 );

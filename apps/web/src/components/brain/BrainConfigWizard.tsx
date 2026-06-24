@@ -5,7 +5,7 @@ import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
 import { useToast } from '../shared/Toast';
 
-type ProviderType = 'hashing' | 'openai';
+type ProviderType = 'local' | 'openai';
 interface IntelligenceConfig {
   embeddingProviderType: ProviderType;
   embeddingProviderConfig: { endpoint?: string; model?: string; apiKeySet?: boolean };
@@ -33,7 +33,7 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
   const [testingAi, setTestingAi] = useState(false);
   const [config, setConfig] = useState<IntelligenceConfig | null>(null);
   const [pendingMigration, setPendingMigration] = useState<PendingMigration | null>(null);
-  const [provider, setProvider] = useState<ProviderType>('hashing');
+  const [provider, setProvider] = useState<ProviderType>('local');
   const [endpoint, setEndpoint] = useState('https://api.openai.com/v1');
   const [model, setModel] = useState('text-embedding-3-small');
   const [embeddingKey, setEmbeddingKey] = useState('');
@@ -73,7 +73,7 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
 
   useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
-  const embeddingConfig = useMemo(() => provider === 'hashing' ? {} : {
+  const embeddingConfig = useMemo(() => provider === 'local' ? {} : {
     endpoint: endpoint.trim(),
     model: model.trim(),
     ...(provider === 'openai' && embeddingKey.trim() ? { apiKey: embeddingKey.trim() } : {}),
@@ -166,10 +166,10 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
       <section className="rounded-card border border-line bg-surface p-4">
         <Header title="Semantic retrieval" description="Find related memories even when the words differ." />
         <div className="mt-3 grid grid-cols-3 gap-2">
-          <Choice active={provider === 'hashing'} icon={<Cpu size={14} />} title="Keyword" onClick={() => setProvider('hashing')} />
+          <Choice active={provider === 'local'} icon={<Cpu size={14} />} title="On-device" onClick={() => setProvider('local')} />
           <Choice active={provider === 'openai'} icon={<Zap size={14} />} title="OpenAI" onClick={() => { setProvider('openai'); setEndpoint('https://api.openai.com/v1'); setModel('text-embedding-3-small'); }} />
         </div>
-        {provider !== 'hashing' && (
+        {provider !== 'local' && (
           <div className="mt-3 space-y-2">
             <TextField label="Endpoint" value={endpoint} onChange={setEndpoint} />
             <TextField label="Embedding model" value={model} onChange={setModel} />

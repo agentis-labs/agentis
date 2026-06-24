@@ -501,6 +501,12 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     });
   });
 
+  app.delete('/:id/surfaces/:name', (c) => {
+    const ws = getWorkspace(c);
+    surfaces.delete(ws.workspaceId, c.req.param('id'), c.req.param('name'));
+    return c.json({ data: { ok: true } });
+  });
+
   app.put('/:id/surfaces', async (c) => {
     const ws = getWorkspace(c);
     const parsed = upsertSurfaceSchema.safeParse(await c.req.json());

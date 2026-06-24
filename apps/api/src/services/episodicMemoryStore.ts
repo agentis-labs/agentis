@@ -90,6 +90,15 @@ export class EpisodicMemoryStore {
     this.resolveProvider = toResolver(embeddingProvider);
   }
 
+  /**
+   * The embedding provider this store writes with for a workspace. The query
+   * path (SharedIntelligence) resolves through this so stored vectors and query
+   * vectors are always produced by the SAME provider — never comparable-by-luck.
+   */
+  embeddingProviderFor(workspaceId: string): EmbeddingProvider | undefined {
+    return this.resolveProvider?.(workspaceId);
+  }
+
   /** Tokenise text for lexical scoring. Same tokeniser shape as KnowledgeStore. */
   static tokenize(input: string): string[] {
     if (!input) return [];

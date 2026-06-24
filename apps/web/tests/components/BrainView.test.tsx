@@ -83,7 +83,7 @@ describe('<BrainView />', () => {
         };
       }
       if (path === '/v1/workspace/intelligence') {
-        return { embeddingProviderType: 'hashing', degraded: false, migration: null };
+        return { embeddingProviderType: 'local', degraded: false, migration: null };
       }
       throw new Error(`Unexpected request: ${path}`);
     });

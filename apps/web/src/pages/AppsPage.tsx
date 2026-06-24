@@ -268,7 +268,7 @@ export function AppsPage() {
           onClick={() => fileInputRef.current?.click()}
           className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-canvas px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary"
         >
-          {importBusy ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Import
+          {importBusy ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Import
         </button>
         <button
           type="button"
@@ -432,11 +432,21 @@ function AppCard({
   const isLogic = item.kind === 'logic';
   return (
     <article
-      className="group rounded-card border border-line bg-surface p-4 text-left shadow-card transition-colors hover:border-line-strong hover:bg-surface-2"
+      className="group relative rounded-card border border-line bg-surface p-4 text-left shadow-card transition-colors hover:border-line-strong hover:bg-surface-2"
     >
       <div className="flex items-start gap-3">
-        <span className={clsx('flex h-10 w-10 shrink-0 items-center justify-center rounded-card border', isLogic ? 'border-accent/20 bg-accent-soft text-accent' : 'border-line bg-canvas text-text-secondary')}>
-          {isLogic ? <Workflow size={17} /> : item.kind === 'app' && item.icon ? <span className="text-[18px]">{item.icon}</span> : <Boxes size={17} />}
+        <span className={clsx('flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-card border', isLogic ? 'border-accent/20 bg-accent-soft text-accent' : 'border-line bg-canvas text-text-secondary')}>
+          {isLogic ? (
+            <Workflow size={17} />
+          ) : item.kind === 'app' && item.icon ? (
+            item.icon.startsWith('http://') || item.icon.startsWith('https://') || item.icon.startsWith('data:image/') ? (
+              <img src={item.icon} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <span className="text-[18px]">{item.icon}</span>
+            )
+          ) : (
+            <Boxes size={17} />
+          )}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -444,7 +454,7 @@ function AppCard({
               type="button"
               onClick={onOpen}
               disabled={opening}
-              className="min-w-0 truncate rounded-md text-left text-[14px] font-semibold text-text-primary hover:text-accent disabled:opacity-50"
+              className="min-w-0 truncate rounded-md text-left text-[14px] font-semibold text-text-primary group-hover:text-accent disabled:opacity-50 after:absolute after:inset-0 after:rounded-[inherit]"
             >
               {item.name}
             </button>
@@ -453,7 +463,7 @@ function AppCard({
               <button
                 type="button"
                 onClick={onOpenSettings}
-                className="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted opacity-80 transition-colors hover:bg-canvas hover:text-text-primary group-hover:opacity-100"
+                className="relative z-10 ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted opacity-80 transition-colors hover:bg-canvas hover:text-text-primary group-hover:opacity-100"
                 title="App engine"
                 aria-label={`App engine ${item.name}`}
               >

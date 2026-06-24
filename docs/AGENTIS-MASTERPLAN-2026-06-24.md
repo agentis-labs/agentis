@@ -29,11 +29,11 @@ Status legend: ✅ done & tested · ◑ partial · ⬜ not started · 🚫 out o
 | 0.2 | Channel inbound fails closed (Telegram) | ✅ |
 | 0.3 | Harden CustomView for untrusted UI | ⬜ |
 | 0.4 | Provenance gate on installed bundles | ⬜ |
-| 0.5 | Cap & abort process fan-out | ◑ (abort-signal, sibling-cancel, `maxConcurrent` clamp done; global semaphore + `unbounded` guard left) |
+| 0.5 | Cap & abort process fan-out | ✅ (abort-signal, sibling-cancel, `maxConcurrent` clamp, `unbounded` guard, **global process semaphore** all done) |
 | 1.1 | Real per-task isolation (agent_swarm) | ✅ |
-| 1.2 | Concurrency honored, not advertised | ◑ (swarm clamp done; global ceiling left) |
+| 1.2 | Concurrency honored, not advertised | ✅ (swarm clamp + `unbounded` hard-cap + global semaphore done) |
 | 1.3 | Generic per-node `retryPolicy` | ⬜ |
-| 1.4 | Durability (loops resume, evaluator bound, durable delegation, checkpoint timeout) | ⬜ |
+| 1.4 | Durability (loops resume, evaluator bound, durable delegation, checkpoint timeout) | ◑ (**checkpoint `auto_after_timeout` done**; loops-resume / evaluator-bound / durable-delegation left) |
 | 1.5 | Human-in-the-loop inside teams (worker yields) | ⬜ |
 | 1.6 | Explicit join semantics (merge ↔ parallel) | ⬜ |
 | 1.7 | Time / aggregation / pagination / human-input primitives | ⬜ |
@@ -314,6 +314,7 @@ Memory/recall/formation work is tracked separately by the operator at `docs/brai
 
 > Keep reconciled with real code. Append newest-first. Each entry: date · track · what shipped · file(s) · tests.
 
+- _2026-06-24_ — **Phase 0.5 + 1.2 COMPLETE: global process semaphore SHIPPED.** `AdapterManager` now holds a workspace-wide counting `Semaphore` (`apps/api/src/adapters/semaphore.ts`, default 128, `AGENTIS_MAX_CONCURRENT_PROCESSES` override): `dispatchTask` acquires a slot before dispatching and releases it on the task's terminal event (`task.completed`/`task.failed` via the adapter event stream), on dispatch-throw, or via a per-task safety timer (`timeoutMs + 60s`) so a hung process can never leak a slot or deadlock dispatch. Across many overlapping runs/swarms the host can't be flooded with processes — the last gap in the fan-out-safety story (isolate + abort + sibling-cancel + per-adapter clamp + `unbounded` cap + **global ceiling**). Tests: `AdapterManager.semaphore.test.ts` (5 — Semaphore admit/queue/drop + manager cap/resume/throw-release); swarm + checkpoint suites still green (10/10). Typecheck clean. **0.5 and 1.2 now ✅.**
 - _2026-06-24_ — **Phase 1.4-partial (checkpoint `auto_after_timeout`) + Phase 0.5/1.2-partial (`unbounded` parallelism guard) SHIPPED.** (1.4) `#executeCheckpoint` now honors `approvalMode:'auto_after_timeout'` + `timeoutMs`: arms a timer that auto-approves through the same `ApprovalInboxService.resolve` path an operator uses (marks the row resolved, resumes via the bound handler); no-ops if the operator already decided (RESOURCE_CONFLICT caught). In-memory timer — a restart before it fires falls back to manual approval (noted in code). Test `WorkflowEngine.checkpoint.test.ts`: a real run completes with zero operator action and the approval row is `approved`. (0.5/1.2) `resolveParallelism` no longer returns `Number.MAX_SAFE_INTEGER` for `unbounded` — capped at `WORKFLOW_PARALLELISM_HARD_CAP = 256` (explicit values clamped too). Test `resolveParallelism.test.ts` (5 cases). Typecheck clean; **34/34 of this session's tests green**.
   - _Process note:_ a verification step ran `git stash` in the background and accidentally expanded to the full suite — confirming **57 failures exist on the baseline with my batch stashed**, i.e. they belong to the concurrent in-flight refactor (db/app/brain/cora), NOT this work (e.g. the `sharedBrain` `APP-SCOPED-VIP-RULE` failure). The pop restored the full 555-file working tree (my batch + in-flight, typecheck clean, no conflict markers); a redundant snapshot remains in `stash@{0}: verify-brain` — safe to `git stash drop` once confirmed.
 - _2026-06-24_ — **Doc completed into a full execution-ready spec.** Added the progress dashboard (all 26 items + status), pinned active blockers, a per-item Definition of Done, and **Files + Acceptance** for every Phase 0–5 item so any can be picked up cold. Part III (Execution & Tracking) added. Statuses reconciled with shipped code: 0.1/0.2/1.1 ✅, 0.5/1.2 ◑, rest ⬜; Brain 🚫 (owner-handled). No code change in this entry — documentation only.

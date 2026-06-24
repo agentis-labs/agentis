@@ -215,7 +215,12 @@ describe('WorkflowEngine shared brain injection', () => {
 
     // Own the workflow with an App, then write a memory at the APP's brain scope.
     const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Orders App', entryWorkflowId: workflowId });
-    new MemoryStore(ctx.db, ctx.logger).write({
+    // Write the App-scoped memory through a stub-backed store so it carries a
+    // comparable vector; SharedIntelligence resolves queries through the SAME store.
+    const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
+    const memory = new MemoryStore(ctx.db, ctx.logger);
+    memory.setEpisodicStore(episodes);
+    memory.write({
       workspaceId: ctx.workspace.id,
       scopeId: app.id,
       kind: 'fact',
@@ -233,7 +238,7 @@ describe('WorkflowEngine shared brain injection', () => {
     const sharedIntelligence = new SharedIntelligenceService(
       ctx.db,
       ctx.bus,
-      new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider()),
+      episodes,
       ctx.logger,
     );
     const engine = new WorkflowEngine({

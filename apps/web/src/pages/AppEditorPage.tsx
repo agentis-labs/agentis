@@ -32,7 +32,7 @@ import {
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
-import type { AppRecord, AppSurface, CollectionInfo, SurfaceAction, ViewNode } from '@agentis/core';
+import type { AppRecord, AppSurface, CollectionInfo, SurfaceAction, SurfaceKind, ViewNode } from '@agentis/core';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
 import { api, apiErrorMessage } from '../lib/api';
 import { AppRuntime } from '../components/apps/AppRuntime';
@@ -58,6 +58,7 @@ import {
   removeNodeAtPath,
   updateNodeAtPath,
 } from '../components/apps/viewTree';
+import { StudioSurfaceBuilder } from '../components/apps/StudioSurfaceBuilder';
 import { WorkflowCanvasPage, WorkflowBrainTab } from './WorkflowCanvasPage';
 import { SegmentedControl, type SegmentDef } from '../components/shared/SegmentedControl';
 
@@ -283,6 +284,67 @@ export function AppEditorPage() {
     }
   }, [currentSurface, id, load, surfaceActionsDraft, surfaceDraft]);
 
+  const updateSurfaceMeta = useCallback(async (patch: { kind?: SurfaceKind; shareable?: boolean }) => {
+    if (!currentSurface) return;
+    setBusy('surface-save');
+    setStatus(null);
+    try {
+      await appsApi.upsertSurface(id, {
+        name: currentSurface.name,
+        kind: patch.kind ?? currentSurface.kind,
+        view: parseViewDraft(surfaceDraft) ?? currentSurface.view ?? emptySurfaceView(),
+        actions: surfaceActionsDraft,
+        shareable: patch.shareable ?? currentSurface.shareable,
+      });
+      setStatus('Saved');
+      await load();
+    } catch (e) {
+      setStatus(apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [currentSurface, id, load, surfaceActionsDraft, surfaceDraft]);
+
+  const duplicateSurface = useCallback(async () => {
+    if (!currentSurface) return;
+    setBusy('surface');
+    setStatus(null);
+    try {
+      const name = uniqueName(`${currentSurface.name}-copy`, surfaces.map((s) => s.name));
+      await appsApi.upsertSurface(id, {
+        name,
+        kind: currentSurface.kind,
+        view: parseViewDraft(surfaceDraft) ?? currentSurface.view ?? emptySurfaceView(),
+        actions: surfaceActionsDraft,
+        shareable: currentSurface.shareable,
+      });
+      await load();
+      setSelectedSurface(name);
+      setStatus('Duplicated');
+    } catch (e) {
+      setStatus(apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [currentSurface, id, load, surfaceActionsDraft, surfaceDraft, surfaces]);
+
+  const deleteSurface = useCallback(async () => {
+    if (!currentSurface) return;
+    setBusy('surface');
+    setStatus(null);
+    try {
+      await appsApi.removeSurface(id, currentSurface.name);
+      const next = surfaces.find((surface) => surface.name !== currentSurface.name)?.name ?? null;
+      await load();
+      setSelectedSurface(next);
+      setStatus('Deleted');
+    } catch (e) {
+      setStatus(apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [currentSurface, id, load, surfaces]);
+
   const generateSurface = useCallback(async (prompt: string) => {
     if (!currentSurface) return;
     setGenerating(true);
@@ -343,8 +405,16 @@ export function AppEditorPage() {
           <ArrowLeft size={12} /> Apps
         </button>
         <div className="mx-2 h-4 w-px bg-line" />
-        <span className="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-canvas text-text-secondary">
-          {app.icon ? <span className="text-[15px]">{app.icon}</span> : <Boxes size={14} />}
+        <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-md border border-line bg-canvas text-text-secondary">
+          {app.icon ? (
+            app.icon.startsWith('http://') || app.icon.startsWith('https://') || app.icon.startsWith('data:image/') ? (
+              <img src={app.icon} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <span className="text-[15px]">{app.icon}</span>
+            )
+          ) : (
+            <Boxes size={14} />
+          )}
         </span>
         {editingName ? (
           <input
@@ -419,6 +489,9 @@ export function AppEditorPage() {
             onRename={renameSurface}
             onSave={() => void saveSurface()}
             onGenerate={generateSurface}
+            onUpdateSurface={(patch) => void updateSurfaceMeta(patch)}
+            onDuplicateSurface={() => void duplicateSurface()}
+            onDeleteSurface={() => void deleteSurface()}
           />
         )}
         {facet === 'data' && <DataFacet collections={collections} />}
@@ -571,6 +644,9 @@ function InterfaceFacet({
   onRename,
   onSave,
   onGenerate,
+  onUpdateSurface,
+  onDuplicateSurface,
+  onDeleteSurface,
 }: {
   appId: string;
   surfaces: AppSurface[];
@@ -590,6 +666,9 @@ function InterfaceFacet({
   onRename: (currentName: string, nextName: string) => Promise<void>;
   onSave: () => void;
   onGenerate: (prompt: string) => Promise<void>;
+  onUpdateSurface: (patch: { kind?: SurfaceKind; shareable?: boolean }) => void;
+  onDuplicateSurface: () => void;
+  onDeleteSurface: () => void;
 }) {
   const [mode, setMode] = useState<BuilderMode>('live');
   const [renamingSurface, setRenamingSurface] = useState<string | null>(null);
@@ -797,53 +876,21 @@ function InterfaceFacet({
               <div className="flex h-full items-center justify-center text-text-muted">No surface selected</div>
             )}
           </div>
+        ) : current ? (
+          <StudioSurfaceBuilder
+            appId={appId}
+            current={current}
+            draft={draft}
+            actions={actions}
+            collections={collections}
+            onDraftChange={onDraftChange}
+            onActionsChange={onActionsChange}
+            onUpdateSurface={onUpdateSurface}
+            onDuplicateSurface={onDuplicateSurface}
+            onDeleteSurface={onDeleteSurface}
+          />
         ) : (
-          <div className="grid h-full grid-cols-[208px_minmax(0,1fr)_272px] overflow-hidden">
-            {/* Palette — agent-native sections first */}
-            <aside className="min-h-0 space-y-5 overflow-auto border-r border-line bg-surface p-3">
-              {SURFACE_GROUPS.map((group) => (
-                <PaletteGroup key={group.title} title={group.title} items={group.items} onAdd={(kind) => addBlock(kind)} />
-              ))}
-            </aside>
-
-            {/* Live canvas */}
-            <div
-              className="relative min-h-0 overflow-auto bg-canvas p-5"
-              role="presentation"
-              onClick={() => setSelectedPath([])}
-              onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }}
-              onDrop={(event) => {
-                event.preventDefault();
-                const kind = event.dataTransfer.getData('application/x-agentis-block');
-                if (isBlockKind(kind)) addBlock(kind);
-              }}
-            >
-              <div className="mx-auto min-h-full w-full max-w-3xl">
-                {view ? (
-                  <SurfaceCanvas appId={appId} view={view} selectedPath={selectedPath} onSelect={setSelectedPath} onChange={setView} />
-                ) : null}
-              </div>
-              {rootEmpty ? <EmptyCanvasHint /> : null}
-            </div>
-
-            {/* Inspector */}
-            <aside className="min-h-0 overflow-auto border-l border-line bg-surface p-3">
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">Properties</div>
-              {selectedNode ? (
-                <SurfaceProperties
-                  node={selectedNode}
-                  collections={collections}
-                  onChange={updateSelected}
-                  onRemove={selectedPath.length > 0 ? removeSelected : undefined}
-                  onAddInside={canHaveChildren(selectedNode) ? (kind) => addBlock(kind, 'selected') : undefined}
-                />
-              ) : (
-                <div className="rounded-card border border-line bg-canvas p-3 text-[12px] text-text-muted">
-                  Select a block on the canvas to edit it, or drop a section from the left.
-                </div>
-              )}
-            </aside>
-          </div>
+          <div className="flex h-full items-center justify-center text-text-muted">No surface selected</div>
         )}
       </div>
     </div>

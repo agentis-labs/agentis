@@ -5,7 +5,23 @@
  * CustomView.collections), recurse through containers, and ignore non-data nodes.
  */
 import { describe, it, expect } from 'vitest';
-import { collectionsInView, type ViewNode } from '../src/types/view.js';
+import { collectionsInView, viewNodeSchema, type ViewNode } from '../src/types/view.js';
+
+describe('ViewNode Studio compatibility', () => {
+  it('accepts row flex widths without changing existing row payloads', () => {
+    expect(viewNodeSchema.parse({ type: 'Row', widths: [2, 1], children: [{ type: 'Text', value: 'Primary' }, { type: 'Text', value: 'Secondary' }] })).toMatchObject({
+      type: 'Row',
+      widths: [2, 1],
+    });
+    expect(viewNodeSchema.parse({ type: 'Row', children: [{ type: 'Text', value: 'Existing' }] })).toMatchObject({ type: 'Row' });
+  });
+
+  it('validates the Studio composite nodes and requires HTTPS embeds', () => {
+    expect(viewNodeSchema.parse({ type: 'Narrative', title: 'Summary', value: 'Everything is on track.' })).toMatchObject({ type: 'Narrative' });
+    expect(viewNodeSchema.parse({ type: 'WebEmbed', url: 'https://example.com' })).toMatchObject({ type: 'WebEmbed' });
+    expect(() => viewNodeSchema.parse({ type: 'WebEmbed', url: 'http://example.com' })).toThrow();
+  });
+});
 
 describe('collectionsInView', () => {
   it('returns an empty set for null / data-free views', () => {

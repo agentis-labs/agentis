@@ -82,6 +82,8 @@ export const appsApi = {
       method: 'PATCH',
       body: JSON.stringify({ name: nextName }),
     }).then((r) => r.data),
+  removeSurface: (id: string, name: string) =>
+    api<Wrapped<{ ok: true }>>(`/v1/apps/${id}/surfaces/${encodeURIComponent(name)}`, { method: 'DELETE' }).then((r) => r.data),
   upsertSurface: (id: string, body: { name: string; kind?: string; view?: unknown; actions?: unknown[]; shareable?: boolean }) =>
     api<Wrapped<AppSurface>>(`/v1/apps/${id}/surfaces`, { method: 'PUT', body: JSON.stringify(body) }).then((r) => r.data),
   generateSurface: (id: string, body: { prompt: string; surface?: string }) =>

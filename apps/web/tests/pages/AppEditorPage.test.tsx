@@ -171,7 +171,7 @@ describe('<AppEditorPage />', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => {
-      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Heading', value: 'New heading' }] });
+      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Row', children: [{ type: 'Heading', value: 'New heading' }] }] });
     });
   });
 
@@ -209,18 +209,37 @@ describe('<AppEditorPage />', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Create form' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Approval gate' }));
 
-    // The form's field renders live on the canvas (derived from the collection schema).
-    expect(await screen.findByText('Title')).toBeInTheDocument();
+    // The approval table renders the collection field and its card inspector.
+    expect((await screen.findAllByText('Title')).length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => {
-      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Form' }] });
+      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Row', children: [{ type: 'Card', title: 'Approval gate' }] }] });
       expect(lastSavedActions).toEqual(
-        expect.arrayContaining([expect.objectContaining({ name: 'create_tasks', kind: 'data', target: 'tasks.insert' })]),
+        expect.arrayContaining([expect.objectContaining({ name: 'approve_tasks', kind: 'data', target: 'tasks.update' })]),
       );
     });
+  });
+
+  it('renders the complete Studio block palette in edit mode', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = init?.method ?? 'GET';
+      if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
+      if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow('surface')] });
+      if (path === '/v1/apps/app-1/collections' && method === 'GET') return jsonResponse({ data: [] });
+      if (path === '/v1/apps/app-1/workflows' && method === 'GET') return jsonResponse({ data: [] });
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEditor('interface');
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    for (const name of ['Message feed', 'Metrics grid', 'Approval gate', 'Data table', 'Chart', 'Document', 'Map', 'Agent card', 'Status board', 'Web embed', 'Narrative', 'Conversation', 'Code viewer', 'Media gallery']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
   });
 
   it('generates a surface from the AI prompt and loads it into the canvas', async () => {
@@ -252,7 +271,7 @@ describe('<AppEditorPage />', () => {
     await userEvent.type(screen.getByLabelText('Describe a surface'), 'a dashboard');
     await userEvent.click(screen.getByRole('button', { name: 'Generate' }));
 
-    expect(await screen.findByText('AI heading')).toBeInTheDocument();
+    expect((await screen.findAllByText('AI heading')).length).toBeGreaterThan(0);
   });
 
   it('renders the operator console bound to the real operator endpoint', async () => {

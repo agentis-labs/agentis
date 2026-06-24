@@ -27,8 +27,23 @@ import type {
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
+import { Semaphore } from './semaphore.js';
 
 export type AdapterEventHandler = (event: NormalizedAgentEvent, agentId: string) => void;
+
+/**
+ * Global ceiling on concurrent task dispatches (child processes) across ALL runs
+ * and swarms. Per-swarm clamps and the parallelism cap throttle a single fan-out;
+ * this protects the host when many fan-outs/runs overlap. Override with
+ * `AGENTIS_MAX_CONCURRENT_PROCESSES`.
+ */
+const DEFAULT_MAX_CONCURRENT_PROCESSES = 128;
+
+function resolveMaxConcurrentProcesses(explicit?: number): number {
+  if (explicit && explicit > 0) return Math.floor(explicit);
+  const raw = Number(process.env.AGENTIS_MAX_CONCURRENT_PROCESSES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_CONCURRENT_PROCESSES;
+}
 
 export interface AdapterRegistration {
   agentId: string;
@@ -43,12 +58,27 @@ export class AdapterManager {
   readonly #handlers = new Set<AdapterEventHandler>();
   readonly #telemetry: Telemetry;
   #toolManifestProvider: ToolManifestProvider | null = null;
+  /** Global concurrent-process ceiling shared by every dispatch. */
+  readonly #processSemaphore: Semaphore;
+  /** taskId → idempotent slot-release, set while a dispatched task is in flight. */
+  readonly #taskReleases = new Map<string, () => void>();
 
   constructor(
     private readonly logger: Logger,
     telemetry: Telemetry = noopTelemetry,
+    maxConcurrentProcesses?: number,
   ) {
     this.#telemetry = telemetry;
+    this.#processSemaphore = new Semaphore(resolveMaxConcurrentProcesses(maxConcurrentProcesses));
+  }
+
+  /** Live concurrency snapshot (diagnostics + tests). */
+  get processConcurrency(): { active: number; waiting: number; max: number } {
+    return {
+      active: this.#processSemaphore.active,
+      waiting: this.#processSemaphore.waiting,
+      max: this.#processSemaphore.max,
+    };
   }
 
   /**
@@ -67,6 +97,10 @@ export class AdapterManager {
       adapter,
     });
     adapter.onEvent((event) => {
+      // A task reaching terminal state frees its global process slot.
+      if (event.eventType === 'task.completed' || event.eventType === 'task.failed') {
+        this.#taskReleases.get(event.taskId)?.();
+      }
       for (const h of this.#handlers) {
         try {
           h(event, agentId);
@@ -134,15 +168,40 @@ export class AdapterManager {
         this.logger.warn('adapter.tool_manifest_failed', { agentId, err: (err as Error).message });
       }
     }
-    await this.#telemetry.span(
-      'adapter.dispatch',
-      () => reg.adapter.dispatchTask(effectiveTask),
-      {
-        'agentis.agent_id': agentId,
-        'agentis.adapter_type': reg.adapterType,
-        'agentis.task_id': task.taskId,
-      },
-    );
+    // Hold a global process slot for the lifetime of this task. The slot is
+    // released when the task reaches terminal state (task.completed/failed) via
+    // the adapter event stream (see register), or by the safety timer below if no
+    // terminal event ever arrives (a hung process / adapter bug must not leak the
+    // slot forever), or immediately if dispatch fails to start.
+    await this.#processSemaphore.acquire();
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      clearTimeout(safetyTimer);
+      this.#taskReleases.delete(task.taskId);
+      this.#processSemaphore.release();
+    };
+    const safetyMs = (task.timeoutMs && task.timeoutMs > 0 ? task.timeoutMs : 600_000) + 60_000;
+    const safetyTimer = setTimeout(release, safetyMs);
+    safetyTimer.unref?.();
+    this.#taskReleases.set(task.taskId, release);
+    try {
+      await this.#telemetry.span(
+        'adapter.dispatch',
+        () => reg.adapter.dispatchTask(effectiveTask),
+        {
+          'agentis.agent_id': agentId,
+          'agentis.adapter_type': reg.adapterType,
+          'agentis.task_id': task.taskId,
+        },
+      );
+    } catch (err) {
+      // Dispatch never started — no process, no terminal event will come.
+      release();
+      throw err;
+    }
+    // On success the slot stays held until the terminal event releases it.
   }
 
   async cancelTask(agentId: string, taskId: string): Promise<void> {

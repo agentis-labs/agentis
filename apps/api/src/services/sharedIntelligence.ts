@@ -266,8 +266,13 @@ export class SharedIntelligenceService {
    * `embedding_provider_type` column. Appendix A: provider is user-selectable.
    */
   #resolveEmbeddingProvider(workspaceId: string): EmbeddingProvider {
-    // §B1.1 — delegate to the single registry when wired; the local cache below
-    // is the legacy fallback for code paths/tests constructed without one.
+    // Query with the SAME provider the episodes store writes with, so stored
+    // vectors and query vectors are always comparable (no write/query drift in
+    // prod OR tests, which inject a deterministic stub into the episodes store).
+    const fromStore = this.episodes.embeddingProviderFor(workspaceId);
+    if (fromStore) return fromStore;
+    // §B1.1 — else delegate to the single registry when wired; the local cache
+    // below is the legacy fallback for code paths constructed without one.
     if (this.embeddingRegistry) return this.embeddingRegistry.resolve(workspaceId);
     const cached = this.#embeddingProviders.get(workspaceId);
     if (cached) return cached;

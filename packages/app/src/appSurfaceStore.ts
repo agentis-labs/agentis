@@ -182,6 +182,13 @@ export class AppSurfaceStore {
   }
 
   /** ui_render — replace the surface's full ViewNode tree. Creates the surface if absent. */
+  delete(workspaceId: string, appId: string, name: string): void {
+    this.requireApp(workspaceId, appId);
+    const existing = this.rowByName(appId, name);
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${name}`);
+    this.db.delete(schema.appSurfaces).where(eq(schema.appSurfaces.id, existing.id)).run();
+  }
+
   render(workspaceId: string, appId: string, name: string, view: unknown): AppSurface {
     this.requireApp(workspaceId, appId);
     const parsed = viewNodeSchema.parse(view);

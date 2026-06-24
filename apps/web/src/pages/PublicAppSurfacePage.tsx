@@ -92,7 +92,18 @@ export function PublicAppSurfacePage() {
   return (
     <div className="min-h-screen bg-canvas">
       <header className="border-b border-line bg-surface px-4 py-3">
-        <span className="text-[14px] font-semibold text-text-primary">{data.app.icon ?? 'App'} {data.app.name}</span>
+        <span className="flex items-center gap-1.5 text-[14px] font-semibold text-text-primary">
+          {data.app.icon ? (
+            data.app.icon.startsWith('http://') || data.app.icon.startsWith('https://') || data.app.icon.startsWith('data:image/') ? (
+              <img src={data.app.icon} alt="" className="h-4 w-4 shrink-0 rounded-sm object-cover" />
+            ) : (
+              <span>{data.app.icon}</span>
+            )
+          ) : (
+            <span className="text-text-muted">App</span>
+          )}
+          <span>{data.app.name}</span>
+        </span>
       </header>
       <RuntimeProvider value={ctx}>
         <div className="mx-auto w-full max-w-3xl p-4">
