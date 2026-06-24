@@ -17,6 +17,7 @@ import { registerEphemeralTools } from './ephemeral.js';
 import { registerCapabilityTools } from './capability.js';
 import { registerTaskSpineTools } from './taskSpine.js';
 import { registerChannelTools } from './channel.js';
+import { registerBrowserTools } from './browser.js';
 import { registerAppDataTools } from './appData.js';
 
 export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -29,6 +30,7 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerCapabilityTools(registry, deps);
   registerTaskSpineTools(registry, deps);
   registerChannelTools(registry, deps);
+  registerBrowserTools(registry, deps);
   registerAppDataTools(registry, deps);
 }
 

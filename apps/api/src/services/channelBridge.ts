@@ -31,9 +31,12 @@ import type {
   ChannelHealthCheckName,
   ChannelKind,
   ChannelStatus,
+  OutboundAttachment,
+  OutboundAttachmentRef,
   ParsedInboundMessage,
 } from '../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
+import type { ArtifactService } from './artifactService.js';
 
 export interface ChannelBridgeDeps {
   db: AgentisSqliteDb;
@@ -45,6 +48,8 @@ export interface ChannelBridgeDeps {
   adapters?: Partial<Record<ChannelKind, ChannelAdapter>>;
   /** Optional runtime probe for the configured agent. */
   runtimeHealth?: (args: { workspaceId: string; agentId: string }) => Promise<ChannelHealthCheck> | ChannelHealthCheck;
+  /** Resolves outbound attachment references (artifact ids, data/http URLs) into bytes. */
+  artifacts?: ArtifactService;
 }
 
 export interface CreateConnectionInput {
@@ -121,7 +126,7 @@ export interface PersistentChannelTransport {
   onCreated?(conn: PersistentChannelRef): void;
   /** Current live-session state, if this transport owns the connection. */
   status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
-  send(connectionId: string, chatId: string, body: string): Promise<void>;
+  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[]): Promise<void>;
   /** Show/clear the typing indicator (best-effort). */
   setTyping?(connectionId: string, chatId: string, on: boolean): Promise<void>;
   /** Tear down the live session when a connection is deleted. */
@@ -203,15 +208,16 @@ export class ChannelBridge {
    * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
    * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
    */
-  async deliverToConnection(args: { connectionId: string; chatId: string; body: string }): Promise<void> {
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[] }): Promise<void> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, args.connectionId))
       .get();
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
+    const attachments = await this.#resolveAttachments(row.workspaceId, args.attachments);
     try {
-      await this.#sendRow(row, args.chatId, args.body);
+      await this.#sendRow(row, args.chatId, args.body, attachments);
       this.#markActive(row.id);
       this.deps.bus.publish(
         REALTIME_ROOMS.workspace(row.workspaceId),

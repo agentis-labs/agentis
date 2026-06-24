@@ -41,6 +41,7 @@ import {
   type RouterNodeConfig,
   type MergeNodeConfig,
   type CheckpointNodeConfig,
+  type HumanInputNodeConfig,
   type ScratchpadNodeConfig,
   type AgentSwarmNodeConfig,
   type ArtifactCollectNodeConfig,
@@ -2990,7 +2991,7 @@ export class WorkflowEngine {
       return { requiredInputs: 'all', mergeStrategy: 'merge_keys', onError: 'fail' };
     }
     const mergeCfg = node.config as MergeNodeConfig;
-    const parallel = this.#nearestUpstreamParallel(ctx, node.id);
+    const parallel = this.#parallelForMerge(ctx, mergeCfg, node.id);
     const requiredInputs = mergeCfg.requiredInputs !== 'all'
       ? mergeCfg.requiredInputs
       : parallel?.waitFor === 'first'
@@ -3001,6 +3002,21 @@ export class WorkflowEngine {
       mergeStrategy: parallel?.mergeStrategy ?? 'merge_keys',
       onError: parallel?.onBranchError === 'continue_with_results' ? 'continue' : 'fail',
     };
+  }
+
+  /**
+   * The `parallel` whose policy governs a merge: the explicitly-bound
+   * `parallelSourceId` when it resolves to a parallel node, otherwise the
+   * nearest upstream parallel (heuristic). Explicit binding removes the
+   * ambiguity in diamond / nested fan-ins.
+   */
+  #parallelForMerge(ctx: RunningContext, mergeCfg: MergeNodeConfig, mergeNodeId: string): ParallelNodeConfig | undefined {
+    if (mergeCfg.parallelSourceId) {
+      const named = ctx.graph.nodes.find((n) => n.id === mergeCfg.parallelSourceId);
+      if (named?.config.kind === 'parallel') return named.config as ParallelNodeConfig;
+      // Bound but unresolvable (stale id / not a parallel) → fall back, don't break.
+    }
+    return this.#nearestUpstreamParallel(ctx, mergeNodeId);
   }
 
   /** Nearest `parallel` ancestor of a node (BFS backward through edges), if any. */
@@ -3117,6 +3133,10 @@ export class WorkflowEngine {
       }
       case 'checkpoint': {
         await this.#executeCheckpoint(ctx, node, resolvedConfig as CheckpointNodeConfig, item.inputData);
+        return;
+      }
+      case 'human_input': {
+        await this.#executeHumanInput(ctx, node, resolvedConfig as HumanInputNodeConfig, item.inputData);
         return;
       }
       case 'extension_task': {
@@ -4793,10 +4813,16 @@ export class WorkflowEngine {
     let brainBlock = '';
     if (this.deps.sharedIntelligence) {
       try {
+        // §C7 — App-owned runs recall the UNION of the App's brain and the
+        // operating agent's own memory (neither is amnesic to the other); a
+        // plain run just recalls the agent's scope. Workspace-shared atoms come
+        // through either pass.
+        const appScopeId = this.#appScopeId(ctx.workspaceId, ctx.workflowId);
+        const recallScopes = [appScopeId, agentId].filter((s): s is string => Boolean(s));
         const brain = await this.deps.sharedIntelligence.buildDispatchContext({
           workspaceId: ctx.workspaceId,
-          // App-owned runs recall from the App's brain; otherwise the agent's own scope.
-          scopeId: this.#appScopeId(ctx.workspaceId, ctx.workflowId) ?? agentId ?? null,
+          scopeId: appScopeId ?? agentId ?? null,
+          scopeIds: recallScopes.length > 0 ? Array.from(new Set(recallScopes)) : undefined,
           agentId: agentId ?? null,
           runId: ctx.runId,
           taskDescription: prompt,
@@ -5738,7 +5764,17 @@ export class WorkflowEngine {
     config: WaitNodeConfig,
     inputData: Record<string, unknown>,
   ): Promise<void> {
-    const delayMs = Math.max(0, Math.floor(config.delayMs ?? 0));
+    // Absolute wake time wins over a relative delay when set: "wait until <ISO>".
+    let delayMs: number;
+    if (config.untilIso) {
+      const untilMs = Date.parse(config.untilIso);
+      if (Number.isNaN(untilMs)) {
+        throw new AgentisError('VALIDATION_FAILED', `wait node: untilIso '${config.untilIso}' is not a valid ISO 8601 timestamp`);
+      }
+      delayMs = Math.max(0, untilMs - Date.now());
+    } else {
+      delayMs = Math.max(0, Math.floor(config.delayMs ?? 0));
+    }
     if (delayMs <= 0) {
       await this.#completeNode(ctx, node.id, inputData);
       return;
@@ -6885,6 +6921,45 @@ export class WorkflowEngine {
     }
   }
 
+  /**
+   * `human_input`: pause the run and collect structured form values from a human,
+   * then resume with those values as the node output. Reuses the checkpoint
+   * approval/resume path (source 'checkpoint'); `resolveApproval` detects the
+   * human_input node and completes it with the submitted `data` instead of a
+   * bare `{ approved: true }`.
+   */
+  async #executeHumanInput(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: HumanInputNodeConfig,
+    _inputData: Record<string, unknown>,
+  ): Promise<void> {
+    const fieldCount = Array.isArray(config.fields) ? config.fields.length : 0;
+    const approval = await this.deps.approvals.create({
+      workspaceId: ctx.workspaceId,
+      ambientId: ctx.ambientId,
+      userId: ctx.userId,
+      runId: ctx.runId,
+      taskId: null,
+      targetId: node.id,
+      gatewayId: null,
+      source: 'checkpoint',
+      title: (config.prompt?.trim() || `Provide input: ${node.title}`).slice(0, 200),
+      summary: `Fill ${fieldCount} field(s) to continue.`,
+      confidence: null,
+    });
+    this.#pendingApprovals(ctx).set(approval.id, { kind: 'checkpoint', targetId: node.id });
+    const ns = ctx.state.nodeStates[node.id]!;
+    ns.status = 'WAITING';
+    await this.#persistRun(ctx);
+    // Carry the form spec so the UI can render the inputs to collect.
+    this.deps.bus.publish(
+      REALTIME_ROOMS.run(ctx.runId),
+      REALTIME_EVENTS.NODE_WAITING_FOR_INPUT,
+      { runId: ctx.runId, nodeId: node.id, reason: 'human_input', approvalId: approval.id, form: { prompt: config.prompt ?? null, fields: config.fields } },
+    );
+  }
+
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Lifecycle helpers
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -6958,12 +7033,32 @@ export class WorkflowEngine {
     return ctx.pendingApprovals;
   }
 
+  #nodeRetryAttempts(ctx: RunningContext): Map<string, number> {
+    if (!ctx.nodeRetryAttempts) ctx.nodeRetryAttempts = new Map();
+    return ctx.nodeRetryAttempts;
+  }
+
+  /** Whether a failed node qualifies for generic `retryPolicy` re-dispatch. */
+  #shouldGenericRetry(node: WorkflowNode, error: string): boolean {
+    const policy = node.retryPolicy;
+    if (!policy || !(policy.maxAttempts > 0)) return false;
+    // Agent-like kinds run through self-heal / AgentRetryPolicy — never double-retry.
+    if (GENERIC_RETRY_EXCLUDED_KINDS.has(node.config.kind)) return false;
+    // Self-heal-terminal / recoverable-model errors are handled separately upstream.
+    if (isSelfHealTerminalError(error)) return false;
+    if (policy.retryOn && policy.retryOn.length > 0) {
+      const lc = error.toLowerCase();
+      if (!policy.retryOn.some((s) => lc.includes(s.toLowerCase()))) return false;
+    }
+    return true;
+  }
+
   /**
    * Route an approval resolution to the right resume path (checkpoint node or
    * phase gate). The resume target is looked up from the in-memory map keyed by
    * the approval id. Public â€” called from the approval-resolution wiring.
    */
-  async resolveApproval(args: { runId: string; approvalId: string; decision: 'approve' | 'reject' }): Promise<void> {
+  async resolveApproval(args: { runId: string; approvalId: string; decision: 'approve' | 'reject'; data?: Record<string, unknown> }): Promise<void> {
     const ctx = this.#runs.get(args.runId) ?? this.#ensureRecoveredCtx(args.runId);
     if (!ctx) return;
     const pending = ctx.pendingApprovals?.get(args.approvalId) ?? this.#recoverPendingApproval(ctx, args.approvalId);
@@ -7027,6 +7122,22 @@ export class WorkflowEngine {
         }
         await this.#failNode(ctx, pending.targetId, 'self-healing fix was rejected by the operator');
         this.#audit(ctx, { nodeId: pending.targetId, action: 'self_heal.rejected', actorType: 'user', actorId: 'operator', outputSummary: 'operator rejected repair' });
+        void this.#tick(ctx);
+      }
+      return;
+    }
+    // checkpoint / human_input. A human_input node completes with the SUBMITTED
+    // form values as its output; a plain checkpoint completes with { approved }.
+    const resolvedNode = ctx.graph.nodes.find((n) => n.id === pending.targetId);
+    if (resolvedNode?.config.kind === 'human_input') {
+      if (args.decision === 'approve') {
+        const cfg = resolvedNode.config as HumanInputNodeConfig;
+        const submitted = args.data ?? {};
+        const output = cfg.outputKey ? { [cfg.outputKey]: submitted } : submitted;
+        await this.notifyTaskCompleted({ runId: args.runId, nodeId: pending.targetId, output });
+      } else {
+        // The human declined to provide input — fail the node so the run doesn't hang.
+        await this.#failNode(ctx, pending.targetId, 'human input was declined');
         void this.#tick(ctx);
       }
       return;
@@ -7634,6 +7745,53 @@ export class WorkflowEngine {
     if (node?.config.kind === 'agent_task') {
       this.#reflectHardNodeFailure(ctx, node, error);
     }
+    // Generic per-node retryPolicy: bounded re-dispatch of transient IO /
+    // deterministic failures BEFORE error-edge routing, so any non-agent node
+    // gets the resilience that previously only agent_task had. Agent-like kinds
+    // are excluded (they use self-heal / AgentRetryPolicy above).
+    if (node && this.#shouldGenericRetry(node, error)) {
+      const attempts = this.#nodeRetryAttempts(ctx);
+      const prior = attempts.get(nodeId) ?? 0;
+      const cap = Math.min(Math.max(node.retryPolicy!.maxAttempts, 0), 10);
+      if (prior < cap) {
+        const attempt = prior + 1;
+        attempts.set(nodeId, attempt);
+        const base = node.retryPolicy!.backoffMs && node.retryPolicy!.backoffMs > 0 ? node.retryPolicy!.backoffMs : 1000;
+        const delay = Math.min(base * 2 ** (attempt - 1), 60_000);
+        const inputData = ns.inputData ?? {};
+        // Hold the run open during the backoff — a synthetic execution keeps the
+        // settle loop from marking the run done while the retry timer is pending.
+        delete ctx.state.activeExecutions[nodeId];
+        ctx.state.activeExecutions[nodeId] = {
+          taskId: `retry:${nodeId}`,
+          nodeId,
+          executorType: 'wait',
+          executorRef: `retry:${attempt}/${cap}`,
+          startedAt: new Date().toISOString(),
+        };
+        ns.status = 'WAITING';
+        this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, {
+          runId: ctx.runId,
+          nodeId,
+          attempt,
+          reason: 'retry_policy',
+        });
+        await this.#persistRun(ctx).catch(() => {});
+        const timer = setTimeout(() => {
+          delete ctx.state.activeExecutions[nodeId];
+          void (async () => {
+            try {
+              await this.#dispatchNode(ctx, node, { nodeId, priority: 0, insertedAt: new Date().toISOString(), inputData });
+            } catch (err) {
+              await this.#failNode(ctx, nodeId, (err as Error).message);
+            }
+            void this.#tick(ctx);
+          })();
+        }, delay);
+        timer.unref?.();
+        return; // retrying — do not route the error / fail the node yet
+      }
+    }
     delete ctx.state.activeExecutions[nodeId];
 
     // â”€â”€ Error-edge routing (must happen BEFORE we mark the node as FAILED
@@ -8210,6 +8368,8 @@ interface RunningContext {
   swarms: Map<string, SwarmState>;
   /** Self-heal attempt counters keyed by agent_task node id. */
   selfHealAttempts: Map<string, number>;
+  /** Generic `retryPolicy` attempt counters keyed by node id (non-agent nodes). */
+  nodeRetryAttempts?: Map<string, number>;
   /**
    * Run-scoped cancellation (NATIVE-ADVANCEMENT Proposal 7, Agentis-native form).
    * `cancelRun` aborts this so in-flight work that honors the signal (HTTP
@@ -8303,6 +8463,15 @@ function parseSwarmTaskId(taskId: string): { nodeId: string; index: number } | n
  * 256 is far above any real need while keeping a runaway bounded.
  */
 export const WORKFLOW_PARALLELISM_HARD_CAP = 256;
+
+/** Node kinds that own their retry/self-heal path; excluded from generic retryPolicy. */
+const GENERIC_RETRY_EXCLUDED_KINDS = new Set<string>([
+  'agent_task',
+  'agent_swarm',
+  'agent_session',
+  'dynamic_swarm',
+  'planner',
+]);
 
 export function resolveParallelism(): number {
   const raw = process.env.AGENTIS_WORKFLOW_PARALLELISM ?? CONSTANTS.WORKFLOW_PARALLELISM_DEFAULT;

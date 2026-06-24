@@ -37,6 +37,7 @@ const SUPPORTED_NODE_KINDS = new Set([
   'checkpoint',
   'subflow',
   'scratchpad',
+  'human_input',
   'agent_swarm',
   'dynamic_swarm',
   'planner',

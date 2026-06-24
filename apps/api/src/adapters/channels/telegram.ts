@@ -15,7 +15,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -133,35 +133,63 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string }): Promise<void> {
-    const url = `${TELEGRAM_API}/bot${encodeURIComponent(args.token)}/sendMessage`;
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<void> {
+    const attachments = args.attachments ?? [];
+    if (attachments.length === 0) {
+      await this.#sendMessage(args.token, args.chatId, args.body);
+      return;
+    }
+    // First attachment carries the body as its caption; the rest go captionless.
+    for (let i = 0; i < attachments.length; i += 1) {
+      const caption = i === 0 ? args.body : '';
+      await this.#sendMedia(args.token, args.chatId, attachments[i]!, caption);
+    }
+  }
+
+  async #sendMessage(token: string, chatId: string, body: string): Promise<void> {
+    const url = `${TELEGRAM_API}/bot${encodeURIComponent(token)}/sendMessage`;
     const res = await this.fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: args.chatId, text: args.body }),
+      body: JSON.stringify({ chat_id: chatId, text: body }),
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      let description = text.slice(0, 200);
-      try {
-        const json = JSON.parse(text) as { description?: string };
-        if (json.description) description = json.description;
-      } catch {
-        /* non-JSON body — keep the raw text */
-      }
-      // "chat not found" is Telegram's response when the bot has never had a
-      // conversation with this chat. Bots cannot initiate chats: the user must
-      // message the bot first (or the chat must be a group the bot has joined),
-      // and the chat ID must be that conversation's numeric ID. Surface that
-      // instead of the opaque API string.
-      const hint = /chat not found/i.test(description)
-        ? `: the bot can't message chat "${args.chatId}" until that chat messages the bot first (open the bot in Telegram and press Start), and the chat ID must be the numeric ID of that conversation`
-        : '';
-      throw new AgentisError(
-        'CHANNEL_SEND_FAILED',
-        `telegram sendMessage failed (${res.status}): ${description}${hint}`,
-      );
+    if (!res.ok) await this.#throwSendError(res, chatId, 'sendMessage');
+  }
+
+  async #sendMedia(token: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<void> {
+    const isPhoto = attachment.kind === 'image';
+    const method = isPhoto ? 'sendPhoto' : 'sendDocument';
+    const field = isPhoto ? 'photo' : 'document';
+    const form = new FormData();
+    form.set('chat_id', chatId);
+    if (caption) form.set('caption', caption.slice(0, 1024));
+    form.set(field, new Blob([attachment.data], { type: attachment.mimeType }), attachment.filename);
+    const url = `${TELEGRAM_API}/bot${encodeURIComponent(token)}/${method}`;
+    const res = await this.fetchImpl(url, { method: 'POST', body: form });
+    if (!res.ok) await this.#throwSendError(res, chatId, method);
+  }
+
+  async #throwSendError(res: Response, chatId: string, method: string): Promise<never> {
+    const text = await res.text().catch(() => '');
+    let description = text.slice(0, 200);
+    try {
+      const json = JSON.parse(text) as { description?: string };
+      if (json.description) description = json.description;
+    } catch {
+      /* non-JSON body — keep the raw text */
     }
+    // "chat not found" is Telegram's response when the bot has never had a
+    // conversation with this chat. Bots cannot initiate chats: the user must
+    // message the bot first (or the chat must be a group the bot has joined),
+    // and the chat ID must be that conversation's numeric ID. Surface that
+    // instead of the opaque API string.
+    const hint = /chat not found/i.test(description)
+      ? `: the bot can't message chat "${chatId}" until that chat messages the bot first (open the bot in Telegram and press Start), and the chat ID must be the numeric ID of that conversation`
+      : '';
+    throw new AgentisError(
+      'CHANNEL_SEND_FAILED',
+      `telegram ${method} failed (${res.status}): ${description}${hint}`,
+    );
   }
 
   verify(args: {

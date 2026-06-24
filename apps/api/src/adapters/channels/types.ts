@@ -42,17 +42,52 @@ export interface ParsedInboundMessage {
   from?: string;
 }
 
+/**
+ * A fully-resolved outbound attachment: raw bytes plus the metadata a channel
+ * API needs to upload it. The ChannelBridge resolves loose references
+ * (artifact ids, data URLs, http URLs) into these before calling `send`, so
+ * adapters never fetch or decode anything themselves.
+ */
+export interface OutboundAttachment {
+  /** `image` → inline photo where the channel supports it; `file` → document upload. */
+  kind: 'image' | 'file';
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+}
+
+/**
+ * A loose, caller-supplied attachment reference (from `agentis.channel.send` or
+ * a turn reply). The ChannelBridge resolves these into `OutboundAttachment`s.
+ * Provide exactly one source: `artifactId`, or a `url` that is an `artifact:<id>`,
+ * `data:` URL, or `http(s)` URL.
+ */
+export interface OutboundAttachmentRef {
+  url?: string;
+  artifactId?: string;
+  filename?: string;
+  mimeType?: string;
+  /** Hint how to deliver; inferred from the resolved MIME type when omitted. */
+  kind?: 'image' | 'file';
+}
+
 export interface ChannelAdapter {
   readonly kind: ChannelKind;
 
   /**
-   * Send a text message via the channel's API. Throws on transport failure.
+   * Send a message via the channel's API. Throws on transport failure.
+   *
+   * When `attachments` are present, the adapter uploads them via the channel's
+   * media API (Telegram sendPhoto/sendDocument, Discord multipart, Slack
+   * files). The `body` becomes the caption/text. Adapters that cannot carry a
+   * given attachment should still deliver the text.
    */
   send(args: {
     token: string;
     chatId: string;
     body: string;
     settings?: Record<string, unknown>;
+    attachments?: OutboundAttachment[];
   }): Promise<void>;
 
   /**

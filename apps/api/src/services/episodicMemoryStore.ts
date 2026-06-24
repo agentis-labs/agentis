@@ -171,8 +171,12 @@ export class EpisodicMemoryStore {
       // set them to inject as constitutional / carry scope-affinity links.
       governing: (input as { governing?: boolean }).governing ?? false,
       appliesTo: (input as { appliesTo?: string[] }).appliesTo ?? [],
-      // §C7 — team visibility. Default shared; private writes opt out.
-      shared: (input as { shared?: boolean }).shared ?? true,
+      // §C7/§3.6 — team visibility. Workspace-level memory (no scope) is shared
+      // by default; scoped (agent/App) memory stays PRIVATE to its scope unless
+      // the writer explicitly opts in, so one agent's personal memory never leaks
+      // workspace-wide. Recall RLS already admits `shared OR own-scope` atoms, and
+      // App-owned runs recall the union of their scopes (§C7 multi-scope).
+      shared: (input as { shared?: boolean }).shared ?? ((input.scopeId ?? null) === null),
       metadata: input.metadata ?? {},
       reinforcedAt: null,
       archivedAt: null,
@@ -238,7 +242,7 @@ export class EpisodicMemoryStore {
         reinforcedAt: now,
         updatedAt: now,
       })
-      .where(eq(schema.memoryEpisodes.id, id))
+      .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
       .run();
     return this.byId(workspaceId, id);
   }
@@ -272,7 +276,7 @@ export class EpisodicMemoryStore {
 
     this.db.update(schema.memoryEpisodes)
       .set(set)
-      .where(eq(schema.memoryEpisodes.id, id))
+      .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
       .run();
     return this.byId(workspaceId, id);
   }

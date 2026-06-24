@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
 
 const SLACK_API = 'https://slack.com/api';
 
@@ -34,8 +34,13 @@ export class SlackChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string }): Promise<void> {
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<void> {
     const [channel, threadTs] = args.chatId.split(':thread:');
+    const attachments = args.attachments ?? [];
+    if (attachments.length > 0) {
+      await this.#uploadFiles(args.token, channel!, threadTs, args.body, attachments);
+      return;
+    }
     const res = await this.fetchImpl(`${SLACK_API}/chat.postMessage`, {
       method: 'POST',
       headers: {
@@ -46,16 +51,61 @@ export class SlackChannelAdapter implements ChannelAdapter {
     });
     const json = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
     if (!res.ok || json.ok === false) {
-      const error = json.error ?? res.statusText;
-      const hint = error === 'channel_not_found'
-        ? ' Make sure the default channel ID exists and invite the bot to the channel.'
-        : error === 'not_in_channel'
-          ? ' Invite the Slack app bot to the channel, then retry.'
-          : /missing_scope/i.test(error)
-            ? ' Add chat:write to the Slack app scopes and reinstall the app.'
-            : '';
-      throw new AgentisError('CHANNEL_SEND_FAILED', `slack sendMessage failed: ${error}.${hint}`);
+      throw new AgentisError('CHANNEL_SEND_FAILED', `slack sendMessage failed: ${this.#explain(json.error ?? res.statusText)}`);
     }
+  }
+
+  /**
+   * Upload files via Slack's external-upload flow (the supported replacement for
+   * the deprecated `files.upload`): getUploadURLExternal → PUT bytes →
+   * completeUploadExternal. The body rides along as `initial_comment`.
+   */
+  async #uploadFiles(token: string, channel: string, threadTs: string | undefined, body: string, attachments: OutboundAttachment[]): Promise<void> {
+    const completed: Array<{ id: string; title: string }> = [];
+    for (const attachment of attachments) {
+      const params = new URLSearchParams({ filename: attachment.filename, length: String(attachment.data.length) });
+      const urlRes = await this.fetchImpl(`${SLACK_API}/files.getUploadURLExternal`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Bearer ${token}` },
+        body: params.toString(),
+      });
+      const urlJson = await urlRes.json().catch(() => ({})) as { ok?: boolean; error?: string; upload_url?: string; file_id?: string };
+      if (!urlRes.ok || urlJson.ok === false || !urlJson.upload_url || !urlJson.file_id) {
+        throw new AgentisError('CHANNEL_SEND_FAILED', `slack getUploadURLExternal failed: ${this.#explain(urlJson.error ?? urlRes.statusText)}`);
+      }
+      const putForm = new FormData();
+      putForm.set('file', new Blob([attachment.data], { type: attachment.mimeType }), attachment.filename);
+      const putRes = await this.fetchImpl(urlJson.upload_url, { method: 'POST', body: putForm });
+      if (!putRes.ok) {
+        throw new AgentisError('CHANNEL_SEND_FAILED', `slack file upload failed (${putRes.status})`);
+      }
+      completed.push({ id: urlJson.file_id, title: attachment.filename });
+    }
+    const completeRes = await this.fetchImpl(`${SLACK_API}/files.completeUploadExternal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=utf-8', authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        files: completed,
+        channel_id: channel,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        ...(body ? { initial_comment: body } : {}),
+      }),
+    });
+    const completeJson = await completeRes.json().catch(() => ({})) as { ok?: boolean; error?: string };
+    if (!completeRes.ok || completeJson.ok === false) {
+      throw new AgentisError('CHANNEL_SEND_FAILED', `slack completeUploadExternal failed: ${this.#explain(completeJson.error ?? completeRes.statusText)}`);
+    }
+  }
+
+  #explain(error: string): string {
+    const hint = error === 'channel_not_found'
+      ? ' Make sure the default channel ID exists and invite the bot to the channel.'
+      : error === 'not_in_channel'
+        ? ' Invite the Slack app bot to the channel, then retry.'
+        : /missing_scope/i.test(error)
+          ? ' Add chat:write (and files:write for attachments) to the Slack app scopes and reinstall the app.'
+          : '';
+    return `${error}.${hint}`;
   }
 
   verify(args: { headers: Record<string, string | undefined>; rawBody: string; secret: string | null }): boolean {

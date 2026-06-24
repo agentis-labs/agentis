@@ -141,6 +141,7 @@ const mergeConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('merge'),
   requiredInputs: z.union([z.literal('all'), z.literal('any'), z.array(z.string())]),
+  parallelSourceId: z.string().min(1).optional(),
 });
 
 const checkpointConfigSchema = z.object({
@@ -251,6 +252,11 @@ export const workflowNodeSchema = z.object({
   title: z.string().max(255).optional(),
   position: z.object({ x: z.number(), y: z.number() }).optional(),
   config: workflowNodeConfigSchema,
+  retryPolicy: z.object({
+    maxAttempts: z.number().int().min(0).max(10),
+    backoffMs: z.number().int().positive().optional(),
+    retryOn: z.array(z.string()).optional(),
+  }).optional(),
 });
 
 export const workflowEdgeSchema = z.object({

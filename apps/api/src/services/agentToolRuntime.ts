@@ -15,6 +15,8 @@ import type { KnowledgeBaseService } from './knowledgeBase.js';
 import type { WorkflowStoreService } from './workflowStore.js';
 import type { AgentMemoryService } from './agentMemory.js';
 import type { MemoryStore } from './memoryStore.js';
+import type { BrowserPool, BrowserRenderOptions } from './browserPool.js';
+import type { ArtifactService } from './artifactService.js';
 import type { Logger } from '../logger.js';
 
 export interface AgentToolResult {
@@ -55,6 +57,10 @@ export interface AgentToolRuntimeDeps {
   callWorkflow?: (args: { workspaceId: string; workflowId: string; inputs: Record<string, unknown> }) => Promise<unknown>;
   /** Optional web-search provider. When absent, `web_search` reports unavailable. */
   webSearch?: (query: string) => Promise<unknown>;
+  /** Headless Chromium pool — backs the `browser_*` tools. Absent → tools report unavailable. */
+  browser?: BrowserPool;
+  /** Artifact persistence — screenshots become referenceable artifacts for channel send. */
+  artifacts?: ArtifactService;
   /** App Datastore (§5) — backs the `data_*` tools. Scoped by `context.appId`. */
   appData?: AppDatastore;
   /** AG-UI surfaces (§4) — backs the `ui_render` / `ui_patch` / `ui_action_schema` tools. */
@@ -230,6 +236,53 @@ export class AgentToolRuntime {
         return await this.deps.webSearch(requireStr(args.query, 'query'));
       }
 
+      // ── Browser/computer-use (headless Chromium via BrowserPool) ──
+      case 'browser_screenshot': {
+        const browser = this.#requireBrowser();
+        const opts = browserOptsFromArgs(args, { requireTarget: true });
+        const png = await browser.screenshot(opts);
+        const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+        if (!this.deps.artifacts) {
+          // No artifact store wired — still return the image inline so the caller isn't blocked.
+          return { mimeType: 'image/png', dataUrl };
+        }
+        const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : 'Screenshot';
+        const artifact = this.deps.artifacts.persist({
+          workspaceId,
+          type: 'image',
+          title,
+          name: `${slugify(title)}.png`,
+          content: dataUrl,
+          agentId: context.agentId ?? null,
+          workflowId: context.workflowId ?? null,
+          savedBy: 'browser_screenshot',
+        });
+        return { artifactId: artifact.id, ref: artifact.ref, url: artifact.url, mimeType: 'image/png' };
+      }
+      case 'browser_navigate': {
+        const browser = this.#requireBrowser();
+        const r = await browser.navigate(browserOptsFromArgs(args, { requireTarget: true }));
+        return { title: r.title, text: r.text.slice(0, 20_000), html: r.html.slice(0, 200_000) };
+      }
+      case 'browser_extract_text': {
+        const browser = this.#requireBrowser();
+        const text = await browser.extractText(browserOptsFromArgs(args, { requireTarget: true }));
+        return { text: text.slice(0, 50_000) };
+      }
+      case 'browser_extract_table': {
+        const browser = this.#requireBrowser();
+        const rows = await browser.extractTable(browserOptsFromArgs(args, { requireTarget: true }));
+        return { rows, count: rows.length };
+      }
+      case 'browser_fill_form': {
+        const browser = this.#requireBrowser();
+        const opts = browserOptsFromArgs(args, { requireTarget: true });
+        opts.formData = requireObj(args.formData, 'formData') as Record<string, string>;
+        if (typeof args.submitSelector === 'string') opts.submitSelector = args.submitSelector;
+        const r = await browser.fillForm(opts);
+        return { title: r.title, values: r.values, html: r.html.slice(0, 200_000) };
+      }
+
       // ── AG-UI: author Agentic App surfaces (§4) ──
       case 'ui_render': {
         const surfaces = this.#requireSurfaces();
@@ -367,6 +420,11 @@ export class AgentToolRuntime {
     return out;
   }
 
+  #requireBrowser(): BrowserPool {
+    if (!this.deps.browser) throw new AgentisError('VALIDATION_FAILED', 'browser runtime is not wired (Playwright unavailable)');
+    return this.deps.browser;
+  }
+
   #requireData(): AppDatastore {
     if (!this.deps.appData) throw new AgentisError('VALIDATION_FAILED', 'App Datastore is not wired in this runtime');
     return this.deps.appData;
@@ -386,6 +444,32 @@ export class AgentToolRuntime {
     }
     throw new AgentisError('VALIDATION_FAILED', 'this tool requires an Agentic App context (no appId resolved)');
   }
+}
+
+/** Build BrowserPool render options from loosely-typed tool args. */
+function browserOptsFromArgs(args: Record<string, unknown>, opts: { requireTarget: boolean }): BrowserRenderOptions {
+  const url = typeof args.url === 'string' && args.url.trim() ? args.url.trim() : undefined;
+  const html = typeof args.html === 'string' && args.html ? args.html : undefined;
+  if (opts.requireTarget && !url && !html) {
+    throw new AgentisError('VALIDATION_FAILED', 'browser tool requires a `url` or `html` argument');
+  }
+  const out: BrowserRenderOptions = {};
+  if (url) out.url = url;
+  if (html) out.html = html;
+  if (typeof args.selector === 'string' && args.selector.trim()) out.selector = args.selector.trim();
+  if (typeof args.fullPage === 'boolean') out.fullPage = args.fullPage;
+  const vp = args.viewport;
+  if (vp && typeof vp === 'object' && !Array.isArray(vp)) {
+    const v = vp as { width?: unknown; height?: unknown };
+    if (typeof v.width === 'number' && typeof v.height === 'number') {
+      out.viewport = { width: v.width, height: v.height };
+    }
+  }
+  return out;
+}
+
+function slugify(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'screenshot';
 }
 
 function requireObj(value: unknown, name: string): Record<string, unknown> {

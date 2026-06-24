@@ -11,7 +11,7 @@
  */
 
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
 
 const DISCORD_API = 'https://discord.com/api/v10';
 
@@ -47,16 +47,17 @@ export class DiscordChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string }): Promise<void> {
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<void> {
     const url = `${DISCORD_API}/channels/${encodeURIComponent(args.chatId)}/messages`;
-    const res = await this.fetchImpl(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bot ${args.token}`,
-      },
-      body: JSON.stringify({ content: args.body }),
-    });
+    const attachments = args.attachments ?? [];
+    const init: RequestInit = attachments.length > 0
+      ? { method: 'POST', headers: { authorization: `Bot ${args.token}` }, body: this.#multipart(args.body, attachments) }
+      : {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bot ${args.token}` },
+          body: JSON.stringify({ content: args.body }),
+        };
+    const res = await this.fetchImpl(url, init);
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       const hint = res.status === 403
@@ -69,6 +70,17 @@ export class DiscordChannelAdapter implements ChannelAdapter {
         `discord sendMessage failed: ${res.status} ${text.slice(0, 200)}${hint}`,
       );
     }
+  }
+
+  /** Build a multipart body: `payload_json` (content + attachment descriptors) + one part per file. */
+  #multipart(body: string, attachments: OutboundAttachment[]): FormData {
+    const form = new FormData();
+    const descriptors = attachments.map((a, i) => ({ id: i, filename: a.filename }));
+    form.set('payload_json', JSON.stringify({ content: body, attachments: descriptors }));
+    attachments.forEach((a, i) => {
+      form.set(`files[${i}]`, new Blob([a.data], { type: a.mimeType }), a.filename);
+    });
+    return form;
   }
 
   verify(): boolean {

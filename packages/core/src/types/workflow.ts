@@ -48,6 +48,7 @@ export type WorkflowNodeType =
   | 'browser'
   // Human interaction
   | 'checkpoint'
+  | 'human_input'
   // Utility & data primitives (WORKFLOW-UPDATE — n8n-inspired) — deterministic
   | 'error_trigger'        // fires a workflow on another workflow's failure
   | 'stop_error'           // terminate the run with a custom error
@@ -84,12 +85,37 @@ export interface WorkflowGraph {
   phases?: WorkflowPhase[];
 }
 
+/**
+ * Generic per-node retry policy. Applies to deterministic / integration / IO
+ * node kinds (transform, code, http_request, integration, browser, graphql,
+ * extension_task, …). Agent-like nodes (`agent_task`/`agent_swarm`/
+ * `agent_session`) are EXCLUDED — they run through self-heal / their own
+ * `AgentRetryPolicy`, and double-retrying them would re-bill model calls.
+ */
+export interface NodeRetryPolicy {
+  /** Retries AFTER the first failure (0/undefined = no retry). Capped by the engine. */
+  maxAttempts: number;
+  /** Delay before the first retry; doubled each attempt up to a cap. Default 1000ms. */
+  backoffMs?: number;
+  /**
+   * Only retry when the error message matches one of these substrings (case-
+   * insensitive). Empty/undefined = retry on any error.
+   */
+  retryOn?: string[];
+}
+
 export interface WorkflowNode {
   id: string;
   type: WorkflowNodeType;
   title: string;
   position: { x: number; y: number };
   config: WorkflowNodeConfig;
+  /**
+   * Optional generic retry policy for transient failures. Handled centrally by
+   * the engine BEFORE error-edge routing, so any IO/deterministic node gets the
+   * resilience that previously only `agent_task` had. See {@link NodeRetryPolicy}.
+   */
+  retryPolicy?: NodeRetryPolicy;
 }
 
 export interface WorkflowEdge {
@@ -178,6 +204,7 @@ export type WorkflowNodeConfig = (
   | RouterNodeConfig
   | MergeNodeConfig
   | CheckpointNodeConfig
+  | HumanInputNodeConfig
   | SubflowNodeConfig
   | ScratchpadNodeConfig
   | AgentSwarmNodeConfig
@@ -500,12 +527,43 @@ export interface RouterNodeConfig {
 export interface MergeNodeConfig {
   kind: 'merge';
   requiredInputs: 'all' | 'any' | string[];
+  /**
+   * Explicitly bind this merge to the `parallel` node whose fan-out it joins.
+   * When set, the engine reads join policy (waitFor / onBranchError /
+   * mergeStrategy) from THAT parallel instead of guessing the nearest upstream
+   * one — removes the ambiguity in diamond / nested fan-ins. Falls back to the
+   * nearest-upstream heuristic when unset or unresolvable.
+   */
+  parallelSourceId?: string;
 }
 
 export interface CheckpointNodeConfig {
   kind: 'checkpoint';
   approvalMode: 'manual' | 'auto_after_timeout';
   timeoutMs?: number;
+}
+
+/**
+ * Pause the run and collect STRUCTURED input from a human via a form, then
+ * continue. Unlike `checkpoint` (approve/reject), the operator submits field
+ * values which become the node's output — e.g. "draft → I fill in the subject &
+ * send-date → publish". Resumes through the same approval-resume path; the
+ * submitted values arrive as the resolution payload.
+ */
+export interface HumanInputNodeConfig {
+  kind: 'human_input';
+  /** Prompt shown above the form. */
+  prompt?: string;
+  /** The fields the human fills. */
+  fields: Array<{
+    key: string;
+    label?: string;
+    type?: 'text' | 'textarea' | 'number' | 'boolean' | 'select' | 'date';
+    required?: boolean;
+    options?: Array<{ value: string; label?: string }>;
+  }>;
+  /** Wrap the submitted values under this key in the node output. Omitted = the values ARE the output. */
+  outputKey?: string;
 }
 
 export interface SubflowNodeConfig {
@@ -531,6 +589,13 @@ export interface WaitNodeConfig {
   kind: 'wait';
   /** Delay in milliseconds. ≤0 completes instantly. */
   delayMs: number;
+  /**
+   * Absolute wake time (ISO 8601, e.g. "2026-07-01T09:00:00Z"). When set, the
+   * engine waits until then instead of for `delayMs` — enabling "send Monday 9am"
+   * / SLA-style schedules. A time already in the past completes instantly.
+   * Supports `{{variable}}` templates (resolved before this handler).
+   */
+  untilIso?: string;
 }
 
 /** JS expression evaluated against `input`. Output replaces the node's outputData. */

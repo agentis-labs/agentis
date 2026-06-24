@@ -30,6 +30,8 @@ import type { AbilityCreationService } from '../abilityCreationService.js';
 import type { MemoryStore } from '../memoryStore.js';
 import type { PlanService } from '../planService.js';
 import type { ChannelBridge } from '../channelBridge.js';
+import type { BrowserPool } from '../browserPool.js';
+import type { ArtifactService } from '../artifactService.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -86,4 +88,8 @@ export interface ToolHandlerDeps {
   specialistRouter?: SpecialistDemandRouter;
   plans?: PlanService;
   channels?: ChannelBridge;
+  /** Headless Chromium pool — backs the `agentis.browser.*` tools. */
+  browserPool?: BrowserPool;
+  /** Artifact persistence + resolution — screenshots become referenceable, channel attachments resolve to bytes. */
+  artifacts?: ArtifactService;
 }

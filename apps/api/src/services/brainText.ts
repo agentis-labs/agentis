@@ -14,10 +14,19 @@ export function safeJson(raw: string): unknown {
   }
 }
 
+/** Scripts with no whitespace word boundaries — segmented per-character. */
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const CJK_GLOBAL = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+
 export function tokenize(input: string): string[] {
-  return input
-    .toLowerCase()
-    .match(/[a-z0-9_]+/g)?.filter((token) => token.length > 2 && !STOP_WORDS.has(token)) ?? [];
+  // Unicode-aware: \p{L}/\p{N} cover any script (ASCII a-z0-9 unchanged), so
+  // accented/non-Latin words tokenize instead of being dropped. CJK has no word
+  // boundaries, so each ideograph/kana/hangul is isolated into its own token —
+  // otherwise a whole CJK sentence is one un-tokenizable (or undroppable) blob,
+  // which is exactly why CJK personas formed almost no memory.
+  const spaced = input.toLowerCase().replace(CJK_GLOBAL, (ch) => ` ${ch} `);
+  const matches = spaced.match(/[\p{L}\p{N}_]+/gu) ?? [];
+  return matches.filter((token) => CJK.test(token) || (token.length > 2 && !STOP_WORDS.has(token)));
 }
 
 export function normalizeTextKey(input: string): string {

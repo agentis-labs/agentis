@@ -44,6 +44,20 @@ export function buildWebhookRoutes(deps: { runtime: TriggerRuntime; bridge?: Cha
     return c.json(result, result.idempotent ? 200 : 202);
   });
 
+  // Native SaaS webhook ingress — provider-signed (GitHub/Stripe/Slack/…). The
+  // trigger config names the provider; its webhookSecret is the provider's
+  // signing secret. Verification happens in TriggerRuntime.fireConnectorWebhook.
+  app.post('/connector/:triggerId', async (c) => {
+    const triggerId = c.req.param('triggerId');
+    const headers: Record<string, string | undefined> = {};
+    c.req.raw.headers.forEach((value, key) => {
+      headers[key.toLowerCase()] = value;
+    });
+    const rawBody = await c.req.text();
+    const result = await deps.runtime.fireConnectorWebhook({ triggerId, rawBody, headers });
+    return c.json(result, result.idempotent ? 200 : 202);
+  });
+
   app.post('/channel/:connectionId', async (c) => {
     if (!deps.bridge) {
       throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');

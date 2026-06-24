@@ -31,6 +31,7 @@ import { buildInitialRunState } from './initialRunState.js';
 import { ListenerRuntime } from './ListenerRuntime.js';
 import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
 import { hashWorkflowGraph } from '../services/graphHash.js';
+import { connectorFromConfig, verifyConnectorWebhook } from './triggerConnectors.js';
 
 interface CronLib {
   schedule(expression: string, callback: () => void, options?: { scheduled?: boolean; timezone?: string }): {
@@ -344,12 +345,60 @@ export class TriggerRuntime {
     }
     if (!ok) throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', 'invalid HMAC');
 
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(args.rawBody) as Record<string, unknown>;
+    } catch {
+      payload = { raw: args.rawBody };
+    }
+    return this.#deliverWebhook(trigger, args.deliveryId, payload);
+  }
+
+  /**
+   * Native SaaS webhook ingress (GitHub / Stripe / Slack / Linear / …). Unlike
+   * {@link fireWebhook} (Agentis HMAC), this verifies the PROVIDER's own
+   * signature scheme using the trigger's stored `webhookSecret`, then fires the
+   * workflow through the same idempotency + dispatch path. The provider is named
+   * by the trigger config (`connector`/`provider`). The full set of verifiers
+   * (github/slack/linear/stripe/typeform/gmail/shopify/hubspot/intercom/zendesk/
+   * twilio/discord/pagerduty/sendgrid) lived behind this seam, unreachable, until
+   * now — this is the poll-only → real-webhook-receiver switch.
+   */
+  async fireConnectorWebhook(args: {
+    triggerId: string;
+    rawBody: string;
+    headers: Record<string, string | undefined>;
+  }): Promise<{ runId: string; idempotent: boolean; eventType: string }> {
+    const trigger = this.deps.db.select().from(schema.triggers).where(eq(schema.triggers.id, args.triggerId)).get();
+    if (!trigger) throw new AgentisError('RESOURCE_NOT_FOUND', `trigger ${args.triggerId} not found`);
+    if (trigger.triggerType !== 'webhook') throw new AgentisError('TRIGGER_INVALID_CONFIG', 'not a webhook trigger');
+    if (trigger.status !== 'active') throw new AgentisError('TRIGGER_NOT_ACTIVE', 'trigger is not active');
+    if (!trigger.webhookSecret) throw new AgentisError('TRIGGER_INVALID_CONFIG', 'trigger missing webhookSecret');
+    const connector = connectorFromConfig((trigger.config ?? {}) as Record<string, unknown>);
+    if (connector === 'generic') {
+      throw new AgentisError('TRIGGER_INVALID_CONFIG', 'no SaaS connector configured on this trigger; use the Agentis HMAC endpoint instead');
+    }
+    // Throws WEBHOOK_SIGNATURE_INVALID / VALIDATION_FAILED on a bad/forged delivery.
+    const verified = verifyConnectorWebhook({ connector, rawBody: args.rawBody, headers: args.headers, secret: trigger.webhookSecret });
+    const out = await this.#deliverWebhook(trigger, verified.deliveryId, { ...verified.payload, eventType: verified.eventType });
+    return { ...out, eventType: verified.eventType };
+  }
+
+  /**
+   * Shared idempotency-reserve → fire → finalize for both webhook ingress paths.
+   * A duplicate (triggerId, deliveryId) is a no-op returning the prior run.
+   */
+  async #deliverWebhook(
+    trigger: typeof schema.triggers.$inferSelect,
+    deliveryId: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ runId: string; idempotent: boolean }> {
     const findDelivery = () => this.deps.db
       .select()
       .from(schema.webhookDeliveries)
       .where(and(
-        eq(schema.webhookDeliveries.triggerId, args.triggerId),
-        eq(schema.webhookDeliveries.deliveryId, args.deliveryId),
+        eq(schema.webhookDeliveries.triggerId, trigger.id),
+        eq(schema.webhookDeliveries.deliveryId, deliveryId),
       ))
       .get();
     const existing = findDelivery();
@@ -365,7 +414,7 @@ export class TriggerRuntime {
           id: reservationId,
           triggerId: trigger.id,
           workspaceId: trigger.workspaceId,
-          deliveryId: args.deliveryId,
+          deliveryId,
           status: 'processing',
           responseRunId: null,
         })
@@ -385,12 +434,6 @@ export class TriggerRuntime {
       triggerType: 'webhook',
       config: (trigger.config ?? {}) as Record<string, unknown>,
     };
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(args.rawBody) as Record<string, unknown>;
-    } catch {
-      payload = { raw: args.rawBody };
-    }
     try {
       const result = await this.fire({ trigger: t, payload });
       this.deps.db

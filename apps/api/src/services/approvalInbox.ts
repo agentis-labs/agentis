@@ -43,6 +43,8 @@ export type CheckpointResumeHandler = (args: {
   source: string;
   targetId: string | null;
   decision: 'approve' | 'reject';
+  /** Submitted form values for a `human_input` node (becomes the node output). */
+  data?: Record<string, unknown>;
 }) => Promise<void>;
 
 export class ApprovalInboxService {
@@ -103,6 +105,8 @@ export class ApprovalInboxService {
     approvalId: string;
     decision: 'approve' | 'reject';
     reason?: string;
+    /** Submitted form values for a `human_input` node. */
+    data?: Record<string, unknown>;
   }) {
     const row = this.db
       .select()
@@ -141,6 +145,7 @@ export class ApprovalInboxService {
         source: row.source,
         targetId: row.targetId ?? row.taskId ?? null,
         decision: args.decision,
+        ...(args.data ? { data: args.data } : {}),
       });
     }
     return { ...row, status: next, resolvedAt, resolutionReason: args.reason ?? null };

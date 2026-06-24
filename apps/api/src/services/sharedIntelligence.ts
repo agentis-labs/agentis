@@ -187,6 +187,18 @@ const EMBED_HIGH_SIMILARITY = 0.88;
 /** Minimum cosine relevance for an atom to enter a dispatch context block. */
 const DISPATCH_MIN_RELEVANCE = 0.32;
 /**
+ * Per-provider relevance floor. Cosine distributions differ wildly by model:
+ * `local`/e5 sits in a high, compressed band (~0.78–0.92 even for unrelated
+ * text), so the generic 0.32 floor would admit everything and flood dispatch
+ * with noise; OpenAI sits lower; unknown/test-stub providers keep the permissive
+ * default. (Measured for multilingual-e5-small; tune as providers are added.)
+ */
+function dispatchRelevanceFloor(modelId: string): number {
+  if (modelId.startsWith('local:')) return 0.82;
+  if (modelId.startsWith('openai:')) return 0.35;
+  return DISPATCH_MIN_RELEVANCE;
+}
+/**
  * §B2.2 — MMR diversity weight. 1.0 = pure relevance (today's behavior); lower
  * values trade a little relevance for diversity so a single dispatch never gets
  * five near-duplicate atoms eating the budget. 0.72 keeps relevance dominant.
@@ -705,6 +717,11 @@ export class SharedIntelligenceService {
   async buildDispatchContext(args: {
     workspaceId: string;
     scopeId?: string | null;
+    /** §C7 — recall the union of these brain scopes (e.g. [appId, agentId]) so an
+     * App-owned run sees BOTH the App's brain and the operating agent's own
+     * memory — neither scope is amnesic to the other. Falls back to [scopeId]
+     * when omitted. Workspace-shared atoms are included by every pass + deduped. */
+    scopeIds?: string[];
     agentId?: string | null;
     runId?: string | null;
     taskDescription: string;
@@ -741,18 +758,34 @@ export class SharedIntelligenceService {
     // than an honest "nothing matched".
     let relevanceAbstained = false;
     if (remaining > 0) {
-      const rawHits = await this.searchAtoms({
-        workspaceId: args.workspaceId,
-        scopeId,
-        query: args.taskDescription,
-        scope: scopeId ? 'both' : 'workspace',
-        limit: Math.max(remaining * 3, remaining),
-        minConfidence: 0,
-        // §C7 — the dispatched agent sees shared knowledge + its own private memory.
-        requesterScopeId: scopeId,
-      });
+      // §C7 — recall the union of every brain scope this run belongs to. Each
+      // pass returns shared (workspace) + own-scope atoms under team RLS; merging
+      // them lets an App-owned run see both the App's brain and the operating
+      // agent's private memory. Shared atoms recur across passes and are deduped,
+      // keeping the strongest score.
+      const scopes = (args.scopeIds && args.scopeIds.length > 0 ? args.scopeIds : [scopeId])
+        .filter((s, i, a) => a.indexOf(s) === i);
+      const byId = new Map<string, BrainSearchResult>();
+      for (const s of scopes) {
+        const hits = await this.searchAtoms({
+          workspaceId: args.workspaceId,
+          scopeId: s,
+          query: args.taskDescription,
+          scope: s ? 'both' : 'workspace',
+          limit: Math.max(remaining * 3, remaining),
+          minConfidence: 0,
+          // §C7 — the dispatched agent sees shared knowledge + its own private memory.
+          requesterScopeId: s,
+        });
+        for (const hit of hits) {
+          const prev = byId.get(hit.id);
+          if (!prev || hit.score > prev.score) byId.set(hit.id, hit);
+        }
+      }
+      const rawHits = Array.from(byId.values()).sort((a, b) => b.score - a.score);
       const candidates = rawHits.filter((hit) => !charterIds.has(hit.id));
-      const cleared = candidates.filter((hit) => hit.score >= DISPATCH_MIN_RELEVANCE || hit.confidence >= 0.74);
+      const relevanceFloor = dispatchRelevanceFloor(this.#resolveEmbeddingProvider(args.workspaceId).modelId);
+      const cleared = candidates.filter((hit) => hit.score >= relevanceFloor || hit.confidence >= 0.74);
       // §C5 — fill the budget across temporal SCALES (working/episodic/semantic)
       // so recency never crowds out durable rules (or vice versa), per surface.
       relevant = selectAcrossScales(cleared, remaining, args.surface ?? 'dispatch');
@@ -764,25 +797,28 @@ export class SharedIntelligenceService {
       // even when the live retriever was thin.
       if (relevant.length < remaining) {
         const injected = new Set<string>([...charterIds, ...relevant.map((r) => r.id)]);
-        for (const a of this.getWorkingSet(args.workspaceId, scopeId)) {
+        for (const s of scopes) {
           if (relevant.length >= remaining) break;
-          if (injected.has(a.id)) continue;
-          if (similarity(args.taskDescription, `${a.title} ${a.content}`) < 0.08) continue;
-          relevant.push({
-            id: a.id,
-            kind: (a.kind as KnowledgeAtomKind) ?? 'episode',
-            title: a.title,
-            content: a.content,
-            confidence: clamp01(a.score),
-            score: a.score,
-            scopeId,
-            tags: ['working_set'],
-            status: null,
-            managed: null,
-            updatedAt: new Date().toISOString(),
-          });
-          injected.add(a.id);
-          relevanceAbstained = false;
+          for (const a of this.getWorkingSet(args.workspaceId, s)) {
+            if (relevant.length >= remaining) break;
+            if (injected.has(a.id)) continue;
+            if (similarity(args.taskDescription, `${a.title} ${a.content}`) < 0.08) continue;
+            relevant.push({
+              id: a.id,
+              kind: (a.kind as KnowledgeAtomKind) ?? 'episode',
+              title: a.title,
+              content: a.content,
+              confidence: clamp01(a.score),
+              score: a.score,
+              scopeId: s,
+              tags: ['working_set'],
+              status: null,
+              managed: null,
+              updatedAt: new Date().toISOString(),
+            });
+            injected.add(a.id);
+            relevanceAbstained = false;
+          }
         }
       }
     }
@@ -814,7 +850,7 @@ export class SharedIntelligenceService {
 
     const scopeLabel = scopeId ? 'scope + workspace' : 'workspace';
     const capacity = this.#capacityStatus(args.workspaceId);
-    const degradedPrefix = embeddingStatus.degraded ? 'degraded - hashing embeddings | ' : '';
+    const degradedPrefix = embeddingStatus.degraded ? 'degraded - embeddings unavailable | ' : '';
     const total = charter.length + relevant.length;
     const header = `WORKSPACE BRAIN [${degradedPrefix}${total} atoms | scope: ${scopeLabel} | retrieval: graph | capacity: ${capacity.percent}%${capacity.recommended ? ' - compression recommended' : ''}]`;
 

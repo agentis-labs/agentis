@@ -33,6 +33,26 @@ function resolveAppId(args: Record<string, unknown>, ctx: AgentisToolContext): s
   throw new AgentisError('VALIDATION_FAILED', 'no App in context — pass appId (or open the app first)');
 }
 
+// §1.3 — the Datastore→Brain bridge must not dump raw record fields (PII/secrets)
+// into durable, recall-injected memory. We mask secret-like keys and obvious PII
+// values (emails, phone numbers) and cap length. The agent is asked to pass a
+// concise `summary` instead; this scrub is the safety net when it doesn't.
+const SECRET_KEY = /(secret|token|api[_-]?key|password|passwd|credential|bearer|private[_-]?key|ssn|cvv|card[_-]?number)/i;
+const EMAIL_RE = /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g;
+const PHONE_RE = /\+?\d[\d\s().-]{7,}\d/g;
+function scrubForMemory(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(EMAIL_RE, '[email]').replace(PHONE_RE, '[phone]');
+  if (Array.isArray(value)) return value.map(scrubForMemory);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = SECRET_KEY.test(k) ? '[redacted]' : scrubForMemory(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 /** A workflow id from an explicit arg, or the workflow the operator is viewing. */
 function resolveWorkflowId(args: Record<string, unknown>, ctx: AgentisToolContext, name = 'workflowId'): string {
   if (typeof args[name] === 'string' && (args[name] as string).trim()) return args[name] as string;
@@ -188,8 +208,8 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.data.promote_memory',
         family: 'app',
-        description: 'Promote a Datastore record into the workspace Brain as a durable memory (one-way bridge — data stays source of truth).',
-        inputSchema: { type: 'object', properties: { ...appIdProp, collection: { type: 'string' }, id: { type: 'string' }, title: { type: 'string' } }, required: ['collection', 'id'] },
+        description: 'Promote a Datastore record into the workspace Brain as a durable memory (one-way bridge — data stays source of truth). Pass `summary` with the concise, durable LESSON to remember (not raw fields); without it, the record is stored with secrets/PII masked. The Datastore remains the source of truth — do not promote whole records to recall them later.',
+        inputSchema: { type: 'object', properties: { ...appIdProp, collection: { type: 'string' }, id: { type: 'string' }, title: { type: 'string' }, summary: { type: 'string', description: 'The durable lesson/fact to remember, in plain language. Preferred over dumping record fields.' } }, required: ['collection', 'id'] },
         mutating: true,
         autoExecute: true,
       },
@@ -200,6 +220,10 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const id = str(args.id, 'id');
         const record = data.getRecord(ctx.workspaceId, appId, collection, id);
         const title = typeof args.title === 'string' && args.title.trim() ? args.title : `${collection} record`;
+        // §1.3 — prefer the agent's plain-language lesson; fall back to a
+        // secret/PII-scrubbed, length-capped projection of the record (never raw).
+        const summary = typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : null;
+        const content = (summary ?? JSON.stringify(scrubForMemory(record.data))).slice(0, 600);
         const memoryId = deps.memory.write({
           workspaceId: ctx.workspaceId,
           // Bind to the App's brain scope (AGENTIC-APPS-10X §5.4), not the whole
@@ -208,7 +232,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           kind: 'fact',
           source: 'agent',
           title,
-          content: JSON.stringify(record.data),
+          content,
           trust: 0.8,
           importance: 0.65,
           tags: ['app_datastore', 'promoted', collection],

@@ -95,6 +95,9 @@ export interface FormationContext {
 /** Minimum deterministic score for a statement to survive the gate. */
 export const FORMATION_MIN_SCORE = 0.5;
 
+/** Scripts that pack meaning densely and lack whitespace word boundaries. */
+const CJK_DENSE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u;
+
 /**
  * Extract candidate memory statements from raw task output, dropping structural
  * garbage. Deterministic and model-free — safe to run on every promotion.
@@ -106,7 +109,13 @@ export function extractCandidateStatements(taskOutput: unknown): ScoredStatement
 
   for (const rawLine of raw.split(/\r?\n|(?<=[.!?])\s+/)) {
     const text = stripMarkdownPrefix(rawLine).trim().replace(/\s+/g, ' ');
-    if (text.length < 25 || text.length > 500) continue;
+    // §3.5 — CJK/Thai/etc. carry far more meaning per character than Latin, so a
+    // 25-char floor silently rejects substantial non-Latin statements. Drop the
+    // floor for scripts without whitespace word boundaries (measured in code
+    // points, not UTF-16 units). Latin stays at 25.
+    const len = [...text].length;
+    const minLen = CJK_DENSE.test(text) ? 10 : 25;
+    if (len < minLen || len > 500) continue;
     if (isRejectable(text)) continue;
     if (looksSensitive(text)) continue;
 
@@ -173,13 +182,30 @@ export function scoreStatement(text: string): number {
   const words = tokenize(text);
   if (words.length < 4) return 0;
 
-  let score = 0.35;
+  // §3.5 — the durable-knowledge CUES below are English regexes; on non-Latin
+  // text none can fire, so a substantive statement is stuck at the base and
+  // never clears the threshold (CJK personas formed almost no memory). For
+  // predominantly non-Latin text we can't pattern-match cues, so we lean on the
+  // reject-gate it already cleared + the FormationJudge downstream, and start
+  // from a passing base. English text is all-Latin → base unchanged → the 27
+  // English formation tests are unaffected.
+  const letters = lower.match(/\p{L}/gu) ?? [];
+  const latin = lower.match(/\p{Script=Latin}/gu) ?? [];
+  const predominantlyNonLatin = letters.length >= 4 && latin.length / letters.length < 0.5;
+
+  let score = predominantlyNonLatin ? 0.5 : 0.35;
 
   // Durable-knowledge cues: rules, causes, learnings, constraints.
   if (/\b(always|never|must|should|do not|don't|avoid|prefer|require|ensure|only|instead of)\b/.test(lower)) score += 0.22;
   if (/\b(because|therefore|so that|due to|results? in|leads? to|caused?|in order to)\b/.test(lower)) score += 0.12;
   if (/\b(learned|observed|confirmed|discovered|turns out|works? when|fails? when|the trick is)\b/.test(lower)) score += 0.16;
   if (/\b(rate limit|timeout|retry|threshold|policy|constraint|invariant|edge case|gotcha|pitfall)\b/.test(lower)) score += 0.12;
+  // Additive durable-rule cues for the major Latin-script languages (es/pt/fr/
+  // de/it) so non-English personas aren't mute. Purely additive — English text
+  // won't match these and the English cues above still fire, so English scoring
+  // is unchanged.
+  if (/\b(siempre|sempre|toujours|immer|nunca|jamais|niemals|debe|deve|doit|muss|evitar|vermeiden|porque|weil|portanto|donc|deshalb)\b/i.test(lower)
+    || /(parce que|por lo tanto|éviter)/i.test(lower)) score += 0.2;
 
   // Specificity: concrete identifiers, paths, code refs, numbers-in-context.
   if (/[`/]\w|\.\w{1,4}\b|--?\w|\b\w+\(\)/.test(text)) score += 0.08;

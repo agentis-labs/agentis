@@ -1164,8 +1164,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // 3) Approval resume → engine. Checkpoints complete their node; phase gates
   //    release (approve) or fail (reject) the gated phase. `targetId` carries the
   //    checkpoint node id / phase id.
-  approvals.bindCheckpointHandler(async ({ runId, approvalId, decision }) => {
-    await engine.resolveApproval({ runId, approvalId, decision });
+  approvals.bindCheckpointHandler(async ({ runId, approvalId, decision, data }) => {
+    await engine.resolveApproval({ runId, approvalId, decision, data });
   });
 
   const app = new Hono();

@@ -90,6 +90,12 @@ export type AgentTool =
   | 'run_code'
   | 'git_diff'
   | 'git_status'
+  // ── Browser/computer-use: drive headless Chromium during the reasoning loop ──
+  | 'browser_screenshot'
+  | 'browser_navigate'
+  | 'browser_extract_text'
+  | 'browser_extract_table'
+  | 'browser_fill_form'
   | 'knowledge_search'
   | 'memory_append'
   | 'agent_memory_search'
@@ -131,6 +137,11 @@ export const DEFAULT_SPECIALIST_TOOLS: AgentTool[] = [
   'workflow_memory_write',
   'run_code',
   'call_workflow',
+  'browser_screenshot',
+  'browser_navigate',
+  'browser_extract_text',
+  'browser_extract_table',
+  'browser_fill_form',
   'ui_render',
   'ui_patch',
   'ui_action_schema',
@@ -169,6 +180,11 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   run_code: 'Evaluate a sandboxed JS expression â€” no I/O, pure compute. args: { expression: string, input?: object }',
   git_diff: 'Show the working-tree diff (git-backed workspaces only).',
   git_status: 'Show git status (git-backed workspaces only).',
+  browser_screenshot: 'Open a real (headless) browser, render a URL or inline HTML, and capture a PNG screenshot saved as an artifact you can send to a channel. Returns { artifactId, ref, url }. Pass `ref` to agentis.channel.send attachments to deliver the image. args: { url?: string, html?: string, fullPage?: boolean, viewport?: { width, height }, title?: string }',
+  browser_navigate: 'Open a real browser, load a URL, and return its { title, text, html }. Use to read JS-rendered pages that read_url cannot. args: { url: string }',
+  browser_extract_text: 'Open a real browser, load a URL (or html), and return the visible text under a CSS selector (default body). args: { url?: string, html?: string, selector?: string }',
+  browser_extract_table: 'Open a real browser and parse an HTML <table> into an array of row objects. args: { url?: string, html?: string, selector?: string }',
+  browser_fill_form: 'Open a real browser, fill form fields by CSS selector, optionally submit, and return the read-back values + final HTML. args: { url?: string, html?: string, formData: { [selector]: value }, submitSelector?: string }',
   knowledge_search: 'Search the workspace Brain (knowledge bases) for relevant passages. args: { query: string, topK?: number }',
   memory_append: 'Record a finding or decision so future runs start knowing it. scope "workspace" (default) writes the shared log every agent sees; scope "agent" writes your own private memory. args: { section: string, entry: string, scope?: "workspace" | "agent" }',
   agent_memory_search: 'Recall your own past findings from your personal memory (separate from the shared workspace log). args: { query: string, topK?: number }',
