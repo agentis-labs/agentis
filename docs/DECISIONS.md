@@ -452,10 +452,10 @@ Constrained to `border-line`, `bg-surface`, `bg-surface-2`, `bg-canvas`, `text-t
 
 **Decision.** apps/api now ships 223 vitest tests across 32 files (was 53 across 10), built on a shared `createTestContext` helper.
 
-- **`apps/api/tests/_helpers/createTestContext.ts`** � single fixture that spins up an in-memory SQLite, RS256 keypair via `generateKeyPairSync`, `AuthService`, in-process `EventBus`, `CredentialVault`, error-level logger, and seeds an operator user + Personal workspace + Local ambient. Returns `{db, sqlite, auth, bus, vault, logger, secrets, user, workspace, ambient, accessToken, refreshToken, authHeaders, buildApp(mounts), captureBus(), close()}`. `buildApp` mounts route builders onto a Hono app pre-wired with the production `errorHandler` so route tests exercise the same composition root as bootstrap. Optional `foreignKeysOff` for unit tests that seed orphan rows.
+- **`apps/api/tests/_helpers/createTestContext.ts`** � single fixture that spins up an in-memory SQLite, RS256 keypair via `generateKeyPairSync`, `AuthService`, in-process `EventBus`, `CredentialVault`, error-level logger, and seeds an operator user + Personal workspace + Local ambient. Returns `{db, sqlite, auth, bus, vault, logger, secrets, user, workspace, ambient, accessToken, refreshToken, authHeaders, buildApp(mounts), captureBus(), close()}`. `buildApp` mounts route builders onto a Hono app pre-wired with the production `errorHandler` so route tests exercise the same composition root as bootstrap. Optional `foreignKeysOff` for unit tests that seed detached rows.
 - **Layers covered.** core (errors, constants, events, schemas auth+workflow � 67 tests), engine (ReadyQueue, WaitingInputBuffer, RunStateStore, SafeConditionParser extended � 30 tests), adapters (CircuitBreaker � 7 tests), event-bus (4 tests), services (scratchpad, activityFeed, workspaceContext, gatewayDirectory, commandIndex, credentialVault extended � 34 tests), routes (auth, workspaces, dashboard, command, activity � 30 tests). Plus the original 53 from D26/D27.
 - **Wire-shape locked.** The errorHandler middleware emits `{ error: { code, message, details? } }`, not bare `{ code }`; route tests assert against `body.error.code` so any future flattening regression fails loudly.
-- **Patterns established for the next batch.** Use `ctx.buildApp([{ path, app: buildXxxRoutes(...) }])` + `app.request(url, { headers: ctx.authHeaders })`. Use `ctx.captureBus()` to assert on emitted realtime events. Use `vi.useFakeTimers()` for breaker/cooldown timing. Use `pragma('foreign_keys = OFF')` only when seeding intentionally-orphaned rows (RunStateStore tests do this).
+- **Patterns established for the next batch.** Use `ctx.buildApp([{ path, app: buildXxxRoutes(...) }])` + `app.request(url, { headers: ctx.authHeaders })`. Use `ctx.captureBus()` to assert on emitted realtime events. Use `vi.useFakeTimers()` for breaker/cooldown timing. Use `pragma('foreign_keys = OFF')` only when seeding intentionally-detached rows (RunStateStore tests do this).
 
 **Why this shape.** A route-level integration test fails when *any* of routing, auth middleware, workspace middleware, error normalization, or the underlying service logic regresses � the highest coverage-per-line for the V1 surface. The shared fixture means adding the next 200+ tests is mechanical: pick a builder, mount it, exercise it.
 
@@ -724,7 +724,7 @@ verified" asymmetry.
 
 **New page (apps/web/src/pages/)**
 
-- `AgentsPage.tsx` - V1-SPEC sec 3.3 spec-named page, uses the previously orphaned
+- `AgentsPage.tsx` - V1-SPEC sec 3.3 spec-named page, uses the previously unused
   `AgentFleetTable` component for presentation + an inline `RegisterAgentDrawer`
   for create. Routed at `/agents` (replacing the inline `AgentFleetPage`
   table). The legacy filename `AgentFleetPage.tsx` is now a thin re-export

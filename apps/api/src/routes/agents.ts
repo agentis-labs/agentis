@@ -9,7 +9,7 @@
 
 import { Hono } from 'hono';
 import { and, eq, inArray } from 'drizzle-orm';
-import { AgentisError, CONSTANTS, type AdapterCapabilities } from '@agentis/core';
+import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS, configuredAffordances, potentialAffordances, type AdapterCapabilities } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -24,10 +24,14 @@ import { buildAgentMutationRoutes } from './agentMutations.js';
 import { PLAYBOOK_LIBRARY } from '../data/playbook-library.js';
 import { listAgentInstructionFiles, resolveWritableInstructionFile, writeInstructionFile } from '../services/agentInstructionFiles.js';
 import type { HarnessMemoryIngestionService } from '../services/harnessMemoryIngestion.js';
+import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import type { McpHarnessSessionService } from '../services/mcpHarnessSession.js';
 import { detectRuntimeState, listRuntimeModels, modelConfiguredOnAgent } from '../services/runtimeModels.js';
 import { RuntimeProfileService } from '../services/runtimeProfileService.js';
 import { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import { registerAdapter } from '../services/agentCommission.js';
+import { repairCliHarnessConfig } from '../services/harnessConfigRepair.js';
+import type { V1HarnessAdapterType } from '../services/harnessProbe.js';
 
 export interface AgentRoutesDeps {
   db: AgentisSqliteDb;
@@ -40,6 +44,8 @@ export interface AgentRoutesDeps {
   /** Optional: distils a connected harness's own memory into the agent's Brain. */
   harnessMemoryIngestion?: HarnessMemoryIngestionService;
   mcpHarness?: McpHarnessSessionService;
+  /** Optional: lets agent deletion decide the fate of the agent's memory (B11). */
+  episodes?: EpisodicMemoryStore;
 }
 
 interface AgentAbilitySummary {
@@ -68,7 +74,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         : eq(schema.agents.workspaceId, ws.workspaceId))
       .all();
     const spaces = deps.db
-      .select({ id: schema.spaces.id, name: schema.spaces.name, colorHex: schema.spaces.colorHex })
+      .select({ id: schema.spaces.id, name: schema.spaces.name, colorHex: schema.spaces.colorHex, parentDomainId: schema.spaces.parentDomainId })
       .from(schema.spaces)
       .where(eq(schema.spaces.workspaceId, ws.workspaceId))
       .all();
@@ -112,10 +118,17 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         .all()
       : [];
     const workflows = deps.db
-      .select({ id: schema.workflows.id, graph: schema.workflows.graph })
+      .select({ id: schema.workflows.id, graph: schema.workflows.graph, ownerAgentId: schema.workflows.ownerAgentId, spaceId: schema.workflows.spaceId })
       .from(schema.workflows)
       .where(eq(schema.workflows.workspaceId, ws.workspaceId))
       .all();
+    // Direct per-workflow ownership count, keyed by the owning specialist.
+    const ownedWorkflowsByAgent = new Map<string, number>();
+    for (const workflow of workflows) {
+      if (workflow.ownerAgentId) {
+        ownedWorkflowsByAgent.set(workflow.ownerAgentId, (ownedWorkflowsByAgent.get(workflow.ownerAgentId) ?? 0) + 1);
+      }
+    }
     const abilityRows = agentIds.length > 0
       ? deps.db
         .select({
@@ -182,12 +195,21 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       agents: rows.map((agent) => {
         const stats = statsByAgent.get(agent.id) ?? createAgentNodeStats();
         const space = agent.spaceId ? spacesById.get(agent.spaceId) : null;
+        // When the agent's immediate space is a Subdomain, surface both the
+        // subdomain (its badge / cluster) and the top-level Domain (for grouping
+        // the specialist under its manager on the canvas).
+        const isSubdomain = Boolean(space?.parentDomainId);
+        const parentDomain = isSubdomain && space?.parentDomainId ? spacesById.get(space.parentDomainId) : null;
         return {
           ...presentAgent(agent, deps.adapters),
           managerId: agent.reportsTo ?? null,
           domainColor: agent.colorHex ?? null,
           spaceName: space?.name ?? agent.spaceTag ?? null,
           spaceColorHex: space?.colorHex ?? null,
+          domainId: isSubdomain ? space?.parentDomainId ?? null : agent.spaceId ?? null,
+          domainName: isSubdomain ? parentDomain?.name ?? null : space?.name ?? agent.spaceTag ?? null,
+          subdomainId: isSubdomain ? agent.spaceId ?? null : null,
+          subdomainName: isSubdomain ? space?.name ?? null : null,
           abilities: abilitiesByAgent.get(agent.id) ?? [],
           canvasAngle: canvasAngleFromPosition(agent.canvasPosition),
           runsToday: stats.runsToday,
@@ -195,6 +217,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
           pendingApprovals: stats.pendingApprovals,
           connectionCounts: {
             workflows: stats.workflowIds.size,
+            ownedWorkflows: ownedWorkflowsByAgent.get(agent.id) ?? 0,
           },
         };
       }),
@@ -443,8 +466,61 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
 
   app.post('/:id/runtime/probe', async (c) => {
     const ws = getWorkspace(c);
-    const agent = runtimeProfiles.loadAgent(ws.workspaceId, c.req.param('id'));
-    return c.json({ runtime: await runtimeProfiles.describe(agent) });
+    const id = c.req.param('id');
+    let agent = runtimeProfiles.loadAgent(ws.workspaceId, id);
+    const adapterType = normalizeRuntimeAdapterType(agent.adapterType);
+    let runtime = await runtimeProfiles.describe(agent);
+
+    if (adapterType && !agent.isPaused) {
+      try {
+        const repaired = await repairCliHarnessConfig(adapterType, recordFromUnknown(agent.config));
+        if (repaired.changed) {
+          deps.db
+            .update(schema.agents)
+            .set({ config: repaired.config, updatedAt: new Date().toISOString() })
+            .where(eq(schema.agents.id, agent.id))
+            .run();
+        }
+        await registerAdapter(deps, ws.workspaceId, agent.id, adapterType, repaired.config, {
+          skipConfigRepair: true,
+        });
+        agent = runtimeProfiles.loadAgent(ws.workspaceId, id);
+        runtime = await runtimeProfiles.describe(agent);
+        if (!runtime.health.isHealthy) {
+          throw new AgentisError('VALIDATION_FAILED', runtime.health.error ?? 'Runtime health check failed.');
+        }
+        const now = new Date().toISOString();
+        deps.db
+          .update(schema.agents)
+          .set({
+            status: 'online',
+            lastHeartbeatAt: now,
+            updatedAt: now,
+          })
+          .where(eq(schema.agents.id, agent.id))
+          .run();
+        deps.bus?.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_STATUS_CHANGED, {
+          id: agent.id,
+          agentId: agent.id,
+          status: 'online',
+        });
+      } catch (error) {
+        const now = new Date().toISOString();
+        deps.db
+          .update(schema.agents)
+          .set({ status: 'error', updatedAt: now })
+          .where(eq(schema.agents.id, agent.id))
+          .run();
+        deps.bus?.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_STATUS_CHANGED, {
+          id: agent.id,
+          agentId: agent.id,
+          status: 'error',
+        });
+        throw error;
+      }
+    }
+
+    return c.json({ runtime });
   });
 
   app.get('/:id/runtime/resources', (c) => {
@@ -575,10 +651,22 @@ function presentAgent<T extends { id: string; status: string; lastHeartbeatAt?: 
 ): T & { adapterCapabilities?: AdapterCapabilities | null } {
   const status = derivedAgentStatus(agent, adapters);
   const adapterCapabilities = adapters.capabilities(agent.id);
+  // Supply view: what this agent's runtime advertises by configuration (and could
+  // advertise if enabled), independent of whether it is connected right now. Lets
+  // the canvas/readiness distinguish "offline but capable" and "can be enabled"
+  // from "can never do this" instead of a blanket "missing".
+  const meta = agent as { adapterType?: string | null; config?: unknown };
+  const config = meta.config && typeof meta.config === 'object' && !Array.isArray(meta.config)
+    ? meta.config as Record<string, unknown>
+    : null;
+  const configured = configuredAffordances(meta.adapterType ?? null, config);
+  const potential = potentialAffordances(meta.adapterType ?? null);
   return {
     ...agent,
     status,
     ...(adapterCapabilities ? { adapterCapabilities } : {}),
+    configuredAffordances: configured,
+    potentialAffordances: potential,
     ...(status === 'offline' ? { currentTaskId: null } : {}),
   } as T & { adapterCapabilities?: AdapterCapabilities | null };
 }
@@ -656,7 +744,7 @@ function booleanOf(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function normalizeRuntimeAdapterType(value: unknown): 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'http' | null {
+function normalizeRuntimeAdapterType(value: unknown): V1HarnessAdapterType | null {
   if (
     value === 'openclaw'
     || value === 'hermes_agent'
@@ -676,7 +764,7 @@ function mergeRuntimeContextModels(
     label: string;
     recommended?: boolean;
     legacy?: boolean;
-    source?: 'runtime' | 'profile' | 'agent_config' | 'workspace_policy' | 'fallback';
+    source?: 'runtime' | 'profile' | 'agent_config' | 'workspace_policy' | 'fallback' | 'custom';
     verified?: boolean;
   }>,
   currentModel: string,
@@ -687,7 +775,7 @@ function mergeRuntimeContextModels(
       id: currentModel,
       label: currentModel,
       recommended: true,
-      source: 'fallback' as const,
+      source: 'custom' as const,
       verified: false,
     },
     ...models,

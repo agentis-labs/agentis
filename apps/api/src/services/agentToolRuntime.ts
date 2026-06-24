@@ -5,7 +5,9 @@
  * writes go to the canonical DB brain, not to workspace Markdown files.
  */
 
-import { AgentisError, roleTools, type AgentRole, type AgentTool } from '@agentis/core';
+import { AgentisError, roleTools, DEFAULT_SPECIALIST_TOOLS, isSpecialistRole, collectionSchemaSchema, dataQuerySchema, viewNodeSchema, uiPatchOpSchema, surfaceActionSchema, type AgentRole, type AgentTool, type SurfaceAction, type UiPatchOp } from '@agentis/core';
+import { z } from 'zod';
+import type { AppDatastore, AppSurfaceStore } from '@agentis/app';
 import { evaluateExpression } from '../engine/safeExpression.js';
 import { assertSafeUrl } from './safeUrl.js';
 import type { WorkspaceVolumeService } from './workspaceVolume.js';
@@ -27,6 +29,8 @@ export interface AgentToolContext {
   workflowId?: string;
   /** The concrete agent executing the tool; scopes agent-private memory. */
   agentId?: string;
+  /** The Agentic App this agent is operating; scopes data_* and ui_* tools (§4/§5). */
+  appId?: string;
   /**
    * Explicit granted manifest. When set, a tool is permitted if it's in this set
    * OR the role's static manifest — so a custom/generated specialist with the
@@ -51,6 +55,12 @@ export interface AgentToolRuntimeDeps {
   callWorkflow?: (args: { workspaceId: string; workflowId: string; inputs: Record<string, unknown> }) => Promise<unknown>;
   /** Optional web-search provider. When absent, `web_search` reports unavailable. */
   webSearch?: (query: string) => Promise<unknown>;
+  /** App Datastore (§5) — backs the `data_*` tools. Scoped by `context.appId`. */
+  appData?: AppDatastore;
+  /** AG-UI surfaces (§4) — backs the `ui_render` / `ui_patch` / `ui_action_schema` tools. */
+  appSurfaces?: AppSurfaceStore;
+  /** Resolve an App id from the running workflow when `context.appId` is unset. */
+  resolveAppIdForWorkflow?: (workspaceId: string, workflowId: string) => string | undefined;
 }
 
 const SECRET_RE = /(^|\/)\.env(\.|$)|(^|\/)\.git\//i;
@@ -58,9 +68,18 @@ const SECRET_RE = /(^|\/)\.env(\.|$)|(^|\/)\.git\//i;
 export class AgentToolRuntime {
   constructor(private readonly deps: AgentToolRuntimeDeps) {}
 
-  /** The tools a role is permitted to call. */
+  /**
+   * The tools a role is permitted to call. Built-in specialists were retired, so
+   * the role vocabulary is now open: a role with no explicit manifest that is a
+   * specialist (anything but orchestrator/manager) gets the universal
+   * knowledge-worker floor (DEFAULT_SPECIALIST_TOOLS) rather than an empty
+   * toolbox — otherwise every open-vocabulary specialist collapses to a
+   * single-shot text generator.
+   */
   toolsForRole(role: AgentRole): AgentTool[] {
-    return roleTools(role);
+    const explicit = roleTools(role);
+    if (explicit.length > 0) return explicit;
+    return isSpecialistRole(role) ? DEFAULT_SPECIALIST_TOOLS : [];
   }
 
   /** True when the role's manifest grants the tool. */
@@ -122,7 +141,10 @@ export class AgentToolRuntime {
         if (!this.deps.knowledgeBases) throw new AgentisError('VALIDATION_FAILED', 'knowledge base service not available');
         const query = requireStr(args.query, 'query');
         const topK = typeof args.topK === 'number' ? args.topK : 5;
-        const bases = this.deps.knowledgeBases.listKnowledgeBases(workspaceId);
+        const bases = this.deps.knowledgeBases.listKnowledgeBases(workspaceId, {
+          scopeId: context.workflowId ?? null,
+          includeWorkspace: Boolean(context.workflowId),
+        });
         const hits = (await Promise.all(bases.map((b) =>
           this.deps.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))))
           .flat()
@@ -207,6 +229,107 @@ export class AgentToolRuntime {
         if (!this.deps.webSearch) throw new AgentisError('VALIDATION_FAILED', 'web_search provider is not configured');
         return await this.deps.webSearch(requireStr(args.query, 'query'));
       }
+
+      // ── AG-UI: author Agentic App surfaces (§4) ──
+      case 'ui_render': {
+        const surfaces = this.#requireSurfaces();
+        const appId = this.#requireAppId(workspaceId, context);
+        const surface = requireStr(args.surface, 'surface');
+        const view = viewNodeSchema.parse(args.view);
+        const result = surfaces.render(workspaceId, appId, surface, view);
+        return { rendered: true, surface, revision: result.revision };
+      }
+      case 'ui_patch': {
+        const surfaces = this.#requireSurfaces();
+        const appId = this.#requireAppId(workspaceId, context);
+        const surface = requireStr(args.surface, 'surface');
+        const ops = z.array(uiPatchOpSchema).min(1).parse(args.ops) as UiPatchOp[];
+        const result = surfaces.patch(workspaceId, appId, surface, ops);
+        return { patched: true, surface, revision: result.revision };
+      }
+      case 'ui_action_schema': {
+        const surfaces = this.#requireSurfaces();
+        const appId = this.#requireAppId(workspaceId, context);
+        const surface = requireStr(args.surface, 'surface');
+        const actions = z.array(surfaceActionSchema).parse(args.actions) as SurfaceAction[];
+        surfaces.setActions(workspaceId, appId, surface, actions);
+        return { ok: true, surface, actions: actions.length };
+      }
+
+      // ── App Datastore (§5) ──
+      case 'data_define_collection': {
+        const data = this.#requireData();
+        const appId = this.#requireAppId(workspaceId, context);
+        const name = requireStr(args.name, 'name');
+        const colSchema = collectionSchemaSchema.parse(args.schema);
+        return data.defineCollection(workspaceId, appId, { name, schema: colSchema });
+      }
+      case 'data_insert': {
+        const data = this.#requireData();
+        const appId = this.#requireAppId(workspaceId, context);
+        const collection = requireStr(args.collection, 'collection');
+        const record = requireObj(args.record, 'record');
+        return data.insert(workspaceId, appId, collection, record, context.agentId);
+      }
+      case 'data_update': {
+        const data = this.#requireData();
+        const appId = this.#requireAppId(workspaceId, context);
+        const collection = requireStr(args.collection, 'collection');
+        const id = requireStr(args.id, 'id');
+        const patch = requireObj(args.patch, 'patch');
+        return data.update(workspaceId, appId, collection, id, patch);
+      }
+      case 'data_upsert': {
+        const data = this.#requireData();
+        const appId = this.#requireAppId(workspaceId, context);
+        const collection = requireStr(args.collection, 'collection');
+        const match = requireObj(args.match, 'match');
+        const record = requireObj(args.record, 'record');
+        return data.upsert(workspaceId, appId, collection, match, record, context.agentId);
+      }
+      case 'data_delete': {
+        const data = this.#requireData();
+        const appId = this.#requireAppId(workspaceId, context);
+        const collection = requireStr(args.collection, 'collection');
+        const id = requireStr(args.id, 'id');
+        data.delete(workspaceId, appId, collection, id);
+        return { deleted: true, id };
+      }
+      case 'data_query': {
+        const data = this.#requireData();
+        const appId = this.#requireAppId(workspaceId, context);
+        const collection = requireStr(args.collection, 'collection');
+        const query = dataQuerySchema.parse({
+          ...(args.filter !== undefined ? { filter: args.filter } : {}),
+          ...(args.sort !== undefined ? { sort: args.sort } : {}),
+          ...(args.limit !== undefined ? { limit: args.limit } : {}),
+          ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
+        });
+        return data.query(workspaceId, appId, collection, query);
+      }
+      case 'data_promote_memory': {
+        const data = this.#requireData();
+        if (!this.deps.memory) throw new AgentisError('VALIDATION_FAILED', 'workspace memory service not available');
+        const appId = this.#requireAppId(workspaceId, context);
+        const collection = requireStr(args.collection, 'collection');
+        const id = requireStr(args.id, 'id');
+        const record = data.getRecord(workspaceId, appId, collection, id);
+        const title = typeof args.title === 'string' && args.title.trim() ? args.title : `${collection} record`;
+        const memoryId = this.deps.memory.write({
+          workspaceId,
+          scopeId: null,
+          kind: 'fact',
+          source: 'agent',
+          title,
+          content: JSON.stringify(record.data),
+          trust: 0.8,
+          importance: 0.65,
+          tags: ['app_datastore', 'promoted', collection],
+          provenance: { source: 'data_promote_memory', appId, collection, recordId: id, agentId: context.agentId ?? null },
+        });
+        return { promoted: true, memoryId, collection, recordId: id };
+      }
+
       case 'git_diff':
       case 'git_status':
         throw new AgentisError('VALIDATION_FAILED', `${tool} requires a git-backed workspace (not available for Volume-only workspaces)`);
@@ -243,6 +366,33 @@ export class AgentToolRuntime {
     await visit(dir, 0);
     return out;
   }
+
+  #requireData(): AppDatastore {
+    if (!this.deps.appData) throw new AgentisError('VALIDATION_FAILED', 'App Datastore is not wired in this runtime');
+    return this.deps.appData;
+  }
+
+  #requireSurfaces(): AppSurfaceStore {
+    if (!this.deps.appSurfaces) throw new AgentisError('VALIDATION_FAILED', 'App surfaces are not wired in this runtime');
+    return this.deps.appSurfaces;
+  }
+
+  /** Resolve the App the agent is operating: explicit context, else derived from the workflow. */
+  #requireAppId(workspaceId: string, context: AgentToolContext): string {
+    if (context.appId) return context.appId;
+    if (context.workflowId && this.deps.resolveAppIdForWorkflow) {
+      const appId = this.deps.resolveAppIdForWorkflow(workspaceId, context.workflowId);
+      if (appId) return appId;
+    }
+    throw new AgentisError('VALIDATION_FAILED', 'this tool requires an Agentic App context (no appId resolved)');
+  }
+}
+
+function requireObj(value: unknown, name: string): Record<string, unknown> {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentisError('VALIDATION_FAILED', `tool argument '${name}' must be an object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function requireStr(value: unknown, name: string): string {

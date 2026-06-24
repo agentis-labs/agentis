@@ -5,6 +5,7 @@ import { AlertTriangle, Check, ExternalLink, Loader2, RefreshCw } from 'lucide-r
 import { api } from '../../lib/api';
 import { ClaudeIcon, CodexIcon, CursorIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
 import { ModelChooser } from './ModelChooser';
+import { runtimeModelValue, withRuntimeModel } from './runtimeModelField';
 
 export type AdapterType = 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'http';
 
@@ -203,7 +204,9 @@ export function RuntimePicker({
   }
 
   useEffect(() => {
-    if (controlledDetections !== undefined || editing) return;
+    // Detect when uncontrolled — including in editing mode, where the runtime
+    // switcher (Track R) needs live status dots to show which harness is ready.
+    if (controlledDetections !== undefined) return;
     void refreshDetections();
   }, [controlledDetections, editing]);
 
@@ -244,15 +247,25 @@ export function RuntimePicker({
     <div className="space-y-4">
       {editing ? (
         <div className="space-y-3">
-          <div className="flex items-center gap-3 rounded-lg border border-line bg-surface-2 px-3 py-2.5">
-            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-canvas text-text-primary">
-              <activeAdapter.icon className="h-5 w-5" />
+          {/* Track R: the runtime is a swappable binding. Picking a different
+              harness rebinds this agent in place — identity, memory and abilities
+              are unchanged. The agent is Agentis-owned, not the runtime's. */}
+          <div className="flex items-start gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5">
+            <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-canvas text-text-primary">
+              <activeAdapter.icon className="h-4 w-4" />
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-text-primary">{activeAdapter.title}</div>
-              <div className="text-xs text-text-muted">To switch harness, recreate the agent</div>
+              <div className="text-sm font-medium text-text-primary">Running on {activeAdapter.title}</div>
+              <div className="text-xs text-text-muted">Switch runtime below — keeps this agent's identity, memory and abilities. Only the execution backend changes.</div>
             </div>
           </div>
+          <HarnessGrid
+            adapters={ADAPTERS}
+            adapterType={adapterType}
+            detectionByType={detectionByType}
+            detecting={detecting}
+            onAdapterChange={chooseAdapter}
+          />
           <HarnessModelPassthrough
             agentId={agentId}
             adapterType={adapterType}
@@ -382,20 +395,14 @@ function HarnessModelPassthrough({
   config: RuntimeConfig;
   onConfigChange: (value: RuntimeConfig) => void;
 }) {
-  const modelKey = adapterType === 'claude_code' ? 'claudeModel'
-    : adapterType === 'codex' ? 'codexModel'
-    : adapterType === 'cursor' ? 'cursorModel'
-    : adapterType === 'hermes_agent' ? 'hermesModel'
-    : adapterType === 'openclaw' ? 'openclawModel'
-    : 'httpModel';
-  const value = config[modelKey];
+  const value = runtimeModelValue(config, adapterType);
 
   return (
     <ModelChooser
       adapterType={adapterType}
       agentId={agentId}
       value={value}
-      onChange={(next) => onConfigChange({ ...config, [modelKey]: next })}
+      onChange={(next) => onConfigChange(withRuntimeModel(config, adapterType, next))}
     />
   );
 }

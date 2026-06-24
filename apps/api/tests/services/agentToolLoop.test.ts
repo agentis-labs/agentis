@@ -48,7 +48,9 @@ describe('AgentToolLoop', () => {
       { thought: 'have it', action: 'final', output: 'The spec says the answer is 42.' },
     ]);
     const loop = new AgentToolLoop({ runtime, llm });
-    const res = await loop.run({ workspaceId: WS, role: 'coder', task: 'What does the spec say?' });
+    // Built-in role manifests were retired; pass the effective toolbox explicitly
+    // (read_file is a coding tool outside the universal floor).
+    const res = await loop.run({ workspaceId: WS, role: 'coder', task: 'What does the spec say?', tools: ['read_file'] });
 
     expect(res.stoppedReason).toBe('final');
     expect(res.toolCalls).toBe(1);

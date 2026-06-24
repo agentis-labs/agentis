@@ -128,7 +128,6 @@ describe('auditLog middleware', () => {
       ['/v1/scheduler/schedules', 'scheduler.create'],
       ['/v1/integrations', 'integration.create'],
       ['/v1/rooms', 'room.create'],
-      ['/v1/teams', 'team.create'],
       ['/v1/budgets/spend', 'budget.create'],
     ] as const;
     const app = buildApp((a) => {

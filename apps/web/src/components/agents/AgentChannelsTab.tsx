@@ -1,51 +1,70 @@
 /**
- * AgentChannelsTab — manage an agent's messaging channels (AGENTS-PAGE-REDESIGN.md §3.5,
- * OMNICHANNEL-ORCHESTRATOR-10X §3).
+ * AgentChannelsTab - manage native messaging channels for an agent.
  *
- * Channels belong with the agent, not buried in workspace settings. Each
- * provider card shows a connected state (name + chat id + Test + Disconnect) or
- * a not-connected state with an inline connect flow. Two auth styles:
- *   - token  (Telegram / Discord / Slack): paste a bot token.
- *   - qr     (WhatsApp): create the connection, then scan a QR to link a phone.
- *
- * Telegram additionally supports long-polling (no public webhook) via a toggle.
+ * The UI mirrors the backend health contract: a channel is only "active" when
+ * credentials, transport, outbound, inbound, and runtime checks pass.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Plug } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { AlertTriangle, CheckCircle2, Loader2, Plug, RefreshCcw, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
 import { useToast } from '../shared/Toast';
 
+type ChannelStatus = 'needs_action' | 'verifying' | 'active' | 'degraded' | 'error' | 'paused' | string;
+type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp';
+type WhatsAppMode = 'qr_local' | 'cloud';
+
+interface HealthCheck {
+  name: 'credential' | 'transport' | 'outbound' | 'inbound' | 'runtime';
+  ok: boolean;
+  code: string;
+  message: string;
+  remediation?: string;
+  checkedAt: string;
+}
+
+interface ChannelHealth {
+  status: ChannelStatus;
+  checks: HealthCheck[];
+  lastTestAt?: string;
+}
+
 interface ChannelConnection {
   id: string;
   agentId: string;
-  kind: string;
+  kind: ChannelKind;
   name: string;
-  status: string;
+  status: ChannelStatus;
   defaultChatId: string | null;
+  targetAliases?: Record<string, string>;
+  transport?: string | null;
+  mode?: string | null;
+  transportStatus?: string | null;
+  health: ChannelHealth;
   lastError?: string | null;
 }
 
-type AuthStyle = 'token' | 'qr';
-
 interface Provider {
-  kind: string;
+  kind: ChannelKind;
   label: string;
-  auth: AuthStyle;
   hint: string;
-  /** Optional persistent transport (no public webhook): Telegram long-poll / Discord gateway. */
   persistent?: { value: 'polling' | 'gateway'; label: string };
 }
 
 const PROVIDERS: Provider[] = [
-  { kind: 'telegram', label: 'Telegram', auth: 'token', hint: 'Bot token from @BotFather', persistent: { value: 'polling', label: 'Use long-polling (no public webhook needed)' } },
-  { kind: 'whatsapp', label: 'WhatsApp', auth: 'qr', hint: 'Scan a QR in WhatsApp → Linked Devices' },
-  { kind: 'slack', label: 'Slack', auth: 'token', hint: 'Bot token (xoxb-…) from your Slack app' },
-  { kind: 'discord', label: 'Discord', auth: 'token', hint: 'Bot token from the Discord developer portal', persistent: { value: 'gateway', label: 'Two-way via gateway (requires the Message Content intent)' } },
+  { kind: 'telegram', label: 'Telegram', hint: 'Bot token from @BotFather', persistent: { value: 'polling', label: 'Use long polling' } },
+  { kind: 'whatsapp', label: 'WhatsApp', hint: 'QR local is the easiest setup. Cloud API is available for production/webhook deployments.' },
+  { kind: 'slack', label: 'Slack', hint: 'Bot token and signing secret from your Slack app' },
+  { kind: 'discord', label: 'Discord', hint: 'Bot token from the Discord Developer Portal', persistent: { value: 'gateway', label: 'Two-way gateway' } },
 ];
+
+const EMPTY_HEALTH: ChannelHealth = {
+  status: 'verifying',
+  checks: [],
+};
 
 export function AgentChannelsTab({ agentId, agentName }: { agentId: string; agentName: string }) {
   const toast = useToast();
@@ -64,15 +83,14 @@ export function AgentChannelsTab({ agentId, agentName }: { agentId: string; agen
     void refresh();
   }, [refresh]);
 
-  if (connections === null) return <Skeleton height={320} />;
+  if (connections === null) return <Skeleton height={360} />;
 
   return (
     <div className="max-w-2xl space-y-3">
       <div>
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">Channels</div>
         <p className="mt-1 text-[13px] text-text-secondary">
-          Connect messaging channels to {agentName}'s inbox. Messages run a real orchestrator turn
-          and the reply is delivered back to the channel.
+          Connect messaging channels to {agentName}'s inbox. Saved channels are verified before they are marked active.
         </p>
       </div>
       {PROVIDERS.map((provider) => (
@@ -112,18 +130,29 @@ function ProviderCard({
   toast: ReturnType<typeof useToast>;
 }) {
   const [connecting, setConnecting] = useState(false);
-  const [busy, setBusy] = useState<'test' | 'disconnect' | 'save' | 'link' | null>(null);
+  const [busy, setBusy] = useState<'test' | 'disconnect' | 'save' | 'link' | 'target' | null>(null);
   const [name, setName] = useState(`${agentName} ${provider.label}`);
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState('');
-  const [usePersistent, setUsePersistent] = useState(false);
-  const [testResult, setTestResult] = useState<'ok' | 'fail' | null>(null);
+  const [usePersistent, setUsePersistent] = useState(provider.kind === 'telegram');
+  const [whatsappMode, setWhatsappMode] = useState<WhatsAppMode>('qr_local');
+  const [signingSecret, setSigningSecret] = useState('');
+  const [phoneNumberId, setPhoneNumberId] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+  const [verifyToken, setVerifyToken] = useState('');
   const [qr, setQr] = useState<QrState | null>(null);
+  const [lastHealth, setLastHealth] = useState<ChannelHealth | null>(null);
 
-  // ── WhatsApp QR login polling ────────────────────────────
+  const health = lastHealth ?? connection?.health ?? EMPTY_HEALTH;
   const qrConnId = qr?.connectionId;
   const linked = qr?.status === 'open';
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    setLastHealth(null);
+    setChatId(connection?.defaultChatId ?? '');
+  }, [connection?.id, connection?.status, connection?.defaultChatId]);
+
   useEffect(() => {
     if (!qrConnId || linked) {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -137,15 +166,15 @@ function ProviderCard({
             ? { ...prev, status: state.status, dataUrl: state.qrDataUrl ?? prev.dataUrl }
             : prev));
           if (state.status === 'open') {
-            toast.success(`${provider.label} linked`);
+            toast.success(`${provider.label} transport open`);
             setQr(null);
             setConnecting(false);
             await onChanged();
           } else if (state.status === 'logged_out' || state.status === 'error') {
-            toast.error(`${provider.label} login failed`, 'Try generating a new QR.');
+            toast.error(`${provider.label} login failed`, 'Generate a new QR and relink the device.');
           }
         } catch {
-          /* transient — keep polling */
+          /* transient polling failure */
         }
       })();
     }, 2500);
@@ -154,46 +183,76 @@ function ProviderCard({
     };
   }, [qrConnId, linked, provider.label, toast, onChanged]);
 
-  async function saveToken() {
-    if (token.trim().length < 8) {
-      toast.error('Token too short', 'Paste the full bot token.');
+  async function saveConnection() {
+    const isWhatsAppCloud = provider.kind === 'whatsapp' && whatsappMode === 'cloud';
+    const needsToken = provider.kind !== 'whatsapp' || isWhatsAppCloud;
+    if (needsToken && token.trim().length < 8) {
+      toast.error('Token too short', 'Paste the full provider token.');
+      return;
+    }
+    if (isWhatsAppCloud && (!phoneNumberId.trim() || !appSecret.trim() || !verifyToken.trim())) {
+      toast.error('Cloud setup incomplete', 'Add phone number ID, app secret, and verify token.');
       return;
     }
     setBusy('save');
     try {
-      await api('/v1/channels', {
+      const created = await api<{ connection: ChannelConnection; health: ChannelHealth }>('/v1/channels', {
         method: 'POST',
         body: JSON.stringify({
           kind: provider.kind,
           name: name.trim() || `${agentName} ${provider.label}`,
           agentId,
-          token: token.trim(),
+          ...(needsToken ? { token: token.trim() } : {}),
           defaultChatId: chatId.trim() || undefined,
+          ...(provider.kind === 'whatsapp' ? { mode: whatsappMode } : {}),
+          ...(provider.kind === 'slack' && signingSecret.trim() ? { signingSecret: signingSecret.trim() } : {}),
+          ...(isWhatsAppCloud
+            ? {
+                phoneNumberId: phoneNumberId.trim(),
+                appSecret: appSecret.trim(),
+                verifyToken: verifyToken.trim(),
+                defaultRecipient: chatId.trim() || undefined,
+              }
+            : {}),
           ...(provider.persistent && usePersistent ? { transport: provider.persistent.value } : {}),
         }),
       });
-      toast.success(`${provider.label} connected`);
+      setLastHealth(created.health);
+      if (created.health.status === 'active') {
+        toast.success(`${provider.label} active`);
+      } else {
+        toast.error(`${provider.label} needs action`, firstProblem(created.health) ?? 'Open the check details.');
+      }
       setConnecting(false);
       setToken('');
+      setSigningSecret('');
+      setAppSecret('');
+      setVerifyToken('');
       await onChanged();
     } catch (err) {
-      toast.error(`Could not connect ${provider.label}`, String(err));
+      toast.error(`Could not save ${provider.label}`, String(err));
     } finally {
       setBusy(null);
     }
   }
 
-  /** WhatsApp: create the connection (if needed) then start a QR login. */
   async function startQrLogin(existingId?: string) {
     setBusy('save');
     try {
       let connId = existingId;
       if (!connId) {
-        const created = await api<{ connection: { id: string } }>('/v1/channels', {
+        const created = await api<{ connection: ChannelConnection; health: ChannelHealth }>('/v1/channels', {
           method: 'POST',
-          body: JSON.stringify({ kind: provider.kind, name: name.trim() || `${agentName} ${provider.label}`, agentId }),
+          body: JSON.stringify({
+            kind: provider.kind,
+            mode: 'qr_local',
+            name: name.trim() || `${agentName} ${provider.label}`,
+            agentId,
+            defaultChatId: chatId.trim() || undefined,
+          }),
         });
         connId = created.connection.id;
+        setLastHealth(created.health);
       }
       const login = await api<{ status: string; qrDataUrl?: string }>(`/v1/channels/${connId}/login`, { method: 'POST' });
       setQr({ connectionId: connId, status: login.status, dataUrl: login.qrDataUrl });
@@ -208,16 +267,16 @@ function ProviderCard({
   async function test() {
     if (!connection) return;
     setBusy('test');
-    setTestResult(null);
     try {
-      await api(`/v1/channels/${connection.id}/test`, {
+      const result = await api<{ ok: boolean; health: ChannelHealth }>(`/v1/channels/${connection.id}/test`, {
         method: 'POST',
         body: JSON.stringify({ body: `Hello from ${agentName}.` }),
       });
-      setTestResult('ok');
-      toast.success('Test message delivered');
+      setLastHealth(result.health);
+      if (result.ok) toast.success('Channel test passed');
+      else toast.error('Channel needs action', firstProblem(result.health) ?? 'Open the check details.');
+      await onChanged();
     } catch (err) {
-      setTestResult('fail');
       toast.error('Test failed', String(err));
     } finally {
       setBusy(null);
@@ -239,110 +298,164 @@ function ProviderCard({
     }
   }
 
-  // WhatsApp/QR connections aren't usable until linked (status 'active').
-  const isQr = provider.auth === 'qr';
-  const connectedAndLive = connection && (!isQr || connection.status === 'active');
-  const needsLink = connection && isQr && connection.status !== 'active';
+  async function saveTargets() {
+    if (!connection) return;
+    setBusy('target');
+    try {
+      const result = await api<{ connection: ChannelConnection; health: ChannelHealth }>(`/v1/channels/${connection.id}/targets`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          defaultChatId: chatId.trim() || null,
+          ...(chatId.trim() ? { targetAliases: { me: chatId.trim(), default: chatId.trim() } } : {}),
+        }),
+      });
+      setLastHealth(result.health);
+      toast.success('Default recipient saved');
+      await onChanged();
+    } catch (err) {
+      toast.error('Could not save recipient', String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const isWhatsApp = provider.kind === 'whatsapp';
+  const isQrConnection = isWhatsApp && connection?.mode !== 'cloud';
+  const status = connection?.status ?? health.status;
+  const active = status === 'active';
+  const needsLink = Boolean(connection && isQrConnection && connection.status !== 'active');
 
   return (
     <div className="rounded-card border border-line bg-surface px-4 py-3.5">
       <div className="flex items-center gap-2">
         <span className="text-[14px] font-medium text-text-primary">{provider.label}</span>
-        {connectedAndLive ? (
-          <span className="flex items-center gap-1 text-[12px] text-accent">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent" /> connected
-          </span>
-        ) : needsLink ? (
-          <span className="flex items-center gap-1 text-[12px] text-amber-500">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> needs linking
-          </span>
-        ) : (
-          <span className="flex items-center gap-1 text-[12px] text-text-muted">
-            <span className="h-1.5 w-1.5 rounded-full bg-text-muted" /> not connected
-          </span>
-        )}
-        {testResult === 'ok' && <span className="ml-auto text-[12px] text-accent">Delivered ✓</span>}
-        {testResult === 'fail' && <span className="ml-auto text-[12px] text-danger">Failed ✗</span>}
+        <StatusBadge status={status} />
+        {isQrConnection && connection?.transportStatus ? (
+          <span className="text-[11px] text-text-muted">transport: {connection.transportStatus}</span>
+        ) : null}
       </div>
 
-      {/* Active QR login panel (WhatsApp) */}
       {qr ? (
-        <div className="mt-3 flex flex-col items-center gap-2 rounded-input border border-line bg-surface-2 p-4">
-          {qr.dataUrl ? (
-            <img src={qr.dataUrl} alt={`${provider.label} login QR`} className="h-44 w-44 rounded bg-white p-1" />
-          ) : (
-            <Loader2 size={28} className="animate-spin text-text-muted" />
-          )}
-          <p className="text-center text-[12px] text-text-secondary">
-            Open {provider.label} → <strong>Linked Devices</strong> → scan this code.
-          </p>
-          <p className="text-[11px] text-text-muted">Waiting for scan… ({qr.status})</p>
-          <Button size="sm" variant="ghost" onClick={() => { setQr(null); setConnecting(false); }}>
-            Cancel
-          </Button>
-        </div>
-      ) : connectedAndLive ? (
+        <QrPanel provider={provider} qr={qr} onCancel={() => { setQr(null); setConnecting(false); }} />
+      ) : connection ? (
         <>
           <div className="mt-1 text-[12px] text-text-muted">
-            {connection!.name}
-            {connection!.defaultChatId ? ` · chat ID: ${connection!.defaultChatId}` : ''}
+            {connection.name}
+            {connection.mode ? ` · ${connection.mode === 'cloud' ? 'Cloud API' : 'QR local'}` : ''}
+            {connection.defaultChatId ? ` · target: ${connection.defaultChatId}` : ''}
           </div>
-          {connection!.lastError && <div className="mt-1 text-[12px] text-danger">{connection!.lastError}</div>}
+          {connection.lastError && <div className="mt-1 text-[12px] text-danger">{connection.lastError}</div>}
+          <TargetEditor
+            provider={provider}
+            value={chatId}
+            busy={busy === 'target'}
+            onChange={setChatId}
+            onSave={() => void saveTargets()}
+          />
+          <HealthDetails health={health} />
           <div className="mt-3 flex flex-wrap gap-2">
-            {!isQr && (
-              <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void test()}>
-                {busy === 'test' ? <Loader2 size={12} className="animate-spin" /> : 'Test'}
+            <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void test()}>
+              {busy === 'test' ? <Loader2 size={12} className="animate-spin" /> : 'Test'}
+            </Button>
+            {needsLink ? (
+              <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void startQrLogin(connection.id)}>
+                {busy === 'save' ? 'Starting...' : 'Relink QR'}
               </Button>
-            )}
+            ) : isQrConnection ? (
+              <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void startQrLogin(connection.id)}>
+                <RefreshCcw size={12} /> Restart link
+              </Button>
+            ) : null}
             <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void disconnect()}>
-              {busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}
+              {busy === 'disconnect' ? 'Disconnecting...' : 'Disconnect'}
             </Button>
           </div>
+          {!active && <ProblemHint health={health} />}
         </>
-      ) : needsLink ? (
-        <>
-          <div className="mt-1 text-[12px] text-text-muted">{connection!.name} · not yet linked</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void startQrLogin(connection!.id)}>
-              {busy === 'save' ? 'Starting…' : 'Show QR'}
-            </Button>
-            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void disconnect()}>
-              Remove
-            </Button>
-          </div>
-        </>
-      ) : connecting && !isQr ? (
+      ) : connecting ? (
         <div className="mt-3 space-y-2">
           <ConnectField label="Connection name">
             <input value={name} onChange={(event) => setName(event.target.value)} className={INPUT_CLS} />
           </ConnectField>
-          <ConnectField label="Bot token" hint={provider.hint}>
-            <input
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              type="password"
-              placeholder="Paste the bot token"
-              className={INPUT_CLS}
-            />
-          </ConnectField>
-          <ConnectField label="Default chat ID" hint="Optional — where test + outbound messages go">
+
+          {isWhatsApp && (
+            <div className="grid grid-cols-2 gap-2">
+              <ModeButton active={whatsappMode === 'qr_local'} onClick={() => setWhatsappMode('qr_local')} title="QR local" detail="Easy setup" />
+              <ModeButton active={whatsappMode === 'cloud'} onClick={() => setWhatsappMode('cloud')} title="Cloud API" detail="Production" />
+            </div>
+          )}
+
+          {(!isWhatsApp || whatsappMode === 'cloud') && (
+            <ConnectField label={isWhatsApp ? 'Cloud access token' : 'Bot token'} hint={provider.hint}>
+              <input
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                type="password"
+                placeholder="Paste token"
+                className={INPUT_CLS}
+              />
+            </ConnectField>
+          )}
+
+          {provider.kind === 'slack' && (
+            <ConnectField label="Signing secret" hint="Required for Events API URL verification and signed callbacks">
+              <input
+                value={signingSecret}
+                onChange={(event) => setSigningSecret(event.target.value)}
+                type="password"
+                placeholder="Slack signing secret"
+                className={INPUT_CLS}
+              />
+            </ConnectField>
+          )}
+
+          {isWhatsApp && whatsappMode === 'cloud' && (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <ConnectField label="Phone number ID">
+                <input value={phoneNumberId} onChange={(event) => setPhoneNumberId(event.target.value)} className={INPUT_CLS} />
+              </ConnectField>
+              <ConnectField label="Verify token">
+                <input value={verifyToken} onChange={(event) => setVerifyToken(event.target.value)} type="password" className={INPUT_CLS} />
+              </ConnectField>
+              <div className="sm:col-span-2">
+                <ConnectField label="App secret">
+                  <input value={appSecret} onChange={(event) => setAppSecret(event.target.value)} type="password" className={INPUT_CLS} />
+                </ConnectField>
+              </div>
+            </div>
+          )}
+
+          <ConnectField label={isWhatsApp ? 'Default recipient' : 'Default chat ID'} hint={targetHint(provider.kind)}>
             <input
               value={chatId}
               onChange={(event) => setChatId(event.target.value)}
-              placeholder="e.g. -100123456789"
+              placeholder={targetPlaceholder(provider.kind)}
               className={INPUT_CLS}
             />
           </ConnectField>
+
           {provider.persistent && (
             <label className="flex items-center gap-2 text-[12px] text-text-secondary">
               <input type="checkbox" checked={usePersistent} onChange={(event) => setUsePersistent(event.target.checked)} />
               {provider.persistent.label}
             </label>
           )}
+          {provider.kind === 'discord' && usePersistent && (
+            <div className="rounded-input border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-text-secondary">
+              Gateway mode requires the Discord Message Content intent.
+            </div>
+          )}
+
           <div className="flex gap-2 pt-1">
-            <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void saveToken()}>
-              {busy === 'save' ? 'Connecting…' : `Connect ${provider.label}`}
-            </Button>
+            {isWhatsApp && whatsappMode === 'qr_local' ? (
+              <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void startQrLogin()}>
+                {busy === 'save' ? 'Starting...' : 'Show QR'}
+              </Button>
+            ) : (
+              <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void saveConnection()}>
+                {busy === 'save' ? 'Verifying...' : `Save ${provider.label}`}
+              </Button>
+            )}
             <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setConnecting(false)}>
               Cancel
             </Button>
@@ -356,9 +469,9 @@ function ProviderCard({
             iconLeft={<Plug size={12} />}
             disabled={busy !== null}
             aria-label={`Connect ${provider.label} to ${agentName}`}
-            onClick={() => (isQr ? void startQrLogin() : setConnecting(true))}
+            onClick={() => setConnecting(true)}
           >
-            {busy === 'save' && isQr ? 'Starting…' : `Connect ${provider.label}`}
+            Connect {provider.label}
           </Button>
         </div>
       )}
@@ -366,15 +479,160 @@ function ProviderCard({
   );
 }
 
+function QrPanel({ provider, qr, onCancel }: { provider: Provider; qr: QrState; onCancel: () => void }) {
+  return (
+    <div className="mt-3 flex flex-col items-center gap-2 rounded-input border border-line bg-surface-2 p-4">
+      {qr.dataUrl ? (
+        <img src={qr.dataUrl} alt={`${provider.label} login QR`} className="h-44 w-44 rounded bg-white p-1" />
+      ) : (
+        <Loader2 size={28} className="animate-spin text-text-muted" />
+      )}
+      <p className="text-center text-[12px] text-text-secondary">
+        Open WhatsApp Linked Devices and scan this code.
+      </p>
+      <p className="text-[11px] text-text-muted">Transport status: {qr.status}</p>
+      <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: ChannelStatus }) {
+  const tone =
+    status === 'active' ? 'text-accent' :
+    status === 'needs_action' || status === 'verifying' ? 'text-amber-500' :
+    status === 'degraded' ? 'text-cyan-400' :
+    status === 'error' ? 'text-danger' :
+    'text-text-muted';
+  const dot =
+    status === 'active' ? 'bg-accent' :
+    status === 'needs_action' || status === 'verifying' ? 'bg-amber-500' :
+    status === 'degraded' ? 'bg-cyan-400' :
+    status === 'error' ? 'bg-danger' :
+    'bg-text-muted';
+  const label =
+    status === 'active' ? 'active' :
+    status === 'needs_action' ? 'needs action' :
+    status === 'verifying' ? 'verifying' :
+    status === 'degraded' ? 'degraded' :
+    status === 'error' ? 'error' :
+    status || 'not connected';
+  return (
+    <span className={clsx('flex items-center gap-1 text-[12px]', tone)}>
+      <span className={clsx('h-1.5 w-1.5 rounded-full', dot)} /> {label}
+    </span>
+  );
+}
+
+function HealthDetails({ health }: { health: ChannelHealth }) {
+  if (!health.checks.length) return null;
+  return (
+    <div className="mt-3 grid gap-1.5">
+      {health.checks.map((check) => (
+        <div key={check.name} className="rounded-input border border-line bg-surface-2 px-3 py-2">
+          <div className="flex items-start gap-2">
+            {check.ok ? <CheckCircle2 size={13} className="mt-0.5 text-accent" /> : <XCircle size={13} className="mt-0.5 text-danger" />}
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[12px] font-medium capitalize text-text-primary">{check.name}</span>
+                <span className="font-mono text-[10px] text-text-muted">{check.code}</span>
+              </div>
+              <div className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">{check.message}</div>
+              {check.remediation ? <div className="mt-1 text-[11px] leading-relaxed text-text-muted">{check.remediation}</div> : null}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProblemHint({ health }: { health: ChannelHealth }) {
+  const problem = health.checks.find((check) => !check.ok);
+  if (!problem) return null;
+  return (
+    <div className="mt-3 flex gap-2 rounded-input border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[12px] text-text-secondary">
+      <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />
+      <span>{problem.remediation ?? problem.message}</span>
+    </div>
+  );
+}
+
+function TargetEditor({
+  provider,
+  value,
+  busy,
+  onChange,
+  onSave,
+}: {
+  provider: Provider;
+  value: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="mt-3 flex flex-col gap-2 rounded-input border border-line bg-surface-2 px-3 py-2 sm:flex-row sm:items-end">
+      <div className="min-w-0 flex-1">
+        <ConnectField label={provider.kind === 'whatsapp' ? 'Default recipient' : 'Default target'} hint={targetHint(provider.kind)}>
+          <input
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder={targetPlaceholder(provider.kind)}
+            className={INPUT_CLS}
+          />
+        </ConnectField>
+      </div>
+      <Button size="sm" variant="secondary" disabled={busy} onClick={onSave}>
+        {busy ? 'Saving...' : 'Save'}
+      </Button>
+    </div>
+  );
+}
+
+function ModeButton({ active, onClick, title, detail }: { active: boolean; onClick: () => void; title: string; detail: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        'rounded-input border px-3 py-2 text-left transition-colors',
+        active ? 'border-accent bg-accent/10 text-text-primary' : 'border-line bg-surface-2 text-text-secondary hover:text-text-primary',
+      )}
+    >
+      <span className="block text-[12px] font-medium">{title}</span>
+      <span className="text-[11px] text-text-muted">{detail}</span>
+    </button>
+  );
+}
+
 const INPUT_CLS =
   'w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none';
 
-function ConnectField({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function ConnectField({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
-    <label className={clsx('block')}>
+    <label className="block">
       <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-text-muted">{label}</span>
       {children}
       {hint && <span className="mt-1 block text-[11px] text-text-muted">{hint}</span>}
     </label>
   );
+}
+
+function targetPlaceholder(kind: ChannelKind): string {
+  if (kind === 'whatsapp') return '+12345678901 or 12345678901@s.whatsapp.net';
+  if (kind === 'slack') return 'Slack channel ID';
+  if (kind === 'discord') return 'Discord channel ID';
+  if (kind === 'telegram') return 'Human Telegram chat ID';
+  return 'Target ID';
+}
+
+function targetHint(kind: ChannelKind): string {
+  if (kind === 'whatsapp') return 'Optional. Explicit phone numbers still work without this.';
+  if (kind === 'telegram') return 'Use the human chat ID after that account sends /start to the bot.';
+  return "Used for Test and default recipient.";
+}
+
+function firstProblem(health: ChannelHealth): string | null {
+  const problem = health.checks.find((check) => !check.ok);
+  return problem?.remediation ?? problem?.message ?? null;
 }

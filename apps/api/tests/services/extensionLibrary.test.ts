@@ -85,6 +85,27 @@ describe('ExtensionLibraryService', () => {
     }
   });
 
+  it('rejects CommonJS source at creation so a "require is not defined" extension can never be persisted', async () => {
+    const dbCtx = await createTestContext();
+    try {
+      const library = new ExtensionLibraryService(volume, dbCtx.db);
+      await expect(library.createNodeWorkerExtension(
+        { workspaceId: dbCtx.workspace.id, ambientId: dbCtx.ambient.id, userId: dbCtx.user.id },
+        {
+          name: 'CJS Scraper',
+          source: `const crypto = require('crypto');\nexport async function execute(inputs, ctx) { return { id: crypto.randomUUID() }; }`,
+          operations: [{ name: 'execute', inputSchema: {}, outputSchema: {} }],
+        },
+      )).rejects.toMatchObject<Partial<AgentisError>>({ code: 'VALIDATION_FAILED' });
+
+      // Nothing was written to the volume or the database.
+      expect(await library.listSourceFiles(dbCtx.workspace.id)).toEqual([]);
+      expect(dbCtx.db.select().from(schema.extensions).all()).toEqual([]);
+    } finally {
+      dbCtx.close();
+    }
+  });
+
   it('updates a semantically identical extension instead of creating a renamed duplicate', async () => {
     const dbCtx = await createTestContext();
     try {

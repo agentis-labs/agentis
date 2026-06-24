@@ -1,7 +1,8 @@
-export { ConnectorRegistry } from './ConnectorRegistry.js';
+export { ConnectorRegistry, missingContractFields } from './ConnectorRegistry.js';
 export type {
   ConnectorExecuteOptions,
   ConnectorModule,
+  ConnectorOperationContract,
   IntegrationAuthConfig,
   IntegrationAuthType,
   IntegrationHttpMethod,

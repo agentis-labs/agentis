@@ -23,8 +23,13 @@ import type { AgentLibraryService } from '../agentLibrary.js';
 import type { ExtensionLibraryService } from '../extensionLibrary.js';
 import type { SpecialistAgentService } from '../specialistAgents.js';
 import type { SpecialistDemandRouter } from '../specialistDemandRouter.js';
+import type { SpecialistProfileService } from '../specialistProfileService.js';
+import type { SpecialistRuntimeService } from '../specialistRuntimeService.js';
 import type { OrchestratorModelRouter } from '../orchestratorModelRouter.js';
 import type { AbilityCreationService } from '../abilityCreationService.js';
+import type { MemoryStore } from '../memoryStore.js';
+import type { PlanService } from '../planService.js';
+import type { ChannelBridge } from '../channelBridge.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -38,6 +43,8 @@ export interface ToolHandlerDeps {
   activity: ActivityFeedService;
   replay: PartialReplayService;
   knowledgeBases?: KnowledgeBaseService;
+  /** §B4 — typed workspace memory facade over the unified episode substrate. */
+  memory?: MemoryStore;
   /** Optional — used by NL workflow synthesis for structured-output LLM calls. */
   evaluatorRuntime?: EvaluatorRuntime;
   /** Optional — dedicated workflow-synthesis runtime (§6). Falls back to evaluatorRuntime. */
@@ -47,7 +54,11 @@ export interface ToolHandlerDeps {
    * (OMNICHANNEL §4.4). When set, synthesis honors per-workspace model overrides;
    * falls back to synthesisRuntime/evaluatorRuntime.
    */
-  resolveEvaluatorRuntime?: (workspaceId: string, role: 'synthesis' | 'evaluation') => EvaluatorRuntime | undefined;
+  resolveEvaluatorRuntime?: (
+    workspaceId: string,
+    role: 'synthesis' | 'evaluation',
+    hint?: { task?: string | null; purpose?: string | null; explicitModel?: string | null },
+  ) => EvaluatorRuntime | undefined;
   /**
    * Optional — per-role orchestrator model router. Lets workflow synthesis route
    * around a slow per-call CLI harness through the operator's configured streaming
@@ -55,6 +66,8 @@ export interface ToolHandlerDeps {
    * it, synthesis falls back to the agent's own adapter.
    */
   modelRouter?: OrchestratorModelRouter;
+  /** Optional workspace gate for automatic model-assisted evaluator/brain/runtime fallback. */
+  modelAssistedRuntimeEnabled?: (workspaceId: string) => boolean;
   /** Optional — Layer 1 workspace context injected into build_workflow synthesis. */
   workspaceIntelligence?: WorkspaceIntelligenceService;
   /** Optional — Principle #11 agent-as-file library; expands the casting vocabulary with custom roles. */
@@ -68,5 +81,9 @@ export interface ToolHandlerDeps {
    * nodes) so the team is real and visible the moment a workflow is built.
    */
   specialists?: SpecialistAgentService;
+  specialistProfiles?: SpecialistProfileService;
+  specialistRuntime?: SpecialistRuntimeService;
   specialistRouter?: SpecialistDemandRouter;
+  plans?: PlanService;
+  channels?: ChannelBridge;
 }

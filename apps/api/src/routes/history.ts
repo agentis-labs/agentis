@@ -15,6 +15,7 @@ import { firstFailedNodeId } from '../services/runStateFailures.js';
 type HistoryType = 'all' | 'runs' | 'activity' | 'audit';
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;
 type ActivityEventRow = typeof schema.activityEvents.$inferSelect;
+type ObservabilityEventRow = typeof schema.observabilityEvents.$inferSelect;
 type WorkflowRow = typeof schema.workflows.$inferSelect;
 
 interface HistoryEvent {
@@ -28,6 +29,8 @@ interface HistoryEvent {
   agentId?: string;
   agentName?: string;
   workflowName?: string;
+  workflowId?: string;
+  failedNodeId?: string;
   failedNode?: string;
   context?: Record<string, unknown>;
 }
@@ -56,6 +59,12 @@ export function buildHistoryRoutes(deps: { db: AgentisSqliteDb; auth: AuthServic
       });
       const agentsById = loadAgentNames(deps.db, ws.workspaceId, filtered);
       events.push(...filtered.map((event) => presentActivityEvent(event, agentsById.get(event.actorId ?? ''))));
+    }
+
+    if (type === 'all' || type === 'activity') {
+      const observations = loadAgentObservabilityEvents(deps.db, ws.workspaceId, limit * 2);
+      const agentsById = loadObservationAgentNames(deps.db, ws.workspaceId, observations);
+      events.push(...observations.map((event) => presentObservabilityEvent(event, agentsById.get(event.agentId ?? ''))));
     }
 
     events.sort((left, right) => right.timestamp.localeCompare(left.timestamp));
@@ -89,6 +98,20 @@ function loadActivityEvents(db: AgentisSqliteDb, workspaceId: string, limit: num
     .orderBy(desc(schema.activityEvents.createdAt))
     .limit(limit)
     .all();
+}
+
+function loadAgentObservabilityEvents(db: AgentisSqliteDb, workspaceId: string, limit: number): ObservabilityEventRow[] {
+  return db
+    .select()
+    .from(schema.observabilityEvents)
+    .where(eq(schema.observabilityEvents.workspaceId, workspaceId))
+    .orderBy(desc(schema.observabilityEvents.createdAt))
+    .limit(limit)
+    .all()
+    .filter((event) =>
+      event.sourceEvent === REALTIME_EVENTS.AGENT_WORK_STEP
+      || event.sourceEvent === REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL
+      || event.sourceEvent === REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE);
 }
 
 function loadWorkflows(
@@ -127,11 +150,30 @@ function loadAgentNames(
   );
 }
 
+function loadObservationAgentNames(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  events: ObservabilityEventRow[],
+): Map<string, { id: string; name: string }> {
+  const ids = [...new Set(events.map((event) => event.agentId).filter((id): id is string => Boolean(id)))];
+  if (ids.length === 0) return new Map();
+  return new Map(
+    db
+      .select({ id: schema.agents.id, name: schema.agents.name })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), inArray(schema.agents.id, ids)))
+      .all()
+      .map((agent) => [agent.id, agent]),
+  );
+}
+
 function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEvent {
   const status = mapRunStatus(run.status);
   const workflowName = workflow?.title ?? run.ephemeralTitle ?? 'Workflow';
   const state = run.runState as WorkflowRunState;
-  const failedNode = firstFailedNodeId(state) ?? undefined;
+  const failedNodeId = firstFailedNodeId(state) ?? undefined;
+  const graph = ((run.graphSnapshot as { nodes?: Array<{ id: string; title?: string }> } | null)?.nodes ?? []);
+  const failedNode = failedNodeId ? graph.find((node) => node.id === failedNodeId)?.title ?? failedNodeId : undefined;
   return {
     id: `run-${run.id}`,
     type: status === 'failed'
@@ -143,7 +185,9 @@ function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEv
     timestamp: run.completedAt ?? run.startedAt ?? run.createdAt,
     status,
     runId: run.id,
+    workflowId: run.workflowId ?? undefined,
     workflowName,
+    failedNodeId,
     failedNode,
     context: {
       workflowId: run.workflowId,
@@ -172,6 +216,32 @@ function presentActivityEvent(event: ActivityEventRow, agent?: { id: string; nam
       entityType: event.entityType,
       entityId: event.entityId,
       metadata: event.metadata,
+    },
+  };
+}
+
+function presentObservabilityEvent(event: ObservabilityEventRow, agent?: { id: string; name: string }): HistoryEvent {
+  return {
+    id: `observation-${event.id}`,
+    type: event.sourceEvent,
+    title: event.title,
+    subtitle: event.summary || `${event.kind} ${event.status}`,
+    timestamp: event.createdAt,
+    status: event.status,
+    runId: event.runId ?? undefined,
+    agentId: event.agentId ?? undefined,
+    agentName: agent?.name,
+    workflowName: undefined,
+    context: {
+      scopeType: event.scopeType,
+      scopeId: event.scopeId,
+      kind: event.kind,
+      status: event.status,
+      summary: event.summary,
+      detail: event.detail,
+      correlationId: event.correlationId,
+      sourceEvent: event.sourceEvent,
+      raw: event.rawPayloadRedacted,
     },
   };
 }

@@ -75,6 +75,8 @@ export function buildInitialRunState(args: {
     graphRevision: 1,
     replanCount: 0,
     lastLedgerSequence: 0,
+    selfHealAttempts: {},
+    selfHealIncidents: {},
   };
 }
 

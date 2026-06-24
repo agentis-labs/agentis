@@ -1,12 +1,38 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
 
 const SLACK_API = 'https://slack.com/api';
 
 export class SlackChannelAdapter implements ChannelAdapter {
   readonly kind = 'slack' as const;
   fetchImpl: typeof fetch = (...args) => fetch(...args);
+
+  async probeCredential(args: { token: string }): Promise<ChannelHealthCheck> {
+    const checkedAt = new Date().toISOString();
+    const res = await this.fetchImpl(`${SLACK_API}/auth.test`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${args.token}` },
+    });
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; error?: string; team?: string; user?: string };
+    if (res.ok && json.ok !== false) {
+      return {
+        name: 'credential',
+        ok: true,
+        code: 'slack_auth_test_ok',
+        message: json.team ? `Slack bot token is valid for ${json.team}.` : 'Slack bot token is valid.',
+        checkedAt,
+      };
+    }
+    return {
+      name: 'credential',
+      ok: false,
+      code: 'slack_auth_test_failed',
+      message: `Slack auth.test failed: ${json.error ?? res.statusText}`,
+      remediation: 'Paste a valid xoxb bot token with chat:write and Events API permissions.',
+      checkedAt,
+    };
+  }
 
   async send(args: { token: string; chatId: string; body: string }): Promise<void> {
     const [channel, threadTs] = args.chatId.split(':thread:');
@@ -20,7 +46,15 @@ export class SlackChannelAdapter implements ChannelAdapter {
     });
     const json = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
     if (!res.ok || json.ok === false) {
-      throw new AgentisError('CHANNEL_SEND_FAILED', `slack sendMessage failed: ${json.error ?? res.statusText}`);
+      const error = json.error ?? res.statusText;
+      const hint = error === 'channel_not_found'
+        ? ' Make sure the default channel ID exists and invite the bot to the channel.'
+        : error === 'not_in_channel'
+          ? ' Invite the Slack app bot to the channel, then retry.'
+          : /missing_scope/i.test(error)
+            ? ' Add chat:write to the Slack app scopes and reinstall the app.'
+            : '';
+      throw new AgentisError('CHANNEL_SEND_FAILED', `slack sendMessage failed: ${error}.${hint}`);
     }
   }
 

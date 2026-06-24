@@ -50,3 +50,10 @@ apps/api/.agentis-e2e/
 *.bak
 *.orig
 tsc.out
+
+# Local scratch / dev artifacts (never commit — keeps the repo clean for inspection)
+scratch_*
+tmp-*
+/tmp/
+.playwright-mcp/
+.codex-*

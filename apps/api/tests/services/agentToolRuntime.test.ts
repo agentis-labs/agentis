@@ -69,13 +69,14 @@ describe('AgentToolRuntime', () => {
     expect(matches.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('enforces the role tool manifest', async () => {
-    // researcher is NOT granted write_file.
+  it('enforces the open-vocabulary tool floor', async () => {
+    // Built-in specialists were retired: no role gets file/git tools by default —
+    // write_file is outside the universal knowledge-worker floor.
     const denied = await tools.execute(WS, 'write_file', { path: 'x.txt', content: 'y' }, 'researcher');
     expect(denied.ok).toBe(false);
     expect(denied.error).toMatch(/not granted/);
-    // coder IS granted write_file.
-    const allowed = await tools.execute(WS, 'write_file', { path: 'x.txt', content: 'y' }, 'coder');
+    // ...but every specialist role DOES get the floor (e.g. run_code).
+    const allowed = await tools.execute(WS, 'run_code', { expression: '1 + 1' }, 'researcher');
     expect(allowed.ok).toBe(true);
   });
 
@@ -86,4 +87,5 @@ describe('AgentToolRuntime', () => {
     const git = await tools.execute(WS, 'git_status', {});
     expect(git.ok).toBe(false);
   });
+
 });

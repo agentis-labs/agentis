@@ -83,6 +83,30 @@ describe('ApprovalInboxService', () => {
     expect(handlerCalled).toMatchObject({ decision: 'reject' });
   });
 
+  it('persists self-heal payloads and routes them through the run resume handler', async () => {
+    let handlerCalled: { source: string; targetId: string | null; decision: string } | null = null;
+    svc.bindCheckpointHandler(async (a) => {
+      handlerCalled = a;
+    });
+    const created = await svc.create({
+      ...baseArgs,
+      source: 'self_heal',
+      targetId: 'node-a',
+      payload: { kind: 'self_heal', patch: { patchId: 'p1' } },
+    });
+
+    expect(created.payload).toMatchObject({ kind: 'self_heal' });
+    expect(svc.list('ws1', 'pending')[0]?.payload).toMatchObject({ kind: 'self_heal' });
+
+    await svc.resolve({
+      workspaceId: 'ws1',
+      approvalId: created.id,
+      decision: 'approve',
+    });
+
+    expect(handlerCalled).toMatchObject({ source: 'self_heal', targetId: 'node-a', decision: 'approve' });
+  });
+
   it('throws RESOURCE_CONFLICT when resolving an already-resolved approval', async () => {
     const created = await svc.create(baseArgs);
     await svc.resolve({ workspaceId: 'ws1', approvalId: created.id, decision: 'approve' });

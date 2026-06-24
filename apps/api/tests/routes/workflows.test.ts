@@ -190,6 +190,37 @@ describe('GET /v1/workflows/:id', () => {
   });
 });
 
+describe('workflow owner (specialist responsibility)', () => {
+  function seedOwnerAgent(): string {
+    const id = randomUUID();
+    ctx.db
+      .insert(schema.agents)
+      .values({ id, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, name: 'SEO Specialist', adapterType: 'http', capabilityTags: [], config: {}, status: 'offline', role: 'specialist' })
+      .run();
+    return id;
+  }
+
+  it('round-trips ownerAgentId on create and patch', async () => {
+    const owner = seedOwnerAgent();
+    const created = await app().request('/v1/workflows', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ title: 'SEO Audit', ownerAgentId: owner }),
+    });
+    expect(created.status).toBe(201);
+    const id = ((await created.json()) as { workflow: { id: string } }).workflow.id;
+    expect(ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, id)).get()?.ownerAgentId).toBe(owner);
+
+    const res = await app().request(`/v1/workflows/${id}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ ownerAgentId: null }),
+    });
+    expect(res.status).toBe(200);
+    expect(ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, id)).get()?.ownerAgentId).toBeNull();
+  });
+});
+
 describe('PATCH /v1/workflows/:id', () => {
   it('updates the title', async () => {
     const id = seedWorkflow();
@@ -203,7 +234,7 @@ describe('PATCH /v1/workflows/:id', () => {
 });
 
 describe('workflow deployment', () => {
-  it('publishes a cron workflow through TriggerRuntime and exposes its deployment', async () => {
+  it('activates a cron workflow through TriggerRuntime and exposes its deployment', async () => {
     const graph: WorkflowGraph = {
       version: 1,
       nodes: [
@@ -243,7 +274,7 @@ describe('workflow deployment', () => {
       listeners: undefined,
     } as unknown as TriggerRuntime;
 
-    const publish = await app(runtime).request(`/v1/workflows/${id}/publish`, {
+    const publish = await app(runtime).request(`/v1/workflows/${id}/activate`, {
       method: 'POST',
       headers: ctx.authHeaders,
     });
@@ -653,7 +684,14 @@ describe('POST /v1/workflows/:id/run', () => {
           type: 'integration',
           title: 'Send',
           position: { x: 200, y: 0 },
-          config: { kind: 'integration', integrationId: 'agentmail', operationId: 'send_email', inputs: {} } as never,
+          config: {
+            kind: 'integration',
+            integrationId: 'agentmail',
+            operationId: 'send_email',
+            // Required-field inputs so the run-gate preflight passes; the test's
+            // focus is the generic operationId repair (send_email → send_message).
+            inputs: { to: 'someone@example.com', subject: 'Hi', text: 'Body' },
+          } as never,
         },
       ],
       edges: [{ id: 'e1', source: 'start', target: 'send' }],

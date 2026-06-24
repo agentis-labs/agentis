@@ -11,12 +11,14 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { eq } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
-import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { WorkspaceModelConfigService } from '../services/workspaceModelConfigService.js';
 import type { OrchestratorModelRouter } from '../services/orchestratorModelRouter.js';
 import { ORCHESTRATOR_MODEL_ROLES, type OrchestratorModelRole } from '../services/orchestratorModelRouter.js';
+import type { WorkspaceHarnessRuntimeResolver } from '../services/workspaceHarnessRuntime.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 
@@ -27,12 +29,16 @@ const setSchema = z.object({
   /** Omit to keep the existing key; null/'' to clear; string to set. */
   apiKey: z.string().max(4096).nullish(),
 });
+const modelAssistedRuntimeSchema = z.object({
+  enabled: z.boolean(),
+});
 
 export function buildOrchestratorModelRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
   config: WorkspaceModelConfigService;
   router: OrchestratorModelRouter;
+  harnesses?: WorkspaceHarnessRuntimeResolver;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -55,8 +61,32 @@ export function buildOrchestratorModelRoutes(deps: {
     // never by editing `.env`.
     const autonomyProfile = deps.router.profile('evaluation', ws.workspaceId)
       ?? deps.router.profile('conversation', ws.workspaceId);
-    const autonomy = { enabled: Boolean(autonomyProfile), model: autonomyProfile?.model ?? null };
-    return c.json({ roles, autonomy });
+    const harness = deps.harnesses?.resolve(ws.workspaceId) ?? null;
+    const modelAssistedRuntime = modelAssistedRuntimeConfig(deps.db, ws.workspaceId);
+    const autonomy = {
+      enabled: modelAssistedRuntime.enabled && Boolean(autonomyProfile || harness),
+      model: modelAssistedRuntime.enabled ? autonomyProfile?.model ?? harness?.model ?? null : null,
+      source: autonomyProfile ? 'configured_model' : harness ? 'agent_harness' : 'none',
+      ...(harness ? { agentName: harness.agentName, adapterType: harness.adapterType } : {}),
+    };
+    return c.json({ roles, autonomy, modelAssistedRuntime });
+  });
+
+  app.patch('/model-assisted-runtime', async (c) => {
+    const ws = getWorkspace(c);
+    const body = modelAssistedRuntimeSchema.parse(await c.req.json());
+    const current = workspaceBrainSettings(deps.db, ws.workspaceId);
+    deps.db.update(schema.workspaces)
+      .set({
+        brainSettings: {
+          ...current,
+          modelAssistedRuntimeEnabled: body.enabled,
+        },
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.workspaces.id, ws.workspaceId))
+      .run();
+    return c.json({ modelAssistedRuntime: { enabled: body.enabled } });
   });
 
   app.put('/:role', async (c) => {
@@ -90,4 +120,25 @@ export function buildOrchestratorModelRoutes(deps: {
   });
 
   return app;
+}
+
+function modelAssistedRuntimeConfig(db: AgentisSqliteDb, workspaceId: string): { enabled: boolean } {
+  const settings = workspaceBrainSettings(db, workspaceId);
+  return { enabled: settings.modelAssistedRuntimeEnabled !== false };
+}
+
+function workspaceBrainSettings(db: AgentisSqliteDb, workspaceId: string): Record<string, unknown> {
+  const row = db.select({ brainSettings: schema.workspaces.brainSettings })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .get();
+  const value = row?.brainSettings;
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }

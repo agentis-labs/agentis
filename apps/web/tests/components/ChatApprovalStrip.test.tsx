@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 const state = vi.hoisted(() => ({
-  approvals: [] as Array<{ id: string; workflowName?: string; summary?: string; createdAt: string }>,
+  approvals: [] as Array<{ id: string; title?: string; source?: string; workflowName?: string; summary?: string; createdAt: string }>,
   apiCalls: [] as Array<{ path: string; init: unknown }>,
   refreshed: 0,
 }));
@@ -63,5 +63,26 @@ describe('<ChatApprovalStrip />', () => {
     await waitFor(() => expect(state.apiCalls.length).toBe(1));
     expect(state.apiCalls[0]!.path).toBe('/v1/approvals/ap_2/resolve');
     expect(JSON.parse((state.apiCalls[0]!.init as { body: string }).body)).toEqual({ decision: 'reject' });
+  });
+
+  it('labels self-heal approvals as repair requests', async () => {
+    state.approvals = [{
+      id: 'ap_self_heal',
+      source: 'self_heal',
+      title: 'Approve self-healing fix',
+      summary: 'The node output missed its declared location field.',
+      createdAt: new Date().toISOString(),
+    }];
+    render(<ChatApprovalStrip />);
+
+    expect(screen.getByText('Self-healing fix ready')).toBeTruthy();
+    expect(screen.getByText(/missed its declared location field/)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Approve fix/i));
+    });
+
+    await waitFor(() => expect(state.apiCalls.length).toBe(1));
+    expect(JSON.parse((state.apiCalls[0]!.init as { body: string }).body)).toEqual({ decision: 'approve' });
   });
 });

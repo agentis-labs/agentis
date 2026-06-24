@@ -35,6 +35,7 @@ function fakeTransport() {
       || (conn.kind === 'discord' && (conn.settings as { transport?: string } | undefined)?.transport === 'gateway'),
     requiresNoToken: (kind) => kind === 'whatsapp',
     onCreated: (conn) => { created.push(conn.id); },
+    status: () => ({ status: 'open' }),
     send: async (connectionId, chatId, body) => { sent.push({ connectionId, chatId, body }); },
     setTyping: async (connectionId, chatId, on) => { typing.push({ connectionId, chatId, on }); },
     stop: async (connectionId) => { stopped.push(connectionId); },
@@ -56,7 +57,7 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
   beforeEach(async () => { ctx = await createTestContext(); });
   afterEach(() => ctx.close());
 
-  it('creates a WhatsApp connection without a token, in connecting status', () => {
+  it('creates a WhatsApp connection without a token, needing QR action', () => {
     const { bridge } = buildBridge(ctx);
     const { transport } = fakeTransport();
     bridge.setPersistentTransport(transport);
@@ -67,7 +68,8 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
       agentId, kind: 'whatsapp', name: 'WA personal',
     });
     expect(connection.kind).toBe('whatsapp');
-    expect(connection.status).toBe('connecting');
+    expect(connection.status).toBe('needs_action');
+    expect(connection.health.status).toBe('needs_action');
 
     // tokenEncrypted is still populated (NOT NULL) with an encrypted marker.
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
@@ -89,17 +91,48 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
     const { bridge } = buildBridge(ctx);
     const { transport, sent } = fakeTransport();
     bridge.setPersistentTransport(transport);
+
     const agentId = seedAgent(ctx);
     const { connection } = bridge.create({
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
       agentId, kind: 'whatsapp', name: 'WA',
     });
 
-    await bridge.deliverToConnection({ connectionId: connection.id, chatId: '5511999@s.whatsapp.net', body: 'pong' });
-    expect(sent).toEqual([{ connectionId: connection.id, chatId: '5511999@s.whatsapp.net', body: 'pong' }]);
+    await bridge.deliverToConnection({ connectionId: connection.id, chatId: '1234567@s.whatsapp.net', body: 'pong' });
+    expect(sent).toEqual([{ connectionId: connection.id, chatId: '1234567@s.whatsapp.net', body: 'pong' }]);
 
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect(row.status).toBe('active'); // markActive after a successful send
+  });
+
+  it('normalizes explicit WhatsApp phone numbers before live send', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport, sent } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA',
+    });
+
+    await bridge.deliverToConnection({ connectionId: connection.id, chatId: '+1 (234) 567-8901', body: 'pong' });
+    expect(sent).toEqual([{ connectionId: connection.id, chatId: '12345678901@s.whatsapp.net', body: 'pong' }]);
+  });
+
+  it('marks open WhatsApp QR healthy without requiring a default recipient', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA',
+    });
+
+    const health = await bridge.test({ workspaceId: ctx.workspace.id, id: connection.id });
+    expect(health.status).toBe('active');
+    expect(health.checks.find((check) => check.name === 'outbound')?.code).toBe('outbound_ready_for_explicit_recipient');
+    expect(health.checks.find((check) => check.name === 'inbound')?.code).toBe('inbound_live_ready_no_default');
   });
 
   it('Telegram polling: onCreated fires and outbound routes through the live session', async () => {
@@ -114,7 +147,7 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
       agentId, kind: 'telegram', name: 'TG poll', token: '123456:bot-token', transport: 'polling',
     });
-    expect(connection.status).toBe('connecting');
+    expect(connection.status).toBe('verifying');
     expect(created).toEqual([connection.id]);
 
     await bridge.deliverToConnection({ connectionId: connection.id, chatId: '987', body: 'hi' });
@@ -155,7 +188,7 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
       agentId, kind: 'discord', name: 'DC gateway', token: 'discord-bot-token', transport: 'gateway',
     });
-    expect(connection.status).toBe('connecting');
+    expect(connection.status).toBe('verifying');
     expect(created).toEqual([connection.id]);
     await bridge.deliverToConnection({ connectionId: connection.id, chatId: 'chan-1', body: 'hi' });
     expect(sent).toEqual([{ connectionId: connection.id, chatId: 'chan-1', body: 'hi' }]);

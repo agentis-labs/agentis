@@ -28,6 +28,8 @@ export const REALTIME_EVENTS = {
   AGENT_WORK_STEP: 'agent.work.step',
   AGENT_WAKE_REQUESTED: 'agent.wake.requested',
   AGENT_PROACTIVE_PUSH: 'agent.proactive.push',
+  /** Imported agents have accrued new harness memory available to pull (P4). */
+  HARNESS_IMPORT_UPDATES: 'harness.import.updates',
 
   // Management layer
   GOAL_CREATED: 'goal.created',
@@ -45,9 +47,24 @@ export const REALTIME_EVENTS = {
   WORKFLOW_DELETED: 'workflow.deleted',
   WORKFLOW_GRAPH_PATCHED: 'workflow.graph_patched',
 
+  // Durable task spine
+  TASK_SPINE_ACCEPTED: 'task.spine.accepted',
+  TASK_SPINE_UPDATED: 'task.spine.updated',
+  TASK_SPINE_BOUND: 'task.spine.bound',
+  TASK_SPINE_VERIFYING: 'task.spine.verifying',
+  TASK_SPINE_VERIFIED: 'task.spine.verified',
+  TASK_SPINE_COMPLETED: 'task.spine.completed',
+  TASK_SPINE_BLOCKED: 'task.spine.blocked',
+  TASK_SPINE_FAILED: 'task.spine.failed',
+  TASK_SPINE_DECISION_RECORDED: 'task.spine.decision_recorded',
+  TASK_SPINE_DEVIATION_RECORDED: 'task.spine.deviation_recorded',
+  TASK_SPINE_REDIRECTED: 'task.spine.redirected',
+
   // Runs
   RUN_CREATED: 'run.created',
   RUN_RUNNING: 'run.running',
+  RUN_PAUSED: 'run.paused',
+  RUN_CANCELLED: 'run.cancelled',
   RUN_COMPLETED: 'run.completed',
   RUN_FAILED: 'run.failed',
   RUN_RECOVERED: 'run.recovered',
@@ -108,6 +125,7 @@ export const REALTIME_EVENTS = {
 
   // Activity / approvals
   ACTIVITY_CREATED: 'activity.created',
+  OBSERVABILITY_EVENT: 'observability.event',
   APPROVAL_REQUESTED: 'approval.requested',
   APPROVAL_RESOLVED: 'approval.resolved',
 
@@ -116,16 +134,19 @@ export const REALTIME_EVENTS = {
   ARTIFACT_UPDATED: 'artifact.updated',
   ARTIFACT_DELETED: 'artifact.deleted',
 
+  // AG-UI — Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN §4)
+  // SURFACE_RENDER: full ViewNode tree replaced. SURFACE_PATCH: fine-grained ops.
+  SURFACE_RENDER: 'app.surface_render',
+  SURFACE_PATCH: 'app.surface_patch',
+  // App Datastore (§5) — a record changed; bound views refetch. { appId, collection, op, id }.
+  DATA_CHANGED: 'app.data_changed',
+
   // Spaces
   SPACE_CREATED: 'space.created',
   SPACE_UPDATED: 'space.updated',
   SPACE_DELETED: 'space.deleted',
 
   // Teams
-  TEAM_CREATED: 'team.created',
-  TEAM_UPDATED: 'team.updated',
-  TEAM_DELETED: 'team.deleted',
-  TEAM_CONTEXT_UPDATED: 'team.context.updated',
 
   // State surfaces
   SCRATCHPAD_WRITTEN: 'scratchpad.written',
@@ -202,6 +223,8 @@ export const REALTIME_ROOMS = {
   user: (userId: string) => `user:${userId}`,
   workspace: (workspaceId: string) => `workspace:${workspaceId}`,
   workflow: (workflowId: string) => `workflow:${workflowId}`,
+  /** Agentic App room — surface renders/patches + datastore changes. */
+  app: (appId: string) => `app:${appId}`,
   run: (runId: string) => `run:${runId}`,
   gateway: (gatewayId: string) => `gateway:${gatewayId}`,
   agent: (agentId: string) => `agent:${agentId}`,

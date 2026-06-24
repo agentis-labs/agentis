@@ -3,7 +3,10 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AdapterType, AgentisToolContext, ChatMessage, NormalizedTask } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
+import { publishAgentWorkStep, publishChatDeltaProgress } from '../agentWorkProgress.js';
 import type { ToolHandlerDeps } from './deps.js';
+import { modelConfiguredOnAgent } from '../runtimeModels.js';
+import { renderRuntimeRoutingIntelligence, routeModelForTask } from '../modelRoutingPolicy.js';
 
 const V1_ADAPTERS = new Set<AdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']);
 
@@ -16,7 +19,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         description: 'List agents available in the workspace.',
         inputSchema: {
           type: 'object',
-          properties: { teamId: { type: 'string' }, status: { type: 'string' } },
+          properties: { status: { type: 'string' } },
         },
         mutating: false,
       },
@@ -38,7 +41,73 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
             capabilityTags: agent.capabilityTags,
             registered: Boolean(deps.adapters.get(agent.id)),
           }));
-        return { count: agents.length, agents, ignoredFilters: args.teamId ? ['teamId'] : [] };
+        return { count: agents.length, agents };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.routing.preview',
+        family: 'inspect',
+        description:
+          'Explain which runtime and model Agentis would choose for a task. Use before spawning, dispatching, or escalating model power when routing is unclear.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task: { type: 'string', description: 'Task text or mission brief.' },
+            purpose: { type: 'string', description: 'Optional purpose such as conversation, workflow_synthesis, evaluation, agent_task, or specialist.' },
+            requiredAffordances: { type: 'array', items: { type: 'string' }, description: 'Hard affordances such as browser, web, integration, code, listener, or extension.' },
+            agentId: { type: 'string', description: 'Optional agent whose explicit runtime model should be considered a pin.' },
+            runtime: { type: 'string', description: 'Optional runtime/adapter type such as claude_code, codex, cursor, hermes_agent, or http.' },
+            model: { type: 'string', description: 'Optional explicit model pin to preview.' },
+          },
+          required: ['task'],
+        },
+        mutating: false,
+      },
+      handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
+        const task = String(args.task ?? '');
+        const purpose = args.purpose ? String(args.purpose) : 'conversation';
+        const agentId = args.agentId ? String(args.agentId) : null;
+        const agent = agentId
+          ? deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get()
+          : null;
+        if (agentId && (!agent || agent.workspaceId !== ctx.workspaceId)) throw new Error(`agent ${agentId} not found`);
+        const registration = agentId ? deps.adapters.get(agentId) : null;
+        const explicitModel = args.model
+          ? String(args.model)
+          : agent
+            ? modelConfiguredOnAgent(agent)
+            : null;
+        const runtime = args.runtime
+          ? String(args.runtime)
+          : registration?.adapter.adapterType ?? agent?.adapterType ?? null;
+        const requiredAffordances = parseStringArray(args.requiredAffordances);
+        const decision = deps.modelRouter && !agentId && !runtime
+          ? deps.modelRouter.route({
+              role: purpose.includes('synthesis') || purpose.includes('workflow') ? 'synthesis' : purpose.includes('evaluation') ? 'evaluation' : 'conversation',
+              workspaceId: ctx.workspaceId,
+              task,
+              purpose,
+              explicitModel,
+              requiredAffordances,
+            })
+          : routeModelForTask({
+              task,
+              purpose,
+              runtime,
+              explicitModel,
+              currentModel: explicitModel,
+              requiredAffordances,
+            });
+        return {
+          ok: true,
+          decision,
+          intelligence: renderRuntimeRoutingIntelligence({
+            decision,
+            requiredAffordances,
+            availableRuntimes: runtime ? [{ runtime, models: decision.selectedModel ? [decision.selectedModel] : [], affordances: requiredAffordances }] : undefined,
+          }),
+        };
       },
     },
     createAgentTool('agentis.agents.create'),
@@ -62,15 +131,21 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
             model: { type: 'string', description: 'Optional model hint, e.g. gpt-4o or claude-sonnet.' },
             tools: { type: 'array', items: { type: 'string' }, description: 'Optional role-scoped tool names.' },
             capabilityTags: { type: 'array', items: { type: 'string' }, description: 'Capability tags for routing.' },
+            adapterType: { type: 'string', description: 'Optional runtime to bind (openclaw|claude_code|codex|cursor|hermes_agent|http). Use for roles that need a native runtime power, e.g. codex for a native browser.' },
+            runtimeConfig: { type: 'object', description: 'Optional adapter config paired with adapterType, e.g. { "browser": true } to enable Codex native browser.' },
           },
           required: [],
         },
         mutating: true,
+        autoExecute: true,
       },
       handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
         if (!deps.specialists) {
           return { ok: false, error: 'specialist library not available in this deployment' };
         }
+        const runtimeConfig = args.runtimeConfig && typeof args.runtimeConfig === 'object' && !Array.isArray(args.runtimeConfig)
+          ? args.runtimeConfig as Record<string, unknown>
+          : undefined;
         const result = await deps.specialists.authorSpecialist(ctx.workspaceId, ctx.userId, {
           role: args.role ? String(args.role) : undefined,
           name: args.name ? String(args.name) : undefined,
@@ -80,6 +155,18 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           tools: parseStringArray(args.tools),
           capabilityTags: parseStringArray(args.capabilityTags),
           source: 'generated',
+          ...(args.adapterType ? { adapterType: String(args.adapterType) } : {}),
+          ...(runtimeConfig ? { runtimeConfig } : {}),
+        });
+        const profile = deps.specialistProfiles?.ensureFromDef(ctx.workspaceId, result.def, ctx.userId);
+        const instanceId = deps.specialistRuntime?.ensureInstance({
+          workspaceId: ctx.workspaceId,
+          role: result.role,
+          agentId: result.agentId,
+          profileId: profile?.id ?? null,
+          mode: 'durable',
+          parentAgentId: ctx.agentId ?? null,
+          reportsTo: ctx.agentId ?? null,
         });
         // CONVERSATION THEATER: the orchestrator commissioning a specialist (and the
         // instructions it gave) is a first-class collaboration moment — record it as
@@ -98,6 +185,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
             metadata: {
               role: result.role,
               created: result.created,
+              ...(instanceId ? { specialistInstanceId: instanceId } : {}),
               ...(args.instructions ? { instructions: String(args.instructions).slice(0, 400) } : {}),
             },
           });
@@ -107,6 +195,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           agentId: result.agentId,
           role: result.role,
           created: result.created,
+          ...(instanceId ? { specialistInstanceId: instanceId } : {}),
           name: result.def.name,
           delegateHint: `You can now delegate to this specialist by role "${result.role}".`,
         };
@@ -130,6 +219,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           required: ['task'],
         },
         mutating: true,
+        autoExecute: true,
       },
       handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
         if (!deps.specialistRouter) {
@@ -174,6 +264,24 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         }
 
         const task = String(args.task);
+        const routing = routeModelForTask({
+          task,
+          purpose: 'agent_dispatch',
+          runtime: registration.adapter.adapterType ?? agent.adapterType ?? null,
+          explicitModel: modelConfiguredOnAgent(agent),
+          requiredAffordances: Array.isArray(agent.capabilityTags) ? agent.capabilityTags.map(String) : [],
+        });
+        const preferredModel = routing.selectedModel;
+        const taskId = randomUUID();
+        const workContext = {
+          workspaceId: ctx.workspaceId,
+          ambientId: ctx.ambientId ?? null,
+          agentId,
+          agentName: agent.name,
+          conversationId: ctx.conversationId,
+          taskId,
+          runId: ctx.runId,
+        };
         const capabilities = registration.adapter.capabilities?.();
         if (registration.adapter.chat && capabilities?.interactiveChat !== false) {
           const messages: ChatMessage[] = [
@@ -181,14 +289,33 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
             { role: 'user', content: task },
           ];
           let response = '';
-          for await (const delta of registration.adapter.chat(messages, [])) {
-            if (delta.type === 'text') response += delta.delta;
-            if (delta.type === 'done') break;
+          publishAgentWorkStep(deps.bus, {
+            ...workContext,
+            phase: 'start',
+            description: 'Agent task started',
+          });
+          try {
+            for await (const delta of registration.adapter.chat(messages, [], preferredModel ? { preferredModel } : undefined)) {
+              publishChatDeltaProgress(deps.bus, workContext, delta);
+              if (delta.type === 'text') response += delta.delta;
+              if (delta.type === 'done') break;
+            }
+            publishAgentWorkStep(deps.bus, {
+              ...workContext,
+              phase: 'complete',
+              description: 'Agent task completed',
+            });
+          } catch (err) {
+            publishAgentWorkStep(deps.bus, {
+              ...workContext,
+              phase: 'fail',
+              description: `Agent task failed: ${(err as Error).message}`,
+            });
+            throw err;
           }
-          return { dispatched: true, mode: 'chat', agentId, response };
+          return { dispatched: true, mode: 'chat', agentId, taskId, response, routing };
         }
 
-        const taskId = randomUUID();
         const normalized: NormalizedTask = {
           taskId,
           runId: ctx.runId ?? `chat_${ctx.conversationId ?? randomUUID()}`,
@@ -202,39 +329,10 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           scratchpadSnapshot: {},
           capabilityTags: Array.isArray(agent.capabilityTags) ? agent.capabilityTags.map(String) : [],
           timeoutMs: 120_000,
+          ...(preferredModel ? { preferredModel } : {}),
         };
         await deps.adapters.dispatchTask(normalized, agentId);
-        return { dispatched: true, mode: 'task', agentId, taskId, runId: normalized.runId };
-      },
-    },
-    {
-      definition: {
-        id: 'agentis.team.design',
-        family: 'build',
-        description: 'Design an agent team blueprint for an objective.',
-        inputSchema: {
-          type: 'object',
-          properties: { brief: { type: 'string' }, teamName: { type: 'string' }, teamId: { type: 'string' } },
-          required: ['brief'],
-        },
-        mutating: false,
-      },
-      handler: async (args, ctx) => {
-        const brief = String(args.brief ?? '');
-        const agents = deps.db.select().from(schema.agents).where(eq(schema.agents.workspaceId, ctx.workspaceId)).all();
-        const suggestedRoles = designRoles(brief);
-        return {
-          teamName: args.teamName ?? 'Generated Team',
-          teamId: args.teamId ?? null,
-          objective: brief,
-          existingAgents: agents.map((agent) => ({ id: agent.id, name: agent.name, tags: agent.capabilityTags })),
-          proposedAgents: suggestedRoles,
-          coordination: [
-            'Orchestrator owns planning, status checks, and final synthesis.',
-            'Specialist agents receive narrow tasks with explicit outputs.',
-            'Reviewer checks quality before user-facing delivery.',
-          ],
-        };
+        return { dispatched: true, mode: 'task', agentId, taskId, runId: normalized.runId, routing };
       },
     },
   ]);
@@ -259,6 +357,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           required: ['name'],
         },
         mutating: true,
+        autoExecute: true,
       },
       handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
         const now = new Date().toISOString();
@@ -294,14 +393,12 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     };
   }
 }
-
 function normalizeStatus(status: string): string {
   const value = status.toLowerCase();
   if (value === 'idle') return 'online';
   if (value === 'paused') return 'offline';
   return value;
 }
-
 function normalizeAdapterType(value: unknown): AdapterType {
   const adapterType = String(value ?? 'http') as AdapterType;
   return V1_ADAPTERS.has(adapterType) ? adapterType : 'http';
@@ -323,39 +420,4 @@ function parseStringArray(value: unknown): string[] {
   } catch {
     return value.split(',').map((item) => item.trim()).filter(Boolean);
   }
-}
-
-function designRoles(brief: string): Array<{ name: string; role: string; capabilityTags: string[]; instructions: string }> {
-  const lower = brief.toLowerCase();
-  const roles = [
-    {
-      name: 'Planner',
-      role: 'orchestrator',
-      capabilityTags: ['planning', 'coordination'],
-      instructions: 'Break the objective into tasks, route work, and track completion.',
-    },
-  ];
-  if (/research|competitor|market|document|url/.test(lower)) {
-    roles.push({
-      name: 'Researcher',
-      role: 'agent',
-      capabilityTags: ['research', 'analysis'],
-      instructions: 'Gather evidence, cite sources, and return concise findings.',
-    });
-  }
-  if (/write|content|email|post|report/.test(lower)) {
-    roles.push({
-      name: 'Writer',
-      role: 'agent',
-      capabilityTags: ['writing'],
-      instructions: 'Turn structured findings into polished user-facing output.',
-    });
-  }
-  roles.push({
-    name: 'Reviewer',
-    role: 'reviewer',
-    capabilityTags: ['quality', 'review'],
-    instructions: 'Check completeness, risks, and alignment before delivery.',
-  });
-  return roles;
 }

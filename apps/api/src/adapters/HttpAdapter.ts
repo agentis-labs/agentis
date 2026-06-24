@@ -14,6 +14,7 @@ import type {
   AdapterCapabilities,
   AdapterHealthStatus,
   AdapterType,
+  ChatInvocationOptions,
   ChatMessage,
   ChatDelta,
   ToolDefinition,
@@ -166,7 +167,7 @@ export class HttpAdapter implements AgentAdapter {
     }
   }
 
-  async *chat(messages: ChatMessage[], tools: ToolDefinition[]): AsyncIterable<ChatDelta> {
+  async *chat(messages: ChatMessage[], tools: ToolDefinition[], options?: ChatInvocationOptions): AsyncIterable<ChatDelta> {
     if (!this.opts.chatUrl) {
       yield { type: 'text', delta: 'This HTTP agent has no chat endpoint configured yet. Add `chatUrl` or `baseUrl + chatPath` to enable interactive chat.' };
       yield { type: 'done', finishReason: 'error' };
@@ -176,9 +177,10 @@ export class HttpAdapter implements AgentAdapter {
       allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
     });
     const controller = new AbortController();
+    const unlinkAbort = linkAbortSignal(options?.signal, controller);
     const timeout = setTimeout(
       () => controller.abort(),
-      this.opts.chatTimeoutMs ?? this.opts.dispatchTimeoutMs ?? CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
+      options?.timeoutMs ?? this.opts.chatTimeoutMs ?? this.opts.dispatchTimeoutMs ?? CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
     ).unref?.();
     try {
       const response = await this.#breaker.exec(() => fetch(safe, {
@@ -190,7 +192,9 @@ export class HttpAdapter implements AgentAdapter {
         body: JSON.stringify({
           ...(this.opts.payloadTemplate ?? {}),
           agentId: this.opts.agentId,
-          model: this.opts.model,
+          model: options?.preferredModel ?? this.opts.model,
+          sessionKey: options?.sessionKey,
+          timeoutMs: options?.timeoutMs,
           messages,
           tools: this.opts.supportsTools === true ? tools : [],
           supportsTools: this.opts.supportsTools === true,
@@ -220,6 +224,7 @@ export class HttpAdapter implements AgentAdapter {
       };
       yield { type: 'done', finishReason: 'error' };
     } finally {
+      unlinkAbort();
       if (timeout) clearTimeout(timeout);
     }
   }
@@ -363,9 +368,16 @@ function* parseHttpStreamBlock(block: string): Iterable<ChatDelta> {
   }
 }
 
-function* normalizeHttpChatJson(value: unknown): Iterable<ChatDelta> {
+export function* normalizeHttpChatJson(value: unknown): Iterable<ChatDelta> {
   const object = objectOf(value);
   if (!object) {
+    yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: 'HTTP chat returned a non-object JSON payload.' };
+    yield { type: 'done', finishReason: 'error' };
+    return;
+  }
+  const error = httpErrorMessage(object.error ?? (object.ok === false ? object : undefined));
+  if (error) {
+    yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error };
     yield { type: 'done', finishReason: 'error' };
     return;
   }
@@ -400,10 +412,11 @@ function* normalizeHttpChatJson(value: unknown): Iterable<ChatDelta> {
   const choice = Array.isArray(object.choices) ? object.choices[0] : null;
   const choiceObject = objectOf(choice);
   if (choiceObject) {
+    const delta = objectOf(choiceObject.delta);
     const message = objectOf(choiceObject.message);
-    const choiceText = firstString(message?.content, choiceObject.text);
+    const choiceText = firstString(delta?.content, delta?.text, message?.content, choiceObject.text);
     if (choiceText) yield { type: 'text', delta: choiceText };
-    for (const call of extractToolCalls(message?.tool_calls ?? choiceObject.tool_calls)) {
+    for (const call of extractToolCalls(delta?.tool_calls ?? message?.tool_calls ?? choiceObject.tool_calls)) {
       yield { type: 'tool_call', id: call.id, name: call.name, args: call.args };
       toolCalls.push(call);
     }
@@ -419,6 +432,20 @@ function normalizeDelta(value: unknown): ChatDelta | null {
   const type = firstString(object.type);
   if (type === 'text') return { type: 'text', delta: firstString(object.delta, object.text, object.content) ?? '' };
   if (type === 'thinking') return { type: 'thinking', delta: firstString(object.delta, object.text, object.content) ?? '' };
+  if (type === 'activity') {
+    const status = firstString(object.status);
+    const phase = firstString(object.phase);
+    return {
+      type: 'activity',
+      id: firstString(object.id) ?? `activity_${Math.random().toString(36).slice(2)}`,
+      label: firstString(object.label, object.text, object.content) ?? 'Agent activity',
+      ...(firstString(object.detail) ? { detail: firstString(object.detail) } : {}),
+      phase: phase === 'received' || phase === 'context' || phase === 'runtime' || phase === 'tool' || phase === 'workflow' || phase === 'waiting' || phase === 'complete' || phase === 'error' ? phase : 'runtime',
+      status: status === 'success' || status === 'error' ? status : 'running',
+      ...(firstString(object.startedAt) ? { startedAt: firstString(object.startedAt) } : {}),
+      ...(firstString(object.completedAt) ? { completedAt: firstString(object.completedAt) } : {}),
+    };
+  }
   if (type === 'tool_call') {
     return {
       type: 'tool_call',
@@ -441,6 +468,14 @@ function normalizeDelta(value: unknown): ChatDelta | null {
     return { type: 'done', finishReason: reason === 'tool_calls' || reason === 'error' || reason === 'max_turns' ? reason : 'stop' };
   }
   return null;
+}
+
+function httpErrorMessage(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  const object = objectOf(value);
+  if (!object) return String(value);
+  return firstString(object.message, object.error, object.detail, object.reason) ?? safeStringify(object);
 }
 
 function extractToolCalls(value: unknown): Array<{ id: string; name: string; args: unknown }> {
@@ -474,4 +509,12 @@ function firstString(...values: unknown[]): string | undefined {
     if (typeof value === 'string' && value.length > 0) return value;
   }
   return undefined;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }

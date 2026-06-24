@@ -6,7 +6,7 @@ import { ChatMemoryCaptureService } from '../../src/services/chatMemoryCapture.j
 import { CognitivePromotionQueueWorker } from '../../src/services/cognitivePromotionQueueWorker.js';
 import { ConversationStore } from '../../src/services/conversationStore.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
-import { HashingEmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { MemoryStore } from '../../src/services/memoryStore.js';
 import { PeerProfileService } from '../../src/services/peerProfileService.js';
 import { SessionMomentService } from '../../src/services/sessionMomentService.js';
@@ -38,7 +38,7 @@ function seedAgent(): string {
 }
 
 function buildCaptureStack() {
-  const embedding = new HashingEmbeddingProvider();
+  const embedding = new StubEmbeddingProvider();
   const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, embedding);
   const shared = new SharedIntelligenceService(ctx.db, ctx.bus, episodes, ctx.logger);
   const queue = new CognitivePromotionQueueWorker(ctx.db, shared, ctx.logger);
@@ -110,9 +110,11 @@ describe('ChatMemoryCaptureService', () => {
     expect(result.promotedSessionMoments).toBe(0);
     expect(result.workspaceMemoryIds).toHaveLength(3);
 
-    const workspaceMemory = ctx.db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.workspaceId, ctx.workspace.id)).all();
-    expect(workspaceMemory.map((row) => row.kind).sort()).toEqual(['fact', 'preference', 'rule']);
-    expect(workspaceMemory.map((row) => row.content).join('\n')).toContain('TypeScript');
+    // §B4 — workspace memory now lives in memory_episodes (plane-tagged).
+    const workspaceMemory = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
+    expect(workspaceMemory.map((row) => (row.metadata as Record<string, unknown>).memoryKind as string).sort()).toEqual(['fact', 'preference', 'rule']);
+    expect(workspaceMemory.map((row) => row.summary).join('\n')).toContain('TypeScript');
 
     // Operator preferences must NOT be copied into the agent's private brain
     // (memory_episodes scoped to the agent). They live once in workspace memory.
@@ -162,7 +164,8 @@ describe('ChatMemoryCaptureService', () => {
 
     expect(result.signals).toBe(0);
     expect(result.workspaceMemoryIds).toHaveLength(0);
-    const workspaceMemory = ctx.db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.workspaceId, ctx.workspace.id)).all();
+    const workspaceMemory = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
     expect(workspaceMemory).toHaveLength(0);
   });
 });

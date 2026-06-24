@@ -90,8 +90,28 @@ describe('<AgentsPage />', () => {
   it('opens the agent quick-detail panel when a fleet card is clicked', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
+        if (path === '/v1/agents/a1' && (!init || init.method == null)) {
+          return jsonResponse({
+            agent: {
+              id: 'a1',
+              name: 'Hermes',
+              adapterType: 'http',
+              runtimeModel: 'gpt-4.1',
+              config: { baseUrl: 'https://runtime.example.com', model: 'gpt-4.1' },
+            },
+          });
+        }
+        if (path === '/v1/harness/models/http?agentId=a1') {
+          return jsonResponse({
+            adapterType: 'http',
+            defaultModel: null,
+            defaultLabel: 'Runtime default',
+            supportsManual: true,
+            models: [{ id: 'gpt-4.1', label: 'GPT-4.1', provider: 'OpenAI' }],
+          });
+        }
         if (path === '/v1/channels') return jsonResponse({ connections: [] });
         return jsonResponse({
           agents: [
@@ -126,6 +146,7 @@ describe('<AgentsPage />', () => {
 
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /Open agent$/i })).toBeInTheDocument();
+    expect(screen.getByText(/Runtime model/i)).toBeInTheDocument();
     expect(screen.getByText(/Live status/i)).toBeInTheDocument();
   });
 

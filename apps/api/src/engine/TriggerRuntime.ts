@@ -116,30 +116,46 @@ export class TriggerRuntime {
   }
 
   async #activateCron(t: ActiveTrigger): Promise<void> {
-    const cfg = t.config as { expression?: string; timezone?: string };
-    const expression = String(cfg.expression ?? '');
-    if (!expression) throw new AgentisError('TRIGGER_INVALID_CONFIG', 'cron trigger requires `expression`');
+    const cfg = t.config as {
+      expression?: string;
+      timezone?: string;
+      scheduleRules?: Array<{ expression?: string; timezone?: string; label?: string }>;
+    };
+    const defaultTz = cfg.timezone && cfg.timezone.trim() ? cfg.timezone.trim() : 'UTC';
+    // n8n-inspired multi-rule scheduling: each rule becomes its own cron job. The
+    // single-expression form remains supported as the one-rule case.
+    const rules = cfg.scheduleRules && cfg.scheduleRules.length > 0
+      ? cfg.scheduleRules
+          .filter((r) => r?.expression?.trim())
+          .map((r) => ({ expression: r.expression!.trim(), timezone: (r.timezone?.trim() || defaultTz), label: r.label }))
+      : cfg.expression
+        ? [{ expression: String(cfg.expression).trim(), timezone: defaultTz, label: undefined as string | undefined }]
+        : [];
+    if (rules.length === 0) throw new AgentisError('TRIGGER_INVALID_CONFIG', 'cron trigger requires `expression` or `scheduleRules`');
     const loaded = await loadCron();
     if (loaded.kind === 'unavailable') {
       this.deps.logger.warn('trigger.cron_unavailable', { reason: loaded.reason });
       throw new AgentisError('TRIGGER_INVALID_CONFIG', `node-cron not installed: ${loaded.reason}`);
     }
     const { cron } = loaded;
-    if (!cron.validate(expression)) {
-      throw new AgentisError('TRIGGER_INVALID_CONFIG', `invalid cron expression: ${expression}`);
+    for (const rule of rules) {
+      if (!cron.validate(rule.expression)) {
+        throw new AgentisError('TRIGGER_INVALID_CONFIG', `invalid cron expression: ${rule.expression}`);
+      }
     }
     // The cron expression is authored in a fixed zone (UTC by convention, or the
     // explicit `config.timezone`). Pass it to node-cron so the schedule fires at
     // the intended wall-clock time regardless of the SERVER's local timezone —
     // otherwise a `5 18 * * *` ("18:05 UTC") would fire at 18:05 server-local.
-    const timezone = cfg.timezone && cfg.timezone.trim() ? cfg.timezone.trim() : 'UTC';
-    const job = cron.schedule(expression, () => {
-      void this.fire({ trigger: t, payload: { firedAt: new Date().toISOString() } }).catch((err) =>
-        this.deps.logger.error('trigger.cron_fire_failed', { triggerId: t.triggerId, err: (err as Error).message }),
-      );
-    }, { timezone });
-    job.start();
-    this.deps.registry.activate(t, async () => job.stop());
+    const jobs = rules.map((rule) =>
+      cron.schedule(rule.expression, () => {
+        void this.fire({ trigger: t, payload: { firedAt: new Date().toISOString(), rule: rule.label ?? rule.expression } }).catch((err) =>
+          this.deps.logger.error('trigger.cron_fire_failed', { triggerId: t.triggerId, err: (err as Error).message }),
+        );
+      }, { timezone: rule.timezone }),
+    );
+    for (const job of jobs) job.start();
+    this.deps.registry.activate(t, async () => { for (const job of jobs) job.stop(); });
   }
 
   /** Expose the listener runtime so /v1/listeners routes can read health, pause, fire-now. */

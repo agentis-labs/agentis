@@ -78,9 +78,11 @@ describe('WorkspaceIntelligenceService', () => {
     intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', 'Tech stack: TypeScript + pnpm');
     expect(intel.getContextFile(ctx.workspace.id, 'WORKSPACE.md')).toBe('Tech stack: TypeScript + pnpm');
 
-    const rows = ctx.db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.workspaceId, ctx.workspace.id)).all();
+    // §B4 — charter atoms live in memory_episodes (plane-tagged); operator → operator_write.
+    const rows = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.source).toBe('operator');
+    expect(rows[0]!.source).toBe('operator_write');
     expect(Number(rows[0]!.importance)).toBeGreaterThanOrEqual(0.8);
     expect(rows[0]!.tags as string[]).toEqual(expect.arrayContaining(['charter', 'workspace']));
   });
@@ -89,7 +91,7 @@ describe('WorkspaceIntelligenceService', () => {
     intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', 'Tech stack: TypeScript + pnpm');
     intel.setContextFile(ctx.workspace.id, 'WORKSPACE.md', '   ');
     expect(intel.getContextFile(ctx.workspace.id, 'WORKSPACE.md')).toBe('');
-    expect(ctx.db.select().from(schema.workspaceMemory).all()).toHaveLength(0);
+    expect(ctx.db.select().from(schema.memoryEpisodes).all().filter((row) => (row.tags as string[]).includes('plane:workspace_memory'))).toHaveLength(0);
   });
 
   it('assembles a context block with workspace docs and integrations', async () => {

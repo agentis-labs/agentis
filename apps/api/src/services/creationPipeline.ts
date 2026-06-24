@@ -13,9 +13,7 @@
 
 import { and, eq } from 'drizzle-orm';
 import {
-  SPECIALIST_AGENTS,
-  ROLE_TOOLS,
-  roleTools,
+  effectiveSpecialistTools,
   type AgentRole,
   type AgentTool,
   type WorkflowGraph,
@@ -193,11 +191,7 @@ export async function buildWorkspaceInventory(
   }
 
   // Custom roles from agents/custom/*.md expand the casting vocabulary (Principle #11).
-  const specialistRoles: WorkspaceInventory['specialistRoles'] = SPECIALIST_AGENTS.map((s) => ({
-    role: s.role,
-    tools: roleTools(s.role),
-    defaultModel: s.defaultModel,
-  }));
+  const specialistRoles: WorkspaceInventory['specialistRoles'] = [];
   try {
     for (const cr of (await deps.agentLibrary?.listCustomRoles(workspaceId)) ?? []) {
       if (!specialistRoles.some((r) => r.role === cr.role))
@@ -581,7 +575,7 @@ export function buildTeamRoster(graph: WorkflowGraph, inventory: WorkspaceInvent
   }
   return [...roles].map((role) => {
     const status: TeamMember['status'] = onlineRoles.has(role) ? 'online' : 'offline';
-    const member: TeamMember = { role, tools: roleTools(role), status };
+    const member: TeamMember = { role, tools: effectiveSpecialistTools({ role }), status };
     if (status !== 'online' && SPECIALIST_FALLBACK[role])
       member.fallback = SPECIALIST_FALLBACK[role];
     return member;
@@ -667,17 +661,16 @@ export function preflightAndEnrich(
         // §8 CAPABILITY_MISMATCH: the cast role must be able to do what the task needs.
         if (cfg.agentRole) {
           const role = cfg.agentRole as AgentRole;
-          const manifest = roleTools(role);
+          const manifest = effectiveSpecialistTools({ role });
           const needs = inferToolNeeds(`${node.title} ${String(cfg.prompt ?? '')}`);
           const unmet = needs.filter((tool) => !manifest.includes(tool));
           if (needs.length > 0 && unmet.length === needs.length) {
-            const better = (Object.keys(ROLE_TOOLS) as AgentRole[]).find((r) =>
-              needs.every((tool) => roleTools(r).includes(tool)),
-            );
+            // Built-in specialists were retired, so there is no canned role to
+            // suggest — the task needs a capability outside the universal floor.
             warnings.push({
               code: 'CAPABILITY_MISMATCH',
               nodeId: node.id,
-              message: `${node.title}: role '${role}' lacks ${unmet.join(', ')}${better ? ` — consider '${better}'` : ''}.`,
+              message: `${node.title}: role '${role}' lacks ${unmet.join(', ')} — grant ${unmet.length === 1 ? 'it' : 'them'} explicitly on this node or pick a role whose manifest includes ${unmet.length === 1 ? 'it' : 'them'}.`,
             });
           }
         }

@@ -37,7 +37,7 @@ export function OnboardingStrip() {
       intro={wizardPreset?.role === 'orchestrator'
         ? 'This is the workspace orchestrator. Give it a runtime first so every other surface has a real command target.'
         : wizardPreset?.role === 'manager'
-          ? 'Managers are optional, but the workspace will operate more cleanly with a coordinator above its workers and workflows.'
+          ? 'Managers are optional, but the workspace will operate more cleanly with a coordinator above its specialists and workflows.'
           : undefined}
       onClose={() => setWizardPreset(null)}
       onCreated={() => {

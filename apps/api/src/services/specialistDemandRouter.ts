@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { desc, eq, and } from 'drizzle-orm';
-import { normalizeRole, SPECIALIST_AGENTS, type AgentRole } from '@agentis/core';
+import { normalizeRole, type AgentRole } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
@@ -151,7 +151,6 @@ export class SpecialistDemandRouter {
 
   async #scoreCandidates(workspaceId: string, task: string, modality: string): Promise<CandidateScore[]> {
     const roles = new Set<string>();
-    for (const spec of SPECIALIST_AGENTS) roles.add(normalizeRole(spec.role));
     for (const profile of this.deps.profiles.list(workspaceId)) roles.add(profile.role);
     for (const agent of this.deps.specialists.list(workspaceId)) {
       if (agent.role) roles.add(normalizeRole(agent.role));

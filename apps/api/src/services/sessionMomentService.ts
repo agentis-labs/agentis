@@ -5,7 +5,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { HashingEmbeddingProvider, cosineSimilarity } from './embeddingProvider.js';
+import { cosineSimilarity, providerIdentity, vectorIsComparable } from './embeddingProvider.js';
+import type { EmbeddingProviderResolver } from './embeddingProviderRegistry.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 
 export interface SessionMoment {
@@ -20,7 +21,6 @@ export interface SessionMoment {
   expiresAt: string;
 }
 
-const provider = new HashingEmbeddingProvider();
 const SESSION_ATOM_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class SessionMomentService {
@@ -28,6 +28,8 @@ export class SessionMomentService {
     private readonly db: AgentisSqliteDb,
     private readonly bus: EventBus,
     private readonly logger: Logger,
+    /** §B1.1 — workspace embedding resolver; defaults to none → lexical-only. */
+    private readonly resolveProvider?: EmbeddingProviderResolver,
   ) {}
 
   add(args: {
@@ -38,14 +40,36 @@ export class SessionMomentService {
     confidence?: number;
   }): SessionMoment {
     const now = new Date();
+    const content = args.content.trim();
+    // §B1.1/§B1.2 — embed with the workspace provider, stamp identity, defer
+    // async providers to the re-embed sweep instead of blocking the write.
+    const provider = this.resolveProvider?.(args.workspaceId);
+    let embedding: number[] | null = null;
+    let embeddingModel: string | null = null;
+    let embeddingDims: number | null = null;
+    let needsReembed = false;
+    if (provider) {
+      const raw = provider.embed(content);
+      if (Array.isArray(raw)) {
+        embedding = raw;
+        const identity = providerIdentity(provider);
+        embeddingModel = identity.model;
+        embeddingDims = identity.dims;
+      } else {
+        needsReembed = true;
+      }
+    }
     const row = {
       id: randomUUID(),
       sessionId: args.sessionId,
       workspaceId: args.workspaceId,
       scopeId: args.scopeId ?? null,
-      content: args.content.trim(),
+      content,
       confidence: clamp01(args.confidence ?? 0.65),
-      embedding: provider.embed(args.content.trim()),
+      embedding,
+      embeddingModel,
+      embeddingDims,
+      needsReembed,
       promotedAt: null,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + SESSION_ATOM_TTL_MS).toISOString(),
@@ -70,15 +94,23 @@ export class SessionMomentService {
 
   query(args: { workspaceId: string; sessionId: string; query: string; limit?: number }): SessionMoment[] {
     const limit = Math.min(Math.max(args.limit ?? 5, 1), 20);
-    const queryVec = provider.embed(args.query);
+    const provider = this.resolveProvider?.(args.workspaceId);
+    // Sync-only on this path; an async provider degrades to lexical here.
+    const rawQ = provider?.embed(args.query);
+    const queryVec = Array.isArray(rawQ) ? rawQ : null;
     return this.list({ workspaceId: args.workspaceId, sessionId: args.sessionId, limit: 100 })
       .map((atom) => {
-        const row = this.db.select({ embedding: schema.sessionMoments.embedding }).from(schema.sessionMoments)
+        const row = this.db.select({
+          embedding: schema.sessionMoments.embedding,
+          embeddingModel: schema.sessionMoments.embeddingModel,
+          embeddingDims: schema.sessionMoments.embeddingDims,
+        }).from(schema.sessionMoments)
           .where(eq(schema.sessionMoments.id, atom.id))
           .get();
         const vec = parseEmbedding(row?.embedding);
-        const score = vec && vec.length === queryVec.length
-          ? cosineSimilarity(queryVec, vec)
+        const comparable = queryVec && provider && vectorIsComparable(row?.embeddingModel, row?.embeddingDims, provider);
+        const score = comparable && vec && vec.length === queryVec!.length
+          ? cosineSimilarity(queryVec!, vec)
           : lexicalScore(args.query, atom.content);
         return { ...atom, score };
       })

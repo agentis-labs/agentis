@@ -14,13 +14,14 @@ import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
 import type { ActiveTrigger } from '../engine/ActiveWorkflowRegistry.js';
 import { hashWorkflowGraph } from './graphHash.js';
 import { normalizeExtensionManifest } from './extensionRuntime.js';
+import { preflightWorkflow } from './workflowPreflight.js';
 
 type TriggerType = TriggerNodeConfig['triggerType'];
 
 export interface WorkflowTriggerDeployment {
   triggerId: string;
   workflowId: string;
-  triggerType: Exclude<TriggerType, 'manual'>;
+  triggerType: TriggerType;
   status: 'active' | 'paused' | 'error';
   updatedAt: string;
   lastFiredAt: string | null;
@@ -47,7 +48,7 @@ export class WorkflowTriggerDeploymentService {
     return row ? this.#present(row) : null;
   }
 
-  async publish(args: {
+  async activate(args: {
     workspaceId: string;
     workflowId: string;
     ambientId: string | null;
@@ -55,17 +56,27 @@ export class WorkflowTriggerDeploymentService {
   }): Promise<WorkflowTriggerDeployment> {
     const workflow = this.#loadWorkflow(args.workspaceId, args.workflowId);
     const graph = workflow.graph as WorkflowGraph;
-    const triggerNode = findTriggerNode(graph, true)!;
-    const authored = triggerNode.config as TriggerNodeConfig;
-    if (authored.triggerType === 'manual') {
+    const health = preflightWorkflow({
+      db: this.db,
+      workspaceId: args.workspaceId,
+      workflowId: args.workflowId,
+      graph,
+    });
+    if (health.status === 'blocked') {
+      const first = health.issues.find((issue) => issue.severity === 'error');
       throw new AgentisError(
-        'TRIGGER_INVALID_CONFIG',
-        'Manual workflows run on demand and do not need to be published.',
+        'WORKFLOW_GRAPH_INVALID',
+        `Workflow cannot be activated until preflight passes${first ? `: ${first.message}` : ''}`,
       );
     }
+    const triggerNode = findTriggerNode(graph, true)!;
+    const authored = triggerNode.config as TriggerNodeConfig;
 
     const runtimeConfig = runtimeConfigFromNode(authored);
-    this.#assertRuntimeDependencies(args.workspaceId, authored.triggerType, runtimeConfig);
+    const effectiveType = effectiveTriggerType(authored.triggerType);
+    if (effectiveType !== 'manual') {
+      this.#assertRuntimeDependencies(args.workspaceId, effectiveType, runtimeConfig);
+    }
     const existingRows = this.#workflowTriggers(args.workspaceId, args.workflowId);
     const existing = (authored.triggerId
       ? existingRows.find((candidate) => candidate.id === authored.triggerId)
@@ -77,7 +88,7 @@ export class WorkflowTriggerDeploymentService {
     }
 
     const triggerId = existing?.id ?? authored.triggerId ?? randomUUID();
-    const triggerType = authored.triggerType;
+    const triggerType = effectiveType;
     const now = new Date().toISOString();
     const needsWebhookSecret = triggerType === 'webhook'
       && (!existing?.webhookSecret || existing.triggerType !== 'webhook');
@@ -127,24 +138,32 @@ export class WorkflowTriggerDeploymentService {
       .where(eq(schema.workflows.id, args.workflowId))
       .run();
 
-    const active = toActiveTrigger({
-      triggerId,
-      workflowId: args.workflowId,
-      workspaceId: args.workspaceId,
-      ambientId: args.ambientId,
-      userId: args.userId,
-      triggerType,
-      config: runtimeConfig,
-    });
-    try {
-      await this.runtime.activate(active);
-    } catch (error) {
+    if (triggerType === 'manual') {
       this.db
         .update(schema.triggers)
-        .set({ status: 'error', updatedAt: new Date().toISOString() })
+        .set({ status: 'active', updatedAt: new Date().toISOString() })
         .where(eq(schema.triggers.id, triggerId))
         .run();
-      throw error;
+    } else {
+      const active = toActiveTrigger({
+        triggerId,
+        workflowId: args.workflowId,
+        workspaceId: args.workspaceId,
+        ambientId: args.ambientId,
+        userId: args.userId,
+        triggerType,
+        config: runtimeConfig,
+      });
+      try {
+        await this.runtime.activate(active);
+      } catch (error) {
+        this.db
+          .update(schema.triggers)
+          .set({ status: 'error', updatedAt: new Date().toISOString() })
+          .where(eq(schema.triggers.id, triggerId))
+          .run();
+        throw error;
+      }
     }
 
     const row = this.db.select().from(schema.triggers).where(eq(schema.triggers.id, triggerId)).get()!;
@@ -159,16 +178,18 @@ export class WorkflowTriggerDeploymentService {
     this.#loadWorkflow(workspaceId, workflowId);
     const row = pickCanonicalTrigger(this.#workflowTriggers(workspaceId, workflowId));
     if (!row) {
-      throw new AgentisError('RESOURCE_NOT_FOUND', 'This workflow has not been published yet.');
+      throw new AgentisError('RESOURCE_NOT_FOUND', 'This workflow has not been activated yet.');
     }
-    if (status === 'active') {
+    if (row.triggerType === 'manual') {
+      this.db.update(schema.triggers).set({ status, updatedAt: new Date().toISOString() }).where(eq(schema.triggers.id, row.id)).run();
+    } else if (status === 'active') {
       await this.runtime.activate(toActiveTrigger({
         triggerId: row.id,
         workflowId: row.workflowId,
         workspaceId: row.workspaceId,
         ambientId: row.ambientId,
         userId: row.userId,
-        triggerType: row.triggerType as Exclude<TriggerType, 'manual'>,
+        triggerType: row.triggerType as ActiveTrigger['triggerType'],
         config: objectRecord(row.config),
       }));
     } else {
@@ -200,7 +221,7 @@ export class WorkflowTriggerDeploymentService {
     row: typeof schema.triggers.$inferSelect,
     webhookSecret?: string,
   ): WorkflowTriggerDeployment {
-    const triggerType = row.triggerType as Exclude<TriggerType, 'manual'>;
+    const triggerType = row.triggerType as TriggerType;
     return {
       triggerId: row.id,
       workflowId: row.workflowId,
@@ -260,7 +281,9 @@ export class WorkflowTriggerDeploymentService {
         throw new AgentisError('RESOURCE_NOT_FOUND', 'Choose an agent from this workspace for the listener source.');
       }
     }
-    if (listener.source.kind === 'workflow_event') {
+    if (listener.source.kind === 'workflow_event' && listener.source.workflowId !== '*') {
+      // `'*'` is the error_trigger "any workflow in this workspace" scope — no
+      // specific target to verify.
       const workflow = this.db.select().from(schema.workflows).where(eq(schema.workflows.id, listener.source.workflowId)).get();
       if (!workflow || workflow.workspaceId !== workspaceId) {
         throw new AgentisError('RESOURCE_NOT_FOUND', 'Choose a workflow from this workspace for the listener source.');
@@ -276,34 +299,106 @@ function findTriggerNode(graph: WorkflowGraph, required: boolean): WorkflowNode 
   throw new AgentisError(
     'TRIGGER_INVALID_CONFIG',
     triggers.length === 0
-      ? 'Add a trigger node before publishing this workflow.'
-      : 'A workflow can only publish one trigger node.',
+      ? 'Add a trigger node before activating this workflow.'
+      : 'A workflow can only activate one trigger node.',
   );
+}
+
+/**
+ * The 3 canvas trigger types added by WORKFLOW-UPDATE (error_trigger, rss_feed,
+ * email_imap) are runtime-equivalent to `persistent_listener` — they each
+ * synthesize a ListenerConfig and run through the ListenerRuntime. Everything
+ * else maps to itself. This keeps the DB trigger taxonomy + ActiveTrigger union
+ * unchanged while exposing the new types first-class on the canvas.
+ */
+function effectiveTriggerType(
+  t: TriggerNodeConfig['triggerType'],
+): 'manual' | 'cron' | 'webhook' | 'persistent_listener' {
+  if (t === 'error_trigger' || t === 'rss_feed' || t === 'email_imap') return 'persistent_listener';
+  return t;
 }
 
 function runtimeConfigFromNode(config: TriggerNodeConfig): Record<string, unknown> {
   switch (config.triggerType) {
     case 'cron': {
-      const expression = config.schedule?.trim();
+      // Prefer the first non-empty scheduleRule, else the single `schedule`.
+      const expression = config.scheduleRules?.find((r) => r.expression?.trim())?.expression?.trim()
+        ?? config.schedule?.trim();
       if (!expression) {
         throw new AgentisError('TRIGGER_INVALID_CONFIG', 'Schedule triggers require a cron expression.');
       }
-      return { expression, timezone: config.timezone?.trim() || 'UTC' };
+      const out: Record<string, unknown> = { expression, timezone: config.timezone?.trim() || 'UTC' };
+      if (config.scheduleRules && config.scheduleRules.length > 0) {
+        out.scheduleRules = config.scheduleRules
+          .filter((r) => r.expression?.trim())
+          .map((r) => ({ expression: r.expression.trim(), timezone: (r.timezone ?? config.timezone)?.trim() || 'UTC', label: r.label }));
+      }
+      return out;
     }
     case 'webhook':
       return {};
     case 'persistent_listener': {
       const parsed = schemas.listenerConfigSchema.safeParse(config.listenerConfig);
       if (!parsed.success) {
-        throw new AgentisError('LISTENER_INVALID_CONFIG', 'Complete the listener source configuration before publishing.', {
+        throw new AgentisError('LISTENER_INVALID_CONFIG', 'Complete the listener source configuration before activating.', {
           details: { issues: parsed.error.issues },
         });
       }
       return parsed.data as ListenerConfig as unknown as Record<string, unknown>;
     }
+    case 'error_trigger': {
+      const et = config.errorTrigger;
+      const onStatus = et?.onStatus && et.onStatus.length > 0 ? et.onStatus : (['FAILED'] as const);
+      const listener: ListenerConfig = {
+        source: { kind: 'workflow_event', workflowId: et?.targetWorkflowId ?? '*', onStatus: [...onStatus] },
+        firePolicy: { mode: 'immediate' },
+      };
+      return validateSynthesizedListener(listener);
+    }
+    case 'rss_feed': {
+      const rss = config.rssFeed;
+      if (!rss?.feedUrl?.trim()) {
+        throw new AgentisError('TRIGGER_INVALID_CONFIG', 'RSS triggers require a feed URL.');
+      }
+      const listener: ListenerConfig = {
+        source: { kind: 'rss', feedUrl: rss.feedUrl.trim(), intervalMs: Math.max(5_000, rss.pollIntervalMs ?? 300_000) },
+        firePolicy: { mode: 'immediate' },
+      };
+      return validateSynthesizedListener(listener);
+    }
+    case 'email_imap': {
+      const im = config.emailImap;
+      if (!im?.host?.trim()) {
+        throw new AgentisError('TRIGGER_INVALID_CONFIG', 'IMAP triggers require a host.');
+      }
+      const listener: ListenerConfig = {
+        source: {
+          kind: 'email_imap',
+          host: im.host.trim(),
+          port: im.port,
+          secure: im.secure,
+          credentialId: im.credentialId,
+          mailbox: im.mailbox,
+          search: im.search,
+          pollIntervalMs: Math.max(5_000, im.pollIntervalMs ?? 60_000),
+        },
+        firePolicy: { mode: 'immediate' },
+      };
+      return validateSynthesizedListener(listener);
+    }
     case 'manual':
       return {};
   }
+}
+
+function validateSynthesizedListener(listener: ListenerConfig): Record<string, unknown> {
+  const parsed = schemas.listenerConfigSchema.safeParse(listener);
+  if (!parsed.success) {
+    throw new AgentisError('LISTENER_INVALID_CONFIG', 'Synthesized listener config is invalid.', {
+      details: { issues: parsed.error.issues },
+    });
+  }
+  return parsed.data as ListenerConfig as unknown as Record<string, unknown>;
 }
 
 function linkTriggerNode(
@@ -326,7 +421,7 @@ function linkTriggerNode(
               timezone: String(runtimeConfig.timezone ?? 'UTC'),
             }
           : {}),
-        ...(authored.triggerType === 'persistent_listener'
+        ...(effectiveTriggerType(authored.triggerType) === 'persistent_listener'
           ? { listenerConfig: runtimeConfig as unknown as ListenerConfig }
           : {}),
       };
@@ -351,7 +446,7 @@ function toActiveTrigger(args: {
   workspaceId: string;
   ambientId: string | null;
   userId: string;
-  triggerType: Exclude<TriggerType, 'manual'>;
+  triggerType: ActiveTrigger['triggerType'];
   config: Record<string, unknown>;
 }): ActiveTrigger {
   return args;

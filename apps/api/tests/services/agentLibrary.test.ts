@@ -1,14 +1,13 @@
 /**
  * Principle #11 — AgentLibraryService (agent identity as files).
  *
- * Platform specialists export to agents/platform/<role>.md (read-only defaults);
- * operator custom roles in agents/custom/*.md expand the casting vocabulary.
+ * Built-in platform specialists are no longer exported; operator custom roles
+ * in agents/custom/*.md expand the casting vocabulary.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { SPECIALIST_AGENTS } from '@agentis/core';
 import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
 import { AgentLibraryService } from '../../src/services/agentLibrary.js';
 
@@ -28,17 +27,11 @@ afterEach(async () => {
 });
 
 describe('AgentLibraryService', () => {
-  it('exports every platform specialist as agents/platform/<role>.md (idempotent)', async () => {
+  it('does not export platform specialists', async () => {
     await library.ensurePlatformAgents(WS);
-    const sample = SPECIALIST_AGENTS[0]!;
-    const md = await volume.read(WS, `agents/platform/${sample.role}.md`);
-    expect(md).toMatch(new RegExp(`role: ${sample.role}`));
-    expect(md).toMatch(/tools: \[/);
-
-    // Idempotent: second call does not throw and platform files still parse.
     await library.ensurePlatformAgents(WS);
     const all = await library.list(WS);
-    expect(all.filter((a) => a.source === 'platform')).toHaveLength(SPECIALIST_AGENTS.length);
+    expect(all.filter((a) => a.source === 'platform')).toHaveLength(0);
   });
 
   it('round-trips a custom agent and surfaces it as a custom role', async () => {
@@ -59,7 +52,6 @@ describe('AgentLibraryService', () => {
 
     const roles = await library.listCustomRoles(WS);
     expect(roles.map((r) => r.role)).toContain('compliance_analyst');
-    // Platform roles are NOT reported as custom.
-    expect(roles.some((r) => SPECIALIST_AGENTS.some((s) => s.role === r.role))).toBe(false);
+    expect(roles.every((r) => r.source !== 'platform')).toBe(true);
   });
 });

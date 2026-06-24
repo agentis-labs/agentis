@@ -25,7 +25,9 @@ export type ListenerSourceKind =
   | 'file_watch'
   | 'extension'
   | 'agent_event'
-  | 'workflow_event';
+  | 'workflow_event'
+  | 'rss'
+  | 'email_imap';
 
 export type ListenerSource =
   | {
@@ -95,9 +97,26 @@ export type ListenerSource =
     }
   | {
       kind: 'workflow_event';
+      /** A specific workflow id, or `'*'` to match any workflow in the workspace (error_trigger). */
       workflowId: string;
       onStatus: Array<'COMPLETED' | 'FAILED' | 'CANCELLED'>;
       sourceNodeId?: string;
+    }
+  | {
+      kind: 'rss';
+      feedUrl: string;
+      intervalMs?: number; // min 5000; default 300000
+      headers?: Record<string, string>;
+    }
+  | {
+      kind: 'email_imap';
+      host: string;
+      port?: number;
+      secure?: boolean;
+      credentialId?: string;
+      mailbox?: string;
+      search?: string;
+      pollIntervalMs?: number;
     };
 
 export interface CursorConfig {

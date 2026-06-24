@@ -90,6 +90,39 @@ const seeds: ManifestSeed[] = [
   manifest('google_analytics', 'Google Analytics', 'Analytics', 'Run GA4 reports.', ['get_report'], oauthCredential),
   manifest('mixpanel', 'Mixpanel', 'Analytics', 'Track events, get reports, and create cohorts.', ['track_event', 'get_report', 'create_cohort'], apiKeyCredential),
   manifest('rss_feed', 'RSS Feed', 'Web', 'Fetch and parse RSS or Atom feed items.', ['fetch_feed', 'parse_items'], noCredential),
+
+  // WORKFLOW-UPDATE — n8n-inspired high-value integrations.
+  // Communication
+  manifest('teams', 'Microsoft Teams', 'Communication', 'Send channel messages and create channels.', ['send_message', 'create_channel'], oauthCredential),
+  manifest('whatsapp', 'WhatsApp Business', 'Communication', 'Send WhatsApp messages and templates via the Business API.', ['send_message', 'send_template'], bearerCredential),
+  manifest('line', 'LINE', 'Communication', 'Push and reply to LINE messages.', ['push_message', 'reply_message'], bearerCredential),
+  // CRM
+  manifest('zoho_crm', 'Zoho CRM', 'CRM', 'Create, update, and search Zoho CRM records.', ['create_record', 'update_record', 'search'], oauthCredential),
+  manifest('monday_com', 'Monday.com', 'CRM', 'Create items, update columns, and query boards.', ['create_item', 'update_column', 'query_board'], bearerCredential),
+  manifest('attio', 'Attio', 'CRM', 'Create and update records and lists in Attio.', ['create_record', 'update_record', 'add_to_list'], bearerCredential),
+  // Data / Engineering
+  manifest('snowflake', 'Snowflake', 'Data', 'Run SQL and load rows into Snowflake.', ['execute_query', 'insert', 'bulk_load'], { type: 'api_key', fields: ['account', 'username', 'password', 'warehouse'] }),
+  manifest('bigquery', 'Google BigQuery', 'Data', 'Run queries and insert rows into BigQuery.', ['query', 'insert_rows', 'create_table'], oauthCredential),
+  manifest('dynamodb', 'AWS DynamoDB', 'Data', 'Get, put, query, and delete items.', ['get_item', 'put_item', 'query', 'delete_item'], apiKeyCredential),
+  manifest('pinecone', 'Pinecone', 'Data', 'Upsert, query, and delete vectors.', ['upsert', 'query', 'delete'], apiKeyCredential),
+  manifest('qdrant', 'Qdrant', 'Data', 'Upsert, search, and delete points.', ['upsert', 'search', 'delete'], apiKeyCredential),
+  // Files
+  manifest('box', 'Box', 'Files', 'Upload, download, and share files.', ['upload', 'download', 'share'], oauthCredential),
+  manifest('onedrive', 'OneDrive', 'Files', 'Upload, download, and list files.', ['upload', 'download', 'list'], oauthCredential),
+  manifest('sharepoint', 'SharePoint', 'Files', 'List items, upload files, and read lists.', ['list_items', 'upload_file', 'read_list'], oauthCredential),
+  // Monitoring
+  manifest('grafana', 'Grafana', 'Monitoring', 'Create annotations and read dashboards.', ['create_annotation', 'get_dashboard', 'list_dashboards'], bearerCredential),
+  manifest('splunk', 'Splunk', 'Monitoring', 'Ingest events via HEC and run searches.', ['ingest_event', 'search'], { type: 'api_key', fields: ['hecUrl', 'hecToken'] }),
+  // Marketing
+  manifest('mailchimp', 'Mailchimp', 'Marketing', 'Manage lists, add members, and send campaigns.', ['add_member', 'update_member', 'create_campaign', 'send_campaign'], { type: 'api_key', fields: ['apiKey', 'serverPrefix'] }),
+  manifest('sendgrid_marketing', 'SendGrid Marketing', 'Marketing', 'Manage marketing contacts and lists.', ['add_contact', 'create_list', 'send_marketing_email'], bearerCredential),
+  manifest('youtube', 'YouTube', 'Marketing', 'Upload videos and read channel analytics.', ['upload_video', 'get_analytics', 'list_videos'], oauthCredential),
+  // DevOps
+  manifest('jenkins', 'Jenkins', 'DevOps', 'Trigger builds and read job status.', ['trigger_build', 'get_build_status', 'list_jobs'], { type: 'api_key', fields: ['baseUrl', 'username', 'apiToken'] }),
+  manifest('circleci', 'CircleCI', 'DevOps', 'Trigger pipelines and read job status.', ['trigger_pipeline', 'get_pipeline', 'get_job_status'], bearerCredential),
+  // Finance
+  manifest('chargebee', 'Chargebee', 'Payments', 'Create subscriptions, customers, and invoices.', ['create_subscription', 'create_customer', 'create_invoice'], { type: 'api_key', fields: ['site', 'apiKey'] }),
+  manifest('quickbooks', 'QuickBooks', 'Payments', 'Create invoices, customers, and read reports.', ['create_invoice', 'create_customer', 'get_report'], oauthCredential),
 ];
 
 export const builtinIntegrationManifests: IntegrationManifest[] = seeds.map((seed) => ({

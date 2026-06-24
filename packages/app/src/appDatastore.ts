@@ -1,0 +1,393 @@
+/**
+ * AppDatastore — typed collection + record persistence (AGENTIC-APPS-10X §5).
+ *
+ * Records are validated against the collection's field schema on write. Queries
+ * filter via SQLite json_extract over `data_json` (V1; a later pass projects
+ * indexed fields into generated columns for scale). This is the App's
+ * operational data store — distinct from the Brain, which handles memory.
+ *
+ * All methods are workspace-scoped and resolve the collection by (appId, name).
+ */
+
+import { randomUUID } from 'node:crypto';
+import { and, asc, desc, eq, sql, type SQL } from 'drizzle-orm';
+import {
+  AgentisError,
+  collectionSchemaSchema,
+  dataQuerySchema,
+  type CollectionField,
+  type CollectionInfo,
+  type CollectionRecord,
+  type CollectionSchema,
+  type DataQuery,
+  type DefineCollectionInput,
+} from '@agentis/core';
+import { schema } from '@agentis/db/sqlite';
+import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { z } from 'zod';
+
+type CollectionRow = typeof schema.appCollections.$inferSelect;
+type RecordRow = typeof schema.appRecords.$inferSelect;
+
+const FILTER_OPS = new Set(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in']);
+
+export type DataChangeOp = 'insert' | 'update' | 'delete';
+
+export class AppDatastore {
+  /** Optional realtime sink — bound views refetch on DATA_CHANGED. */
+  constructor(
+    private readonly db: AgentisSqliteDb,
+    private readonly onChange?: (args: { workspaceId: string; appId: string; collection: string; op: DataChangeOp; id: string }) => void,
+  ) {}
+
+  // ── Collections ─────────────────────────────────────────────
+
+  defineCollection(workspaceId: string, appId: string, input: DefineCollectionInput): CollectionInfo {
+    this.requireApp(workspaceId, appId);
+    const schemaParsed = collectionSchemaSchema.parse(input.schema);
+    const now = new Date().toISOString();
+    const existing = this.findCollectionRow(appId, input.name);
+    if (existing) {
+      this.db
+        .update(schema.appCollections)
+        .set({ schemaJson: schemaParsed, updatedAt: now })
+        .where(eq(schema.appCollections.id, existing.id))
+        .run();
+      const info = this.toCollectionInfo({ ...existing, schemaJson: schemaParsed, updatedAt: now });
+      this.rebuildCollectionIndex(workspaceId, appId, info.id, info.schema);
+      return info;
+    }
+    const id = randomUUID();
+    this.db
+      .insert(schema.appCollections)
+      .values({ id, appId, workspaceId, name: input.name, schemaJson: schemaParsed, createdAt: now, updatedAt: now })
+      .run();
+    return this.toCollectionInfo(this.findCollectionRow(appId, input.name)!);
+  }
+
+  listCollections(workspaceId: string, appId: string): CollectionInfo[] {
+    this.requireApp(workspaceId, appId);
+    return this.db
+      .select()
+      .from(schema.appCollections)
+      .where(eq(schema.appCollections.appId, appId))
+      .orderBy(asc(schema.appCollections.name))
+      .all()
+      .map((r) => this.toCollectionInfo(r));
+  }
+
+  // ── Records ─────────────────────────────────────────────────
+
+  insert(workspaceId: string, appId: string, collection: string, record: Record<string, unknown>, userId?: string): CollectionRecord {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    const data = this.recordValidator(col.schema).parse(record);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .insert(schema.appRecords)
+      .values({ id, collectionId: col.id, appId, workspaceId, dataJson: data, version: 1, createdBy: userId ?? null, createdAt: now, updatedAt: now })
+      .run();
+    this.writeIndexEntries(workspaceId, appId, col.id, id, col.schema, data);
+    this.onChange?.({ workspaceId, appId, collection, op: 'insert', id });
+    return this.getRecord(workspaceId, appId, collection, id);
+  }
+
+  update(workspaceId: string, appId: string, collection: string, id: string, patch: Record<string, unknown>): CollectionRecord {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    const current = this.getRecord(workspaceId, appId, collection, id);
+    const merged = { ...current.data, ...patch };
+    const data = this.recordValidator(col.schema).parse(merged);
+    const now = new Date().toISOString();
+    this.db
+      .update(schema.appRecords)
+      .set({ dataJson: data, version: current.version + 1, updatedAt: now })
+      .where(eq(schema.appRecords.id, id))
+      .run();
+    this.deleteIndexEntries(col.id, id);
+    this.writeIndexEntries(workspaceId, appId, col.id, id, col.schema, data);
+    this.onChange?.({ workspaceId, appId, collection, op: 'update', id });
+    return this.getRecord(workspaceId, appId, collection, id);
+  }
+
+  upsert(workspaceId: string, appId: string, collection: string, match: Record<string, unknown>, record: Record<string, unknown>, userId?: string): CollectionRecord {
+    const existing = this.query(workspaceId, appId, collection, { filter: match as DataQuery['filter'], limit: 1 }).rows[0];
+    if (existing) return this.update(workspaceId, appId, collection, existing.id, record);
+    return this.insert(workspaceId, appId, collection, { ...match, ...record }, userId);
+  }
+
+  delete(workspaceId: string, appId: string, collection: string, id: string): void {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    this.deleteIndexEntries(col.id, id);
+    this.db.delete(schema.appRecords).where(and(eq(schema.appRecords.id, id), eq(schema.appRecords.collectionId, col.id))).run();
+    this.onChange?.({ workspaceId, appId, collection, op: 'delete', id });
+  }
+
+  getRecord(workspaceId: string, appId: string, collection: string, id: string): CollectionRecord {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    const row = this.db
+      .select()
+      .from(schema.appRecords)
+      .where(and(eq(schema.appRecords.id, id), eq(schema.appRecords.collectionId, col.id)))
+      .get();
+    if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `record not found: ${id}`);
+    return this.toRecord(row, col.name);
+  }
+
+  query(workspaceId: string, appId: string, collection: string, q: DataQuery): { rows: CollectionRecord[]; nextCursor?: string } {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    const query = dataQuerySchema.parse(q);
+    const conditions: SQL[] = [eq(schema.appRecords.collectionId, col.id)];
+    const indexedCondition = this.indexedCondition(col, query.filter ?? {});
+    if (indexedCondition) conditions.push(indexedCondition);
+    for (const [key, raw] of Object.entries(query.filter ?? {})) {
+      conditions.push(this.filterCondition(key, raw));
+    }
+    const offset = this.decodeCursor(query.cursor);
+    let builder = this.db
+      .select()
+      .from(schema.appRecords)
+      .where(and(...conditions))
+      .$dynamic();
+    if (query.sort && query.sort.length > 0) {
+      const orderExprs = query.sort.map((s) => {
+        const path = this.jsonPath(s.field);
+        return s.dir === 'desc' ? desc(path) : asc(path);
+      });
+      builder = builder.orderBy(...orderExprs);
+    } else {
+      builder = builder.orderBy(desc(schema.appRecords.updatedAt));
+    }
+    const rows = builder.limit(query.limit + 1).offset(offset).all();
+    const hasMore = rows.length > query.limit;
+    const page = hasMore ? rows.slice(0, query.limit) : rows;
+    return {
+      rows: page.map((r) => this.toRecord(r, col.name)),
+      ...(hasMore ? { nextCursor: this.encodeCursor(offset + query.limit) } : {}),
+    };
+  }
+
+  // ── Internals ───────────────────────────────────────────────
+
+  private requireApp(workspaceId: string, appId: string): void {
+    const row = this.db
+      .select({ id: schema.apps.id })
+      .from(schema.apps)
+      .where(and(eq(schema.apps.workspaceId, workspaceId), eq(schema.apps.id, appId)))
+      .get();
+    if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+  }
+
+  private findCollectionRow(appId: string, name: string): CollectionRow | undefined {
+    return this.db
+      .select()
+      .from(schema.appCollections)
+      .where(and(eq(schema.appCollections.appId, appId), eq(schema.appCollections.name, name)))
+      .get();
+  }
+
+  private requireCollection(workspaceId: string, appId: string, name: string): { id: string; name: string; schema: CollectionSchema } {
+    this.requireApp(workspaceId, appId);
+    const row = this.findCollectionRow(appId, name);
+    if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `collection not found: ${name}`);
+    return { id: row.id, name: row.name, schema: collectionSchemaSchema.parse(row.schemaJson) };
+  }
+
+  /** Build a zod validator from the field DSL. Unknown keys pass through untyped. */
+  private recordValidator(collectionSchema: CollectionSchema): z.ZodType<Record<string, unknown>> {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const field of collectionSchema.fields) {
+      let base: z.ZodTypeAny;
+      switch (field.type) {
+        case 'string':
+        case 'date':
+          base = z.string();
+          break;
+        case 'number':
+          base = z.number();
+          break;
+        case 'boolean':
+          base = z.boolean();
+          break;
+        default:
+          base = z.unknown();
+      }
+      shape[field.key] = field.required ? base : base.optional();
+    }
+    return z.object(shape).passthrough() as unknown as z.ZodType<Record<string, unknown>>;
+  }
+
+  private jsonPath(field: CollectionField['key']): SQL<unknown> {
+    return sql`json_extract(${schema.appRecords.dataJson}, ${'$.' + field})`;
+  }
+
+  private indexedCondition(col: { id: string; schema: CollectionSchema }, filter: NonNullable<DataQuery['filter']>): SQL | null {
+    const indexed = new Set(col.schema.fields.filter((field) => field.indexed).map((field) => field.key));
+    for (const [key, raw] of Object.entries(filter)) {
+      if (!indexed.has(key)) continue;
+      const values = indexedLookupValues(raw);
+      if (!values) continue;
+      return sql`${schema.appRecords.id} IN (
+        SELECT ${schema.appRecordIndex.recordId}
+        FROM ${schema.appRecordIndex}
+        WHERE ${schema.appRecordIndex.collectionId} = ${col.id}
+          AND ${schema.appRecordIndex.fieldKey} = ${key}
+          AND ${indexedValuePredicate(values)}
+      )`;
+    }
+    return null;
+  }
+
+  private filterCondition(key: string, raw: unknown): SQL {
+    const path = this.jsonPath(key);
+    if (raw !== null && typeof raw === 'object' && 'op' in (raw as object)) {
+      const { op, value } = raw as { op: string; value: unknown };
+      if (!FILTER_OPS.has(op)) throw new AgentisError('VALIDATION_FAILED', `unknown filter op: ${op}`);
+      switch (op) {
+        case 'eq':
+          return sql`${path} = ${this.scalar(value)}`;
+        case 'ne':
+          return sql`${path} != ${this.scalar(value)}`;
+        case 'gt':
+          return sql`${path} > ${this.scalar(value)}`;
+        case 'gte':
+          return sql`${path} >= ${this.scalar(value)}`;
+        case 'lt':
+          return sql`${path} < ${this.scalar(value)}`;
+        case 'lte':
+          return sql`${path} <= ${this.scalar(value)}`;
+        case 'contains':
+          return sql`${path} LIKE ${'%' + String(value) + '%'}`;
+        case 'in': {
+          const arr = Array.isArray(value) ? value : [value];
+          if (arr.length === 0) return sql`1 = 0`;
+          return sql`${path} IN (${sql.join(arr.map((v) => sql`${this.scalar(v)}`), sql`, `)})`;
+        }
+        default:
+          throw new AgentisError('VALIDATION_FAILED', `unknown filter op: ${op}`);
+      }
+    }
+    // Bare value → equality.
+    return sql`${path} = ${this.scalar(raw)}`;
+  }
+
+  /** Coerce a JS value to a json_extract-comparable scalar (booleans become 0/1 as SQLite stores them). */
+  private scalar(value: unknown): string | number {
+    if (typeof value === 'boolean') return value ? 1 : 0;
+    if (typeof value === 'number') return value;
+    return String(value);
+  }
+
+  private encodeCursor(offset: number): string {
+    return Buffer.from(String(offset), 'utf8').toString('base64');
+  }
+
+  private decodeCursor(cursor: string | undefined): number {
+    if (!cursor) return 0;
+    const n = Number.parseInt(Buffer.from(cursor, 'base64').toString('utf8'), 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  }
+
+  private toCollectionInfo(row: CollectionRow): CollectionInfo {
+    return {
+      id: row.id,
+      appId: row.appId,
+      name: row.name,
+      schema: collectionSchemaSchema.parse(row.schemaJson),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  private toRecord(row: RecordRow, collectionName: string): CollectionRecord {
+    return {
+      id: row.id,
+      appId: row.appId,
+      collectionId: row.collectionId,
+      name: collectionName,
+      data: (row.dataJson ?? {}) as Record<string, unknown>,
+      version: row.version,
+      createdBy: row.createdBy,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  private rebuildCollectionIndex(workspaceId: string, appId: string, collectionId: string, collectionSchema: CollectionSchema): void {
+    this.db.delete(schema.appRecordIndex).where(eq(schema.appRecordIndex.collectionId, collectionId)).run();
+    const rows = this.db
+      .select()
+      .from(schema.appRecords)
+      .where(and(eq(schema.appRecords.workspaceId, workspaceId), eq(schema.appRecords.appId, appId), eq(schema.appRecords.collectionId, collectionId)))
+      .all();
+    for (const row of rows) {
+      this.writeIndexEntries(workspaceId, appId, collectionId, row.id, collectionSchema, (row.dataJson ?? {}) as Record<string, unknown>);
+    }
+  }
+
+  private deleteIndexEntries(collectionId: string, recordId: string): void {
+    this.db
+      .delete(schema.appRecordIndex)
+      .where(and(eq(schema.appRecordIndex.collectionId, collectionId), eq(schema.appRecordIndex.recordId, recordId)))
+      .run();
+  }
+
+  private writeIndexEntries(
+    workspaceId: string,
+    appId: string,
+    collectionId: string,
+    recordId: string,
+    collectionSchema: CollectionSchema,
+    data: Record<string, unknown>,
+  ): void {
+    for (const field of collectionSchema.fields) {
+      if (!field.indexed) continue;
+      const value = data[field.key];
+      if (!isIndexableScalar(value)) continue;
+      this.db
+        .insert(schema.appRecordIndex)
+        .values({
+          workspaceId,
+          appId,
+          collectionId,
+          recordId,
+          fieldKey: field.key,
+          ...indexValueColumns(value),
+        })
+        .run();
+    }
+  }
+}
+
+function indexedLookupValues(raw: unknown): unknown[] | null {
+  if (raw !== null && typeof raw === 'object' && 'op' in (raw as object)) {
+    const { op, value } = raw as { op: string; value: unknown };
+    if (op === 'eq') return [value];
+    if (op === 'in') return Array.isArray(value) ? value : [value];
+    return null;
+  }
+  return [raw];
+}
+
+function indexedValuePredicate(values: unknown[]): SQL {
+  const clauses = values.filter(isIndexableScalar).map((value) => {
+    if (typeof value === 'number') return sql`${schema.appRecordIndex.valueNumber} = ${value}`;
+    if (typeof value === 'boolean') return sql`${schema.appRecordIndex.valueBoolean} = ${value}`;
+    return sql`${schema.appRecordIndex.valueText} = ${String(value)}`;
+  });
+  if (clauses.length === 0) return sql`1 = 0`;
+  return sql.join(clauses.map((clause) => sql`(${clause})`), sql` OR `);
+}
+
+function isIndexableScalar(value: unknown): value is string | number | boolean {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function indexValueColumns(value: string | number | boolean): {
+  valueText: string | null;
+  valueNumber: number | null;
+  valueBoolean: boolean | null;
+} {
+  if (typeof value === 'number') return { valueText: null, valueNumber: value, valueBoolean: null };
+  if (typeof value === 'boolean') return { valueText: null, valueNumber: null, valueBoolean: value };
+  return { valueText: value, valueNumber: null, valueBoolean: null };
+}

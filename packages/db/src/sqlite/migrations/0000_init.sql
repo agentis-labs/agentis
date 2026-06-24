@@ -272,6 +272,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   title             TEXT NOT NULL,
   summary           TEXT NOT NULL,
   confidence        INTEGER,
+  payload           TEXT NOT NULL DEFAULT '{}',
   status            TEXT NOT NULL DEFAULT 'pending',
   resolution_reason TEXT,
   resolved_at       TEXT,

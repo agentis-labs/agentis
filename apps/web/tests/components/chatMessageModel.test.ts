@@ -61,4 +61,31 @@ describe('chat message model', () => {
       'stream-turn-a',
     ]);
   });
+
+  it('keeps a replaced assistant message in the original local turn position', () => {
+    const firstAt = '2026-06-03T10:00:00.000Z';
+    const secondAt = '2026-06-03T10:01:00.000Z';
+    const current = [
+      msg({ id: 'tmp-turn-a', authorKind: 'operator', text: 'first', createdAt: firstAt, metadata: { clientTurnId: 'turn-a' } }),
+      msg({ id: 'stream-turn-a', authorKind: 'agent', createdAt: firstAt, metadata: { clientTurnId: 'turn-a' } }),
+      msg({ id: 'tmp-turn-b', authorKind: 'operator', text: 'second', createdAt: secondAt, metadata: { clientTurnId: 'turn-b' } }),
+      msg({ id: 'stream-turn-b', authorKind: 'agent', createdAt: secondAt, metadata: { clientTurnId: 'turn-b' } }),
+    ];
+    const persisted = msg({
+      id: 'persisted-a',
+      authorKind: 'agent',
+      text: 'done',
+      createdAt: '2026-06-03T10:05:00.000Z',
+      metadata: { turn: { clientTurnId: 'turn-a', startedAt: firstAt } },
+    });
+
+    const merged = mergeMessage(current, persisted);
+
+    expect(merged.map((message) => message.id)).toEqual([
+      'tmp-turn-a',
+      'persisted-a',
+      'tmp-turn-b',
+      'stream-turn-b',
+    ]);
+  });
 });

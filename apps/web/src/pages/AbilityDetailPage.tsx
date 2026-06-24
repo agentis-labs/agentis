@@ -76,6 +76,7 @@ export function AbilityDetailPage() {
   const [tab, setTab] = useState<Tab>('overview');
   const [loading, setLoading] = useState(true);
   const initialTabSet = useRef(false);
+  const hydratedAbilityIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (ability && !initialTabSet.current) {
@@ -125,6 +126,7 @@ export function AbilityDetailPage() {
   const [assetNoteContent, setAssetNoteContent] = useState('');
   const [assetNoteImportance, setAssetNoteImportance] = useState(0.60);
   const [addingAsset, setAddingAsset] = useState(false);
+  const [tokenBudgetDraft, setTokenBudgetDraft] = useState('');
 
   // Run promotion flywheel states
   const [showRunHistory, setShowRunHistory] = useState(false);
@@ -142,6 +144,7 @@ export function AbilityDetailPage() {
   const [editingExample, setEditingExample] = useState<AbilityExample | null>(null);
 
   const [saving, setSaving] = useState(false);
+  const [savingBudget, setSavingBudget] = useState(false);
   const [compiling, setCompiling] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   // Real phase reported by the server, refreshed by the status poll.
@@ -159,8 +162,33 @@ export function AbilityDetailPage() {
 
   useEffect(() => { void refreshConfig(); }, [refreshConfig]);
 
+  const hydrateEditorFromAbility = useCallback((nextAbility: Ability) => {
+    hydratedAbilityIdRef.current = nextAbility.id;
+    setEditName(nextAbility.name);
+    setEditIconEmoji(nextAbility.iconEmoji ?? 'âš¡');
+    setEditDomainTag(nextAbility.domainTag ?? 'custom');
+    setEditDescription(nextAbility.description ?? '');
+    setEditSpecs(
+      Object.entries(nextAbility.specs)
+        .filter(([key]) => key !== '__persona_locked')
+        .map(([key, value]) => ({
+          key,
+          value: value ?? '',
+        }))
+    );
+    setEditRulesAlways(nextAbility.rulesAlways);
+    setEditRulesNever(nextAbility.rulesNever);
+    setEditToolHints(nextAbility.toolHints);
+    setPersonaLocked(nextAbility.specs.__persona_locked === 'true');
+    setEditPersona(nextAbility.compiledPrompt ?? '');
+    setTokenBudgetDraft(nextAbility.tokenBudget == null ? '' : String(nextAbility.tokenBudget));
+  }, []);
+
   useEffect(() => {
-    if (!ability) return;
+    if (!ability || hydratedAbilityIdRef.current === ability.id) return;
+    hydrateEditorFromAbility(ability);
+    /*
+    return;
     setEditName(ability.name);
     setEditIconEmoji(ability.iconEmoji ?? '⚡');
     setEditDomainTag(ability.domainTag ?? 'custom');
@@ -178,7 +206,8 @@ export function AbilityDetailPage() {
     setEditToolHints(ability.toolHints);
     setPersonaLocked(ability.specs.__persona_locked === 'true');
     setEditPersona(ability.compiledPrompt ?? '');
-  }, [ability]);
+    */
+  }, [ability, hydrateEditorFromAbility]);
 
   const isDirty = useMemo(() => {
     if (!ability) return false;
@@ -224,7 +253,7 @@ export function AbilityDetailPage() {
     );
   }, [ability, editName, editIconEmoji, editDomainTag, editDescription, editSpecs, editRulesAlways, editRulesNever, editToolHints, personaLocked, editPersona]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ preserveDraft = true }: { preserveDraft?: boolean } = {}) => {
     if (!id) return;
     setLoading(true);
     try {
@@ -236,12 +265,15 @@ export function AbilityDetailPage() {
       setAbility(a.ability);
       setExamples(ex.examples);
       setKnowledge(kn.knowledge);
+      if (!preserveDraft || hydratedAbilityIdRef.current !== a.ability.id) {
+        hydrateEditorFromAbility(a.ability);
+      }
     } catch (err) {
       toast.error('Could not load ability', apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, [id, toast]);
+  }, [hydrateEditorFromAbility, id, toast]);
 
   const loadAgentPins = useCallback(async () => {
     if (!id) return;
@@ -282,6 +314,10 @@ export function AbilityDetailPage() {
 
   const handleDiscardChanges = useCallback(() => {
     if (!ability) return;
+    hydrateEditorFromAbility(ability);
+    toast.success('Changes discarded');
+    /*
+    return;
     setEditName(ability.name);
     setEditIconEmoji(ability.iconEmoji ?? '⚡');
     setEditDomainTag(ability.domainTag ?? 'custom');
@@ -300,7 +336,8 @@ export function AbilityDetailPage() {
     setPersonaLocked(ability.specs.__persona_locked === 'true');
     setEditPersona(ability.compiledPrompt ?? '');
     toast.success('Changes discarded');
-  }, [ability, toast]);
+    */
+  }, [ability, hydrateEditorFromAbility, toast]);
 
   const handleSaveChanges = useCallback(async () => {
     if (!ability || !id) return;
@@ -329,7 +366,7 @@ export function AbilityDetailPage() {
         compiledPrompt: personaLocked ? editPersona : (ability.compiledPrompt ?? null),
       });
       toast.success('Ability saved successfully');
-      await refresh();
+      await refresh({ preserveDraft: false });
     } catch (err) {
       toast.error('Failed to save ability', apiErrorMessage(err));
     } finally {
@@ -337,7 +374,7 @@ export function AbilityDetailPage() {
     }
   }, [ability, id, editName, editIconEmoji, editDomainTag, editDescription, editSpecs, editRulesAlways, editRulesNever, editToolHints, personaLocked, editPersona, refresh, toast]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void refresh({ preserveDraft: false }); }, [refresh]);
 
   // Compile-status polling — fetches the server-reported phase every 1.5s
   // while compiling. The stage drives the progress UI (no more cosmetic
@@ -355,7 +392,7 @@ export function AbilityDetailPage() {
           setCompiling(false);
           setCancelling(false);
           setCompileStage(null);
-          await refresh();
+          await refresh({ preserveDraft: false });
         } else {
           setAbility((prev) => prev ? {
             ...prev,
@@ -378,7 +415,7 @@ export function AbilityDetailPage() {
     setCancelling(true);
     try {
       await abilitiesApi.cancelCompile(ability.id);
-      toast.info('Cancel requested', 'Worker will stop at the next stage boundary.');
+      toast.info('Cancel requested', 'Specialist will stop at the next stage boundary.');
     } catch (err) {
       setCancelling(false);
       toast.error('Cancel failed', apiErrorMessage(err));
@@ -487,14 +524,39 @@ export function AbilityDetailPage() {
 
   async function handleFileUploads(files: File[]) {
     if (!ability) return;
+    if (files.length === 0) return;
+    setIsDragging(false);
     for (const file of files) {
       try {
         await abilitiesApi.uploadKnowledgeFile(ability.id, file);
         toast.success(`Uploaded ${file.name}`);
-        await refresh();
+        await refresh({ preserveDraft: true });
       } catch (err) {
         toast.error(`Failed to upload ${file.name}`, apiErrorMessage(err));
       }
+    }
+  }
+
+  const budgetDirty = tokenBudgetDraft !== (ability?.tokenBudget == null ? '' : String(ability.tokenBudget));
+
+  async function handleSaveBudget() {
+    if (!ability || savingBudget) return;
+    const trimmed = tokenBudgetDraft.trim();
+    const nextBudget = trimmed === '' ? null : Number(trimmed);
+    if (nextBudget !== null && (!Number.isInteger(nextBudget) || nextBudget <= 0)) {
+      toast.error('Save failed', 'Token budget must be a positive whole number.');
+      return;
+    }
+    setSavingBudget(true);
+    try {
+      const result = await abilitiesApi.update(ability.id, { tokenBudget: nextBudget });
+      setAbility(result.ability);
+      setTokenBudgetDraft(result.ability.tokenBudget == null ? '' : String(result.ability.tokenBudget));
+      toast.success('Budget cap updated successfully');
+    } catch (err) {
+      toast.error('Save failed', apiErrorMessage(err));
+    } finally {
+      setSavingBudget(false);
     }
   }
 
@@ -518,7 +580,7 @@ export function AbilityDetailPage() {
       setAssetUrl('');
       setAssetUrlTitle('');
       setAssetUrlSummary('');
-      await refresh();
+      await refresh({ preserveDraft: true });
     } catch (err) {
       toast.error('Failed to add URL asset', apiErrorMessage(err));
     } finally {
@@ -543,7 +605,7 @@ export function AbilityDetailPage() {
       toast.success('Note asset added successfully');
       setAssetNoteTitle('');
       setAssetNoteContent('');
-      await refresh();
+      await refresh({ preserveDraft: true });
     } catch (err) {
       toast.error('Failed to add note asset', apiErrorMessage(err));
     } finally {
@@ -1268,9 +1330,18 @@ export function AbilityDetailPage() {
                 <div className="mb-6">
                   {activeAssetTab === 'upload' && (
                     <div
-                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                      onDragLeave={() => setIsDragging(false)}
-                      onDrop={e => void handleFileUploads(Array.from(e.dataTransfer.files))}
+                      onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); }}
+                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; setIsDragging(true); }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setIsDragging(false);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void handleFileUploads(Array.from(e.dataTransfer.files));
+                      }}
                       className={`relative flex flex-col items-center justify-center rounded-xl border border-dashed p-8 text-center transition-all ${
                         isDragging
                           ? 'border-accent bg-accent-soft/20 text-accent scale-[0.99] shadow-sm'
@@ -1471,7 +1542,7 @@ export function AbilityDetailPage() {
                                   try {
                                     await abilitiesApi.deleteKnowledge(ability.id, k.id);
                                     toast.success('Reference removed');
-                                    await refresh();
+                                    await refresh({ preserveDraft: true });
                                   } catch (err) {
                                     toast.error('Delete failed', apiErrorMessage(err));
                                   }
@@ -1604,7 +1675,7 @@ export function AbilityDetailPage() {
                                     try {
                                       await abilitiesApi.deleteExample(ability.id, ex.id);
                                       toast.success('Exemplar deleted successfully');
-                                      await refresh();
+                                      await refresh({ preserveDraft: true });
                                     } catch (err) {
                                       toast.error('Delete failed', apiErrorMessage(err));
                                     }
@@ -1654,26 +1725,30 @@ export function AbilityDetailPage() {
                     <p className="text-[12px] text-text-muted leading-relaxed mb-4">
                       Define the maximum context tokens this ability can consume per run. Leave empty to inherit the default workspace system quota.
                     </p>
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex items-end gap-2.5">
                       <input
                         type="number"
-                        value={ability.tokenBudget == null ? '' : String(ability.tokenBudget)}
-                        onChange={async (e) => {
-                          const v = e.target.value.trim() === '' ? null : Number(e.target.value);
-                          if (v !== null && (!Number.isFinite(v) || v <= 0)) return;
-                          try {
-                            await abilitiesApi.update(ability.id, { tokenBudget: v });
-                            toast.success('Budget cap updated successfully');
-                            await refresh();
-                          } catch (err) {
-                            toast.error('Save failed', apiErrorMessage(err));
-                          }
+                        value={tokenBudgetDraft}
+                        onChange={(e) => {
+                          const nextValue = e.target.value;
+                          if (nextValue !== '' && !/^\d+$/.test(nextValue)) return;
+                          setTokenBudgetDraft(nextValue);
                         }}
                         placeholder="Inherit workspace default"
                         min={0}
+                        step={1}
                         className="h-10 w-full max-w-[200px] rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary font-bold focus:border-accent focus:outline-none"
                       />
                       <span className="text-[11px] text-text-muted font-bold">tokens cap</span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={handleSaveBudget}
+                        loading={savingBudget}
+                        disabled={savingBudget || !budgetDirty}
+                      >
+                        Save
+                      </Button>
                     </div>
                   </section>
 
@@ -1813,7 +1888,7 @@ export function AbilityDetailPage() {
                 toast.success('Curated example added successfully');
               }
               setEditingExample(null);
-              await refresh();
+              await refresh({ preserveDraft: true });
             } catch (err) {
               toast.error('Save failed', apiErrorMessage(err));
             }

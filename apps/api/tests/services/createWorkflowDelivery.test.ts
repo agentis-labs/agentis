@@ -1,10 +1,9 @@
 /**
- * createWorkflowFromDescription — AI-only creation (no deterministic builder).
+ * createWorkflowFromDescription - model-assisted or agent-authored creation.
  *
- * Agentis builds workflows with AI. With no model the build REFUSES (asks the
- * operator to configure one) instead of emitting a dumb template. With a model,
- * the LLM graph is post-processed by structural repair (delivery/state) and the
- * reviewer — both surfaced in the inspectable trace.
+ * A configured fast runtime may synthesize the graph. Otherwise the calling
+ * agent authors graphDraft or patchDraft. Every path flows through structural
+ * repair, delivery/state enrichment, and inspectable trace output.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
@@ -50,7 +49,7 @@ function fakeRuntime(payload: unknown) {
   return { completeStructured: async () => payload } as unknown as NonNullable<ToolHandlerDeps['evaluatorRuntime']>;
 }
 
-describe('createWorkflowFromDescription — AI-only creation', () => {
+describe('createWorkflowFromDescription — model-assisted creation', () => {
   let ctx: TestContext;
   beforeEach(async () => { ctx = await createTestContext(); });
   afterEach(() => ctx.close());
@@ -66,14 +65,19 @@ describe('createWorkflowFromDescription — AI-only creation', () => {
     } as unknown as ToolHandlerDeps;
   }
 
-  it('REFUSES (throws) to build when no orchestrator model is configured', async () => {
+  it('accepts an agent-authored graph draft when no synthesis model is configured', async () => {
     const depsNoModel = { db: ctx.db, logger: ctx.logger, bus: ctx.bus } as unknown as ToolHandlerDeps;
-    await expect(
-      createWorkflowFromDescription(depsNoModel, {
-        workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
-        description: 'search AI news and email me every morning', stream: false,
-      }),
-    ).rejects.toMatchObject({ code: 'WORKFLOW_SYNTHESIS_UNAVAILABLE' });
+    const res = await createWorkflowFromDescription(depsNoModel, {
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      description: 'gather AI news and summarize it',
+      graphDraft: synthGraph(),
+      stream: false,
+    });
+
+    expect((res as { trace: { synthesis: string } }).trace.synthesis).toBe('agent_draft');
+    const graph = res.graph as WorkflowGraph;
+    expect(graph.nodes.length).toBeGreaterThanOrEqual(3);
+    expect(graph.nodes.some((n) => (n.config as { kind?: string }).kind === 'return_output')).toBe(true);
   });
 
   it('falls back to the building agent\'s OWN model when no runtime is configured', async () => {
@@ -102,9 +106,35 @@ describe('createWorkflowFromDescription — AI-only creation', () => {
     expect((res.graph as WorkflowGraph).nodes.length).toBeGreaterThan(0);
   });
 
-  it('surfaces the REAL model error (not a generic message) when synthesis fails', async () => {
-    // A model is available but its endpoint keeps erroring — the thrown message
-    // must carry the backend's own reason so the operator can act on it.
+  it('requires a draft instead of recursively calling a slow CLI harness', async () => {
+    let chatCalls = 0;
+    const adapterDeps = {
+      db: ctx.db, logger: ctx.logger, bus: ctx.bus,
+      adapters: {
+        get: (_agentId: string) => ({
+          adapter: {
+            capabilities: () => ({ interactiveChat: true, toolForwarding: 'mcp_native' }),
+            chat: async function* () {
+              chatCalls += 1;
+              yield { type: 'done', finishReason: 'stop' };
+            },
+          },
+        }),
+      },
+    } as unknown as ToolHandlerDeps;
+
+    await expect(createWorkflowFromDescription(adapterDeps, {
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id, agentId: 'orchy',
+      description: 'Take a deep look into C:\\Users\\antar\\OneDrive\\Documentos\\stores and build an Agentis workflow with a rendered dashboard output.',
+      stream: false,
+    })).rejects.toMatchObject({ code: 'WORKFLOW_DRAFT_REQUIRED' });
+
+    expect(chatCalls, 'the build tool must never recursively invoke the calling harness').toBe(0);
+  });
+
+  it('fails honestly instead of fabricating a graph when model synthesis fails', async () => {
+    // A model is available but its endpoint keeps erroring. The failure must be
+    // surfaced without persisting a fabricated fallback graph.
     const runtime = {
       completeStructured: async () => null,
       lastError: 'model backend returned 400: temperature does not support 0',
@@ -115,15 +145,12 @@ describe('createWorkflowFromDescription — AI-only creation', () => {
         (role === 'synthesis' ? runtime : undefined),
     } as unknown as ToolHandlerDeps;
 
-    await expect(
-      createWorkflowFromDescription(deps, {
-        workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
-        description: 'gather AI news and summarize it', stream: false,
-      }),
-    ).rejects.toMatchObject({
-      code: 'WORKFLOW_SYNTHESIS_UNAVAILABLE',
-      message: expect.stringContaining('temperature does not support 0'),
-    });
+    await expect(createWorkflowFromDescription(deps, {
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      description: 'gather AI news and summarize it', stream: false,
+    })).rejects.toMatchObject({ code: 'WORKFLOW_SYNTHESIS_UNAVAILABLE' });
+
+    expect(ctx.db.select().from(schema.workflows).all()).toHaveLength(0);
   });
 
   it('does NOT create a duplicate when the SAME request builds twice (cross-caller dedup)', async () => {
@@ -199,6 +226,48 @@ describe('createWorkflowFromDescription — AI-only creation', () => {
     expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Updated Transform');
     expect(synthesisUserPrompt).toContain('THIS IS AN IN-PLACE EDIT');
     expect(synthesisUserPrompt).toContain('CURRENT WORKFLOW GRAPH');
+  });
+
+  it('applies an agent-authored patch without invoking a synthesis model', async () => {
+    const existing = editableGraph();
+    ctx.db.insert(schema.workflows).values({
+      id: 'workflow-agent-patch',
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      title: 'Agent Patch Workflow',
+      description: 'Original durable purpose',
+      graph: existing,
+      settings: {},
+      concurrencyOverflow: 'queue',
+    }).run();
+    const updatedTransform = {
+      ...existing.nodes[1],
+      title: 'Agent Authored Transform',
+      config: { kind: 'transform' as const, expression: '({ value: String(trigger.value) })' },
+    };
+
+    const result = await createWorkflowFromDescription(
+      { db: ctx.db, logger: ctx.logger, bus: ctx.bus } as unknown as ToolHandlerDeps,
+      {
+        workspaceId: ctx.workspace.id,
+        ambientId: null,
+        userId: ctx.user.id,
+        workflowId: 'workflow-agent-patch',
+        description: 'make the transform stringify its value',
+        patchDraft: {
+          addNodes: [],
+          updateNodes: [updatedTransform],
+          removeNodeIds: [],
+          addEdges: [],
+          removeEdgeIds: [],
+        },
+        stream: false,
+      },
+    );
+
+    const saved = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, 'workflow-agent-patch')).get()!;
+    expect((result as { trace: { synthesis: string } }).trace.synthesis).toBe('agent_patch');
+    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Agent Authored Transform');
   });
 
   it('rejects destructive edit output and leaves the persisted workflow unchanged', async () => {
@@ -284,6 +353,8 @@ describe('createWorkflowFromDescription — AI-only creation', () => {
         && (n.config as { integrationId?: string }).integrationId === 'agentmail',
     );
     expect(integration, 'expected an agentmail integration node').toBeTruthy();
+    expect((integration!.config as { inputs?: { subject?: string; markdown?: string } }).inputs?.subject).toContain('Workflow result:');
+    expect((integration!.config as { inputs?: { subject?: string; markdown?: string } }).inputs?.markdown?.trim().length).toBeGreaterThan(0);
     const terminal = graph.nodes.find((n) => (n.config as { kind?: string }).kind === 'return_output');
     expect(graph.edges.some((e) => e.source === integration!.id && e.target === terminal!.id)).toBe(true);
     expect((res as { trace: { synthesis: string } }).trace.synthesis).toBe('llm');
@@ -341,6 +412,7 @@ describe('createWorkflowFromDescription — AI-only creation', () => {
     const mail = graph.nodes.find((n) => ['agentmail', 'gmail'].includes((n.config as { integrationId?: string }).integrationId ?? ''));
     // Either no recipient was force-filled, or it is not the operator's address.
     expect((mail?.config as { inputs?: { to?: string } } | undefined)?.inputs?.to).not.toBe('op@acme.com');
+    expect((mail?.config as { inputs?: { to?: string } } | undefined)?.inputs?.to).toBe('team@example.com');
   });
 
   it('materializes the cast — commissions a real specialist and pins it to the node (F7)', async () => {

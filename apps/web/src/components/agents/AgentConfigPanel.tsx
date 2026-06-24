@@ -2,7 +2,8 @@
  * AgentConfigPanel — Config tab content for AgentDetailPage.
  *
  * Two sections:
- *   1. Runtime — adapter locked, model picker first, advanced config collapsed
+ *   1. Runtime — swappable binding (Track R: switch runtime without losing
+ *      identity/memory), model picker first, advanced config collapsed
  *   2. Operations — budget, standby, reporting chain
  *
  * Identity (name, role, appearance, tags) is managed on the Identity tab.
@@ -18,6 +19,7 @@ import { useAgentInstallSession } from '../../hooks/useBackgroundInstall';
 import { RuntimePicker, configToRuntimeConfig, isV1AdapterType, runtimeConfigToAdapterConfig, runtimeModelFor } from './RuntimePicker';
 import type { AdapterType, HarnessDetectionResult, RuntimeConfig } from './RuntimePicker';
 import type { CommandAgent } from './AgentCard';
+import { switchAgentRuntime } from '../../lib/agentImport';
 
 interface HarnessTestResult {
   status: 'pass' | 'warn' | 'fail';
@@ -114,6 +116,27 @@ export function AgentConfigPanel({
         ...(status ? { status } : {}),
       }),
     });
+  }
+
+  // Track R: rebind this agent to a different runtime WITHOUT losing its
+  // identity, Brain or abilities. The agent is Agentis-owned; the runtime is a
+  // swappable binding.
+  async function rebindRuntime(next: AdapterType) {
+    if (next === adapterType) return;
+    setSavingRuntime(true);
+    try {
+      await switchAgentRuntime(agent.id, {
+        adapterType: next,
+        config: runtimeConfigToAdapterConfig(next, runtimeConfig),
+        runtimeModel: runtimeModelFor(next, runtimeConfig),
+      });
+      toast.success('Runtime switched', `${runtimeDisplayName(next)} is now this agent's runtime — identity and memory are unchanged.`);
+      onSaved();
+    } catch (err) {
+      toast.error('Switch failed', apiErrorMessage(err));
+    } finally {
+      setSavingRuntime(false);
+    }
   }
 
   async function markRuntimeMissing(message: string) {
@@ -286,7 +309,7 @@ export function AgentConfigPanel({
           agentId={agent.id}
           adapterType={adapterType}
           runtimeConfig={runtimeConfig}
-          onAdapterChange={() => {}}
+          onAdapterChange={(next) => { void rebindRuntime(next); }}
           onConfigChange={setRuntimeConfig}
           editing
         />

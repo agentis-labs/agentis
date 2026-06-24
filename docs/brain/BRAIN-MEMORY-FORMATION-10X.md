@@ -285,7 +285,7 @@ P0 is shippable immediately and independently. P1 and P2 deliver most of the use
 ## 8. What this is explicitly NOT
 
 - Not a retrieval/RAG change — `BRAIN-IMPROVEMENT-PLAN.md` owns that and stays authoritative there.
-- Not a new parallel store — everything reuses `memory_episodes`, `promoted_patterns`, `workspace_memory`, the temporal link graph, and the existing queue worker. No orphan tables. (See `[[project_orphans_are_intentional]]`.)
+- Not a new parallel store — everything reuses `memory_episodes`, `promoted_patterns`, `workspace_memory`, the temporal link graph, and the existing queue worker. No disconnected tables.
 - Not a model-family branch — the judge is one structured-completion call behind a capability check, with a deterministic fallback.
 - Not destructive — cleanup quarantines (archives) and is reversible; the Formation Judge supersedes via temporal links rather than hard-deleting.
 

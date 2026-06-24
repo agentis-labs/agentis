@@ -31,6 +31,7 @@ const SUPPORTED_NODE_KINDS = new Set([
   'agent_session',
   'extension_task',
   'knowledge',
+  'knowledge_ingest',
   'router',
   'merge',
   'checkpoint',
@@ -54,6 +55,19 @@ const SUPPORTED_NODE_KINDS = new Set([
   'return_output',
   'artifact_save',
   'browser',
+  // WORKFLOW-UPDATE — n8n-inspired utility & data primitives
+  'error_trigger',
+  'stop_error',
+  'code',
+  'datetime',
+  'crypto_util',
+  'xml_parse',
+  'markdown',
+  'json_schema_validate',
+  'sticky_note',
+  'spreadsheet',
+  'html_extract',
+  'graphql',
 ]);
 
 export function validateWorkflowGraph(
@@ -95,14 +109,124 @@ export function validateWorkflowGraph(
     const kind = node.config.kind;
     switch (kind) {
       case 'trigger':
-        if (node.config.triggerType === 'cron' && !node.config.schedule?.trim()) {
-          fail(`Node ${node.id} (cron trigger) missing schedule`);
+        if (node.config.triggerType === 'cron') {
+          const hasRules = Array.isArray(node.config.scheduleRules) && node.config.scheduleRules.length > 0;
+          if (!node.config.schedule?.trim() && !hasRules) {
+            fail(`Node ${node.id} (cron trigger) missing schedule or scheduleRules`);
+          }
+          for (const rule of node.config.scheduleRules ?? []) {
+            if (!rule?.expression?.trim()) {
+              fail(`Node ${node.id} (cron trigger) has a scheduleRule with an empty expression`);
+            }
+          }
         }
         if (node.config.triggerType === 'persistent_listener') {
           const parsed = schemas.listenerConfigSchema.safeParse(node.config.listenerConfig);
           if (!parsed.success) {
             fail(`Node ${node.id} (persistent_listener) has incomplete listener config`);
           }
+        }
+        if (node.config.triggerType === 'error_trigger') {
+          const et = node.config.errorTrigger;
+          if (!et || !Array.isArray(et.onStatus) || et.onStatus.length === 0) {
+            fail(`Node ${node.id} (error_trigger) requires errorTrigger.onStatus with at least one status`);
+          }
+        }
+        if (node.config.triggerType === 'rss_feed' && !node.config.rssFeed?.feedUrl?.trim()) {
+          fail(`Node ${node.id} (rss_feed trigger) missing rssFeed.feedUrl`);
+        }
+        if (node.config.triggerType === 'email_imap' && !node.config.emailImap?.host?.trim()) {
+          fail(`Node ${node.id} (email_imap trigger) missing emailImap.host`);
+        }
+        break;
+      case 'error_trigger':
+        if (!Array.isArray(node.config.onStatus) || node.config.onStatus.length === 0) {
+          fail(`Node ${node.id} (error_trigger) requires onStatus with at least one of FAILED/CANCELLED`);
+        }
+        break;
+      case 'stop_error':
+        if (!node.config.errorMessage || !node.config.errorMessage.trim()) {
+          fail(`Node ${node.id} (stop_error) missing errorMessage`);
+        }
+        break;
+      case 'code':
+        if (!node.config.code || !node.config.code.trim()) {
+          fail(`Node ${node.id} (code) missing code`);
+        }
+        if (node.config.language !== 'javascript' && node.config.language !== 'python') {
+          fail(`Node ${node.id} (code) language must be 'javascript' or 'python'`);
+        }
+        break;
+      case 'datetime':
+        if (!node.config.operation) {
+          fail(`Node ${node.id} (datetime) missing operation`);
+        }
+        break;
+      case 'crypto_util':
+        if (!node.config.operation) {
+          fail(`Node ${node.id} (crypto_util) missing operation`);
+        }
+        if (node.config.operation === 'hmac' && !node.config.secretPath) {
+          fail(`Node ${node.id} (crypto_util hmac) requires secretPath`);
+        }
+        break;
+      case 'xml_parse':
+        if (node.config.operation !== 'parse' && node.config.operation !== 'build') {
+          fail(`Node ${node.id} (xml_parse) operation must be 'parse' or 'build'`);
+        }
+        break;
+      case 'markdown':
+        if (node.config.operation !== 'to_html' && node.config.operation !== 'from_html') {
+          fail(`Node ${node.id} (markdown) operation must be 'to_html' or 'from_html'`);
+        }
+        break;
+      case 'json_schema_validate':
+        if (!node.config.schema || !node.config.schema.trim()) {
+          fail(`Node ${node.id} (json_schema_validate) missing schema`);
+        } else {
+          try {
+            JSON.parse(node.config.schema);
+          } catch {
+            fail(`Node ${node.id} (json_schema_validate) schema is not valid JSON`);
+          }
+        }
+        if (node.config.onViolation !== 'block' && node.config.onViolation !== 'flag') {
+          fail(`Node ${node.id} (json_schema_validate) onViolation must be 'block' or 'flag'`);
+        }
+        break;
+      case 'html_extract':
+        if (!node.config.selector || !node.config.selector.trim()) {
+          fail(`Node ${node.id} (html_extract) missing selector`);
+        }
+        if (node.config.extractAs === 'attribute' && !node.config.attribute) {
+          fail(`Node ${node.id} (html_extract) extractAs 'attribute' requires an attribute name`);
+        }
+        break;
+      case 'spreadsheet':
+        if (node.config.operation !== 'parse' && node.config.operation !== 'build') {
+          fail(`Node ${node.id} (spreadsheet) operation must be 'parse' or 'build'`);
+        }
+        if (node.config.format !== 'csv' && node.config.format !== 'xlsx') {
+          fail(`Node ${node.id} (spreadsheet) format must be 'csv' or 'xlsx'`);
+        }
+        break;
+      case 'graphql':
+        if (!node.config.endpoint || !node.config.endpoint.trim()) {
+          fail(`Node ${node.id} (graphql) missing endpoint`);
+        }
+        if (!node.config.query || !node.config.query.trim()) {
+          fail(`Node ${node.id} (graphql) missing query`);
+        }
+        break;
+      case 'sticky_note':
+        // Pure annotation — nothing to validate.
+        break;
+      case 'knowledge_ingest':
+        if (
+          !(node.config.content && node.config.content.trim())
+          && !(node.config.contentPath && node.config.contentPath.trim())
+        ) {
+          fail(`Node ${node.id} (knowledge_ingest) needs a content source (content or contentPath)`);
         }
         break;
       case 'agent_task':
@@ -291,6 +415,31 @@ export function validateWorkflowGraph(
     }
     if (typeof edge.condition === 'string' && edge.condition.trim()) {
       assertConditionSyntax(edge.condition, `Edge ${edge.id}`, fail);
+    }
+  }
+
+  const phaseIds = new Set<string>();
+  const phaseByNode = new Map<string, string>();
+  for (const phase of graph.phases ?? []) {
+    if (phaseIds.has(phase.id)) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Duplicate phase id: ${phase.id}`);
+    }
+    phaseIds.add(phase.id);
+    for (const nodeId of phase.nodeIds) {
+      if (!ids.has(nodeId)) {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `Phase ${phase.id} references missing node ${nodeId}`,
+        );
+      }
+      const existing = phaseByNode.get(nodeId);
+      if (existing) {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `Node ${nodeId} belongs to more than one phase (${existing}, ${phase.id})`,
+        );
+      }
+      phaseByNode.set(nodeId, phase.id);
     }
   }
 

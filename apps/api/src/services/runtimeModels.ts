@@ -5,16 +5,20 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { V1HarnessAdapterType } from './harnessProbe.js';
+import { inferModelTierFromId, routingMetadataForModelId, type ModelTier } from './modelRoutingPolicy.js';
 
 export interface RuntimeModelOption {
   id: string;
   label: string;
   provider: string;
-  tier?: 'flagship' | 'balanced' | 'fast' | 'auto';
+  tier?: ModelTier;
   recommended?: boolean;
   description?: string;
-  source: 'runtime' | 'profile' | 'agent_config' | 'fallback';
+  source: 'runtime' | 'profile' | 'agent_config' | 'fallback' | 'custom';
   verified: boolean;
+  capabilityHints?: string[];
+  costRank?: number;
+  latencyRank?: number;
 }
 
 export interface RuntimeModelCatalog {
@@ -110,15 +114,21 @@ export function modelConfiguredOnAgent(agent: { runtimeModel?: string | null; co
 }
 
 function configuredModelOption(id: string): RuntimeModelOption {
+  const metadata = routingMetadataForModelId(id);
   return {
     id,
     label: id,
     provider: 'Selected agent',
-    tier: inferTierFromModelId(id),
+    tier: metadata.tier,
     recommended: true,
-    description: 'Configured on the selected agent runtime.',
+    description: metadata.knownPattern
+      ? 'Configured on the selected agent runtime.'
+      : 'Custom model ID configured on the selected agent runtime.',
     source: 'agent_config',
     verified: false,
+    capabilityHints: metadata.capabilityHints,
+    costRank: metadata.costRank,
+    latencyRank: metadata.latencyRank,
   };
 }
 
@@ -128,7 +138,7 @@ export function defaultModelFor(adapterType: V1HarnessAdapterType): string | nul
   // with "model is not supported". Defaulting here keeps a fresh Codex agent
   // runnable out of the box; users on an API key can still pick a `*-codex` id.
   if (adapterType === 'codex') return 'gpt-5.5';
-  if (adapterType === 'claude_code') return 'claude-opus-4-20250514';
+  if (adapterType === 'claude_code') return 'claude-sonnet-4-6';
   if (adapterType === 'cursor') return 'auto';
   if (adapterType === 'hermes_agent') return 'hermes-auto';
   if (adapterType === 'openclaw') return 'gateway-default';
@@ -162,17 +172,21 @@ function runtimeDefaultModelOption(
   id: string,
   detected: boolean,
 ): RuntimeModelOption {
+  const metadata = routingMetadataForModelId(id);
   return {
     id,
     label: id,
     provider: providerLabelFor(adapterType),
-    tier: inferTierFromModelId(id),
+    tier: metadata.tier,
     recommended: true,
     description: detected
       ? 'Detected from the runtime configuration on this machine.'
       : 'Agentis fallback default for this runtime.',
     source: detected ? 'profile' : 'fallback',
     verified: detected,
+    capabilityHints: metadata.capabilityHints,
+    costRank: metadata.costRank,
+    latencyRank: metadata.latencyRank,
   };
 }
 
@@ -264,7 +278,7 @@ async function fetchOpenAiModels(adapterType: V1HarnessAdapterType): Promise<Run
 }
 
 async function fetchAnthropicModels(adapterType: V1HarnessAdapterType): Promise<RuntimeModelOption[]> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.OPENANTHROPIC_API_KEY;
   if (!apiKey) return [];
   try {
     const res = await fetch('https://api.anthropic.com/v1/models', {
@@ -314,23 +328,13 @@ function parseModelsResponse(
       id,
       label: id,
       provider,
-      tier: inferTierFromModelId(id),
+      tier: inferModelTierFromId(id),
       description: `Dynamically fetched model ${id}.`,
       source: 'runtime',
       verified: true,
+      ...routingOptionMetadata(id),
     };
   }).filter((m: any): m is RuntimeModelOption => m !== null);
-}
-
-function inferTierFromModelId(id: string): 'flagship' | 'balanced' | 'fast' | 'auto' {
-  const lower = id.toLowerCase();
-  if (lower.includes('opus') || lower.includes('flagship') || lower.includes('pro') || lower.includes('4-sonnet') || lower.includes('gpt-5.5') || lower.includes('gpt-5.4') || lower.includes('gpt-5.3') || lower.includes('gpt-5.2') || lower.includes('gpt-5.1-codex-max') || lower.includes('gpt-5-codex')) {
-    return 'flagship';
-  }
-  if (lower.includes('haiku') || lower.includes('mini') || lower.includes('flash') || lower.includes('speed') || lower.includes('fast') || lower.includes('nano')) {
-    return 'fast';
-  }
-  return 'balanced';
 }
 
 function mergeModels(staticModels: RuntimeModelOption[], dynamicModels: RuntimeModelOption[]): RuntimeModelOption[] {
@@ -352,39 +356,47 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
       // and ChatGPT-account Codex auth. The `*-codex` ids are rejected on a
       // ChatGPT account, so they're offered but not the default.
       option('gpt-5.5', 'OpenAI', true),
+      option('gpt-5.4', 'OpenAI'),
+      option('gpt-5.4-mini', 'OpenAI'),
       option('gpt-5.3-codex', 'OpenAI'),
-      option('gpt-5-codex', 'OpenAI'),
       option('gpt-5.2-codex', 'OpenAI'),
-      option('gpt-5.1-codex', 'OpenAI'),
-      option('gpt-5.1-codex-max', 'OpenAI'),
-      option('gpt-5.1-codex-mini', 'OpenAI'),
-      option('codex-mini-latest', 'OpenAI'),
     ];
   }
   if (adapterType === 'claude_code') {
     return [
-      option('claude-opus-4-1-20250805', 'Anthropic', true),
-      option('claude-opus-4-20250514', 'Anthropic'),
-      option('claude-sonnet-4-20250514', 'Anthropic'),
-      option('claude-3-7-sonnet-20250219', 'Anthropic'),
-      option('claude-3-5-haiku-20241022', 'Anthropic'),
-      option('claude-3-5-sonnet-20241022', 'Anthropic'),
-      option('claude-3-opus-20240229', 'Anthropic'),
+      option('claude-sonnet-4-6', 'Anthropic', true),
+      option('claude-haiku-4-5', 'Anthropic'),
+      option('claude-haiku-3-5', 'Anthropic'),
+      option('claude-opus-4-8', 'Anthropic'),
+      option('claude-opus-4-7', 'Anthropic'),
     ];
   }
   return [];
 }
 
 function option(id: string, provider: string, recommended = false): RuntimeModelOption {
+  const metadata = routingMetadataForModelId(id);
   return {
     id,
     label: id,
     provider,
-    tier: inferTierFromModelId(id),
+    tier: metadata.tier,
     recommended,
     description: 'Known upstream runtime model.',
     source: 'fallback',
     verified: false,
+    capabilityHints: metadata.capabilityHints,
+    costRank: metadata.costRank,
+    latencyRank: metadata.latencyRank,
+  };
+}
+
+function routingOptionMetadata(id: string): Pick<RuntimeModelOption, 'capabilityHints' | 'costRank' | 'latencyRank'> {
+  const metadata = routingMetadataForModelId(id);
+  return {
+    capabilityHints: metadata.capabilityHints,
+    costRank: metadata.costRank,
+    latencyRank: metadata.latencyRank,
   };
 }
 

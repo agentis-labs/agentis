@@ -197,6 +197,52 @@ describe('ListenerRuntime — bus integration', () => {
     await runtime.deactivate('t-agent');
   });
 
+  it('error_trigger (workflow_event "*") fires on any workspace failure but skips its own', async () => {
+    const bus = createInProcessEventBus();
+    const health = new ListenerHealthStore();
+    const fired: Array<Record<string, unknown>> = [];
+    const fire = vi.fn(async (args: { payload: Record<string, unknown> }) => {
+      fired.push(args.payload);
+      return { runId: `run-${fired.length}` };
+    });
+    const runtime = new ListenerRuntime({
+      db: {} as AgentisSqliteDb,
+      logger,
+      bus,
+      workflowStore: {} as WorkflowStoreService,
+      health,
+      fire: fire as never,
+      allowPrivateNetwork: false,
+    });
+
+    // This error-handler workflow is `wf-handler`, watching ANY workflow failure.
+    const errorTrigger: ActiveTrigger = {
+      triggerId: 't-error',
+      workflowId: 'wf-handler',
+      workspaceId: 'ws-1',
+      ambientId: null,
+      userId: 'u-1',
+      triggerType: 'persistent_listener',
+      config: {
+        source: { kind: 'workflow_event', workflowId: '*', onStatus: ['FAILED', 'CANCELLED'] },
+        firePolicy: { mode: 'immediate' },
+      } as unknown as Record<string, unknown>,
+    };
+    await runtime.activate(errorTrigger);
+
+    // A different workflow in the same workspace FAILS → error_trigger fires.
+    bus.publish(REALTIME_ROOMS.workspace('ws-1'), REALTIME_EVENTS.RUN_FAILED, { runId: 'r1', status: 'FAILED', workflowId: 'wf-other', workspaceId: 'ws-1' });
+    // A failure in a DIFFERENT workspace → ignored.
+    bus.publish(REALTIME_ROOMS.workspace('ws-2'), REALTIME_EVENTS.RUN_FAILED, { runId: 'r2', status: 'FAILED', workflowId: 'wf-x', workspaceId: 'ws-2' });
+    // The error-handler's OWN failure → skipped (loop guard).
+    bus.publish(REALTIME_ROOMS.workspace('ws-1'), REALTIME_EVENTS.RUN_FAILED, { runId: 'r3', status: 'FAILED', workflowId: 'wf-handler', workspaceId: 'ws-1' });
+
+    await vi.waitFor(() => expect(fire).toHaveBeenCalledTimes(1));
+    expect(fired[0]).toMatchObject({ workflowId: 'wf-other', status: 'FAILED' });
+
+    await runtime.deactivate('t-error');
+  });
+
   it('surfaces asynchronous extension-source failures in listener health', async () => {
     const bus = createInProcessEventBus();
     const health = new ListenerHealthStore();

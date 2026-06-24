@@ -78,11 +78,7 @@ export class StructuredEvaluatorRuntime implements EvaluationRuntime {
         source: this.completer.label,
         error: this.completer.lastError ?? null,
       });
-      return {
-        score: 0,
-        passed: false,
-        critique: `evaluator response was not valid JSON${reason}; treating as failure`,
-      };
+      throw new Error(`evaluator runtime did not produce a valid verdict${reason}`);
     }
     return {
       score: verdict.score,

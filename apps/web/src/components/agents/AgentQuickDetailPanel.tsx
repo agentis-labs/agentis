@@ -17,6 +17,7 @@ import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realt
 import { useToast } from '../shared/Toast';
 import { useAgentInstallSession } from '../../hooks/useBackgroundInstall';
 import { dismissInstallSession, type InstallSession } from '../../lib/backgroundInstall';
+import { SelectedAgentModelControl } from './SelectedAgentModelControl';
 
 export interface QuickDetailAgent {
   id: string;
@@ -47,10 +48,14 @@ interface ChannelConnection {
   name: string;
   status: string;
   defaultChatId: string | null;
+  mode?: string | null;
+  health?: { status?: string; checks?: Array<{ ok: boolean; message: string; remediation?: string }> };
 }
 
 const CHANNEL_PROVIDERS = [
   { kind: 'telegram', label: 'Telegram' },
+  { kind: 'whatsapp', label: 'WhatsApp' },
+  { kind: 'slack', label: 'Slack' },
   { kind: 'discord', label: 'Discord' },
 ] as const;
 
@@ -105,10 +110,12 @@ export function AgentQuickDetailPanel({
   open,
   agent,
   onClose,
+  onAgentUpdated,
 }: {
   open: boolean;
   agent: QuickDetailAgent | null;
   onClose: () => void;
+  onAgentUpdated?: () => void;
 }) {
   const nav = useNavigate();
   const toast = useToast();
@@ -270,7 +277,9 @@ export function AgentQuickDetailPanel({
         <div className="flex gap-2 border-b border-line px-5 py-3">
           <button
             type="button"
-            onClick={() => nav(`/chat/agent/${agent.id}`)}
+            onClick={() => window.dispatchEvent(new CustomEvent('agentis:chat-panel-open', {
+              detail: { agentId: agent.id, name: agent.name, mode: 'fullscreen' },
+            }))}
             className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
           >
             <MessageCircle size={13} /> Talk
@@ -285,6 +294,12 @@ export function AgentQuickDetailPanel({
         </div>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
+          <SelectedAgentModelControl
+            agentId={agent.id}
+            adapterType={agent.adapterType}
+            onUpdated={onAgentUpdated}
+          />
+
           <Section title="Live status">
             <div className="rounded-[14px] border border-line bg-surface-2 px-4 py-3">
               {isSettingUp ? (
@@ -327,6 +342,8 @@ export function AgentQuickDetailPanel({
             <div className="space-y-2">
               {CHANNEL_PROVIDERS.map((provider) => {
                 const conn = channels.find((c) => c.kind === provider.kind);
+                const healthStatus = conn?.health?.status ?? conn?.status;
+                const problem = conn?.health?.checks?.find((check) => !check.ok);
                 return (
                   <div
                     key={provider.kind}
@@ -335,10 +352,19 @@ export function AgentQuickDetailPanel({
                     <span className="text-[13px] font-medium text-text-primary">{provider.label}</span>
                     {conn ? (
                       <>
-                        <span className="flex items-center gap-1 text-[12px] text-accent">
-                          <span className="h-1.5 w-1.5 rounded-full bg-accent" /> connected
+                        <span className={clsx(
+                          'flex items-center gap-1 text-[12px]',
+                          healthStatus === 'active' ? 'text-accent' : healthStatus === 'error' ? 'text-danger' : 'text-amber-500',
+                        )}>
+                          <span className={clsx(
+                            'h-1.5 w-1.5 rounded-full',
+                            healthStatus === 'active' ? 'bg-accent' : healthStatus === 'error' ? 'bg-danger' : 'bg-amber-500',
+                          )} />
+                          {healthStatus === 'active' ? 'active' : healthStatus === 'needs_action' ? 'needs action' : healthStatus ?? 'verifying'}
                         </span>
-                        <span className="ml-auto truncate text-[11px] text-text-muted">{conn.name}</span>
+                        <span className="ml-auto truncate text-[11px] text-text-muted">
+                          {problem?.remediation ?? problem?.message ?? conn.name}
+                        </span>
                       </>
                     ) : (
                       <>

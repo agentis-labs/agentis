@@ -80,11 +80,21 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .limit(10)
       .all();
 
+    const tokenRows = deps.db
+      .select({
+        tokensIn: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensIn}), 0)`.mapWith(Number),
+        tokensOut: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensOut}), 0)`.mapWith(Number),
+      })
+      .from(schema.agentSessions)
+      .where(eq(schema.agentSessions.workspaceId, ws.workspaceId))
+      .get();
+    const totalTokens = (tokenRows?.tokensIn ?? 0) + (tokenRows?.tokensOut ?? 0);
+
     return c.json({
       agents: { total: agentsTotal, online: agentsOnline },
       gateways: { total: gatewaysTotal, connected: gatewaysConnected },
       workflows: { total: workflowsTotal },
-      runs: { active: activeRuns, total: runsTotal, recent: recentRuns },
+      runs: { active: activeRuns, total: runsTotal, recent: recentRuns, totalTokens },
       approvals: { pending: approvalsPending },
       operator: getUser(c),
     });

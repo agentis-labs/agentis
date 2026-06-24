@@ -13,10 +13,11 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { ArrowUp, Mic, MicOff, Paperclip, File, X, Eye, Loader2 } from 'lucide-react';
+import { ArrowUp, Mic, MicOff, Paperclip, File, X, Eye, Loader2, Square } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { ComposerStatusBar } from './ComposerStatusBar';
+import { workspace } from '../../lib/api';
 
 interface SpeechRecognitionEvent {
   resultIndex: number;
@@ -44,8 +45,34 @@ interface SpeechRecognition {
 
 // Module-level draft cache — survives component unmount (panel close/reopen)
 const _draftCache = new Map<string, string>();
+const DRAFT_STORAGE_PREFIX = 'agentis.chatDraft.v2';
+
+function persistedDraftKey(key: string): string {
+  return `${DRAFT_STORAGE_PREFIX}:${workspace.get() ?? 'workspace'}:${key}`;
+}
+
+function readDraft(key: string): string | undefined {
+  const cached = _draftCache.get(key);
+  if (cached !== undefined) return cached;
+  try {
+    const stored = localStorage.getItem(persistedDraftKey(key));
+    return stored ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeDraft(key: string, value: string): void {
+  _draftCache.set(key, value);
+  try {
+    if (value) localStorage.setItem(persistedDraftKey(key), value);
+    else localStorage.removeItem(persistedDraftKey(key));
+  } catch { /* storage is best-effort */ }
+}
+
 export function clearDraft(key: string): void {
   _draftCache.delete(key);
+  try { localStorage.removeItem(persistedDraftKey(key)); } catch { /* ignore */ }
 }
 
 interface Props {
@@ -59,6 +86,8 @@ interface Props {
   footer?: React.ReactNode;
   draftKey?: string;
   agentId?: string;
+  isRunning?: boolean;
+  onStop?: () => void;
 }
 
 interface Suggestion {
@@ -75,6 +104,8 @@ interface SlashCommand {
 }
 
 const SLASH_COMMANDS: SlashCommand[] = [
+  { cmd: 'plan', blurb: 'Build an editable plan canvas before creating anything' },
+  { cmd: 'act', blurb: 'Leave Plan mode and return to normal chat tools' },
   { cmd: 'run', blurb: 'Run a workflow now (/run [workflow])' },
   { cmd: 'pause', blurb: 'Pause an agent (/pause @agent)' },
   { cmd: 'wake', blurb: 'Wake a paused agent (/wake @agent)' },
@@ -96,11 +127,11 @@ interface Attachment {
   progress: number;
 }
 
-export function Composer({ onSend, awareness, initialText, placeholder, footer, draftKey, agentId }: Props) {
+export function Composer({ onSend, awareness, initialText, placeholder, footer, draftKey, agentId, isRunning = false, onStop }: Props) {
   const [isFocused, setIsFocused] = useState(false);
   const [text, setText] = useState<string>(() => {
     if (draftKey) {
-      const cached = _draftCache.get(draftKey);
+      const cached = readDraft(draftKey);
       if (cached !== undefined) return cached;
     }
     return initialText ?? '';
@@ -221,7 +252,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     const ta = taRef.current;
     if (!ta) return;
     ta.style.height = 'auto';
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`;
   }, []);
 
   useEffect(() => {
@@ -303,7 +334,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
   function onChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const v = e.target.value;
     setText(v);
-    if (draftKey) _draftCache.set(draftKey, v);
+    if (draftKey) writeDraft(draftKey, v);
     const caret = e.target.selectionStart ?? v.length;
     setActive(detectTrigger(v, caret));
     adjustHeight();
@@ -319,6 +350,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     if (tokenStart < 0) return;
     const next = `${text.slice(0, tokenStart + 1)}${s.insert} ${text.slice(caret)}`;
     setText(next);
+    if (draftKey) writeDraft(draftKey, next);
     setActive(null);
     requestAnimationFrame(() => {
       ta.focus();
@@ -334,6 +366,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
   }
 
   async function send() {
+    if (isRunning) return;
     const value = text.trim();
     if (!value && attachments.length === 0) return;
     if (value.startsWith('/')) {
@@ -345,12 +378,25 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     lastSent.current = value;
     setText('');
     setAttachments([]);
-    if (draftKey) _draftCache.delete(draftKey);
-    await onSend(value, { useViewportContext });
-    setUseViewportContext(true);
+    if (draftKey) clearDraft(draftKey);
+    try {
+      await onSend(value, { useViewportContext });
+      setUseViewportContext(true);
+    } catch (error) {
+      setText(value);
+      if (draftKey) writeDraft(draftKey, value);
+      throw error;
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && !text && lastSent.current) {
+      e.preventDefault();
+      setText(lastSent.current);
+      if (draftKey) writeDraft(draftKey, lastSent.current);
+      requestAnimationFrame(adjustHeight);
+      return;
+    }
     if (active && suggestions.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -401,14 +447,14 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       className={clsx(
-        "relative shrink-0 border-t border-line px-4 py-3 transition-all duration-300",
-        "bg-glass-panel/95 backdrop-blur-md",
-        isFocused ? "border-accent/30 shadow-[0_-4px_24px_rgba(74,222,128,0.04)]" : "shadow-card",
+        "relative min-w-0 shrink-0 overflow-visible border-t border-line px-3 py-2.5",
+        "bg-surface/98",
+        isFocused ? "border-accent/30" : "",
         dragOver && "border-accent/40 bg-accent/5 ring-1 ring-accent/20"
       )}
     >
       {active && suggestions.length > 0 && (
-        <div className="absolute bottom-full left-0 right-0 mx-4 mb-2 max-h-60 overflow-y-auto rounded-xl border border-glass-border bg-glass-panel/98 backdrop-blur-xl shadow-modal z-50 animate-in fade-in slide-in-from-bottom-1 duration-150">
+        <div className="absolute bottom-full left-0 right-0 z-50 mx-3 mb-2 max-h-60 max-w-[calc(100%-1.5rem)] overflow-y-auto rounded-lg border border-line bg-canvas shadow-modal">
           <ul className="p-1.5 space-y-0.5">
             {suggestions.map((s, i) => (
               <li key={s.id}>
@@ -417,14 +463,14 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                   onMouseEnter={() => setHighlight(i)}
                   onClick={() => acceptSuggestion(s)}
                   className={clsx(
-                    "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-xs rounded-lg transition-colors duration-150",
+                    "flex w-full min-w-0 items-center justify-between gap-3 px-3 py-1.5 text-left text-xs rounded-lg transition-colors duration-150",
                     i === highlight
                       ? 'bg-accent/10 text-accent font-medium'
                       : 'text-text-secondary hover:bg-surface-3/50 hover:text-text-primary'
                   )}
                 >
-                  <span className="font-mono">{s.label}</span>
-                  <div className="flex items-center gap-2">
+                  <span className="min-w-0 truncate font-mono">{s.label}</span>
+                  <div className="flex min-w-0 items-center gap-2">
                     {s.detail && <span className="truncate text-[10px] text-text-muted font-normal">{s.detail}</span>}
                     {i === highlight && (
                       <kbd className="hidden sm:inline-flex min-h-[16px] items-center justify-center rounded bg-surface px-1 font-mono text-[9px] text-text-muted">
@@ -439,10 +485,10 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
         </div>
       )}
       {awareness?.active && useViewportContext && (
-        <div className="mb-3 flex items-center gap-1.5 text-[11px] text-text-muted animate-in fade-in duration-200">
-          <span className="inline-flex items-center gap-1.5 max-w-full truncate rounded-full border border-glass-border bg-glass-panel px-3 py-1 text-text-secondary shadow-sm font-medium">
+        <div className="mb-3 flex min-w-0 items-center gap-1.5 text-[11px] text-text-muted animate-in fade-in duration-200">
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 truncate rounded-full border border-glass-border bg-glass-panel px-3 py-1 text-text-secondary shadow-sm font-medium">
             <Eye size={12} className="text-accent" />
-            Viewing: <span className="text-text-primary font-semibold">{awareness.label}</span>
+            Viewing: <span className="min-w-0 truncate text-text-primary font-semibold">{awareness.label}</span>
           </span>
           <button
             type="button"
@@ -457,13 +503,13 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
       
       {/* File Attachment Previews */}
       {attachments.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-2">
+        <div className="mb-2 flex min-w-0 flex-wrap gap-2">
           {attachments.map((att) => {
             const isImage = att.type.startsWith('image/');
             return (
               <div
                 key={att.id}
-                className="group relative flex items-center gap-2 rounded-lg border border-line bg-canvas/40 p-1.5 pr-2.5 text-xs text-text-secondary shadow-sm transition hover:border-accent/40"
+                className="group relative flex min-w-0 items-center gap-2 rounded-lg border border-line bg-canvas/40 p-1.5 pr-2.5 text-xs text-text-secondary shadow-sm transition hover:border-accent/40"
               >
                 {isImage && att.url ? (
                   <img
@@ -509,7 +555,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
         </div>
       )}
 
-      <div className="relative group">
+      <div className="min-w-0 overflow-hidden rounded-xl border border-line bg-canvas/45 focus-within:border-accent/40">
         <textarea
           ref={taRef}
           value={text}
@@ -519,15 +565,10 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
           onBlur={() => setIsFocused(false)}
           rows={1}
           placeholder={placeholder ?? 'Message · / commands · @ agents · # refs'}
-          className={clsx(
-            "w-full resize-none rounded-2xl border bg-canvas/60 pb-11 pl-4 pr-4 pt-3.5 text-sm text-text-primary outline-none transition-all duration-200",
-            isFocused
-              ? "border-accent/40 bg-canvas/80 shadow-[inset_0_1px_2px_rgba(0,0,0,0.2)]"
-              : "border-line bg-canvas/30 hover:border-line-strong"
-          )}
-          style={{ minHeight: '46px', maxHeight: '200px', overflowY: 'auto' }}
+          className="block w-full resize-none border-0 bg-transparent px-3 pt-3 text-sm text-text-primary outline-none"
+          style={{ minHeight: '46px', maxHeight: '140px', overflowY: 'auto' }}
         />
-        <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-2.5 py-2">
+        <div className="flex min-h-10 min-w-0 items-center justify-between gap-2 px-2 py-1.5">
           <div className="min-w-0 flex-1 flex items-center gap-1">
             {footer}
             {agentId && <ComposerStatusBar agentId={agentId} />}
@@ -553,7 +594,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
               type="button"
               onClick={triggerFileSelect}
               aria-label="Attach files"
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-xl text-text-muted hover:text-text-primary hover:bg-surface-3/60 transition-all duration-200"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text-primary active:scale-[0.97]"
             >
               <Paperclip size={14} />
             </button>
@@ -563,7 +604,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                 onClick={toggleRecording}
                 aria-label={recording ? 'Stop recording' : 'Start voice dictation'}
                 className={clsx(
-                  "relative grid h-8 w-8 shrink-0 place-items-center rounded-xl transition-all duration-200",
+                    "relative grid h-7 w-7 shrink-0 place-items-center rounded-md",
                   recording
                     ? "bg-danger/10 text-danger border border-danger/30"
                     : "text-text-muted hover:text-text-primary hover:bg-surface-3/60"
@@ -577,17 +618,25 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
             )}
             <button
               type="button"
-              onClick={() => void send()}
-              disabled={(!text.trim() && attachments.length === 0) || attachments.some(a => a.loading)}
-              aria-label="Send message"
+              onClick={() => {
+                if (isRunning) {
+                  onStop?.();
+                  return;
+                }
+                void send();
+              }}
+              disabled={isRunning ? !onStop : ((!text.trim() && attachments.length === 0) || attachments.some(a => a.loading))}
+              aria-label={isRunning ? 'Stop agent response' : 'Send message'}
               className={clsx(
-                "grid h-8 w-8 shrink-0 place-items-center rounded-xl transition-all duration-200",
-                (!text.trim() && attachments.length === 0) || attachments.some(a => a.loading)
+                "grid h-7 w-7 shrink-0 place-items-center rounded-md",
+                isRunning
+                  ? "bg-danger/12 text-danger ring-1 ring-danger/25 hover:bg-danger/18 active:scale-[0.97]"
+                  : (!text.trim() && attachments.length === 0) || attachments.some(a => a.loading)
                   ? "bg-surface-3 text-text-muted opacity-40 cursor-not-allowed"
-                  : "bg-accent text-canvas hover:scale-105 active:scale-95 shadow-glow"
+                  : "bg-accent text-canvas active:scale-[0.97]"
               )}
             >
-              <ArrowUp size={14} className="font-bold" />
+              {isRunning ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
             </button>
           </div>
         </div>

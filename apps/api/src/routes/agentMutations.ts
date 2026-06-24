@@ -18,20 +18,15 @@ import type { CredentialVault } from '../services/credentialVault.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { Logger } from '../logger.js';
 import type { ConversationStore } from '../services/conversationStore.js';
+import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
-import { HttpAdapter } from '../adapters/HttpAdapter.js';
-import { ClaudeCodeAdapter } from '../adapters/ClaudeCodeAdapter.js';
-import { CodexAdapter } from '../adapters/CodexAdapter.js';
-import { CursorAdapter } from '../adapters/CursorAdapter.js';
-import { HermesAgentAdapter } from '../adapters/HermesAgentAdapter.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { assertSafeUrl } from '../services/safeUrl.js';
 import { defaultInstructionsForRole, isDefaultRoleInstructions } from '../data/playbook-library.js';
-import { joinUrl, normalizeOpenClawGatewayUrl, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
+import { testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
 import { repairCliHarnessConfig } from '../services/harnessConfigRepair.js';
-import type { McpHarnessServer, McpHarnessSessionService } from '../services/mcpHarnessSession.js';
-import { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import type { McpHarnessSessionService } from '../services/mcpHarnessSession.js';
+import { registerAdapter, runtimeModelFromConfig, switchRuntime } from '../services/agentCommission.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'http']);
 const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
@@ -85,6 +80,17 @@ const terminalSendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
 });
 
+/**
+ * Rebind an agent to a different runtime (AGENT-TRANSITION §2, Track R). The
+ * agent's identity, Brain, abilities and hierarchy are untouched — only the
+ * `(adapterType, config, runtimeModel)` binding changes.
+ */
+const switchRuntimeSchema = z.object({
+  adapterType: adapterTypeSchema,
+  config: z.record(z.unknown()).optional(),
+  runtimeModel: z.string().nullish(),
+});
+
 export interface AgentRouteDeps {
   db: AgentisSqliteDb;
   auth: AuthService;
@@ -93,6 +99,8 @@ export interface AgentRouteDeps {
   logger: Logger;
   conversations: ConversationStore;
   mcpHarness?: McpHarnessSessionService;
+  /** Optional: lets agent deletion decide the fate of the agent's memory (B11). */
+  episodes?: EpisodicMemoryStore;
 }
 
 export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
@@ -284,9 +292,29 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const existing = loadAgent(deps.db, ws.workspaceId, id);
+
+    // B11 — decide the fate of the agent's memory before the row is gone.
+    // promote (default) keeps it in the workspace Brain; transfer moves it to
+    // another agent; delete removes it. Per Brain B7: promote, don't lose.
+    const disposition = (c.req.query('memoryDisposition') ?? 'promote') as 'promote' | 'delete' | 'transfer';
+    let memoryMoved = 0;
+    let memoryDeleted = 0;
+    if (deps.episodes) {
+      if (disposition === 'delete') {
+        memoryDeleted = deps.episodes.deleteScope(ws.workspaceId, id);
+      } else if (disposition === 'transfer') {
+        const target = c.req.query('targetAgentId');
+        if (!target) throw new AgentisError('VALIDATION_FAILED', 'targetAgentId is required to transfer memory');
+        loadAgent(deps.db, ws.workspaceId, target); // validate target in this workspace
+        memoryMoved = deps.episodes.reassignScope(ws.workspaceId, id, target);
+      } else {
+        memoryMoved = deps.episodes.reassignScope(ws.workspaceId, id, null); // promote to workspace
+      }
+    }
+
     await deps.adapters.unregister(existing.id);
     deps.db.delete(schema.agents).where(eq(schema.agents.id, id)).run();
-    return c.json({ ok: true });
+    return c.json({ ok: true, memoryDisposition: disposition, memoryMoved, memoryDeleted });
   });
 
   // POST /v1/agents/:id/terminal/send — direct operator → agent message.
@@ -348,6 +376,22 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
       deps.db.update(schema.agents).set({ config: repaired.config, updatedAt: new Date().toISOString() }).where(eq(schema.agents.id, id)).run();
     }
     const result = await testHarnessConfig(parsed.data, repaired.config, { deep: true });
+    return c.json(result);
+  });
+
+  // POST /v1/agents/:id/runtime — rebind to a different runtime without losing
+  // identity or memory (Track R). The agent is Agentis-owned; the runtime is a
+  // swappable binding.
+  app.post('/:id/runtime', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadAgent(deps.db, ws.workspaceId, id);
+    const body = switchRuntimeSchema.parse(await c.req.json());
+    const result = await switchRuntime(deps, ws.workspaceId, id, {
+      adapterType: body.adapterType,
+      config: body.config,
+      runtimeModel: body.runtimeModel ?? undefined,
+    });
     return c.json(result);
   });
 
@@ -445,261 +489,4 @@ function ensureReportsToTarget(db: AgentisSqliteDb, workspaceId: string, reports
     .where(and(eq(schema.agents.id, reportsTo), eq(schema.agents.workspaceId, workspaceId)))
     .get();
   if (!target) throw new AgentisError('RESOURCE_NOT_FOUND', `reportsTo agent ${reportsTo} not found`);
-}
-
-async function registerAdapter(
-  deps: AgentRouteDeps,
-  workspaceId: string,
-  agentId: string,
-  adapterType: V1HarnessAdapterType,
-  config: Record<string, unknown>,
-) {
-  config = (await repairCliHarnessConfig(adapterType, config)).config;
-  await deps.adapters.unregister(agentId);
-  if (adapterType === 'openclaw') {
-    const gatewayUrl = normalizeOpenClawGatewayUrl(String(config.gatewayUrl ?? '')) ?? '';
-    const credentialId = stringOf(config.deviceTokenCredentialId) ?? stringOf(config.authCredentialId);
-    if (!gatewayUrl) {
-      throw new AgentisError('VALIDATION_FAILED', 'openclaw requires gatewayUrl');
-    }
-    await assertSafeGatewayUrl(gatewayUrl);
-    const deviceToken = credentialId ? deps.vault.decrypt(loadCredential(deps.db, workspaceId, credentialId).encryptedValue) : stringOf(config.authToken);
-    const adapter = new OpenClawAdapter({
-      agentId,
-      gatewayUrl,
-      deviceToken: deviceToken ?? undefined,
-      headers: recordStringOf(config.headers),
-      password: stringOf(config.password) ?? undefined,
-      agentName: stringOf(config.agentName) ?? undefined,
-      sessionKeyStrategy: sessionKeyStrategyOf(config.sessionKeyStrategy),
-      sessionKey: stringOf(config.sessionKey) ?? undefined,
-      disableDeviceAuth: booleanOf(config.disableDeviceAuth),
-      timeoutSec: numberOf(config.timeoutSec),
-      payloadTemplate: recordObjectOf(config.payloadTemplate),
-      logger: deps.logger,
-    });
-    await adapter.connect();
-    deps.adapters.register(agentId, adapter);
-    return;
-  }
-  if (adapterType === 'http') {
-    const dispatchUrl = httpUrlFromConfig(config, 'dispatchPath', 'dispatchUrl');
-    if (!dispatchUrl) {
-      throw new AgentisError('VALIDATION_FAILED', 'http requires baseUrl + dispatchPath or dispatchUrl');
-    }
-    const sharedSecretCredentialId = stringOf(config.sharedSecretCredentialId);
-    const authCredentialId = stringOf(config.authCredentialId);
-    const adapter = new HttpAdapter({
-      agentId,
-      dispatchUrl,
-      cancelUrl: httpUrlFromConfig(config, 'cancelPath', 'cancelUrl') ?? undefined,
-      healthUrl: httpUrlFromConfig(config, 'healthPath', 'healthUrl') ?? undefined,
-      chatUrl: httpUrlFromConfig(config, 'chatPath', 'chatUrl') ?? undefined,
-      supportsTools: booleanOf(config.supportsTools) === true,
-      model: stringOf(config.model) ?? undefined,
-      method: httpMethodOf(config.method),
-      headers: recordStringOf(config.headers),
-      payloadTemplate: recordObjectOf(config.payloadTemplate),
-      dispatchTimeoutMs: numberOf(config.dispatchTimeoutMs),
-      chatTimeoutMs: numberOf(config.chatTimeoutMs),
-      sharedSecret: sharedSecretCredentialId ? deps.vault.decrypt(loadCredential(deps.db, workspaceId, sharedSecretCredentialId).encryptedValue) : undefined,
-      authToken: authCredentialId ? deps.vault.decrypt(loadCredential(deps.db, workspaceId, authCredentialId).encryptedValue) : undefined,
-      logger: deps.logger,
-    });
-    await adapter.connect();
-    deps.adapters.register(agentId, adapter);
-    return;
-  }
-  if (adapterType === 'codex') {
-    await ensureCliHarnessAvailable(adapterType, config);
-    const adapter = new CodexAdapter({
-      agentId,
-      workspaceId,
-      sessionStore: new RuntimeSessionStore(deps.db),
-      binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
-      model: stringOf(config.model) ?? undefined,
-      maxTurns: numberOf(config.maxTurns),
-      modelReasoningEffort: reasoningEffortOf(config.modelReasoningEffort),
-      fastMode: booleanOf(config.fastMode),
-      dangerouslyBypassApprovalsAndSandbox: config.dangerouslyBypassApprovalsAndSandbox === undefined ? undefined : booleanOf(config.dangerouslyBypassApprovalsAndSandbox),
-      extraArgs: stringArrayOf(config.extraArgs),
-      env: recordStringOf(config.env),
-      timeoutSec: numberOf(config.timeoutSec),
-      browser: booleanOf(config.browser),
-      ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
-      logger: deps.logger,
-    });
-    await adapter.connect();
-    deps.adapters.register(agentId, adapter);
-    return;
-  }
-  if (adapterType === 'cursor') {
-    await ensureCliHarnessAvailable(adapterType, config);
-    const adapter = new CursorAdapter({
-      agentId,
-      workspaceId,
-      sessionStore: new RuntimeSessionStore(deps.db),
-      binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
-      model: stringOf(config.model) ?? undefined,
-      extraArgs: stringArrayOf(config.extraArgs),
-      env: recordStringOf(config.env),
-      timeoutSec: numberOf(config.timeoutSec),
-      logger: deps.logger,
-    });
-    await adapter.connect();
-    deps.adapters.register(agentId, adapter);
-    return;
-  }
-  if (adapterType === 'hermes_agent') {
-    await ensureCliHarnessAvailable(adapterType, config);
-    const adapter = new HermesAgentAdapter({
-      agentId,
-      workspaceId,
-      sessionStore: new RuntimeSessionStore(deps.db),
-      binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
-      model: stringOf(config.model) ?? undefined,
-      chatTransport: stringOf(config.chatTransport) === 'acp' ? 'acp' : 'cli',
-      maxTurns: numberOf(config.maxTurns),
-      extraArgs: stringArrayOf(config.extraArgs),
-      env: recordStringOf(config.env),
-      timeoutSec: numberOf(config.timeoutSec),
-      graceSec: numberOf(config.graceSec),
-      instructions: deps.db.select({ instructions: schema.agents.instructions }).from(schema.agents).where(eq(schema.agents.id, agentId)).get()?.instructions ?? null,
-      ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
-      logger: deps.logger,
-    });
-    await adapter.connect();
-    deps.adapters.register(agentId, adapter);
-    return;
-  }
-  await ensureCliHarnessAvailable(adapterType, config);
-  const adapter = new ClaudeCodeAdapter({
-    agentId,
-    workspaceId,
-    sessionStore: new RuntimeSessionStore(deps.db),
-    binaryPath: cliCommandFromConfig(config) ?? undefined,
-    cwd: stringOf(config.cwd) ?? undefined,
-    model: stringOf(config.model) ?? undefined,
-    maxTurns: numberOf(config.maxTurns),
-    allowedTools: stringArrayOf(config.allowedTools),
-    dangerouslySkipPermissions: booleanOf(config.dangerouslySkipPermissions),
-    extraArgs: stringArrayOf(config.extraArgs),
-    env: recordStringOf(config.env),
-    timeoutSec: numberOf(config.timeoutSec),
-    ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
-    logger: deps.logger,
-  });
-  await adapter.connect();
-  deps.adapters.register(agentId, adapter);
-}
-
-async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent'>, config: Record<string, unknown>) {
-  const result = await testHarnessConfig(adapterType, config);
-  if (result.status !== 'fail') return;
-  const firstError = result.checks.find((check) => check.level === 'error') ?? result.checks[0];
-  throw new AgentisError('VALIDATION_FAILED', firstError?.detail ? `${firstError.message} - ${firstError.detail}` : firstError?.message ?? 'Harness binary not found');
-}
-
-function runtimeModelFromConfig(adapterType: V1HarnessAdapterType, config: Record<string, unknown>): string | null {
-  if (adapterType === 'openclaw' || adapterType === 'http') return null;
-  return stringOf(config.model);
-}
-
-function mcpServersFor(deps: AgentRouteDeps, workspaceId: string, agentId: string): McpHarnessServer[] | undefined {
-  if (!deps.mcpHarness?.enabled) return undefined;
-  const agent = deps.db.select({ userId: schema.agents.userId }).from(schema.agents).where(eq(schema.agents.id, agentId)).get();
-  const server = deps.mcpHarness.forWorkspace(workspaceId, null, agent?.userId, agentId);
-  return server ? [server] : undefined;
-}
-
-function httpUrlFromConfig(config: Record<string, unknown>, pathKey: string, urlKey: string): string | null {
-  const direct = stringOf(config[urlKey]);
-  if (direct) return direct;
-  const baseUrl = stringOf(config.baseUrl);
-  const path = stringOf(config[pathKey]);
-  if (!baseUrl || !path) return null;
-  return joinUrl(baseUrl, path);
-}
-
-function stringOf(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function cliCommandFromConfig(config: Record<string, unknown>): string | null {
-  return stringOf(config.command) ?? stringOf(config.binaryPath);
-}
-
-function numberOf(value: unknown): number | undefined {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function stringArrayOf(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const entries = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
-  return entries.length > 0 ? entries : undefined;
-}
-
-function recordStringOf(value: unknown): Record<string, string> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const entries = Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function recordObjectOf(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
-
-function booleanOf(value: unknown): boolean | undefined {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === 'true') return true;
-    if (normalized === 'false') return false;
-  }
-  return undefined;
-}
-
-function httpMethodOf(value: unknown): 'POST' | 'GET' | 'PUT' | 'PATCH' | undefined {
-  const method = stringOf(value)?.toUpperCase();
-  return method === 'POST' || method === 'GET' || method === 'PUT' || method === 'PATCH' ? method : undefined;
-}
-
-function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined {
-  const effort = stringOf(value);
-  return effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' ? effort : undefined;
-}
-
-function sessionKeyStrategyOf(value: unknown): 'issue' | 'fixed' | 'run' | undefined {
-  const strategy = stringOf(value);
-  return strategy === 'issue' || strategy === 'fixed' || strategy === 'run' ? strategy : undefined;
-}
-
-function loadCredential(db: AgentisSqliteDb, workspaceId: string, id: string) {
-  const cred = db
-    .select()
-    .from(schema.credentials)
-    .where(and(eq(schema.credentials.id, id), eq(schema.credentials.workspaceId, workspaceId)))
-    .get();
-  if (!cred) throw new AgentisError('RESOURCE_NOT_FOUND', `credential ${id} not found`);
-  return cred;
-}
-
-async function assertSafeGatewayUrl(rawUrl: string): Promise<void> {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new AgentisError('VALIDATION_FAILED', 'openclaw gatewayUrl must be a valid URL');
-  }
-  if (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') {
-    parsed.protocol = parsed.protocol === 'ws:' ? 'http:' : 'https:';
-  }
-  await assertSafeUrl(parsed.toString(), {
-    allowPrivate: String(process.env.AGENTIS_GATEWAY_ALLOW_PRIVATE ?? process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
-  });
 }

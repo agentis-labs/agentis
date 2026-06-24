@@ -9,6 +9,23 @@
  */
 
 export type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp';
+export type ChannelStatus = 'needs_action' | 'verifying' | 'active' | 'degraded' | 'error' | 'paused';
+export type ChannelHealthCheckName = 'credential' | 'transport' | 'outbound' | 'inbound' | 'runtime';
+
+export interface ChannelHealthCheck {
+  name: ChannelHealthCheckName;
+  ok: boolean;
+  code: string;
+  message: string;
+  remediation?: string;
+  checkedAt: string;
+}
+
+export interface ChannelHealth {
+  status: ChannelStatus;
+  checks: ChannelHealthCheck[];
+  lastTestAt?: string;
+}
 
 export interface ParsedInboundMessage {
   /** Adapter-issued unique id for idempotency (e.g. Telegram update_id). */
@@ -35,7 +52,27 @@ export interface ChannelAdapter {
     token: string;
     chatId: string;
     body: string;
+    settings?: Record<string, unknown>;
   }): Promise<void>;
+
+  /**
+   * Validate channel credentials without sending a user-visible message.
+   */
+  probeCredential?(args: {
+    token: string;
+    settings?: Record<string, unknown>;
+  }): Promise<ChannelHealthCheck>;
+
+  /**
+   * Prepare webhook transport for providers that need a provider API call
+   * after save (Telegram setWebhook, polling deleteWebhook, etc.).
+   */
+  configureTransport?(args: {
+    token: string;
+    webhookUrl?: string;
+    secret?: string | null;
+    transport?: string;
+  }): Promise<ChannelHealthCheck>;
 
   /**
    * Header-level authentication of an inbound webhook. Constant-time

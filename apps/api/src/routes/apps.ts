@@ -1,0 +1,666 @@
+/**
+ * Agentic App routes (AGENTIC-APPS-10X-MASTERPLAN §3).
+ *
+ * CRUD + membership + workflow adoption for the App entity. Surfaces (§4) and
+ * datastore (§5) routes mount separately in later phases. Thin layer over
+ * `AppStore`; all workspace-scoping and validation live here.
+ */
+
+import { randomUUID } from 'node:crypto';
+import { Hono } from 'hono';
+import { z } from 'zod';
+import {
+  AgentisError,
+  createAppSchema,
+  updateAppSchema,
+  appMemberRoleSchema,
+  appStatusSchema,
+  defineCollectionSchema,
+  insertRecordSchema,
+  updateRecordSchema,
+  upsertRecordSchema,
+  dataQuerySchema,
+  collectionsInView,
+  upsertSurfaceSchema,
+  uiRenderSchema,
+  appManifestEnvelopeSchema,
+  promoteAppEnvironmentSchema,
+  upsertAppEnvironmentSchema,
+  type AppInstallPreview,
+  type AppRecord,
+} from '@agentis/core';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
+import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { WorkflowGraph, AgentTool } from '@agentis/core';
+import type { AuthService } from '../services/auth.js';
+import type { EventBus } from '../event-bus.js';
+import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
+import type { AgentToolRuntime } from '../services/agentToolRuntime.js';
+import { runPublishedWorkflow } from '../engine/runPublishedWorkflow.js';
+import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness } from '@agentis/app';
+import { requireAuth } from '../middleware/auth.js';
+import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
+import { scanArtifactBytes, type ScanFinding } from '../services/registryScanner.js';
+import { generateSurfaceView } from '../services/surfaceGenerator.js';
+import type { StructuredCompleter } from '../services/structuredCompleter.js';
+
+export interface AppRoutesDeps {
+  db: AgentisSqliteDb;
+  auth: AuthService;
+  bus?: EventBus;
+  /** Enables `kind:'workflow'` actions (run a workflow synchronously). */
+  engine?: WorkflowEngine;
+  /** Enables `kind:'tool'` actions (invoke an agent tool in App context). */
+  toolRuntime?: AgentToolRuntime;
+  /** Powers agent-assisted surface generation. Omit → deterministic scaffold only. */
+  completer?: StructuredCompleter;
+}
+
+const addMemberSchema = z.object({
+  agentId: z.string().min(1),
+  role: appMemberRoleSchema.default('worker'),
+});
+
+const adoptWorkflowSchema = z.object({ workflowId: z.string().min(1) });
+const renameSurfaceSchema = z.object({ name: z.string().trim().min(1).max(120) });
+const generateSurfaceRequestSchema = z.object({
+  prompt: z.string().trim().min(1).max(2000),
+  surface: z.string().min(1).optional(),
+});
+const operatorCommandSchema = z.object({ command: z.string().trim().min(1).max(4000) });
+
+const createAppRequestSchema = createAppSchema.extend({
+  /** Create the first App workflow in the same transaction as the App itself. */
+  createEntryWorkflow: z.boolean().default(false),
+  entryWorkflowTitle: z.string().trim().min(1).max(255).optional(),
+}).refine(
+  (input) => !(input.createEntryWorkflow && input.entryWorkflowId),
+  { message: 'entryWorkflowId and createEntryWorkflow cannot be used together' },
+);
+
+const importAppSchema = z.object({
+  envelope: appManifestEnvelopeSchema,
+  permissionsAcknowledged: z.array(z.string()).default([]),
+});
+
+const appTestSchema = z.object({
+  envelope: appManifestEnvelopeSchema,
+  actions: z.array(z.object({
+    surface: z.string().min(1),
+    name: z.string().min(1),
+    args: z.record(z.unknown()).optional(),
+  })).default([]),
+  assertions: z.array(z.object({
+    collection: z.string().min(1),
+    query: dataQuerySchema.optional(),
+    count: z.number().int().nonnegative().optional(),
+    includes: z.record(z.unknown()).optional(),
+  })).default([]),
+});
+
+/** Opaque public-share token: base64url("appId\0surfaceName"). The `shareable`
+ * flag on the surface is the real gate; the token just avoids id enumeration. */
+const SHARE_TOKEN_SEPARATOR = '\u001f';
+
+function encodeShareToken(appId: string, surface: string): string {
+  return Buffer.from(`${appId}${SHARE_TOKEN_SEPARATOR}${surface}`, 'utf8').toString('base64url');
+}
+function decodeShareToken(token: string): { appId: string; surface: string } | null {
+  try {
+    const [appId, surface] = Buffer.from(token, 'base64url').toString('utf8').split(SHARE_TOKEN_SEPARATOR);
+    return appId && surface ? { appId, surface } : null;
+  } catch {
+    return null;
+  }
+}
+
+function scanAppEnvelope(envelope: unknown): ScanFinding[] {
+  const label =
+    envelope && typeof envelope === 'object' && 'manifest' in envelope
+      ? String((envelope as { manifest?: { identity?: { slug?: unknown } } }).manifest?.identity?.slug ?? '.agentisapp')
+      : '.agentisapp';
+  const scan = scanArtifactBytes(Buffer.from(JSON.stringify(envelope ?? null), 'utf8'), label);
+  const blockers = scan.findings.filter((finding) => finding.severity === 'block');
+  if (blockers.length > 0) {
+    throw new AgentisError('APP_PACKAGE_SCAN_BLOCKED', 'App import blocked by security scan', {
+      details: { findings: blockers },
+    });
+  }
+  return scan.findings.filter((finding) => finding.severity === 'warn');
+}
+
+function appendScanWarnings(preview: AppInstallPreview, findings: ScanFinding[]): AppInstallPreview {
+  const scanWarnings = findings.map((finding) => `${finding.rule}: ${finding.detail}`);
+  return {
+    ...preview,
+    scanWarnings,
+    warnings: [...preview.warnings, ...scanWarnings.map((warning) => `Security scan warning: ${warning}`)],
+  };
+}
+
+function assertAppPermissionsAcknowledged(preview: AppInstallPreview, acknowledged: string[]): void {
+  const expected = [...preview.permissions].sort();
+  const actual = [...acknowledged].sort();
+  if (expected.length === actual.length && expected.every((permission, index) => permission === actual[index])) return;
+  throw new AgentisError('APP_PERMISSIONS_NOT_ACKNOWLEDGED', 'App permissions must be acknowledged before install', {
+    details: { expected, acknowledged: actual },
+  });
+}
+
+/** Validate a domain (or subdomain) belongs to this workspace before assigning. */
+function ensureAppDomain(db: AgentisSqliteDb, workspaceId: string, domainId: string): void {
+  const domain = db
+    .select({ id: schema.domains.id })
+    .from(schema.domains)
+    .where(and(eq(schema.domains.id, domainId), eq(schema.domains.workspaceId, workspaceId)))
+    .get();
+  if (!domain) throw new AgentisError('RESOURCE_NOT_FOUND', `domain ${domainId} not found`);
+}
+
+export function buildAppRoutes(deps: AppRoutesDeps) {
+  const app = new Hono<{ Variables: { user: { id: string } } }>();
+  const { store, data, surfaces } = buildAppStores(deps);
+  const packager = new AppPackager(deps.db);
+  const lifecycle = new AppLifecycle(deps.db);
+  const environments = new AppEnvironmentStore(deps.db);
+
+  // ── Public, unauthed surface sharing (AGENTIC-APPS-10X §4.7) ────────────────
+  // Registered BEFORE auth. Gated by the surface's `shareable` flag.
+  const loadShared = (token: string) => {
+    const decoded = decodeShareToken(token);
+    if (!decoded) throw new AgentisError('RESOURCE_NOT_FOUND', 'share link invalid');
+    const appRow = deps.db
+      .select({ id: schema.apps.id, workspaceId: schema.apps.workspaceId, name: schema.apps.name, icon: schema.apps.icon })
+      .from(schema.apps)
+      .where(eq(schema.apps.id, decoded.appId))
+      .get();
+    if (!appRow) throw new AgentisError('RESOURCE_NOT_FOUND', 'share link invalid');
+    const surface = surfaces.get(appRow.workspaceId, appRow.id, decoded.surface);
+    if (!surface.shareable) throw new AgentisError('RESOURCE_NOT_FOUND', 'share link invalid');
+    return { appRow, surface };
+  };
+
+  app.get('/public/surfaces/:token', (c) => {
+    const { appRow, surface } = loadShared(c.req.param('token'));
+    return c.json({ data: { app: { name: appRow.name, icon: appRow.icon }, surface } });
+  });
+
+  app.post('/public/surfaces/:token/query', async (c) => {
+    const { appRow, surface } = loadShared(c.req.param('token'));
+    const body = (await c.req.json().catch(() => ({}))) as { collection?: string } & Record<string, unknown>;
+    if (!body.collection) throw new AgentisError('VALIDATION_FAILED', 'collection required');
+    // Authorization: a public share may read ONLY the collections its own view
+    // binds — never a sibling collection it doesn't display. Without this, a
+    // share link to one surface could enumerate every collection in the app.
+    if (!collectionsInView(surface.view).has(body.collection)) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', 'collection not available on this surface');
+    }
+    const query = dataQuerySchema.parse({
+      ...(body.filter !== undefined ? { filter: body.filter } : {}),
+      ...(body.sort !== undefined ? { sort: body.sort } : {}),
+      ...(body.limit !== undefined ? { limit: body.limit } : {}),
+      ...(body.cursor !== undefined ? { cursor: body.cursor } : {}),
+    });
+    return c.json(data.query(appRow.workspaceId, appRow.id, body.collection, query));
+  });
+
+  app.use('*', requireAuth(deps), requireWorkspace(deps));
+
+  app.post('/:id/surfaces/:name/share', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const name = c.req.param('name');
+    surfaces.upsert(ws.workspaceId, appId, { ...surfaces.get(ws.workspaceId, appId, name), shareable: true });
+    const token = encodeShareToken(appId, name);
+    const url = new URL(c.req.url);
+    url.pathname = `/public/apps/${encodeURIComponent(token)}`;
+    url.search = '';
+    return c.json({ data: { token, url: url.toString() } });
+  });
+
+  app.get('/', (c) => {
+    const ws = getWorkspace(c);
+    const statusRaw = c.req.query('status');
+    const status = statusRaw ? appStatusSchema.parse(statusRaw) : undefined;
+    return c.json({ data: store.list(ws.workspaceId, status ? { status } : {}) });
+  });
+
+  app.post('/', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const parsed = createAppRequestSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid app input');
+    const { createEntryWorkflow, entryWorkflowTitle, ...input } = parsed.data;
+    if (input.domainId) ensureAppDomain(deps.db, ws.workspaceId, input.domainId);
+
+    if (!createEntryWorkflow) {
+      return c.json({ data: store.create(ws.workspaceId, user.id, input) }, 201);
+    }
+
+    let created: AppRecord | null = null;
+    deps.db.transaction(() => {
+      const entryWorkflowId = randomUUID();
+      deps.db.insert(schema.workflows).values({
+        id: entryWorkflowId,
+        workspaceId: ws.workspaceId,
+        ambientId: ws.ambientId ?? null,
+        userId: user.id,
+        title: entryWorkflowTitle ?? `${input.name} workflow`,
+        graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+        settings: {},
+        concurrencyOverflow: 'queue',
+      }).run();
+      created = store.create(ws.workspaceId, user.id, { ...input, entryWorkflowId });
+    });
+    if (!created) throw new AgentisError('INTERNAL_ERROR', 'Failed to create app workflow');
+    return c.json({ data: created }, 201);
+  });
+
+  /**
+   * Promote a legacy bare workflow to a first-class App-of-one. The workflow
+   * itself is preserved verbatim; the transaction only assigns its owner App.
+   */
+  app.post('/from-workflow/:workflowId', (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const workflowId = c.req.param('workflowId');
+    let appRecord: AppRecord | null = null;
+    let promoted = false;
+
+    deps.db.transaction(() => {
+      const workflow = deps.db
+        .select({ id: schema.workflows.id, title: schema.workflows.title, appId: schema.workflows.appId })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.id, workflowId)))
+        .get();
+      if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found: ${workflowId}`);
+      if (workflow.appId) {
+        appRecord = store.get(ws.workspaceId, workflow.appId);
+      } else {
+        promoted = true;
+        appRecord = store.create(ws.workspaceId, user.id, {
+          name: workflow.title,
+          description: '',
+          entryWorkflowId: workflow.id,
+        });
+      }
+    });
+
+    if (!appRecord) throw new AgentisError('INTERNAL_ERROR', 'Failed to promote workflow to app');
+    return c.json({ data: appRecord }, promoted ? 201 : 200);
+  });
+
+  app.get('/:id', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: store.get(ws.workspaceId, c.req.param('id')) });
+  });
+
+  // ── Packaging — `.agentisapp` export/import (§7.2) ──────────
+
+  app.get('/:id/export', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: packager.export(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.post('/import/preview', async (c) => {
+    const envelope = appManifestEnvelopeSchema.parse(await c.req.json());
+    const warnings = scanAppEnvelope(envelope);
+    return c.json({ data: appendScanWarnings(packager.preview(envelope), warnings) });
+  });
+
+  app.post('/import', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const body = importAppSchema.parse(await c.req.json());
+    const warnings = scanAppEnvelope(body.envelope);
+    const preview = appendScanWarnings(packager.preview(body.envelope), warnings);
+    assertAppPermissionsAcknowledged(preview, body.permissionsAcknowledged);
+    return c.json({ data: packager.import(ws.workspaceId, user.id, body.envelope) }, 201);
+  });
+
+  app.post('/test', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const body = appTestSchema.parse(await c.req.json());
+    scanAppEnvelope(body.envelope);
+    const manifest = packager.deserialize(body.envelope);
+    const result = new AppTestHarness(deps.db).runIsolated(ws.workspaceId, user.id, {
+      manifest,
+      actions: body.actions,
+      assertions: body.assertions,
+    });
+    return c.json({ data: result });
+  });
+
+  app.post('/:id/upgrade/preview', async (c) => {
+    const ws = getWorkspace(c);
+    const envelope = appManifestEnvelopeSchema.parse(await c.req.json());
+    const manifest = packager.deserialize(envelope);
+    return c.json({ data: lifecycle.planUpgrade(ws.workspaceId, c.req.param('id'), manifest) });
+  });
+
+  app.post('/:id/upgrade', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const envelope = appManifestEnvelopeSchema.parse(await c.req.json());
+    const manifest = packager.deserialize(envelope);
+    return c.json({ data: lifecycle.upgrade(ws.workspaceId, user.id, c.req.param('id'), manifest, { installedChecksum: envelope.checksum }) });
+  });
+
+  app.post('/:id/rollback/:snapshotId', (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    return c.json({ data: lifecycle.rollback(ws.workspaceId, user.id, c.req.param('id'), c.req.param('snapshotId')) });
+  });
+
+  app.get('/:id/environments', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: environments.list(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.post('/:id/environments/:name/snapshot', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const body = z.object({ kind: z.enum(['dev', 'staging', 'production']).default('dev') }).parse(await c.req.json().catch(() => ({})));
+    return c.json({ data: environments.snapshotRuntime(ws.workspaceId, user.id, c.req.param('id'), c.req.param('name'), body.kind) });
+  });
+
+  app.put('/:id/environments/:name', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const body = upsertAppEnvironmentSchema.parse(await c.req.json());
+    return c.json({ data: environments.upsert(ws.workspaceId, user.id, c.req.param('id'), c.req.param('name'), body) });
+  });
+
+  app.post('/:id/environments/:name/promote', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const body = promoteAppEnvironmentSchema.parse(await c.req.json());
+    return c.json({ data: environments.promote(ws.workspaceId, user.id, c.req.param('id'), c.req.param('name'), body) });
+  });
+
+  app.patch('/:id', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = updateAppSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid app update');
+    if (parsed.data.domainId) ensureAppDomain(deps.db, ws.workspaceId, parsed.data.domainId);
+    return c.json({ data: store.update(ws.workspaceId, c.req.param('id'), parsed.data) });
+  });
+
+  app.delete('/:id', (c) => {
+    const ws = getWorkspace(c);
+    store.delete(ws.workspaceId, c.req.param('id'));
+    return c.json({ data: { ok: true } });
+  });
+
+  // ── Membership ──────────────────────────────────────────────
+
+  app.get('/:id/members', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: store.listMembers(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.post('/:id/members', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = addMemberSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid member input');
+    store.addMember(ws.workspaceId, c.req.param('id'), parsed.data.agentId, parsed.data.role);
+    return c.json({ data: store.listMembers(ws.workspaceId, c.req.param('id')) }, 201);
+  });
+
+  app.delete('/:id/members/:agentId', (c) => {
+    const ws = getWorkspace(c);
+    store.removeMember(ws.workspaceId, c.req.param('id'), c.req.param('agentId'));
+    return c.json({ data: { ok: true } });
+  });
+
+  // ── Workflow adoption ───────────────────────────────────────
+
+  app.get('/:id/workflows', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: store.listWorkflowIds(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.post('/:id/workflows', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = adoptWorkflowSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid adopt input');
+    store.adoptWorkflow(ws.workspaceId, c.req.param('id'), parsed.data.workflowId);
+    return c.json({ data: store.listWorkflowIds(ws.workspaceId, c.req.param('id')) });
+  });
+
+  // ── App Datastore (§5) ──────────────────────────────────────
+
+  app.get('/:id/collections', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: data.listCollections(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.post('/:id/collections', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = defineCollectionSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid collection schema');
+    return c.json({ data: data.defineCollection(ws.workspaceId, c.req.param('id'), parsed.data) }, 201);
+  });
+
+  app.post('/:id/collections/:name/query', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = dataQuerySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid query');
+    return c.json(data.query(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data));
+  });
+
+  app.post('/:id/collections/:name/records', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const parsed = insertRecordSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid record');
+    return c.json({ data: data.insert(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.record, user.id) }, 201);
+  });
+
+  app.patch('/:id/collections/:name/records/:recordId', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = updateRecordSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid patch');
+    return c.json({ data: data.update(ws.workspaceId, c.req.param('id'), c.req.param('name'), c.req.param('recordId'), parsed.data.patch) });
+  });
+
+  app.put('/:id/collections/:name/records', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const parsed = upsertRecordSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid upsert');
+    return c.json({ data: data.upsert(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.match, parsed.data.record, user.id) });
+  });
+
+  app.delete('/:id/collections/:name/records/:recordId', (c) => {
+    const ws = getWorkspace(c);
+    data.delete(ws.workspaceId, c.req.param('id'), c.req.param('name'), c.req.param('recordId'));
+    return c.json({ data: { ok: true } });
+  });
+
+  // ── AG-UI surfaces (§4) ─────────────────────────────────────
+
+  app.get('/:id/surfaces', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: surfaces.list(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.get('/:id/surfaces/:name', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: surfaces.get(ws.workspaceId, c.req.param('id'), c.req.param('name')) });
+  });
+
+  app.patch('/:id/surfaces/:name', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = renameSurfaceSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid surface name');
+    return c.json({
+      data: surfaces.rename(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.name),
+    });
+  });
+
+  app.put('/:id/surfaces', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = upsertSurfaceSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid surface');
+    return c.json({ data: surfaces.upsert(ws.workspaceId, c.req.param('id'), parsed.data) });
+  });
+
+  app.post('/:id/surfaces/:name/render', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = uiRenderSchema.shape.view.safeParse((await c.req.json()).view);
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid view tree');
+    return c.json({ data: surfaces.render(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data) });
+  });
+
+  // Agent-assisted surface authoring: NL prompt → validated ViewNode tree.
+  // Falls back to a deterministic scaffold when no model is configured or the
+  // model's output is unparseable, so the builder is never left empty.
+  app.post('/:id/surfaces/generate', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const parsed = generateSurfaceRequestSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'prompt required');
+    const result = await generateSurfaceView({
+      prompt: parsed.data.prompt,
+      collections: data.listCollections(ws.workspaceId, appId),
+      workspaceId: ws.workspaceId,
+      ...(parsed.data.surface ? { surface: parsed.data.surface } : {}),
+      ...(deps.completer ? { completer: deps.completer } : {}),
+    });
+    return c.json({ data: result });
+  });
+
+  // ── Operator — the agent that runs this App (the agentic core) ──────────────
+  // Presence (who is operating + live status) and a command line that runs the
+  // App's entry workflow with the human's instruction, so directing the operator
+  // produces real work the ActivityStream then narrates live.
+
+  app.get('/:id/operator', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId); // 404s if the app is not in this workspace
+    const members = deps.db
+      .select({
+        agentId: schema.agents.id,
+        name: schema.agents.name,
+        status: schema.agents.status,
+        colorHex: schema.agents.colorHex,
+        role: schema.appMembers.role,
+      })
+      .from(schema.appMembers)
+      .innerJoin(schema.agents, eq(schema.agents.id, schema.appMembers.agentId))
+      .where(and(eq(schema.appMembers.appId, appId), eq(schema.agents.workspaceId, ws.workspaceId)))
+      .all();
+    const operator = members.find((m) => m.role === 'operator') ?? members[0] ?? null;
+    const hasWorkflow = store.listWorkflowIds(ws.workspaceId, appId).length > 0;
+    return c.json({ data: operator ? { ...operator, canCommand: hasWorkflow && Boolean(deps.engine) } : null });
+  });
+
+  app.post('/:id/operator/command', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    const parsed = operatorCommandSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'command required');
+    if (!deps.engine) throw new AgentisError('VALIDATION_FAILED', 'operator commands are not enabled in this runtime');
+    const workflowId = store.listWorkflowIds(ws.workspaceId, appId)[0];
+    if (!workflowId) throw new AgentisError('VALIDATION_FAILED', 'this app has no workflow yet — add one so the operator can act');
+    const wf = deps.db
+      .select({ id: schema.workflows.id, ambientId: schema.workflows.ambientId, graph: schema.workflows.graph })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.id, workflowId)))
+      .get();
+    if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found: ${workflowId}`);
+    const result = await runPublishedWorkflow({
+      db: deps.db,
+      engine: deps.engine,
+      workspaceId: ws.workspaceId,
+      ambientId: wf.ambientId ?? null,
+      userId: user.id,
+      workflowId: wf.id,
+      graph: wf.graph as WorkflowGraph,
+      inputs: { command: parsed.data.command },
+    });
+    return c.json({ data: result });
+  });
+
+  // ── Action dispatch — the click → backend loop (§4.4) ───────
+  // V1 resolves `kind: 'data'` fully (form/button → datastore mutation →
+  // DATA_CHANGED → bound views refetch). 'workflow'/'tool' actions require the
+  // engine/tool runtime and are wired in a later pass; they return a clear error.
+
+  app.post('/:id/surfaces/:name/actions/:action', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const surface = surfaces.get(ws.workspaceId, appId, c.req.param('name'));
+    const actionName = c.req.param('action');
+    const action = surface.actions.find((a) => a.name === actionName);
+    if (!action) throw new AgentisError('RESOURCE_NOT_FOUND', `action not declared: ${actionName}`);
+    const argsRaw = (await c.req.json().catch(() => ({}))) as { args?: Record<string, unknown> };
+    const callArgs = argsRaw.args ?? {};
+
+    if (action.kind === 'data') {
+      const [collection, op] = action.target.split('.');
+      if (!collection || !op) throw new AgentisError('VALIDATION_FAILED', `data action target must be "collection.op": ${action.target}`);
+      const user = c.get('user');
+      switch (op) {
+        case 'insert':
+          return c.json({ data: data.insert(ws.workspaceId, appId, collection, (callArgs.record as Record<string, unknown>) ?? callArgs, user.id) });
+        case 'update':
+          return c.json({ data: data.update(ws.workspaceId, appId, collection, String(callArgs.id), (callArgs.patch as Record<string, unknown>) ?? {}) });
+        case 'upsert':
+          return c.json({ data: data.upsert(ws.workspaceId, appId, collection, (callArgs.match as Record<string, unknown>) ?? {}, (callArgs.record as Record<string, unknown>) ?? {}, user.id) });
+        case 'delete':
+          data.delete(ws.workspaceId, appId, collection, String(callArgs.id));
+          return c.json({ data: { ok: true } });
+        default:
+          throw new AgentisError('VALIDATION_FAILED', `unknown data op: ${op}`);
+      }
+    }
+
+    if (action.kind === 'workflow') {
+      const user = c.get('user');
+      const wf = deps.db
+        .select({ id: schema.workflows.id, ambientId: schema.workflows.ambientId, graph: schema.workflows.graph })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.appId, appId), eq(schema.workflows.id, action.target)))
+        .get();
+      if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found: ${action.target}`);
+      if (!deps.engine) throw new AgentisError('VALIDATION_FAILED', 'workflow actions are not enabled in this runtime');
+      const result = await runPublishedWorkflow({
+        db: deps.db,
+        engine: deps.engine,
+        workspaceId: ws.workspaceId,
+        ambientId: wf.ambientId ?? null,
+        userId: user.id,
+        workflowId: wf.id,
+        graph: wf.graph as WorkflowGraph,
+        inputs: callArgs,
+      });
+      return c.json({ data: result });
+    }
+
+    if (action.kind === 'tool') {
+      if (!deps.toolRuntime) throw new AgentisError('VALIDATION_FAILED', 'tool actions are not enabled in this runtime');
+      const user = c.get('user');
+      const res = await deps.toolRuntime.execute(ws.workspaceId, action.target as AgentTool, callArgs, undefined, { appId, agentId: user.id });
+      if (!res.ok) throw new AgentisError('VALIDATION_FAILED', res.error ?? 'tool execution failed');
+      return c.json({ data: res.result });
+    }
+
+    if (action.kind === 'navigate' || action.kind === 'setState') {
+      throw new AgentisError('VALIDATION_FAILED', `${action.kind} actions are handled by @agentis/app-client`);
+    }
+
+    if (action.kind === 'capability') {
+      throw new AgentisError('VALIDATION_FAILED', 'capability actions must be invoked through /v1/capabilities in this runtime');
+    }
+
+    throw new AgentisError('VALIDATION_FAILED', `unknown action kind: ${String(action.kind)}`);
+  });
+
+  return app;
+}

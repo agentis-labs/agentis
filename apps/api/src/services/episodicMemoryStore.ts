@@ -30,7 +30,16 @@ import type {
   RuntimeEpisodeOutcome,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { type EmbeddingProvider, cosineSimilarity } from './embeddingProvider.js';
+import { type EmbeddingProvider, cosineSimilarity, providerIdentity, vectorIsComparable } from './embeddingProvider.js';
+import type { EmbeddingProviderResolver } from './embeddingProviderRegistry.js';
+
+/** Accept either a bound resolver (preferred) or a fixed instance (tests). */
+type EmbeddingProviderInput = EmbeddingProvider | EmbeddingProviderResolver;
+
+function toResolver(input?: EmbeddingProviderInput): EmbeddingProviderResolver | undefined {
+  if (!input) return undefined;
+  return typeof input === 'function' ? input : () => input;
+}
 
 export interface EpisodeSearchArgs {
   workspaceId: string;
@@ -69,12 +78,16 @@ const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 50;
 
 export class EpisodicMemoryStore {
+  /** Per-workspace embedding resolver (§B1.1). Stores never own provider logic. */
+  private readonly resolveProvider?: EmbeddingProviderResolver;
+
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly logger: Logger,
-    private readonly embeddingProvider?: EmbeddingProvider,
+    embeddingProvider?: EmbeddingProviderInput,
   ) {
     void this.logger;
+    this.resolveProvider = toResolver(embeddingProvider);
   }
 
   /** Tokenise text for lexical scoring. Same tokeniser shape as KnowledgeStore. */
@@ -101,11 +114,26 @@ export class EpisodicMemoryStore {
     const importance = clamp01(input.importance ?? 0.5);
     const trust = clamp01(input.trust ?? 0.5);
 
+    // §B1.1/§B1.2 — embed with the workspace's configured provider and stamp its
+    // identity. Sync providers (hashing/local) embed inline; async providers
+    // (openai) are deferred to the re-embed sweep (§B1.4) so a write never blocks
+    // on a network call and never silently stores a null vector.
     let embedding: number[] | null = null;
-    if (this.embeddingProvider) {
+    let embeddingModel: string | null = null;
+    let embeddingDims: number | null = null;
+    let needsReembed = false;
+    const provider = this.resolveProvider?.(input.workspaceId);
+    if (provider) {
       const text = `${input.title} ${input.summary} ${input.details ?? ''}`;
-      const raw = this.embeddingProvider.embed(text);
-      embedding = Array.isArray(raw) ? raw : null;
+      const raw = provider.embed(text);
+      if (Array.isArray(raw)) {
+        embedding = raw;
+        const identity = providerIdentity(provider);
+        embeddingModel = identity.model;
+        embeddingDims = identity.dims;
+      } else {
+        needsReembed = true; // async provider — sweep will embed + stamp.
+      }
     }
 
     const row = {
@@ -127,6 +155,15 @@ export class EpisodicMemoryStore {
       entities: input.entities ?? [],
       outcomeStatus: input.outcomeStatus ?? null,
       embedding: embedding as unknown as null,
+      embeddingModel,
+      embeddingDims,
+      needsReembed,
+      // §B4 — unified-substrate fields. Default off; operator-authored writes may
+      // set them to inject as constitutional / carry scope-affinity links.
+      governing: (input as { governing?: boolean }).governing ?? false,
+      appliesTo: (input as { appliesTo?: string[] }).appliesTo ?? [],
+      // §C7 — team visibility. Default shared; private writes opt out.
+      shared: (input as { shared?: boolean }).shared ?? true,
       metadata: input.metadata ?? {},
       reinforcedAt: null,
       archivedAt: null,
@@ -272,6 +309,27 @@ export class EpisodicMemoryStore {
     return result.changes > 0;
   }
 
+  /**
+   * Reassign every episode in one scope to another (or to the workspace when
+   * `toScopeId` is null). Powers agent-deletion "promote/transfer" of memory
+   * (AGENT-TRANSITION B11). Returns the number of episodes moved.
+   */
+  reassignScope(workspaceId: string, fromScopeId: string, toScopeId: string | null): number {
+    const result = this.db.update(schema.memoryEpisodes)
+      .set({ scopeId: toScopeId, agentId: toScopeId })
+      .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.scopeId, fromScopeId)))
+      .run();
+    return result.changes;
+  }
+
+  /** Delete every episode in one scope. Returns the number removed. */
+  deleteScope(workspaceId: string, scopeId: string): number {
+    const result = this.db.delete(schema.memoryEpisodes)
+      .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.scopeId, scopeId)))
+      .run();
+    return result.changes;
+  }
+
   // ────────────────────────────────────────────────────────────
   // Read
   // ────────────────────────────────────────────────────────────
@@ -396,12 +454,16 @@ export class EpisodicMemoryStore {
     }
 
     // Vector path — when wired and we have at least one chunk with embedding.
+    // Resolve the workspace provider (§B1.1). An async provider (openai) cannot
+    // embed inline on this sync path, so it degrades to lexical here — the live
+    // hot path is SharedIntelligence.searchAtoms, which is async and embeds the
+    // query correctly. This store-level path stays sync + lexical-safe.
     const mode = args.mode ?? 'auto';
+    const provider = this.resolveProvider?.(args.workspaceId);
     let qVec: number[] | null = null;
-    const wantsVector = (mode === 'vector' || mode === 'hybrid' || mode === 'auto')
-      && this.embeddingProvider !== undefined;
-    if (wantsVector) {
-      const raw = this.embeddingProvider!.embed(args.query!);
+    const wantsVector = (mode === 'vector' || mode === 'hybrid' || mode === 'auto') && provider !== undefined;
+    if (wantsVector && provider) {
+      const raw = provider.embed(args.query!);
       if (Array.isArray(raw)) qVec = raw;
     }
 
@@ -419,9 +481,10 @@ export class EpisodicMemoryStore {
       // Lexical contribution (normalised for hybrid combination).
       const normTfidf = c.tfidf / maxTfidf;
 
-      // Vector contribution.
+      // Vector contribution — only when the stored vector is COMPARABLE to the
+      // query provider (same model + dims), not merely the same length (§B1.2).
       let vectorScore = 0;
-      if (qVec) {
+      if (qVec && provider && vectorIsComparable(r.embeddingModel, r.embeddingDims, provider)) {
         const emb = parseJsonArray<number>(r.embedding);
         if (emb.length === qVec.length) vectorScore = cosineSimilarity(qVec, emb);
       }
@@ -455,11 +518,12 @@ export class EpisodicMemoryStore {
     if (candidate.type) args.types = [candidate.type as RuntimeEpisodeType];
     const hits = this.searchEpisodes(args);
     // Heuristic: cosine sim ≥ threshold means "close enough to dedupe".
-    if (!this.embeddingProvider) return hits.slice(0, 1);
-    const candVec = this.embeddingProvider.embed(`${candidate.title} ${candidate.summary}`);
+    const provider = this.resolveProvider?.(workspaceId);
+    if (!provider) return hits.slice(0, 1);
+    const candVec = provider.embed(`${candidate.title} ${candidate.summary}`);
     if (!Array.isArray(candVec)) return hits;
     return hits.filter((h) => {
-      if (!h.embedding) return false;
+      if (!h.embedding || h.embedding.length !== candVec.length) return false;
       return cosineSimilarity(candVec, h.embedding) >= threshold;
     });
   }

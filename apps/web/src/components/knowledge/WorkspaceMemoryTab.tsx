@@ -8,16 +8,18 @@ import { MemoryRecordRow } from './MemoryRecordRow';
 import { MemoryWriteForm } from './MemoryWriteForm';
 import type { MemoryRecordRowData, MemoryKind } from './types';
 
-export function WorkspaceMemoryTab() {
+export function WorkspaceMemoryTab({ scopeId }: { scopeId?: string }) {
   const toast = useToast();
   const [entries, setEntries] = useState<MemoryRecordRowData[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | MemoryKind>('all');
+  const isScoped = Boolean(scopeId);
+  const memoryPath = scopeId ? `/v1/memory?limit=100&scopeId=${encodeURIComponent(scopeId)}` : '/v1/memory?limit=100';
 
   async function refresh() {
     setLoading(true);
     try {
-      const data = await api<{ memory: MemoryRecordRowData[] }>('/v1/memory?limit=100');
+      const data = await api<{ memory: MemoryRecordRowData[] }>(memoryPath);
       setEntries(data.memory ?? []);
     } catch (err) {
       toast.error('Failed to load memory', String(err));
@@ -27,25 +29,31 @@ export function WorkspaceMemoryTab() {
     }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => { void refresh(); }, [scopeId]);
 
   const filtered = useMemo(() => entries.filter((entry) => filter === 'all' || (entry.kind ?? entry.type) === filter), [entries, filter]);
 
   async function saveMemory(entry: { kind: MemoryKind; title: string; content: string }) {
-    await api('/v1/memory', { method: 'POST', body: JSON.stringify({ ...entry, sourceType: 'operator', importance: 7, confidence: 1 }) });
+    const path = scopeId ? `/v1/memory?scopeId=${encodeURIComponent(scopeId)}` : '/v1/memory';
+    await api(path, { method: 'POST', body: JSON.stringify({ ...entry, sourceType: 'operator', importance: 7, confidence: 1 }) });
     toast.success('Memory saved', entry.title);
     await refresh();
   }
 
   async function archive(id: string) {
-    await api(`/v1/memory/${id}`, { method: 'DELETE' });
+    const path = scopeId ? `/v1/memory/${id}?scopeId=${encodeURIComponent(scopeId)}` : `/v1/memory/${id}`;
+    await api(path, { method: 'DELETE' });
     toast.success('Memory archived');
     await refresh();
   }
 
   return (
     <div className="space-y-4">
-      <MemoryWriteForm submitLabel="Save to workspace memory" onSubmit={saveMemory} />
+      <MemoryWriteForm
+        submitLabel={isScoped ? 'Save to workflow memory' : 'Save to workspace memory'}
+        placeholder={isScoped ? 'What should this workflow always remember?' : undefined}
+        onSubmit={saveMemory}
+      />
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[12px] text-text-muted">{entries.length} memory {entries.length === 1 ? 'entry' : 'entries'}</span>
         <div className="ml-auto flex flex-wrap gap-1">
@@ -60,7 +68,9 @@ export function WorkspaceMemoryTab() {
         <EmptyState
           icon={<FileText size={48} />}
           title="No memory entries"
-          body="Add facts, rules, and preferences that every agent and workflow in this workspace can use as shared context."
+          body={isScoped
+            ? 'Add facts, rules, and preferences that only this workflow can use as durable context.'
+            : 'Add facts, rules, and preferences that every agent and workflow in this workspace can use as shared context.'}
         />
       ) : (
         <div className="space-y-2">{filtered.map((entry) => <MemoryRecordRow key={entry.id} entry={entry} onArchive={(id) => void archive(id)} />)}</div>

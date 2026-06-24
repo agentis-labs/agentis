@@ -38,4 +38,23 @@ describe('WorkspaceEvaluatorRuntimeFactory', () => {
     const factory = new WorkspaceEvaluatorRuntimeFactory({ router, logger });
     expect(factory.for('ws-1', 'synthesis')).not.toBe(factory.for('ws-2', 'synthesis'));
   });
+
+  it('can route a flagship default down for simple synthesis work', () => {
+    const router = OrchestratorModelRouter.fromEnv({
+      WORKFLOW_SYNTHESIS_BASE_URL: 'https://synth.example.com/v1',
+      WORKFLOW_SYNTHESIS_MODEL: 'claude-opus-4-8',
+    });
+    const factory = new WorkspaceEvaluatorRuntimeFactory({ router, logger });
+    const profileRuntime = factory.for('ws-1', 'synthesis');
+    const routedRuntime = factory.forTask(
+      'ws-1',
+      'synthesis',
+      'Build a simple workflow that formats incoming text.',
+      'workflow_synthesis',
+    );
+
+    expect(profileRuntime).toBeDefined();
+    expect(routedRuntime).toBeDefined();
+    expect(routedRuntime).not.toBe(profileRuntime);
+  });
 });

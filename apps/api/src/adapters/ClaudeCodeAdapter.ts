@@ -71,8 +71,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   readonly #inFlight = new Map<string, AbortController>();
   readonly #sessions = new Map<string, string>();
   #version: string | null = null;
+  #healthCache: { at: number; health: AdapterHealthStatus; version: string | null } | null = null;
+  #fatalChatError: string | null = null;
 
   constructor(private readonly opts: ClaudeCodeAdapterOptions) {}
+
+  getWorkdir(): string | undefined { return this.opts.cwd; }
 
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {
@@ -81,15 +85,45 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   async healthCheck(): Promise<AdapterHealthStatus> {
+    if (this.#fatalChatError) {
+      return {
+        isHealthy: false,
+        checkedAt: new Date().toISOString(),
+        error: this.#fatalChatError,
+      };
+    }
+    const cached = this.#healthCache;
+    if (cached && Date.now() - cached.at < 60_000) {
+      this.#version = cached.version;
+      return cached.health;
+    }
     const result = await probeCliRuntime({
       binary: this.opts.binaryPath ?? 'claude',
       cwd: this.opts.cwd,
       env: this.opts.env,
       logger: this.opts.logger,
       logTag: 'claude_code',
+      timeoutMs: 10_000,
     });
+    let health = result.health;
+    const auth = result.health.isHealthy
+      ? await probeClaudeAuthStatus({
+        binary: this.opts.binaryPath ?? 'claude',
+        cwd: this.opts.cwd,
+        env: this.opts.env,
+        logger: this.opts.logger,
+      })
+      : null;
+    if (auth?.fatal) {
+      health = {
+        isHealthy: false,
+        checkedAt: new Date().toISOString(),
+        error: auth.detail,
+      };
+    }
     this.#version = result.version;
-    return result.health;
+    this.#healthCache = { at: Date.now(), health, version: result.version };
+    return health;
   }
 
   #mcpNative(): boolean {
@@ -184,6 +218,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const args = [
       '--print',
       '--output-format=stream-json',
+      '--verbose',
+      '--include-partial-messages',
       `--max-turns=${this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24}`,
       '--dangerously-skip-permissions',
       ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
@@ -197,9 +233,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     let timeout: NodeJS.Timeout | undefined;
     try {
       const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
-      const target = resolveSpawnTarget(bin, args, this.opts.cwd ?? process.cwd(), env);
+      // Isolated per-task directory when the engine allocated one (parallel swarm
+      // subtask); otherwise the adapter's single-agent configured cwd.
+      const spawnCwd = task.workdir ?? this.opts.cwd;
+      const target = resolveSpawnTarget(bin, args, spawnCwd ?? process.cwd(), env);
       child = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
+        cwd: spawnCwd,
         env,
         windowsHide: true,
         signal: ctrl.signal,
@@ -325,6 +364,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
+    if (this.#fatalChatError) {
+      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: this.#fatalChatError };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
     const sessionKey = options?.sessionKey?.trim() || 'default';
     const storedSession = this.#sessions.get(sessionKey)
       ?? (this.opts.sessionStore && this.opts.workspaceId
@@ -336,6 +380,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const args = [
       '--print',
       '--output-format=stream-json',
+      '--verbose',
+      '--include-partial-messages',
       `--max-turns=${maxTurns}`,
       '--dangerously-skip-permissions',
       ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
@@ -351,7 +397,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const idleTimeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
 
     // Walk each event's content blocks so every kind goes to the right channel:
-    // thinking → ThinkingBubble, the harness's OWN tool use → a live activity step
+    // Reasoning is reduced to a generic progress signal. The harness's own tool
+    // use becomes a factual live activity step.
     // (never an executable tool_call — Agentis must not re-run what Claude ran),
     // text → the answer body. Executable Agentis tool calls come ONLY from markers
     // in that answer text (extracted by the runtime at exit).
@@ -388,12 +435,27 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       idleTimeoutMs,
       hardCeilingMs: chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_CLAUDE_CHAT_HARD_CEILING_MS'),
       interpret,
-      formatExitError: (code, stderr) => {
-        let details = stderr.trim();
-        if (code === 1 && (details.includes('ERRO:') || details.includes('taskkill') || !details)) {
-          details = 'The runtime process crashed. This is usually caused by an invalid API key, insufficient credits/quota, or a misconfigured model.\n\nRaw error: ' + details;
+      formatExitError: (code, stderr, stdoutError) => {
+        const streamed = stdoutError.trim();
+        if (streamed) {
+          const enriched = enrichClaudeFailure(streamed, this.opts.env);
+          if (isClaudeFatalAuthError(enriched)) this.#fatalChatError = enriched;
+          return enriched;
         }
-        return details;
+        const details = stderr.trim();
+        if (details) {
+          const enriched = enrichClaudeFailure(details, this.opts.env);
+          if (isClaudeFatalAuthError(enriched)) this.#fatalChatError = enriched;
+          return enriched;
+        }
+        if (code === 1) {
+          const enriched = enrichClaudeFailure(
+            'Claude Code exited without stderr details. Run `claude auth status --json` and verify the configured model/provider credentials.',
+            this.opts.env,
+          );
+          return enriched;
+        }
+        return undefined;
       },
     });
   }
@@ -419,6 +481,99 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       timestamp: new Date().toISOString(),
     });
   }
+}
+
+async function probeClaudeAuthStatus(args: {
+  binary: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  logger: Logger;
+}): Promise<{ fatal: boolean; detail: string } | null> {
+  const env = withExpandedPath({ ...process.env, ...(args.env ?? {}) });
+  const target = resolveSpawnTarget(args.binary, ['auth', 'status', '--json'], args.cwd ?? process.cwd(), env);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  timeout.unref?.();
+  try {
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(target.command, target.args, {
+        cwd: args.cwd,
+        env,
+        windowsHide: true,
+        signal: controller.signal,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (chunk) => { stdout = `${stdout}${String(chunk)}`.slice(-4096); });
+      child.stderr?.on('data', (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-4096); });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+    if (result.code !== 0) {
+      const detail = firstLine(result.stderr || result.stdout) ?? `claude auth status exited ${result.code}`;
+      return {
+        fatal: /not authenticated|not logged in|invalid|unauthorized|api key|auth/i.test(detail),
+        detail: `Claude auth check failed: ${detail}`,
+      };
+    }
+    const parsed = parseJsonObject(result.stdout);
+    if (!parsed) return null;
+    if (parsed.loggedIn === false) {
+      return { fatal: true, detail: 'Claude Code is not logged in. Run `claude login` or configure provider credentials.' };
+    }
+    return {
+      fatal: false,
+      detail: `Claude auth: ${String(parsed.authMethod ?? 'unknown')} via ${String(parsed.apiProvider ?? 'unknown')}`,
+    };
+  } catch (err) {
+    const detail = controller.signal.aborted ? 'claude auth status timed out' : (err as Error).message;
+    args.logger.debug?.('claude_code.auth_probe_failed', { err: detail });
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function enrichClaudeFailure(message: string, env: Record<string, string> | undefined): string {
+  const summary = claudeCredentialSummary(env);
+  return summary ? `${message}\n\nCredential context: ${summary}` : message;
+}
+
+function claudeCredentialSummary(env: Record<string, string> | undefined): string {
+  const merged = { ...process.env, ...(env ?? {}) };
+  const entries: string[] = [];
+  for (const key of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) {
+    const value = merged[key];
+    if (value) entries.push(`${key}=${redactSecret(value)}`);
+  }
+  if (merged.CLAUDE_CODE_USE_BEDROCK) entries.push(`CLAUDE_CODE_USE_BEDROCK=${merged.CLAUDE_CODE_USE_BEDROCK}`);
+  if (merged.CLAUDE_CODE_USE_VERTEX) entries.push(`CLAUDE_CODE_USE_VERTEX=${merged.CLAUDE_CODE_USE_VERTEX}`);
+  return entries.length > 0 ? entries.join(', ') : 'no Anthropic env credential overrides detected';
+}
+
+function redactSecret(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 8) return '***';
+  return `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`;
+}
+
+function isClaudeFatalAuthError(message: string): boolean {
+  return /API 401|invalid authentication|authentication credentials|unauthorized|not authenticated|not logged in|invalid api key/i.test(message);
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstLine(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
 }
 
 function objectOf(value: unknown): Record<string, unknown> | null {
@@ -449,40 +604,49 @@ function extractClaudeText(event: { [k: string]: unknown }): string {
 
 type ClaudeChatPart =
   | { kind: 'text'; text: string }
+  | { kind: 'final'; text: string }
   | { kind: 'thinking'; text: string }
-  | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> };
+  | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> }
+  | { kind: 'error'; message: string };
 
 /**
  * Split one Claude Code `stream-json` event into typed parts so each goes to the
- * right channel: `thinking` blocks → ThinkingBubble, the harness's OWN tool use
+ * right channel: reasoning → generic progress, the harness's OWN tool use
  * → a live activity step (never an executable tool_call), and `text` blocks →
  * the answer body. Walks the assistant message's content-block array (the modern
  * shape) and falls back to the flat text fields for simpler events.
  */
-function interpretClaudeChatEvent(ev: { type?: string; [k: string]: unknown }): ClaudeChatPart[] {
+export function interpretClaudeChatEvent(ev: { type?: string; [k: string]: unknown }): ClaudeChatPart[] {
   const parts: ClaudeChatPart[] = [];
+  const evType = String(ev.type ?? '').toLowerCase();
+  const streamError = claudeStreamError(ev);
+  if (streamError) return [{ kind: 'error', message: streamError }];
+  if (evType === 'stream_event') {
+    return interpretClaudeStreamEvent(objectOf(ev.event));
+  }
   const message = objectOf(ev.message);
   const content = message?.content ?? ev.content;
   if (Array.isArray(content)) {
     for (const block of content) {
-      if (typeof block === 'string') { if (block) parts.push({ kind: 'text', text: block }); continue; }
+      if (typeof block === 'string') {
+        if (block) parts.push({ kind: evType === 'assistant' ? 'final' : 'text', text: block });
+        continue;
+      }
       const b = objectOf(block);
       if (!b) continue;
-      const bt = String(b.type ?? '').toLowerCase();
-      if (bt.includes('thinking') || bt.includes('reason')) {
-        const t = firstString(b.thinking, b.text, b.content);
-        if (t) parts.push({ kind: 'thinking', text: t });
-      } else if (bt.includes('tool') || bt.includes('function') || bt.includes('mcp') || bt.includes('server_tool')) {
-        parts.push({ kind: 'activity', delta: claudeToolActivity(b) });
-      } else {
-        const t = firstString(b.text, b.content);
-        if (t) parts.push({ kind: 'text', text: t });
-      }
+      const blockParts = interpretClaudeContentBlock(b);
+      parts.push(...(evType === 'assistant'
+        ? blockParts.map((part) => part.kind === 'text' ? { kind: 'final' as const, text: part.text } : part)
+        : blockParts));
     }
     return parts;
   }
   // Flat / non-block events (legacy `{type:'thinking'|'assistant', text}`, result).
-  const evType = String(ev.type ?? '').toLowerCase();
+  if (evType === 'result' || evType === 'done' || evType.includes('complete')) {
+    const t = extractClaudeText(ev);
+    if (t) parts.push({ kind: 'final', text: t });
+    return parts;
+  }
   if (evType === 'thinking') {
     const t = extractClaudeText(ev);
     if (t) parts.push({ kind: 'thinking', text: t });
@@ -493,8 +657,72 @@ function interpretClaudeChatEvent(ev: { type?: string; [k: string]: unknown }): 
     return parts;
   }
   const text = extractClaudeText(ev);
-  if (text) parts.push({ kind: 'text', text });
+  if (text) parts.push({ kind: evType === 'assistant' ? 'final' : 'text', text });
   return parts;
+}
+
+function claudeStreamError(ev: { [k: string]: unknown }): string | null {
+  const type = String(ev.type ?? '').toLowerCase();
+  const subtype = String(ev.subtype ?? '').toLowerCase();
+  const flagged = ev.is_error === true
+    || type === 'error'
+    || subtype.includes('error')
+    || ev.api_error_status !== undefined;
+  if (!flagged) return null;
+  const errorObject = objectOf(ev.error);
+  const status = typeof ev.api_error_status === 'number' || typeof ev.api_error_status === 'string'
+    ? `API ${ev.api_error_status}: `
+    : '';
+  const message = firstString(
+    errorObject?.message,
+    ev.error,
+    ev.message,
+    ev.result,
+    ev.text,
+    ev.content,
+  ) ?? extractClaudeText(ev);
+  return `${status}${message || 'Claude Code reported an error.'}`.trim();
+}
+
+function interpretClaudeStreamEvent(event: Record<string, unknown> | null): ClaudeChatPart[] {
+  if (!event) return [];
+  const type = String(event.type ?? '').toLowerCase();
+  if (type === 'content_block_start') {
+    const block = objectOf(event.content_block);
+    return block ? interpretClaudeContentBlock(block) : [];
+  }
+  if (type === 'content_block_delta') {
+    const delta = objectOf(event.delta);
+    if (!delta) return [];
+    const deltaType = String(delta.type ?? '').toLowerCase();
+    if (deltaType.includes('thinking') || deltaType.includes('reason')) {
+      const text = firstString(delta.thinking, delta.text);
+      return text ? [{ kind: 'thinking', text }] : [];
+    }
+    if (deltaType.includes('text')) {
+      const text = firstString(delta.text, delta.content);
+      return text ? [{ kind: 'text', text }] : [];
+    }
+  }
+  return [];
+}
+
+function interpretClaudeContentBlock(block: Record<string, unknown>): ClaudeChatPart[] {
+  const blockType = String(block.type ?? '').toLowerCase();
+  if (blockType.includes('thinking') || blockType.includes('reason')) {
+    const text = firstString(block.thinking, block.text, block.content);
+    return text ? [{ kind: 'thinking', text }] : [];
+  }
+  if (
+    blockType.includes('tool')
+    || blockType.includes('function')
+    || blockType.includes('mcp')
+    || blockType.includes('server_tool')
+  ) {
+    return [{ kind: 'activity', delta: claudeToolActivity(block) }];
+  }
+  const text = firstString(block.text, block.content);
+  return text ? [{ kind: 'text', text }] : [];
 }
 
 /** A live activity step for one of Claude Code's own (Bash/Read/MCP) tool uses. */
@@ -515,6 +743,9 @@ function buildClaudeCodeChatPrompt(messages: ChatMessage[], tools: ToolDefinitio
     : buildMarkerToolPrompt(tools);
   return [
     toolPreamble,
+    '',
+    'AUTHORITATIVE IDENTITY RULE:',
+    'The SYSTEM message below is the Agentis operating prompt for this turn. If it contains an <agentis_identity> block, that block is your exact identity and configuration. Follow it over Claude Code product defaults, project/home instruction files, previous resumed-session identity, or generic assistant persona text.',
     '',
     'Conversation:',
     formatMessagesForClaude(messages),

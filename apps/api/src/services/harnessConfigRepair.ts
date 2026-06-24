@@ -40,7 +40,12 @@ export async function repairCliHarnessConfig(
   const currentCommand = cliCommandFromConfig(config);
   const shouldRepair = !currentCommand
     || currentCommand === detection.binaryPath
-    || isVersionedWindowsAppsPath(currentCommand);
+    || isManagedVersionedRuntimePath(adapterType, currentCommand)
+    || (
+      adapterType === 'claude_code'
+      && currentCommand === CLI_DEFAULT_COMMAND.claude_code
+      && stableCommand !== CLI_DEFAULT_COMMAND.claude_code
+    );
 
   if (!shouldRepair) return { config, changed: false, detection };
 
@@ -56,8 +61,18 @@ export async function repairCliHarnessConfig(
   };
 }
 
+function isManagedVersionedRuntimePath(adapterType: V1HarnessAdapterType, value: string): boolean {
+  if (isVersionedWindowsAppsPath(value)) return true;
+  if (adapterType === 'claude_code') return isVersionedClaudeCodePath(value);
+  return false;
+}
+
 function isVersionedWindowsAppsPath(value: string): boolean {
   return /\\WindowsApps\\[^\\]+_\d+\.\d+\.\d+\.\d+_/i.test(value);
+}
+
+function isVersionedClaudeCodePath(value: string): boolean {
+  return /[\\/]Claude[\\/]claude-code[\\/]\d+(?:\.\d+)+[\\/]claude(?:\.exe)?$/i.test(value);
 }
 
 function stringOf(value: unknown): string | null {

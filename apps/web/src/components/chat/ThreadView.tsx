@@ -1,27 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { REALTIME_EVENTS, type ChatDelta, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { api, apiErrorMessage, streamSse } from '../../lib/api';
 import { useViewportAwareness } from '../../lib/viewportContext';
+import { openRunModal } from '../../lib/runModal';
 import { listInteractions, type InteractionEvent } from '../../lib/connections';
 import { useToast } from '../shared/Toast';
-import { useConfirm } from '../shared/ConfirmDialog';
 import { Skeleton } from '../shared/Skeleton';
 import { rtSubscribe, useRealtime } from '../../lib/realtime';
 import { Composer } from './Composer';
 import type { ToolCallData as ToolCallPillData } from './toolCalls';
 import { ProactiveCard, type ProactiveCardData } from './ProactiveCard';
-import { AgentModelSelector } from './AgentModelSelector';
 import { ChatMarkdown } from './ChatMarkdown';
 import { useChatPanelStore } from './ChatPanelStore';
 import { ExecutionFeed } from './ExecutionFeed';
-import { PlanList, derivePlanItems, extractPlan } from './PlanList';
-import { StickyProgressBanner } from './StickyProgressBanner';
 import { LiveActivityTrace } from './LiveActivityTrace';
-import * as ScrollArea from '@radix-ui/react-scroll-area';
-import { formatDistanceToNow } from 'date-fns';
+import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessage } from './messageModel';
+import { useAutoScroll } from '../../hooks/useAutoScroll';
+import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -49,6 +47,11 @@ type AgentMsg = {
   deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
 };
 
+type AgentConversation = {
+  id: string;
+  executionMode?: 'chat' | 'plan';
+};
+
 type RoomMsg = {
   id: string;
   authorType: string;
@@ -59,8 +62,8 @@ type RoomMsg = {
 
 interface MessageMeta {
   source?: 'openclaw_exec' | 'openclaw_session' | 'workflow' | 'manual' | 'proactive' | 'chat_loop' | 'chat_confirmation' | 'tool_call';
+  clientTurnId?: string;
   card?: ProactiveCardData;
-  thinking?: string;
   activity?: Array<Extract<ChatDelta, { type: 'activity' }>>;
   turn?: ChatTurnTrace;
   toolCalls?: ToolCallPillData[];
@@ -145,6 +148,12 @@ function taskLabel(message: string): string {
   return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean;
 }
 
+function createClientTurnId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function normalizeAgentMessage(message: AgentMsg): ChatMessage {
   return {
     id: message.id,
@@ -198,92 +207,6 @@ function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
     text,
     createdAt: event.at,
   };
-}
-
-function getMessageTier(msg: ChatMessage): number {
-  if (msg.id.startsWith('stream-')) return 2;
-  if (msg.id.startsWith('tmp-')) return 1;
-  return 0;
-}
-
-function sortMessages(messages: ChatMessage[]): ChatMessage[] {
-  return [...messages].sort((a, b) => {
-    const tierA = getMessageTier(a);
-    const tierB = getMessageTier(b);
-    if (tierA !== tierB) return tierA - tierB;
-
-    const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    if (diff !== 0) return diff;
-    if (a.authorKind === 'operator' && b.authorKind !== 'operator') return -1;
-    if (b.authorKind === 'operator' && a.authorKind !== 'operator') return 1;
-    if (a.authorKind === 'agent' && b.authorKind === 'system') return -1;
-    if (b.authorKind === 'agent' && a.authorKind === 'system') return 1;
-    return 0;
-  });
-}
-
-function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
-  const byId = new Map<string, ChatMessage>();
-  for (const message of sortMessages(messages)) byId.set(message.id, message);
-  return Array.from(byId.values());
-}
-
-function upsertMessage(messages: ChatMessage[], next: ChatMessage): ChatMessage[] {
-  let found = false;
-  const updated = messages.map((message) => {
-    if (message.id !== next.id) return message;
-    found = true;
-    return next;
-  });
-  return dedupeMessages(found ? updated : [...updated, next]);
-}
-
-function prependUnique(messages: ChatMessage[], older: ChatMessage[]): ChatMessage[] {
-  const seen = new Set(messages.map((message) => message.id));
-  return sortMessages([...older.filter((message) => !seen.has(message.id)), ...messages]);
-}
-
-function mergeMessage(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
-  if (messages.some((message) => message.id === incoming.id)) {
-    return upsertMessage(messages, incoming);
-  }
-  if (incoming.authorKind === 'operator') {
-    const optimisticIndex = messages.findIndex(
-      (message) => message.id.startsWith('tmp-') && message.authorKind === 'operator' && message.text === incoming.text,
-    );
-    if (optimisticIndex >= 0) {
-      return dedupeMessages(messages.map((message, index) => (index === optimisticIndex ? incoming : message)));
-    }
-  }
-  if (incoming.authorKind === 'agent') {
-    const streamingIndex = messages.findIndex((message) => {
-      if (!message.id.startsWith('stream-') || message.authorKind !== 'agent') return false;
-      const currentText = message.text.trim();
-      return currentText.length === 0 || currentText === incoming.text;
-    });
-    if (streamingIndex >= 0) {
-      const replaced = messages.map((message, index) => (index === streamingIndex ? incoming : message));
-      return dedupeMessages(replaced);
-    }
-  }
-  return dedupeMessages([...messages, incoming]);
-}
-
-function harnessLabel(adapterType?: string | null): string {
-  if (adapterType === 'codex') return 'Codex';
-  if (adapterType === 'claude_code') return 'Claude Code';
-  if (adapterType === 'cursor') return 'Cursor';
-  if (adapterType === 'hermes_agent') return 'Hermes Agent';
-  if (adapterType === 'openclaw') return 'OpenClaw';
-  if (adapterType === 'http') return 'HTTP';
-  return 'Runtime';
-}
-
-function formatAssistantLabel(name: string, runtime: AgentRuntimeInfo | null): string {
-  const runtimeModel = runtime?.runtimeModel?.trim()
-    || defaultRuntimeModel(runtime?.adapterType)
-    || harnessLabel(runtime?.adapterType);
-  return `${name} - ${runtimeModel}`;
 }
 
 function runtimeCapabilityWarning(runtime: AgentRuntimeInfo | null): { title: string; body: string } | null {
@@ -347,10 +270,9 @@ export function ThreadView({
   }, []);
   const [agentNoAdapter, setAgentNoAdapter] = useState(false);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
   const [agentTyping, setAgentTyping] = useState(false);
   const [composerInitialText, setComposerInitialText] = useState(initialDraft ?? '');
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const preserveScrollRef = useRef(false);
   const typingTimer = useRef<number | null>(null);
   const activeChatAbortRef = useRef<AbortController | null>(null);
   const autoSentDraftKeyRef = useRef<string | null>(null);
@@ -360,9 +282,14 @@ export function ThreadView({
   const setActiveTask = useChatPanelStore((store) => store.setActiveTask);
   const updateActiveTask = useChatPanelStore((store) => store.updateActiveTask);
   const toast = useToast();
-  const confirm = useConfirm();
   const awareness = useViewportAwareness();
   const navigate = useNavigate();
+  const {
+    scrollRef,
+    isAtBottom,
+    scrollToBottom,
+    suppressNextScroll,
+  } = useAutoScroll(messages.length, agentTyping);
 
   const querySuffix = conversationId ? `?conversationId=${conversationId}` : '';
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
@@ -395,11 +322,12 @@ export function ThreadView({
     const path = `${endpoint}?${query.toString()}`;
     if (kind === 'agent') {
       const [threadData, agentData] = await Promise.all([
-        api<{ messages: AgentMsg[] }>(path),
+        api<{ messages: AgentMsg[]; conversation?: AgentConversation }>(path),
         api<{ agent: { adapterType?: string | null; runtimeModel?: string | null; adapterCapabilities?: AgentRuntimeInfo['adapterCapabilities']; config?: Record<string, unknown> | null } }>(`/v1/agents/${id}`)
           .catch(() => ({ agent: { adapterType: null, runtimeModel: null, adapterCapabilities: null, config: null } })),
       ]);
       if (!before) {
+        setLoadedConversationId(threadData.conversation?.id ?? conversationId ?? null);
         setAgentNoAdapter(!agentData.agent?.adapterType);
         const selectedModel = typeof agentData.agent?.config?.model === 'string'
           ? agentData.agent.config.model
@@ -443,7 +371,7 @@ export function ThreadView({
 
   async function loadOlder() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
-    preserveScrollRef.current = true;
+    suppressNextScroll();
     setLoadingOlder(true);
     try {
       const page = await loadPage(messages[0]!);
@@ -460,7 +388,9 @@ export function ThreadView({
     if (!confirmEndpoint) return;
     const toolStartedAt = new Map<string, number>();
     let streamedBody = '';
-    const streamId = 'stream-' + Date.now();
+    const clientTurnId = createClientTurnId();
+    const createdAt = new Date().toISOString();
+    const streamId = `stream-${clientTurnId}`;
 
     // Set the original confirmation card status to 'approving'
     setMessages((current) => current.map((message) => (
@@ -481,12 +411,14 @@ export function ThreadView({
       authorId: id,
       authorKind: 'agent',
       text: '',
-      createdAt: new Date().toISOString(),
+      createdAt,
       deliveryStatus: 'sending',
       metadata: {
         source: 'chat_loop',
+        clientTurnId,
         turn: {
-          startedAt: new Date().toISOString(),
+          clientTurnId,
+          startedAt: createdAt,
           status: 'running',
         },
       },
@@ -497,7 +429,7 @@ export function ThreadView({
     try {
       await streamSse(confirmEndpoint, {
         method: 'POST',
-        body: JSON.stringify({ turnId: confirmation.turnId, confirmed }),
+        body: JSON.stringify({ turnId: confirmation.turnId, confirmed, clientTurnId }),
       }, {
         onEvent(event, data) {
           if (event === 'delta') {
@@ -552,20 +484,19 @@ export function ThreadView({
             }
           } else if (event === 'message') {
             const persisted = normalizeAgentMessage(data as AgentMsg);
-            setMessages((current) => current.map((message) => {
-              if (message.id === messageId) return message;
-              if (message.id === streamId) {
-                return {
-                  ...persisted,
-                  metadata: {
-                    ...persisted.metadata,
-                    toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
-                    thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
-                  },
-                };
-              }
-              return message;
-            }));
+            setMessages((current) => {
+              const streamMessage = current.find((message) => message.id === streamId);
+              return mergeMessage(current, {
+                ...persisted,
+                metadata: {
+                  ...persisted.metadata,
+                  clientTurnId: persisted.metadata?.clientTurnId ?? clientTurnId,
+                  toolCalls: streamMessage?.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
+                  activity: persisted.metadata?.activity ?? streamMessage?.metadata?.activity,
+                  turn: persisted.metadata?.turn ?? streamMessage?.metadata?.turn,
+                },
+              });
+            });
           } else if (event === 'error') {
             const message = streamErrorMessage(data);
             setAgentTyping(false);
@@ -623,10 +554,14 @@ export function ThreadView({
     void loadInitial();
   }, [kind, id, conversationId]);
 
+  useEffect(() => {
+    setLoadedConversationId(conversationId ?? null);
+  }, [kind, id, conversationId]);
+
   // Drop any "agent working" progress card we own when leaving this thread
-  // (switching agents, navigating to fullscreen /chat, or unmounting). The
+  // (switching agents or unmounting). The
   // server turn keeps running and its result still arrives via realtime, but
-  // the card must never orphan into an undismissable stuck state.
+  // the card must never remain as an undismissable stuck state.
   useEffect(() => () => {
     const store = useChatPanelStore.getState();
     if (store.activeTask?.agentId === id) store.setActiveTask(null);
@@ -670,9 +605,12 @@ export function ThreadView({
       roomId?: string;
       agentId?: string;
       message?: AgentMsg | RoomMsg;
+      conversationId?: string | null;
     };
     if (kind === 'agent') {
       if (payload.agentId !== id) return;
+      const expectedConversationId = loadedConversationId ?? conversationId ?? null;
+      if (!payload.conversationId || !expectedConversationId || payload.conversationId !== expectedConversationId) return;
       if (env.event === REALTIME_EVENTS.CONVERSATION_MESSAGE_DELETED) {
         setMessages((prev) => prev.filter((message) => message.id !== payload.id));
         return;
@@ -744,17 +682,9 @@ export function ThreadView({
     if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
     openedCanvasWorkflowIdsRef.current.add(workflowId);
     window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, runId: payload?.runId ?? null } }));
-    navigate(`/workflows/${workflowId}`);
-    toast.success('Workflow opened on canvas');
+    navigate(`/apps/workflows/${workflowId}`);
+    toast.success('Logic opened on canvas');
   });
-
-  useEffect(() => {
-    if (preserveScrollRef.current) {
-      preserveScrollRef.current = false;
-      return;
-    }
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages.length, agentTyping]);
 
   useEffect(() => () => {
     if (typingTimer.current) window.clearTimeout(typingTimer.current);
@@ -864,7 +794,6 @@ export function ThreadView({
     }
     const value = text.trim();
     if (!value) return;
-
     if (kind === 'room') {
       try {
         const res = await api<{ message?: RoomMsg }>(sendEndpoint, {
@@ -879,23 +808,40 @@ export function ThreadView({
       return;
     }
 
+    const clientTurnId = createClientTurnId();
+    const createdAt = new Date().toISOString();
     const operatorMessage: ChatMessage = {
-      id: `tmp-${Date.now()}`,
+      id: `tmp-${clientTurnId}`,
       authorId: 'operator',
       authorKind: 'operator',
       text: value,
-      createdAt: new Date().toISOString(),
+      createdAt,
       deliveryStatus: 'sending',
+      metadata: { clientTurnId },
     };
-    const streamId = `stream-${Date.now()}`;
+    const streamId = `stream-${clientTurnId}`;
     const streamingMessage: ChatMessage = {
       id: streamId,
       authorId: id,
       authorKind: 'agent',
       text: '',
-      createdAt: new Date().toISOString(),
+      createdAt,
       deliveryStatus: 'sending',
-      metadata: { source: 'chat_loop' },
+      metadata: {
+        source: 'chat_loop',
+        clientTurnId,
+        turn: { clientTurnId, startedAt: createdAt, status: 'running' },
+        activity: [{
+          type: 'activity',
+          id: `activity-${clientTurnId}-local-start`,
+          phase: 'runtime',
+          status: 'running',
+          label: `Starting ${name}`,
+          startedAt: createdAt,
+          agentId: id,
+          clientTurnId,
+        }],
+      },
     };
 
     setMessages((current) => dedupeMessages([...current, operatorMessage, streamingMessage]));
@@ -905,10 +851,9 @@ export function ThreadView({
     const toolStartedAt = new Map<string, number>();
     let toolTotal = 0;
     let toolDone = 0;
+    let streamedBody = '';
 
     try {
-      let streamedBody = '';
-      let streamedThinking = '';
       const controller = new AbortController();
       activeChatAbortRef.current?.abort();
       activeChatAbortRef.current = controller;
@@ -918,6 +863,7 @@ export function ThreadView({
         signal: controller.signal,
         body: JSON.stringify({
           body: value,
+          clientTurnId,
           useViewportContext: options?.useViewportContext !== false,
           viewportOverride,
         }),
@@ -930,20 +876,6 @@ export function ThreadView({
               setMessages((current) => current.map((message) => (
                 message.id === streamId
                   ? { ...message, text: streamedBody, deliveryStatus: 'sending' }
-                  : message
-              )));
-            } else if (delta.type === 'thinking') {
-              streamedThinking += delta.delta;
-              setMessages((current) => current.map((message) => (
-                message.id === streamId
-                  ? {
-                      ...message,
-                      metadata: {
-                        ...(message.metadata ?? {}),
-                        source: message.metadata?.source ?? 'chat_loop',
-                        thinking: streamedThinking,
-                      },
-                    }
                   : message
               )));
             } else if (delta.type === 'activity') {
@@ -983,23 +915,22 @@ export function ThreadView({
           } else if (event === 'message') {
             const persisted = normalizeAgentMessage(data as AgentMsg);
             setMessages((current) => {
-              const merged: ChatMessage[] = current.map((message): ChatMessage => {
-                if (message.id === streamId) {
-                  return {
-                    ...persisted,
-                    metadata: {
-                      ...persisted.metadata,
-                      toolCalls: message.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
-                      thinking: message.metadata?.thinking ?? persisted.metadata?.thinking,
-                      activity: persisted.metadata?.activity ?? message.metadata?.activity,
-                      turn: persisted.metadata?.turn ?? message.metadata?.turn,
-                    },
-                  };
-                }
+              const streamMessage = current.find((message) => message.id === streamId);
+              const incoming: ChatMessage = {
+                ...persisted,
+                metadata: {
+                  ...persisted.metadata,
+                  clientTurnId: persisted.metadata?.clientTurnId ?? clientTurnId,
+                  toolCalls: streamMessage?.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
+                  activity: persisted.metadata?.activity ?? streamMessage?.metadata?.activity,
+                  turn: persisted.metadata?.turn ?? streamMessage?.metadata?.turn,
+                },
+              };
+              const delivered = current.map((message): ChatMessage => {
                 if (message.id === operatorMessage.id) return { ...message, deliveryStatus: 'delivered' as const };
                 return message;
               });
-              return dedupeMessages(merged);
+              return mergeMessage(delivered, incoming);
             });
           } else if (event === 'error') {
             const message = streamErrorMessage(data);
@@ -1021,24 +952,34 @@ export function ThreadView({
       setAgentTyping(false);
       setActiveTask(null);
       const stopped = error instanceof DOMException && error.name === 'AbortError';
-      setMessages((current) => current.map((message) => (
-        message.id === streamId
-          ? {
-              ...message,
-              deliveryStatus: stopped ? 'delivered' : 'failed',
-              metadata: {
-                ...(message.metadata ?? {}),
-                turn: {
-                  ...(message.metadata?.turn ?? { startedAt: message.createdAt }),
-                  completedAt: new Date().toISOString(),
-                  status: stopped ? 'stopped' : 'failed',
-                },
+      const shouldKeepStoppedBubble = streamedBody.trim().length > 0 || toolTotal > 0;
+      const completedAt = new Date().toISOString();
+      setMessages((current) => current.flatMap((message) => {
+        if (message.id === streamId) {
+          if (stopped && !shouldKeepStoppedBubble) return [];
+          return [{
+            ...message,
+            deliveryStatus: stopped ? 'delivered' as const : 'failed' as const,
+            metadata: {
+              ...(message.metadata ?? {}),
+              toolCalls: (message.metadata?.toolCalls ?? []).map((tool) => (
+                tool.status === 'running' || tool.status === 'paused'
+                  ? { ...tool, status: stopped ? 'stopped' as const : 'error' as const }
+                  : tool
+              )),
+              turn: {
+                ...(message.metadata?.turn ?? { clientTurnId, startedAt: message.createdAt }),
+                completedAt,
+                status: stopped ? 'stopped' : 'failed',
               },
-            }
-          : message.id === operatorMessage.id
-            ? { ...message, deliveryStatus: stopped ? 'delivered' : 'failed' }
-          : message
-      )));
+            },
+          }];
+        }
+        if (message.id === operatorMessage.id) {
+          return [{ ...message, deliveryStatus: stopped ? 'delivered' as const : 'failed' as const }];
+        }
+        return [message];
+      }));
       if (!stopped) toast.error('Failed to send', apiErrorMessage(error));
     } finally {
       activeChatAbortRef.current = null;
@@ -1086,23 +1027,6 @@ export function ThreadView({
     onInitialDraftUsed?.();
   }, [autoSendInitialDraft, handleSend, id, initialDraft, kind, onInitialDraftUsed]);
 
-  async function handleDelete(message: ChatMessage) {
-    const ok = await confirm({
-      title: 'Delete this message?',
-      body: 'This message will be removed from the conversation.',
-      confirmLabel: 'Delete',
-      tone: 'danger',
-    });
-    if (!ok) return;
-    try {
-      await api(`${endpoint}/${message.id}`, { method: 'DELETE' });
-      toast.success('Message deleted');
-      setMessages((prev) => prev.filter((item) => item.id !== message.id));
-    } catch (error) {
-      toast.error('Failed to delete', String(error));
-    }
-  }
-
   async function handleCopy(message: ChatMessage) {
     try {
       await navigator.clipboard.writeText(message.text);
@@ -1112,12 +1036,190 @@ export function ThreadView({
     }
   }
 
+  async function rerunFromEditedMessage(message: ChatMessage, value: string) {
+    const clientTurnId = createClientTurnId();
+    const streamId = `stream-${clientTurnId}`;
+    const createdAt = message.createdAt;
+    const editedMessage: ChatMessage = {
+      ...message,
+      text: value,
+      deliveryStatus: 'delivered',
+      metadata: {
+        ...(message.metadata ?? {}),
+        clientTurnId,
+      },
+    };
+    const streamingMessage: ChatMessage = {
+      id: streamId,
+      authorId: id,
+      authorKind: 'agent',
+      text: '',
+      createdAt,
+      deliveryStatus: 'sending',
+      metadata: {
+        source: 'chat_loop',
+        clientTurnId,
+        turn: { clientTurnId, startedAt: createdAt, status: 'running' },
+        activity: [{
+          type: 'activity',
+          id: `activity-${clientTurnId}-local-rewrite`,
+          phase: 'runtime',
+          status: 'running',
+          label: `Starting ${name}`,
+          startedAt: new Date().toISOString(),
+          agentId: id,
+          clientTurnId,
+        }],
+      },
+    };
+
+    setEditingId(null);
+    setMessages((current) => {
+      const ordered = sortMessages(current);
+      const anchorIndex = ordered.findIndex((item) => item.id === message.id);
+      const kept = anchorIndex >= 0 ? ordered.slice(0, anchorIndex) : ordered.filter((item) => item.createdAt < message.createdAt);
+      return dedupeMessages([...kept, editedMessage, streamingMessage]);
+    });
+    setAgentTyping(true);
+    setActiveTask({ agentId: id, agentName: name, label: taskLabel(value), done: 0, total: 0, startedAt: Date.now() });
+
+    const toolStartedAt = new Map<string, number>();
+    let toolTotal = 0;
+    let toolDone = 0;
+    let streamedBody = '';
+
+    try {
+      const controller = new AbortController();
+      activeChatAbortRef.current?.abort();
+      activeChatAbortRef.current = controller;
+      const viewportOverride = pendingViewportOverrideRef.current;
+      await streamSse(`${endpoint}/${message.id}/rewrite${querySuffix}`, {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify({
+          text: value,
+          clientTurnId,
+          useViewportContext: true,
+          viewportOverride,
+        }),
+      }, {
+        onEvent(event, data) {
+          if (event === 'delta') {
+            const delta = data as ChatDelta;
+            if (delta.type === 'text') {
+              streamedBody += delta.delta;
+              setMessages((current) => current.map((item) => (
+                item.id === streamId
+                  ? { ...item, text: streamedBody, deliveryStatus: 'sending' }
+                  : item
+              )));
+            } else if (delta.type === 'activity') {
+              updateActiveTask({ label: delta.label });
+              setMessages((current) => current.map((item) => {
+                if (item.id !== streamId) return item;
+                const activity = item.metadata?.activity ?? [];
+                return {
+                  ...item,
+                  metadata: {
+                    ...(item.metadata ?? {}),
+                    source: item.metadata?.source ?? 'chat_loop',
+                    activity: [...activity.filter((entry) => entry.id !== delta.id), delta].slice(-80),
+                  },
+                };
+              }));
+            } else if (delta.type === 'tool_call') {
+              toolStartedAt.set(delta.id, performance.now());
+              toolTotal += 1;
+              updateActiveTask({ total: toolTotal });
+              applyToolCallDelta(streamId, delta);
+            } else if (delta.type === 'tool_result') {
+              toolDone += 1;
+              updateActiveTask({ done: toolDone });
+              applyToolResultDelta(streamId, delta, toolStartedAt);
+            } else if (delta.type === 'confirmation_required') {
+              applyConfirmationDelta(streamId, delta);
+            } else if (delta.type === 'done') {
+              setAgentTyping(false);
+              setActiveTask(null);
+              setMessages((current) => current.map((item) => (
+                item.id === streamId
+                  ? { ...item, deliveryStatus: delta.finishReason === 'error' ? 'failed' : 'delivered' }
+                  : item
+              )));
+            }
+          } else if (event === 'message') {
+            const persisted = normalizeAgentMessage(data as AgentMsg);
+            setMessages((current) => {
+              const streamMessage = current.find((item) => item.id === streamId);
+              return mergeMessage(current, {
+                ...persisted,
+                metadata: {
+                  ...persisted.metadata,
+                  clientTurnId: persisted.metadata?.clientTurnId ?? clientTurnId,
+                  toolCalls: streamMessage?.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
+                  activity: persisted.metadata?.activity ?? streamMessage?.metadata?.activity,
+                  turn: persisted.metadata?.turn ?? streamMessage?.metadata?.turn,
+                },
+              });
+            });
+          } else if (event === 'error') {
+            const errorMessage = streamErrorMessage(data);
+            setAgentTyping(false);
+            setActiveTask(null);
+            setMessages((current) => current.map((item) => (
+              item.id === streamId
+                ? { ...item, text: item.text || errorMessage, deliveryStatus: 'failed' }
+                : item
+            )));
+            toast.error('Agent could not reply', errorMessage);
+          }
+        },
+      });
+      pendingViewportOverrideRef.current = null;
+    } catch (error) {
+      setAgentTyping(false);
+      setActiveTask(null);
+      const stopped = error instanceof DOMException && error.name === 'AbortError';
+      const shouldKeepStoppedBubble = streamedBody.trim().length > 0 || toolTotal > 0;
+      const completedAt = new Date().toISOString();
+      setMessages((current) => current.flatMap((item) => {
+        if (item.id !== streamId) return [item];
+        if (stopped && !shouldKeepStoppedBubble) return [];
+        return [{
+          ...item,
+          deliveryStatus: stopped ? 'delivered' as const : 'failed' as const,
+          metadata: {
+            ...(item.metadata ?? {}),
+            toolCalls: (item.metadata?.toolCalls ?? []).map((tool) => (
+              tool.status === 'running' || tool.status === 'paused'
+                ? { ...tool, status: stopped ? 'stopped' as const : 'error' as const }
+                : tool
+            )),
+            turn: {
+              ...(item.metadata?.turn ?? { clientTurnId, startedAt: item.createdAt }),
+              completedAt,
+              status: stopped ? 'stopped' : 'failed',
+            },
+          },
+        }];
+      }));
+      if (!stopped) toast.error('Failed to rerun from edited message', apiErrorMessage(error));
+    } finally {
+      activeChatAbortRef.current = null;
+    }
+  }
+
   async function handleEditSave(message: ChatMessage, text: string) {
-    if (!text.trim()) return;
+    const value = text.trim();
+    if (!value) return;
+    if (kind === 'agent' && message.authorKind === 'operator') {
+      await rerunFromEditedMessage(message, value);
+      return;
+    }
     try {
       const res = await api<{ message?: AgentMsg | RoomMsg }>(`${endpoint}/${message.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ text: text.trim() }),
+        body: JSON.stringify({ text: value }),
       });
       setEditingId(null);
       if (res.message) {
@@ -1128,7 +1230,7 @@ export function ThreadView({
             : normalizeRoomMessage(res.message as RoomMsg),
         ));
       } else {
-        setMessages((prev) => prev.map((item) => (item.id === message.id ? { ...item, text: text.trim() } : item)));
+        setMessages((prev) => prev.map((item) => (item.id === message.id ? { ...item, text: value } : item)));
       }
     } catch (error) {
       toast.error('Failed to edit message', String(error));
@@ -1149,12 +1251,6 @@ export function ThreadView({
   const awarenessActive = kind === 'agent'
     && awareness.context.surface !== 'chat'
     && awareness.context.surface !== 'unknown';
-  const activeToolCalls = messages
-    .filter((message) => message.deliveryStatus === 'sending')
-    .flatMap((message) => message.metadata?.toolCalls ?? []);
-  const activeRunId = messages.find(
-    (m) => m.deliveryStatus === 'sending' && m.metadata?.runId
-  )?.metadata?.runId;
   const runtimeWarning = kind === 'agent' && !agentNoAdapter
     ? runtimeCapabilityWarning(agentRuntime)
     : null;
@@ -1165,8 +1261,8 @@ export function ThreadView({
   );
 
   return (
-    <div className="flex h-full flex-col">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      <div ref={scrollRef} className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3">
         {id === '__broadcast__' && (
           <div className="mb-4 mt-2 flex items-center justify-center text-center">
             <span className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-text-muted border border-line shadow-sm">
@@ -1174,12 +1270,6 @@ export function ThreadView({
             </span>
           </div>
         )}
-        <StickyProgressBanner
-          toolCalls={activeToolCalls}
-          activeRunId={activeRunId}
-          onCancelRun={handleCancelRun}
-          onJumpToLatest={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })}
-        />
         {loading ? (
           <div className="space-y-2">
             <Skeleton height={36} />
@@ -1191,7 +1281,7 @@ export function ThreadView({
             {emptyBody ?? `Send a message to start a conversation with ${name}.`}
           </div>
         ) : (
-          <ul className="flex flex-col gap-2.5">
+          <ul className="flex min-w-0 flex-col gap-2.5">
             {hasMore && (
               <li className="flex justify-center">
                 <button
@@ -1209,8 +1299,6 @@ export function ThreadView({
                 key={message.id}
                 msg={message}
                 agentData={agentMap[message.authorId]}
-                assistantLabel={kind === 'agent' ? formatAssistantLabel(name, agentRuntime) : undefined}
-                onDelete={() => void handleDelete(message)}
                 onCopy={() => void handleCopy(message)}
                 isEditing={editingId === message.id}
                 readOnly={readOnly}
@@ -1219,7 +1307,6 @@ export function ThreadView({
                 onCancelEdit={() => setEditingId(null)}
                 onConfirmAction={(confirmation, approved) => void handleConfirmationAction(message.id, confirmation, approved)}
                 onCancelRun={handleCancelRun}
-                onStopTurn={message.deliveryStatus === 'sending' ? stopActiveTurn : undefined}
               />
             ))}
           </ul>
@@ -1229,6 +1316,15 @@ export function ThreadView({
             <TypingDots />
             <span>{name} is thinking…</span>
           </div>
+        )}
+        {!isAtBottom && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom('smooth')}
+            className="sticky bottom-2 mx-auto mt-2 block rounded-full border border-line bg-surface px-3 py-1 text-[11px] text-text-secondary shadow-card hover:text-text-primary"
+          >
+            Jump to latest
+          </button>
         )}
       </div>
 
@@ -1267,11 +1363,10 @@ export function ThreadView({
           initialText={composerInitialText}
           placeholder={composerPlaceholder}
           draftKey={`${kind}:${id}:${conversationId ?? 'active'}`}
-          footer={
-            kind === 'agent' ? (
-              <AgentModelSelector agentId={id} compact />
-            ) : undefined
-          }
+          agentId={kind === 'agent' ? id : undefined}
+          isRunning={streamingAgentActive}
+          onStop={stopActiveTurn}
+          footer={undefined}
         />
       )}
     </div>
@@ -1281,8 +1376,6 @@ export function ThreadView({
 function MessageBubble({
   msg,
   agentData,
-  assistantLabel,
-  onDelete,
   onCopy,
   isEditing,
   readOnly,
@@ -1291,11 +1384,8 @@ function MessageBubble({
   onCancelEdit,
   onConfirmAction,
   onCancelRun,
-  onStopTurn,
 }: {
   msg: ChatMessage;
-  assistantLabel?: string;
-  onDelete: () => void;
   onCopy: () => void;
   isEditing: boolean;
   readOnly: boolean;
@@ -1304,20 +1394,14 @@ function MessageBubble({
   onCancelEdit: () => void;
   onConfirmAction: (confirmation: ConfirmationCardData, approved: boolean) => void;
   onCancelRun?: (runId: string) => void;
-  onStopTurn?: () => void;
   agentData?: { name: string; role?: string | null; colorHex?: string | null };
 }) {
   const isOperator = msg.authorKind === 'operator';
   const [editDraft, setEditDraft] = useState(msg.text);
-  const statusLabel = isOperator && msg.deliveryStatus === 'sending'
-    ? 'sending'
-    : msg.deliveryStatus === 'failed'
-      ? 'failed'
-      : null;
   const streaming = msg.deliveryStatus === 'sending';
-  const parsedPlan = !isOperator && !isEditing ? extractPlan(msg.text) : null;
-  const bodyBeforePlan = parsedPlan ? parsedPlan.before : msg.text;
-  const bodyAfterPlan = parsedPlan?.after ?? '';
+  const parsedAgentPlan = !isOperator && !isEditing ? extractAgentPlan(msg.text) : null;
+  const bodyBeforePlan = parsedAgentPlan ? parsedAgentPlan.before : msg.text;
+  const bodyAfterPlan = parsedAgentPlan?.after ?? '';
   const toolCalls = msg.metadata?.toolCalls ?? [];
   const activities = msg.metadata?.activity ?? [];
 
@@ -1326,7 +1410,7 @@ function MessageBubble({
   }, [isEditing, msg.text]);
 
   return (
-    <li className={clsx('group flex flex-col gap-0.5', isOperator ? 'items-end' : 'items-start')}>
+    <li className={clsx('group flex min-w-0 max-w-full flex-col gap-0.5', isOperator ? 'items-end' : 'items-start')}>
       {!isOperator && msg.authorKind !== 'system' && (
         <span
           className="px-1 text-[11px] font-medium"
@@ -1336,13 +1420,20 @@ function MessageBubble({
           {agentData?.role ? ` - ${agentData.role}` : ''}
         </span>
       )}
-      <div className="flex items-start gap-1.5">
+      <div className={clsx('flex min-w-0 max-w-full items-start gap-1.5', !isOperator && 'w-full')}>
         {isOperator && !readOnly && (
-          <MessageActions onCopy={onCopy} onDelete={onDelete} onEdit={onStartEdit} />
+          <MessageActions onCopy={onCopy} onEdit={onStartEdit} />
         )}
         <div
           className={clsx(
-            'max-w-[85%] rounded-card px-3 py-2 text-[13px] leading-relaxed',
+            'min-w-0 overflow-hidden rounded-card px-3 py-2 text-[13px] leading-relaxed',
+                  isOperator
+                    ? 'max-w-[85%]'
+                    : streaming
+                      ? 'w-full max-w-full'
+                    : parsedAgentPlan
+                        ? 'w-full max-w-full'
+                        : 'max-w-[85%]',
             isOperator
               ? 'bg-accent-soft text-text-primary'
               : msg.authorKind === 'system'
@@ -1350,28 +1441,23 @@ function MessageBubble({
                 : 'bg-surface-2 text-text-primary shadow-[0_18px_35px_-30px_rgba(0,0,0,0.7)]',
           )}
         >
-          {!isOperator && (streaming || activities.length > 0 || Boolean(msg.metadata?.thinking)) && (
+          {!isOperator && (streaming || activities.length > 0) && (
             <LiveActivityTrace
-              text={msg.metadata?.thinking ?? ''}
               activities={activities}
               turn={msg.metadata?.turn}
               streaming={streaming}
               failed={msg.deliveryStatus === 'failed'}
-              onStop={onStopTurn}
             />
           )}
           {!isEditing && bodyBeforePlan && (
             isOperator ? (
-              <div className="mb-2 whitespace-pre-wrap break-words">{bodyBeforePlan}</div>
+              <div className="mb-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{bodyBeforePlan}</div>
             ) : (
-              <div className="mb-2 break-words">
+              <div className="mb-2 break-words [overflow-wrap:anywhere]">
                 <ChatMarkdown text={bodyBeforePlan} />
-                {streaming && !bodyAfterPlan ? <StreamingCursor /> : null}
+                {streaming ? <StreamingCursor /> : null}
               </div>
             )
-          )}
-          {!isOperator && parsedPlan && (
-            <PlanList items={derivePlanItems(parsedPlan.items, toolCalls, streaming)} />
           )}
           {!isOperator && toolCalls.length > 0 && (
             <ExecutionFeed toolCalls={toolCalls} streaming={streaming} />
@@ -1383,6 +1469,7 @@ function MessageBubble({
               onCancel={() => onConfirmAction(msg.metadata!.confirmation!, false)}
             />
           )}
+          {parsedAgentPlan && <ChatPlanCanvas planText={parsedAgentPlan.planText} />}
           {msg.metadata?.card && <ProactiveCard data={msg.metadata.card} />}
           {msg.metadata?.runId && (
             <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/60 px-2 py-1.5 text-[11px] text-text-secondary">
@@ -1391,9 +1478,19 @@ function MessageBubble({
                 {msg.metadata.runTitle ?? (msg.metadata.isEphemeral ? 'Ephemeral run' : 'Workflow run')}
               </span>
               {msg.metadata.runStatus && <span className="uppercase tracking-wide text-text-muted">{msg.metadata.runStatus}</span>}
-              <Link to={`/runs/${msg.metadata.runId}`} className="font-medium text-accent hover:underline">Open run</Link>
+              <button
+                type="button"
+                onClick={() => openRunModal({
+                  runId: msg.metadata!.runId!,
+                  workflowId: msg.metadata!.workflowId,
+                  source: 'chat-message',
+                })}
+                className="font-medium text-accent hover:underline"
+              >
+                Inspect run
+              </button>
               {msg.metadata.workflowId && (
-                <Link to={`/workflows/${msg.metadata.workflowId}`} className="font-medium text-accent hover:underline">Workflow</Link>
+                <Link to={`/apps/workflows/${msg.metadata.workflowId}`} className="font-medium text-accent hover:underline">Logic</Link>
               )}
               {onCancelRun && msg.metadata.runId && (!msg.metadata.runStatus || ['running', 'pending'].includes(msg.metadata.runStatus)) && (
                 <button
@@ -1442,28 +1539,16 @@ function MessageBubble({
               </div>
             </div>
           ) : bodyAfterPlan ? (
-            isOperator ? (
-              <div className="whitespace-pre-wrap break-words">{bodyAfterPlan}</div>
-            ) : (
-              <div className="break-words">
-                <ChatMarkdown text={bodyAfterPlan} />
-                {streaming ? <StreamingCursor /> : null}
-              </div>
-            )
-          ) : (msg.metadata?.card || msg.metadata?.confirmation || toolCalls.length > 0 || activities.length > 0 || bodyBeforePlan || (!isOperator && msg.metadata?.thinking)) ? null : streaming && !isOperator ? (
+            <div className="mt-2 break-words [overflow-wrap:anywhere]">
+              <ChatMarkdown text={bodyAfterPlan} />
+            </div>
+          ) : (msg.metadata?.card || msg.metadata?.confirmation || parsedAgentPlan || toolCalls.length > 0 || activities.length > 0 || bodyBeforePlan) ? null : streaming && !isOperator ? (
             <TypingDots />
           ) : !isOperator ? null : (
             <div className="text-[12px] italic text-text-muted">No text content</div>
           )}
-          <div className="mt-1.5 border-t border-line/30 pt-1 flex flex-wrap items-center gap-1.5 text-[10px] font-mono tracking-wider text-text-muted">
-            <span>{new Date(msg.createdAt).toLocaleTimeString()}</span>
-            {!isOperator && msg.authorKind === 'agent' && assistantLabel && (
-              <span className="rounded bg-canvas px-1">{assistantLabel}</span>
-            )}
-            {statusLabel && <span className={clsx('uppercase font-bold', statusLabel === 'sending' ? 'text-accent' : 'text-danger')}>{statusLabel}</span>}
-          </div>
         </div>
-        {!isOperator && <MessageActions onCopy={onCopy} onDelete={onDelete} />}
+        {!isOperator && <MessageActions onCopy={onCopy} />}
       </div>
     </li>
   );
@@ -1682,11 +1767,9 @@ function StreamingCursor() {
 
 function MessageActions({
   onCopy,
-  onDelete,
   onEdit,
 }: {
   onCopy: () => void;
-  onDelete: () => void;
   onEdit?: () => void;
 }) {
   return (
@@ -1708,14 +1791,6 @@ function MessageActions({
         className="rounded p-0.5 text-text-muted hover:bg-surface-2 hover:text-text-primary"
       >
         <Copy size={10} />
-      </button>
-      <button
-        type="button"
-        onClick={onDelete}
-        aria-label="Delete"
-        className="rounded p-0.5 text-text-muted hover:bg-surface-2 hover:text-danger"
-      >
-        <Trash2 size={10} />
       </button>
     </div>
   );

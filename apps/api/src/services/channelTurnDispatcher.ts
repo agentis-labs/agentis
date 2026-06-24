@@ -22,12 +22,14 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { AgentAdapter, ChatMessage, ChatTurnContext } from '@agentis/core';
+import type { AgentAdapter, ChatDelta, ChatMessage, ChatTurnContext } from '@agentis/core';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from './chatSessionExecutor.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
 import type { Logger } from '../logger.js';
+import type { EventBus } from '../event-bus.js';
+import { publishAgentWorkStep, publishChatDeltaProgress } from './agentWorkProgress.js';
 
 export interface ChannelTurnDeliver {
   (args: { connectionId: string; chatId: string; body: string }): Promise<void>;
@@ -38,6 +40,8 @@ export interface ChannelTurnDispatcherDeps {
   adapters: AdapterManager;
   conversations: ConversationStore;
   logger: Logger;
+  /** Workspace realtime feed for channel turns. */
+  bus?: EventBus;
   /** Send the orchestrator's reply back to the origin channel. */
   deliver: ChannelTurnDeliver;
   /** Optional: show/clear the typing indicator while the turn runs. */
@@ -112,6 +116,12 @@ export class ChannelTurnDispatcher {
    * runs immediately. Fire-and-forget safe — never throws.
    */
   async dispatch(input: ChannelTurnInput): Promise<{ replied: boolean; reason?: string }> {
+    this.#publishWorkStep(input, null, {
+      phase: 'received',
+      step: 'channel_message',
+      description: `${channelLabel(input.kind)} message received`,
+      detail: input.from ? `From ${input.from}` : `Chat ${input.chatId}`,
+    });
     const windowMs = this.deps.debounceMs ?? 0;
     if (windowMs <= 0) {
       return this.#executeTurn(input, input.inboundMessageId ? [input.inboundMessageId] : []);
@@ -153,10 +163,17 @@ export class ChannelTurnDispatcher {
    * that instead of starting a fresh turn. Never throws.
    */
   async #executeTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
+    const clientTurnId = `channel-${randomUUID()}`;
     try {
       const adapter = this.#resolveAdapter(input.agentId, input.workspaceId);
       if (!adapter) {
-        await this.#safeDeliver(input, NOT_CONNECTED);
+        this.#publishWorkStep(input, clientTurnId, {
+          phase: 'fail',
+          step: 'runtime',
+          description: 'Channel reply failed',
+          detail: NOT_CONNECTED,
+        });
+        await this.#persistAndDeliver(input, NOT_CONNECTED, { deliveryStatus: 'failed' });
         return { replied: false, reason: 'no_chat_adapter' };
       }
 
@@ -183,6 +200,7 @@ export class ChannelTurnDispatcher {
           agentId: input.agentId,
           userId: input.userId,
           conversationId: input.conversationId,
+          clientTurnId,
           maxTurns: 8,
           viewport: null,
         };
@@ -194,10 +212,13 @@ export class ChannelTurnDispatcher {
 
       let finalText = '';
       let finishReason = 'stop';
+      let runtimeError: string | null = null;
       let confirmation: Extract<import('@agentis/core').ChatDelta, { type: 'confirmation_required' }> | null = null;
       for await (const delta of stream) {
+        this.#publishDelta(input, clientTurnId, delta);
         if (delta.type === 'text') finalText += delta.delta;
         else if (delta.type === 'confirmation_required') confirmation = delta;
+        else if (delta.type === 'tool_result' && delta.error) runtimeError = delta.error;
         else if (delta.type === 'done') finishReason = delta.finishReason;
       }
 
@@ -216,6 +237,17 @@ export class ChannelTurnDispatcher {
 
       const body = finalText.trim();
       if (!body) {
+        if (finishReason === 'error') {
+          const failure = channelTurnFailureMessage(runtimeError);
+          this.#publishWorkStep(input, clientTurnId, {
+            phase: 'fail',
+            step: 'runtime',
+            description: 'Channel reply failed',
+            detail: failure,
+          });
+          await this.#persistAndDeliver(input, failure, { deliveryStatus: 'failed' });
+          return { replied: true, reason: 'runtime_error' };
+        }
         this.deps.logger.info('channel.turn.empty_reply', {
           connectionId: input.connectionId,
           conversationId: input.conversationId,
@@ -238,28 +270,85 @@ export class ChannelTurnDispatcher {
         conversationId: input.conversationId,
         err: (err as Error).message,
       });
-      return { replied: false, reason: 'error' };
+      const failure = channelTurnFailureMessage(err);
+      this.#publishWorkStep(input, clientTurnId, {
+        phase: 'fail',
+        step: 'runtime',
+        description: 'Channel reply failed',
+        detail: failure,
+      });
+      await this.#persistAndDeliver(input, failure, { deliveryStatus: 'failed' });
+      return { replied: true, reason: 'error_notified' };
     } finally {
       void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
     }
   }
 
   /** Persist a reply as an agent message and deliver it to the channel. */
-  async #persistAndDeliver(input: ChannelTurnInput, body: string): Promise<void> {
+  async #persistAndDeliver(
+    input: ChannelTurnInput,
+    body: string,
+    options: { deliveryStatus?: 'delivered' | 'failed' | 'mirrored' } = {},
+  ): Promise<void> {
     this.deps.conversations.appendMirrored({
       workspaceId: input.workspaceId,
       conversationId: input.conversationId,
       sessionMessageId: `channel_reply_${randomUUID()}`,
       authorType: 'agent',
       body,
+      deliveryStatus: options.deliveryStatus ?? 'delivered',
       metadata: {
         channel: input.kind,
         channelConnectionId: input.connectionId,
         channelReply: true,
+        channelChatId: input.chatId,
         ...(input.threadId ? { threadId: input.threadId } : {}),
       },
     });
     await this.#safeDeliver(input, body);
+  }
+
+  #publishDelta(input: ChannelTurnInput, clientTurnId: string, delta: ChatDelta): void {
+    if (!this.deps.bus) return;
+    if (delta.type === 'thinking') {
+      publishAgentWorkStep(this.deps.bus, {
+        workspaceId: input.workspaceId,
+        ambientId: input.ambientId,
+        agentId: input.agentId,
+        conversationId: input.conversationId,
+        clientTurnId,
+        phase: 'thinking',
+        step: 'thinking',
+        description: delta.delta,
+      });
+      return;
+    }
+    publishChatDeltaProgress(this.deps.bus, {
+      workspaceId: input.workspaceId,
+      ambientId: input.ambientId,
+      agentId: input.agentId,
+      conversationId: input.conversationId,
+      clientTurnId,
+    }, delta);
+  }
+
+  #publishWorkStep(
+    input: ChannelTurnInput,
+    clientTurnId: string | null,
+    args: { phase: string; step: string; description: string; detail?: string },
+  ): void {
+    if (!this.deps.bus) return;
+    publishAgentWorkStep(this.deps.bus, {
+      workspaceId: input.workspaceId,
+      ambientId: input.ambientId,
+      agentId: input.agentId,
+      conversationId: input.conversationId,
+      ...(clientTurnId ? { clientTurnId } : {}),
+      phase: args.phase,
+      step: args.step,
+      description: args.description,
+      ...(args.detail ? { detail: args.detail } : {}),
+    });
   }
 
   #takeFreshPending(key: string): PendingChannelConfirmation | undefined {
@@ -352,4 +441,34 @@ export function interpretConfirmation(text: string): boolean | null {
     return false;
   }
   return null;
+}
+
+function channelTurnFailureMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const detail = raw.trim();
+  if (isCreditOrQuotaError(detail)) {
+    return 'I could not answer because the connected model runtime is out of credits, quota, or billing access. Add credits or switch the Conversation runtime in Agentis settings, then send the message again.';
+  }
+  if (/cancell?ed|aborted/i.test(detail)) {
+    return 'The channel turn was cancelled before the agent could finish. Send the message again when the runtime is available.';
+  }
+  if (/timeout|timed out|deadline/i.test(detail)) {
+    return 'The agent runtime timed out before it could answer this channel message. The turn is visible in Agentis, and you can retry after the runtime is responsive.';
+  }
+  return detail
+    ? `I could not complete this channel turn: ${detail}`
+    : 'I could not complete this channel turn. Check the agent runtime in Agentis and try again.';
+}
+
+function isCreditOrQuotaError(message: string): boolean {
+  return /insufficient[_\s]?quota/i.test(message)
+    || /insufficient[_\s]?(funds|credit|credits|balance)/i.test(message)
+    || /out of credits?/i.test(message)
+    || /billing|payment required|quota exceeded|exceeded your current quota/i.test(message)
+    || /\bno credits?\b/i.test(message);
+}
+
+function channelLabel(kind: string): string {
+  if (!kind) return 'Channel';
+  return `${kind.slice(0, 1).toUpperCase()}${kind.slice(1)}`;
 }

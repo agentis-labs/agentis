@@ -50,6 +50,32 @@ function normalizeParams(
   inputData: Record<string, unknown>,
   contract: ConnectorOperationContract,
 ): Record<string, unknown> {
+  const out = applyContractAliases(params, inputData, contract);
+  for (const field of contract.required ?? []) {
+    if (!isPresent(out[field])) {
+      throw new AgentisError('VALIDATION_FAILED', `${field} is required`);
+    }
+  }
+  for (const group of contract.requiredAny ?? []) {
+    if (!group.some((field) => isPresent(out[field]))) {
+      throw new AgentisError('VALIDATION_FAILED', `one of ${group.join(', ')} is required`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Canonicalize `params` against a contract's aliases, drawing from `params` and
+ * `inputData` (and JSON objects nested inside their text fields). Pure — no
+ * throwing. Shared by {@link normalizeParams} (run time) and
+ * {@link missingContractFields} (design-time preflight) so both resolve fields
+ * the same way.
+ */
+function applyContractAliases(
+  params: Record<string, unknown>,
+  inputData: Record<string, unknown>,
+  contract: ConnectorOperationContract,
+): Record<string, unknown> {
   const out = { ...params };
   const candidates = [
     ...parsedObjectsFrom(params),
@@ -67,17 +93,31 @@ function normalizeParams(
       }
     }
   }
+  return out;
+}
+
+/**
+ * Required / requiredAny fields a contract cannot satisfy from `params` +
+ * `inputData` after the same alias resolution {@link normalizeParams} applies at
+ * run time. Returns the unmet field names (a `requiredAny` group is reported as
+ * `"a or b"`); an empty array means the contract is satisfied. Lets the workflow
+ * preflight probe a connector node's resolved config without crossing the
+ * network — the design-time mirror of the run-time guard.
+ */
+export function missingContractFields(
+  params: Record<string, unknown>,
+  inputData: Record<string, unknown>,
+  contract: ConnectorOperationContract,
+): string[] {
+  const out = applyContractAliases(params, inputData, contract);
+  const missing: string[] = [];
   for (const field of contract.required ?? []) {
-    if (!isPresent(out[field])) {
-      throw new AgentisError('VALIDATION_FAILED', `${field} is required`);
-    }
+    if (!isPresent(out[field])) missing.push(field);
   }
   for (const group of contract.requiredAny ?? []) {
-    if (!group.some((field) => isPresent(out[field]))) {
-      throw new AgentisError('VALIDATION_FAILED', `one of ${group.join(', ')} is required`);
-    }
+    if (!group.some((field) => isPresent(out[field]))) missing.push(group.join(' or '));
   }
-  return out;
+  return missing;
 }
 
 function firstPresent(source: Record<string, unknown>, keys: readonly string[]): unknown {

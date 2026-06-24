@@ -7,8 +7,19 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, layoutWorkflowGraph, isAgentRole } from '@agentis/core';
-import type { AgentAdapter, ExtensionManifest, RealtimeEventName, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
+import {
+  AgentisError,
+  REALTIME_EVENTS,
+  REALTIME_ROOMS,
+  agentSatisfiesRequirements,
+  isAgentRole,
+  layoutWorkflowGraph,
+  layoutWorkflowGraphByPhases,
+  normalizeAgentRequirements,
+  requiredAffordanceKeys,
+  suggestWorkflowPhases,
+} from '@agentis/core';
+import type { AgentAdapter, AgentRequirements, ExtensionManifest, RealtimeEventName, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
@@ -16,6 +27,7 @@ import { PackagerService } from '../packager.js';
 import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan } from '../creationPipeline.js';
 import { AdapterStructuredCompleter, type StructuredCompleter } from '../structuredCompleter.js';
 import { analyzeWorkflowReadiness } from '../workflowReadiness.js';
+import { preflightWorkflow } from '../workflowPreflight.js';
 import { listIntegrationManifests } from '../integrationRegistry.js';
 import { repairIntegrationOperations } from '../integrationOperationRepair.js';
 import { scheduleFromNaturalLanguage } from '../scheduleFromNaturalLanguage.js';
@@ -176,7 +188,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       handler: async (args, ctx) => {
         const id = randomUUID();
         const now = new Date().toISOString();
-        const graph = args.graph as WorkflowGraph;
+        const graph = layoutBuiltWorkflowGraph(args.graph as WorkflowGraph, { existingWorkflow: false });
         deps.db
           .insert(schema.workflows)
           .values({
@@ -238,7 +250,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         if (!wf || wf.workspaceId !== ctx.workspaceId) {
           throw new Error(`workflow ${args.workflowId} not found`);
         }
-        const graph = args.graph as WorkflowGraph;
+        const graph = layoutBuiltWorkflowGraph(args.graph as WorkflowGraph, { existingWorkflow: false });
         deps.db
           .update(schema.workflows)
           .set({ graph, updatedAt: new Date().toISOString() })
@@ -271,7 +283,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.build_workflow',
         family: 'build',
         description:
-          'Generate or REVISE a workflow from natural language and stream canvas build events. '
+          'Validate, enrich, save, and stream an agent-authored workflow draft, or synthesize with a configured fast model. '
           + 'To refine the workflow you just built in this conversation, call again WITHOUT a workflowId — '
           + 'it updates that same workflow in place. Pass workflowId to target a specific one, or set '
           + 'newWorkflow=true to deliberately create a separate workflow. '
@@ -285,6 +297,14 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             title: { type: 'string' },
             workflowId: { type: 'string' },
             newWorkflow: { type: 'boolean' },
+            graphDraft: {
+              type: 'object',
+              description: 'Agent-authored WorkflowGraph for a new workflow or full replacement.',
+            },
+            patchDraft: {
+              type: 'object',
+              description: 'Agent-authored patch object for editing the target workflow: addNodes/updateNodes/removeNodeIds/addEdges/removeEdgeIds.',
+            },
           },
           required: ['description'],
         },
@@ -325,6 +345,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             description,
             title: args.title ? String(args.title) : undefined,
             workflowId: targetWorkflowId,
+            graphDraft: args.graphDraft,
+            patchDraft: args.patchDraft,
             stream: true,
             ...(ctx.signal ? { signal: ctx.signal } : {}),
           });
@@ -450,6 +472,10 @@ export interface CreateWorkflowArgs {
   description: string;
   title?: string;
   workflowId?: string | null;
+  /** Agent-authored graph draft. Agentis validates, repairs, enriches, and saves it. */
+  graphDraft?: unknown;
+  /** Agent-authored edit patch for the target workflow. */
+  patchDraft?: unknown;
   /** When true, animate the build (per-node canvas events + small delays). */
   stream?: boolean;
   /**
@@ -467,8 +493,8 @@ export interface CreateWorkflowArgs {
 /**
  * Shared workflow-creation core (ORCHESTRATOR-CREATION-10X). Used by the
  * `build_workflow` chat tool AND the `POST /v1/workflows/build` Builder Session
- * route: assemble the brief, synthesize (LLM → deterministic fallback), pre-flight
- * enrich, persist, and stream the live canvas build events.
+ * route: assemble the brief, accept an agent-authored draft/patch or synthesize
+ * with a configured fast model, then pre-flight, enrich, persist, and stream.
  */
 export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args: CreateWorkflowArgs) {
   const description = args.description.trim();
@@ -534,7 +560,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // Cancellation: when the chat turn that started this build is aborted (operator
   // disconnected / turn deadline), stop BEFORE each model-spending stage instead
   // of running the full ~6-call pipeline into the void. Cheap stage-boundary checks
-  // here + in-flight HTTP abort in the runtimes together stop the orphaned spend.
+  // here + in-flight HTTP abort in the runtimes together stop abandoned spend.
   const throwIfCanceled = () => {
     if (args.signal?.aborted) {
       throw new AgentisError('OPERATION_CANCELED', 'Build canceled — the chat turn ended before it finished.');
@@ -547,31 +573,45 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     : description;
   const brief = await assembleCreationBrief(deps, args.workspaceId, args.agentId, briefInput);
   throwIfCanceled();
-
-  // ── Stage 1: draft the graph (plan → LLM synthesis) ──
+  // ── Stage 1: accept an agent draft/plan, or synthesize with a fast model ──
   phase('drafting');
-  const synthCompleter = resolveSynthesisCompleter(deps, args.workspaceId, args.agentId);
+  const synthCompleter = resolveSynthesisCompleter(deps, args.workspaceId, args.agentId, description);
   const synthModelAvailable = Boolean(synthCompleter);
   let rawGraphBase: WorkflowGraph;
-  let synthesis: 'plan' | 'llm' | 'deterministic';
-  const deterministic = args.plan || existingWorkflow ? null : tryCompileDeterministicWorkflow(description);
+  let synthesis: 'plan' | 'llm' | 'agent_draft' | 'agent_patch';
   if (args.plan && args.plan.phases.length > 0) {
     rawGraphBase = assembleGraphFromPlan(args.plan, description);
     synthesis = 'plan';
-  } else if (deterministic) {
-    rawGraphBase = deterministic.graph;
-    synthesis = 'deterministic';
-    phase('drafting', deterministic.detail);
+  } else if (args.patchDraft !== undefined) {
+    if (!existingWorkflow) {
+      phase('blocked', 'A workflowId is required before a patch draft can be applied');
+      throw new AgentisError(
+        'WORKFLOW_DRAFT_INVALID',
+        'patchDraft can only update an existing workflow. Pass workflowId, or pass a complete graphDraft for a new workflow.',
+      );
+    }
+    rawGraphBase = applyWorkflowMutationPatch(existingWorkflow.graph as WorkflowGraph, args.patchDraft);
+    assertMutationPreservesGraph(existingWorkflow.graph as WorkflowGraph, rawGraphBase, description);
+    validateWorkflowGraph(rawGraphBase);
+    synthesis = 'agent_patch';
+    phase('drafting', 'Accepted the agent-authored workflow patch');
+  } else if (args.graphDraft !== undefined) {
+    rawGraphBase = parseAgentGraphDraft(args.graphDraft);
+    validateWorkflowGraph(rawGraphBase);
+    if (existingWorkflow) {
+      assertMutationPreservesGraph(existingWorkflow.graph as WorkflowGraph, rawGraphBase, description);
+    }
+    synthesis = 'agent_draft';
+    phase('drafting', 'Accepted the agent-authored workflow graph');
   } else if (!synthCompleter) {
-    // Agentis is an agentic platform: workflow creation is AI-driven. There is
-    // NO deterministic fallback — emitting a "dumb" template would be worse than
-    // refusing. With no configured model AND no chat-capable agent, tell the
-    // operator exactly how to enable it.
+    // Do not recursively invoke a slow runtime-native harness from inside its own
+    // build tool call. The selected agent should draft the graph/patch and let
+    // Agentis validate, repair, enrich, and persist it.
     deps.logger.warn('createWorkflow.no_model', { workspaceId: args.workspaceId, agentId: args.agentId ?? null });
-    phase('blocked', 'No model is available to build with');
+    phase('blocked', 'The agent must provide graphDraft or patchDraft');
     throw new AgentisError(
-      'WORKFLOW_SYNTHESIS_UNAVAILABLE',
-      'Agentis builds workflows with AI. The building agent has no usable model — set one for it (the chat model picker), configure an Orchestrator model in Settings → Runtimes, or set AGENTIS_ORCHESTRATOR_MODEL, then ask me to build this again.',
+      'WORKFLOW_DRAFT_REQUIRED',
+      'This runtime owns the work. Inspect the user request and current Agentis state, then call agentis.build_workflow again with graphDraft for a new workflow or patchDraft for an edit. Agentis will validate, repair, enrich, save, and stream it.',
     );
   } else {
     const outcome = await synthesizeWithLlm(
@@ -586,9 +626,8 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
         : undefined,
     );
     if (!outcome.graph) {
-      // A model WAS available but couldn't produce a usable graph. Surface the
-      // REAL reason (the backend's own error, or the validation failure) — not a
-      // generic "couldn't build" — so the operator can act on it.
+      // Surface the backend or validation error so the operator can act on the
+      // real failure instead of receiving a fabricated fallback graph.
       const runtimeFailure = isSynthesisRuntimeFailure(outcome.error);
       const detail = runtimeFailure
         ? `Workflow synthesis runtime failed${outcome.error ? `: ${outcome.error}` : ''}`
@@ -602,15 +641,18 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
           ? `Workflow synthesis could not reach a healthy model runtime${outcome.error ? ` (${outcome.error})` : ''}. The selected model was not rejected for capability; Agentis exhausted the transient runtime retry. Check the runtime connection and retry.`
           : `The model returned a workflow that Agentis could not validate${outcome.error ? ` (${outcome.error})` : ''}. Retry the request or inspect the validation detail.`,
       );
+    } else {
+      rawGraphBase = outcome.graph;
+      synthesis = 'llm';
     }
-    rawGraphBase = outcome.graph;
-    synthesis = 'llm';
   }
   const draftDetail = synthesis === 'llm'
     ? 'Synthesized with the orchestrator model'
-    : synthesis === 'deterministic'
-      ? 'Compiled with the fast deterministic graph builder'
-      : 'Assembled from your approved plan';
+    : synthesis === 'agent_draft'
+      ? 'Validated an agent-authored graph draft'
+      : synthesis === 'agent_patch'
+        ? 'Applied an agent-authored workflow patch'
+        : 'Assembled from your approved plan';
   phase('drafting', draftDetail);
 
   // ── Stage 2: deterministic structural repair (Iron Rules) ──
@@ -631,8 +673,8 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // setup fast (seconds) instead of doubling an already-slow build.
   const critiques: BuildCritique[] = [];
   let reviewRounds = 0;
-  const reviewer = synthesis === 'llm' && !buildOnlyHasSlowPath(deps, args.workspaceId, args.agentId)
-    ? resolveReviewerCompleter(deps, args.workspaceId, args.agentId)
+  const reviewer = synthesis === 'llm' && !buildOnlyHasSlowPath(deps, args.workspaceId, args.agentId, description)
+    ? resolveReviewerCompleter(deps, args.workspaceId, args.agentId, description)
     : undefined;
   if (reviewer) {
     phase('reviewing', 'Auditing the graph against the workflow grammar');
@@ -674,6 +716,9 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   throwIfCanceled();
   // F7 — materialize the cast: commission a real specialist agent per role and
   // pin it to its node, so the team is real and visible right after the build.
+  if (!existingWorkflow) {
+    workingGraph = normalizeGeneratedHalRequirements(workingGraph);
+  }
   const casting = materializeCast(workingGraph, deps, args.workspaceId, args.userId);
   workingGraph = casting.graph;
   if (casting.cast.length > 0) {
@@ -688,6 +733,17 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   const selfDelivery = fillSelfDeliveryRecipient(workingGraph, deps, args.userId, description);
   workingGraph = selfDelivery.graph;
   if (selfDelivery.filled) phase('repairing', 'Set the email recipient to your account');
+
+  const emailDelivery = ensureEmailDeliveryInputs(workingGraph, description);
+  workingGraph = emailDelivery.graph;
+  if (emailDelivery.completed) {
+    phase(
+      'repairing',
+      emailDelivery.recipientFromRequest
+        ? 'Completed the email delivery details from your request'
+        : 'Completed the email delivery subject and content',
+    );
+  }
 
   const preflight = preflightAndEnrich(workingGraph, brief.inventory);
   // Normalize integration operation names to each connector's REAL catalog so
@@ -704,7 +760,11 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   }
   // Tidy the graph with the shared layered layout so it's readable and framable
   // the instant it lands on the canvas — AI models place nodes arbitrarily.
-  const graph = ensureNodeDisplayFields(layoutWorkflowGraph(opFix.graph));
+  const laidOutGraph = layoutBuiltWorkflowGraph(opFix.graph, {
+    existingWorkflow: Boolean(existingWorkflow),
+    replacePhases: synthesis === 'plan' || wantsPhaseOrganization(description),
+  });
+  const graph = ensureNodeDisplayFields(laidOutGraph);
   const teamRoster = buildTeamRoster(graph, brief.inventory);
   const deliveryPreview = buildDeliveryPreview(graph);
   const approvalRequired = hasManualApprovalBeforeDelivery(graph);
@@ -724,6 +784,24 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     if (args.stream) phase('building', `Scheduled — ${scheduled.detail}`);
   }
 
+  const health = relaxBuildOnlyEmailRecipientIssue(preflightWorkflow({
+    db: deps.db,
+    workspaceId: args.workspaceId,
+    workflowId,
+    graph,
+  }), graph, description);
+  if (health.status === 'blocked') {
+    const first = health.issues.find((issue) => issue.severity === 'error');
+    // Surface the precise issue AND its remediation so the building agent gets a
+    // machine-actionable fix (e.g. "extension uses require(...) — use ctx.http.fetch")
+    // instead of a vague "simulation failed" it can only retry blindly.
+    const detail = first
+      ? `${first.nodeTitle ? `${first.nodeTitle}: ` : ''}${first.message}${first.remediation ? ` — ${first.remediation}` : ''}`
+      : 'The deterministic workflow simulation failed.';
+    phase('blocked', detail);
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID', `Workflow preflight failed before save: ${detail}`);
+  }
+
   const trace = {
     synthesis,
     synthModelAvailable,
@@ -733,6 +811,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     critiques,
     archetype: brief.classification.archetype,
     warnings: preflight.warnings,
+    health,
   };
 
   const now = new Date().toISOString();
@@ -800,9 +879,22 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
 
   for (const node of graph.nodes) {
     if (args.stream) await sleep(120);
+    // Phase metadata must travel with the node, not only in the final saved
+    // graph.  The canvas receives these events while the build is in progress;
+    // without it it can place nodes live but cannot render their phase bands
+    // until a refresh fetches the finished workflow.
+    const nodePhase = graph.phases?.find((phase) => phase.nodeIds.includes(node.id));
     publishCanvas(deps, pubCtx, REALTIME_EVENTS.CANVAS_NODE_PLACED, {
       workflowId, runId: streamRunId, agentId: args.agentId ?? null,
       node: { id: node.id, type: 'default', position: node.position, data: { label: node.title, kind: node.config.kind } },
+      ...(nodePhase ? {
+        phase: {
+          id: nodePhase.id,
+          name: nodePhase.name,
+          color: nodePhase.color,
+          nodeIds: [node.id],
+        },
+      } : {}),
       nodeLabel: node.title, reason: nodeReason(node),
     });
     publishCanvas(deps, pubCtx, REALTIME_EVENTS.AGENT_WORK_STEP, {
@@ -860,6 +952,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     teamRoster,
     plan: brief.classification.archetype === 'enterprise' ? planWorkflow(description, brief.classification) : undefined,
     graph,
+    health,
     trace,
     message: `Workflow "${title}" built with ${graph.nodes.length} nodes (${brief.classification.archetype}).`
       + ` Est. ~${Math.max(1, Math.round(estimateDurationMs(graph) / 1000))}s/run`
@@ -871,6 +964,28 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       + (approvalRequired ? ' Requires approval before delivery.' : '')
       + warnSummary,
   };
+}
+
+export function layoutBuiltWorkflowGraph(
+  graph: WorkflowGraph,
+  options: { existingWorkflow: boolean; replacePhases?: boolean },
+): WorkflowGraph {
+  const shouldEnsurePhases = (!options.existingWorkflow || options.replacePhases) && graph.nodes.length >= 4;
+  const phaseReadyGraph = shouldEnsurePhases
+    ? {
+        ...graph,
+        phases: graph.phases?.length && !options.replacePhases
+          ? graph.phases
+          : suggestWorkflowPhases(graph),
+      }
+    : graph;
+  return phaseReadyGraph.phases?.length
+    ? layoutWorkflowGraphByPhases(phaseReadyGraph)
+    : layoutWorkflowGraph(phaseReadyGraph);
+}
+
+function wantsPhaseOrganization(description: string): boolean {
+  return /\b(phase|phases|lane|lanes|group|grouped|organize|organise|structure)\b/i.test(description);
 }
 
 /**
@@ -1079,9 +1194,29 @@ function materializeCast(
   const cast: CastMember[] = [];
   const byRole = new Map<string, string>();
   const nodes = graph.nodes.map((n) => {
-    const cfg = n.config as { kind?: string; agentRole?: string; agentId?: string };
+    const cfg = n.config as { kind?: string; agentRole?: string; agentId?: string; requires?: unknown };
     if (!AGENT_NODE_KINDS.has(cfg.kind ?? '')) return n;
     if (cfg.agentId) return n; // operator pinned a specific agent — respect it
+
+    // When the node declares hard HAL runtime requirements, a freshly-seeded role
+    // specialist is an offline `http` placeholder that can NEVER satisfy them —
+    // the exact "the orchestrator runs browser work itself / the node stays red"
+    // failure. Bind a CONNECTED workspace agent whose LIVE runtime advertises the
+    // required affordances instead (preferring one that already matches the role).
+    const requires = normalizeAgentRequirements(cfg.requires);
+    if (requiredAffordanceKeys(requires).length > 0) {
+      const capable = findConnectedCapableAgent(deps, workspaceId, requires, cfg.agentRole);
+      if (capable) {
+        if (!cast.some((c) => c.agentId === capable.id)) {
+          cast.push({ role: cfg.agentRole ?? capable.role ?? 'specialist', agentId: capable.id, created: false });
+        }
+        return { ...n, config: { ...cfg, agentId: capable.id } } as WorkflowNode;
+      }
+      // No connected capable runtime — fall through to the role specialist and let
+      // workflow readiness surface the actionable gap (enable native browser /
+      // connect OpenClaw / use a Browser node) rather than dying at run time.
+    }
+
     const role = cfg.agentRole;
     if (!role || !isAgentRole(role)) return n;
     let agentId = byRole.get(role);
@@ -1097,12 +1232,100 @@ function materializeCast(
 }
 
 /**
+ * The first CONNECTED workspace agent whose live runtime satisfies `requires`,
+ * preferring one whose role matches `preferRole`. Used by the cast so a node with
+ * hard HAL requirements routes to a runtime that can actually do the work instead
+ * of an offline role placeholder.
+ */
+function findConnectedCapableAgent(
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+  requires: AgentRequirements,
+  preferRole?: string,
+): { id: string; role: string | null } | null {
+  const rows = deps.db
+    .select({ id: schema.agents.id, role: schema.agents.role })
+    .from(schema.agents)
+    .where(eq(schema.agents.workspaceId, workspaceId))
+    .all();
+  const capable = rows.filter(
+    (row) => Boolean(deps.adapters.get(row.id)) && agentSatisfiesRequirements(deps.adapters.capabilities(row.id), requires),
+  );
+  if (capable.length === 0) return null;
+  const chosen = (preferRole && capable.find((r) => r.role === preferRole)) || capable[0]!;
+  return { id: chosen.id, role: chosen.role };
+}
+
+/**
  * Guarantee every node carries the DISPLAY fields the edit-time API schema and
  * the canvas expect: a non-empty `title` (≤255), a `type`, and a numeric
  * `position`. The engine never requires these, so a model/repair can persist a
  * node without them — which then makes the canvas autosave fail with
  * VALIDATION_FAILED on a graph the build just produced. Backfilled from the kind.
  */
+const HAL_REQUIREMENT_NODE_KINDS = new Set(['agent_task', 'agent_session', 'agent_swarm', 'dynamic_swarm']);
+
+export function normalizeGeneratedHalRequirements(graph: WorkflowGraph): WorkflowGraph {
+  let changed = false;
+  const nodes = graph.nodes.map((node) => {
+    const cfg = node.config as unknown as Record<string, unknown>;
+    const kind = typeof cfg.kind === 'string' ? cfg.kind : '';
+    if (!HAL_REQUIREMENT_NODE_KINDS.has(kind)) return node;
+
+    const original = cfg.requires;
+    const normalized = normalizeAgentRequirements(original);
+    const next: AgentRequirements = { ...normalized };
+    const text = halRequirementIntentText(node, cfg);
+
+    if (next.browser === true && !mentionsNativeBrowserControl(text)) {
+      delete next.browser;
+    }
+    if (next.computerUse === true && !mentionsComputerUseControl(text) && !mentionsNativeBrowserControl(text)) {
+      delete next.computerUse;
+    }
+
+    const hasNext = Object.values(next).some((value) => value === true);
+    const normalizedOriginal = normalizeAgentRequirements(original);
+    const same = JSON.stringify(normalizedOriginal) === JSON.stringify(next)
+      && JSON.stringify(normalizedOriginal) === JSON.stringify(original ?? {});
+    if (same && (hasNext || original === undefined)) return node;
+
+    changed = true;
+    const config = { ...cfg };
+    if (hasNext) config.requires = next;
+    else delete config.requires;
+    return { ...node, config: config as unknown as WorkflowNode['config'] };
+  });
+  return changed ? { ...graph, nodes } : graph;
+}
+
+function halRequirementIntentText(node: WorkflowNode, cfg: Record<string, unknown>): string {
+  return [
+    node.title,
+    cfg.prompt,
+    cfg.goal,
+    cfg.persona,
+    cfg.castingReason,
+  ]
+    .filter((part): part is string => typeof part === 'string')
+    .join('\n')
+    .toLowerCase();
+}
+
+function mentionsNativeBrowserControl(text: string): boolean {
+  // Reserve a HAL native-browser REQUIREMENT for EXPLICIT agent-owned, stateful
+  // browser control. Ordinary web automation — login, fill a form, scrape a page,
+  // screenshot, PDF — is the platform `browser` node's job and must NOT mint a
+  // requires.browser (those would route to a scarce native runtime that usually
+  // isn't connected). So the old click/login/"page" proximity heuristics are gone
+  // on purpose: only direct "drive/control a live browser" phrasing qualifies.
+  return /\b(native browser|browser runtime|live browser|interactive browser|browser session|headful|control(?:s|ling)? (?:a |the )?browser|operate(?:s|ing)? (?:a |the )?browser|drive(?:s|ing)? (?:a |the )?browser|browser automation|chromium|playwright)\b/.test(text);
+}
+
+function mentionsComputerUseControl(text: string): boolean {
+  return /\b(computer use|computer-use|desktop control|desktop automation|host computer|gui|mouse|keyboard|screen control|control(?:s|ling)? (?:the )?desktop|operate(?:s|ing)? (?:the )?desktop)\b/.test(text);
+}
+
 function ensureNodeDisplayFields(graph: WorkflowGraph): WorkflowGraph {
   return {
     ...graph,
@@ -1236,6 +1459,160 @@ function fillSelfDeliveryRecipient(
     return { ...n, config: { ...cfg, inputs } } as WorkflowNode;
   });
   return filled ? { graph: { ...graph, nodes }, filled: true } : { graph, filled: false };
+}
+
+function ensureEmailDeliveryInputs(
+  graph: WorkflowGraph,
+  description: string,
+): {
+  graph: WorkflowGraph;
+  completed: boolean;
+  recipientFromRequest: boolean;
+} {
+  const explicitRecipient = firstExplicitEmailAddress(description);
+  const subject = defaultEmailDeliverySubject(description);
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const incoming = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    if (edge.type === 'error') continue;
+    const sources = incoming.get(edge.target) ?? [];
+    sources.push(edge.source);
+    incoming.set(edge.target, sources);
+  }
+
+  let completed = false;
+  let recipientFromRequest = false;
+  const nodes = graph.nodes.map((node) => {
+    const cfg = node.config as { kind?: string; integrationId?: string; inputs?: Record<string, unknown> };
+    if (cfg.kind !== 'integration') return node;
+    if (!SELF_DELIVERY_EMAIL_SLUGS.has(String(cfg.integrationId ?? '').toLowerCase())) return node;
+
+    const inputs = { ...(cfg.inputs ?? {}) };
+    let changed = false;
+    if (!nonEmptyString(inputs.to) && explicitRecipient) {
+      inputs.to = explicitRecipient;
+      changed = true;
+      recipientFromRequest = true;
+    }
+    if (!nonEmptyString(inputs.subject)) {
+      inputs.subject = subject;
+      changed = true;
+    }
+    if (!hasEmailBodyInput(inputs)) {
+      inputs.markdown = inferEmailDeliveryBodyTemplate(node.id, nodeById, incoming)
+        ?? defaultEmailDeliveryBody(description);
+      changed = true;
+    }
+    if (!changed) return node;
+    completed = true;
+    return { ...node, config: { ...cfg, inputs } } as WorkflowNode;
+  });
+
+  return completed ? { graph: { ...graph, nodes }, completed: true, recipientFromRequest } : { graph, completed: false, recipientFromRequest: false };
+}
+
+function relaxBuildOnlyEmailRecipientIssue(
+  health: ReturnType<typeof preflightWorkflow>,
+  graph: WorkflowGraph,
+  description: string,
+): ReturnType<typeof preflightWorkflow> {
+  if (!isSelfDirectedDelivery(description)) return health;
+  const missingRecipientNodeIds = new Set(
+    graph.nodes
+      .filter((node) => {
+        const cfg = node.config as { kind?: string; integrationId?: string; inputs?: Record<string, unknown> };
+        return cfg.kind === 'integration'
+          && SELF_DELIVERY_EMAIL_SLUGS.has(String(cfg.integrationId ?? '').toLowerCase())
+          && !nonEmptyString(cfg.inputs?.to);
+      })
+      .map((node) => node.id),
+  );
+  if (missingRecipientNodeIds.size === 0) return health;
+
+  let changed = false;
+  const issues = health.issues.map((issue) => {
+    if (
+      issue.severity === 'error'
+      && issue.code === 'INTEGRATION_CONFIG_INCOMPLETE'
+      && issue.nodeId
+      && missingRecipientNodeIds.has(issue.nodeId)
+      && /\bunmapped:.*\bto\b/i.test(issue.message)
+    ) {
+      changed = true;
+      return {
+        ...issue,
+        severity: 'warning' as const,
+        message: `${issue.message} The workflow asked to email you, but your operator profile does not yet have a recipient address.`,
+        remediation: 'Add an email address to your account profile or set the delivery recipient on this step before running.',
+        autoRepairable: false,
+      };
+    }
+    return issue;
+  });
+  if (!changed) return health;
+
+  const nodes = { ...health.nodes };
+  for (const nodeId of missingRecipientNodeIds) {
+    const node = nodes[nodeId];
+    if (node?.status === 'failed') {
+      nodes[nodeId] = { ...node, status: 'unverified', error: undefined };
+    }
+  }
+  const hasErrors = issues.some((issue) => issue.severity === 'error');
+  const hasUnverified = Object.values(nodes).some((node) => node.status === 'unverified' || node.status === 'mocked')
+    || issues.some((issue) => issue.severity === 'warning');
+  return {
+    ...health,
+    status: hasErrors ? 'blocked' : hasUnverified ? 'unverified' : 'healthy',
+    issues,
+    nodes,
+  };
+}
+
+function firstExplicitEmailAddress(text: string): string | undefined {
+  return text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0];
+}
+
+function defaultEmailDeliverySubject(description: string): string {
+  return `Workflow result: ${titleFromDescription(description)}`.slice(0, 140);
+}
+
+function defaultEmailDeliveryBody(description: string): string {
+  return `A workflow run completed for "${titleFromDescription(description)}". Review the full result in Agentis for details.`;
+}
+
+function hasEmailBodyInput(inputs: Record<string, unknown>): boolean {
+  return ['text', 'html', 'markdown', 'body', 'content', 'message', 'digest', 'markdownBody', 'htmlBody']
+    .some((key) => nonEmptyString(inputs[key]));
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function inferEmailDeliveryBodyTemplate(
+  nodeId: string,
+  nodeById: Map<string, WorkflowNode>,
+  incoming: Map<string, string[]>,
+): string | null {
+  for (const upstreamId of incoming.get(nodeId) ?? []) {
+    const upstream = nodeById.get(upstreamId);
+    if (!upstream) continue;
+    const key = preferredEmailOutputKey(upstream);
+    if (key) return `{{nodes.${upstream.id}.${key}}}`;
+    return `{{nodes.${upstream.id}}}`;
+  }
+  return null;
+}
+
+function preferredEmailOutputKey(node: WorkflowNode): string | null {
+  const cfg = node.config as { outputKeys?: unknown };
+  const outputKeys = Array.isArray(cfg.outputKeys)
+    ? cfg.outputKeys.filter((key): key is string => typeof key === 'string' && key.trim().length > 0)
+    : [];
+  if (outputKeys.length === 0) return null;
+  const preferred = ['result', 'summary', 'digest', 'output', 'content', 'message', 'body', 'text'];
+  return outputKeys.find((key) => preferred.includes(key.toLowerCase())) ?? outputKeys[0] ?? null;
 }
 
 /**
@@ -1729,23 +2106,23 @@ function isSlowPerCallHarness(adapter: AgentAdapter | undefined): boolean {
  * The "own model" completer for a build role. ZERO-CONFIG by design: the model the
  * operator already attached to their agent IS the synthesis model — there is no
  * separate "set a synthesis model" step. The only nuance is SPEED — if the agent
- * answers chat through a slow per-call CLI harness, we synthesize through a
- * streaming orchestrator model when one is configured (mirrors the chat loop's
- * fast-path) so builds stay seconds, not minutes. Falls back to the agent's own
- * adapter even when slow — a slow build still beats refusing to build.
+ * answers chat through a slow per-call CLI harness, use a configured streaming
+ * runtime instead. Never recursively spawn the calling harness from inside its
+ * own tool execution; that runtime must author graphDraft or patchDraft.
  */
 function ownModelCompleter(
   deps: ToolHandlerDeps,
   workspaceId: string,
   agentId: string | undefined,
   routerRole: 'synthesis' | 'evaluation',
+  task: string,
 ): StructuredCompleter | undefined {
   const agent = agentChatAdapter(deps, agentId);
   if (agent && !isSlowPerCallHarness(agent)) return new AdapterStructuredCompleter(agent);
-  const streaming = deps.modelRouter?.resolve(routerRole, workspaceId)
-    ?? deps.modelRouter?.resolve('conversation', workspaceId);
+  if (deps.modelAssistedRuntimeEnabled?.(workspaceId) === false) return undefined;
+  const streaming = deps.modelRouter?.resolveRouted({ role: routerRole, workspaceId, task, purpose: routerRole })
+    ?? deps.modelRouter?.resolveRouted({ role: 'conversation', workspaceId, task, purpose: routerRole });
   if (streaming) return new AdapterStructuredCompleter(streaming);
-  if (agent) return new AdapterStructuredCompleter(agent);
   return undefined;
 }
 
@@ -1755,20 +2132,26 @@ function ownModelCompleter(
  * runtime → the agent's own model (streaming fast-path preferred). Undefined only
  * when nothing at all can build (no configured model AND no chat-capable agent).
  */
-function resolveSynthesisCompleter(deps: ToolHandlerDeps, workspaceId: string, agentId?: string): StructuredCompleter | undefined {
-  return deps.resolveEvaluatorRuntime?.(workspaceId, 'synthesis')
+function resolveSynthesisCompleter(deps: ToolHandlerDeps, workspaceId: string, agentId: string | undefined, task: string): StructuredCompleter | undefined {
+  if (deps.modelAssistedRuntimeEnabled?.(workspaceId) === false) {
+    return ownModelCompleter(deps, workspaceId, agentId, 'synthesis', task);
+  }
+  return deps.resolveEvaluatorRuntime?.(workspaceId, 'synthesis', { task, purpose: 'workflow_synthesis' })
     ?? deps.synthesisRuntime
     ?? deps.evaluatorRuntime
-    ?? ownModelCompleter(deps, workspaceId, agentId, 'synthesis');
+    ?? ownModelCompleter(deps, workspaceId, agentId, 'synthesis', task);
 }
 
 /** The completer for the reviewer/critic role — prefers an evaluation model. */
-function resolveReviewerCompleter(deps: ToolHandlerDeps, workspaceId: string, agentId?: string): StructuredCompleter | undefined {
-  return deps.resolveEvaluatorRuntime?.(workspaceId, 'evaluation')
-    ?? deps.resolveEvaluatorRuntime?.(workspaceId, 'synthesis')
+function resolveReviewerCompleter(deps: ToolHandlerDeps, workspaceId: string, agentId: string | undefined, task: string): StructuredCompleter | undefined {
+  if (deps.modelAssistedRuntimeEnabled?.(workspaceId) === false) {
+    return ownModelCompleter(deps, workspaceId, agentId, 'evaluation', task);
+  }
+  return deps.resolveEvaluatorRuntime?.(workspaceId, 'evaluation', { task, purpose: 'workflow_evaluation' })
+    ?? deps.resolveEvaluatorRuntime?.(workspaceId, 'synthesis', { task, purpose: 'workflow_synthesis' })
     ?? deps.synthesisRuntime
     ?? deps.evaluatorRuntime
-    ?? ownModelCompleter(deps, workspaceId, agentId, 'evaluation');
+    ?? ownModelCompleter(deps, workspaceId, agentId, 'evaluation', task);
 }
 
 /**
@@ -1778,14 +2161,17 @@ function resolveReviewerCompleter(deps: ToolHandlerDeps, workspaceId: string, ag
  * round-trips) so a slow setup still returns a workflow quickly; the
  * deterministic `repairGraph` still enforces the Iron Rules structurally.
  */
-function buildOnlyHasSlowPath(deps: ToolHandlerDeps, workspaceId: string, agentId?: string): boolean {
+function buildOnlyHasSlowPath(deps: ToolHandlerDeps, workspaceId: string, agentId: string | undefined, task: string): boolean {
+  if (deps.modelAssistedRuntimeEnabled?.(workspaceId) === false) {
+    return isSlowPerCallHarness(agentChatAdapter(deps, agentId));
+  }
   const hasFastRuntime = Boolean(
-    deps.resolveEvaluatorRuntime?.(workspaceId, 'synthesis')
-    ?? deps.resolveEvaluatorRuntime?.(workspaceId, 'evaluation')
+    deps.resolveEvaluatorRuntime?.(workspaceId, 'synthesis', { task, purpose: 'workflow_synthesis' })
+    ?? deps.resolveEvaluatorRuntime?.(workspaceId, 'evaluation', { task, purpose: 'workflow_evaluation' })
     ?? deps.synthesisRuntime
     ?? deps.evaluatorRuntime
-    ?? deps.modelRouter?.resolve('synthesis', workspaceId)
-    ?? deps.modelRouter?.resolve('conversation', workspaceId),
+    ?? deps.modelRouter?.resolveRouted({ role: 'synthesis', workspaceId, task, purpose: 'workflow_synthesis' })
+    ?? deps.modelRouter?.resolveRouted({ role: 'conversation', workspaceId, task, purpose: 'workflow_synthesis' }),
   );
   if (hasFastRuntime) return false;
   return isSlowPerCallHarness(agentChatAdapter(deps, agentId));
@@ -1795,6 +2181,32 @@ function buildOnlyHasSlowPath(deps: ToolHandlerDeps, workspaceId: string, agentI
 export type SynthesisOutcome =
   | { graph: WorkflowGraph; reason: 'ok' }
   | { graph: null; reason: 'model_error' | 'invalid_graph'; error: string | null };
+
+function parseAgentGraphDraft(value: unknown): WorkflowGraph {
+  const candidate = value && typeof value === 'object' && !Array.isArray(value) && 'graph' in value
+    ? (value as { graph?: unknown }).graph
+    : value;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    throw new AgentisError(
+      'WORKFLOW_DRAFT_INVALID',
+      'graphDraft must be a WorkflowGraph object, or an object with a graph property.',
+    );
+  }
+  const draft = candidate as Partial<WorkflowGraph>;
+  if (!Array.isArray(draft.nodes) || draft.nodes.length === 0) {
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'graphDraft must include at least one workflow node.');
+  }
+  if (!Array.isArray(draft.edges)) {
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'graphDraft.edges must be an array.');
+  }
+  return {
+    version: draft.version ?? 1,
+    nodes: draft.nodes as WorkflowGraph['nodes'],
+    edges: draft.edges as WorkflowGraph['edges'],
+    viewport: draft.viewport ?? { x: 0, y: 0, zoom: 1 },
+    ...(draft.phases ? { phases: draft.phases } : {}),
+  };
+}
 
 type WorkflowMutationPatchPayload = {
   addNodes?: unknown;
@@ -2077,112 +2489,14 @@ const SYNTHESIS_ARCHITECT_PREAMBLE = [
   '13. Recurring Workflows Remember — for `cron` or `persistent_listener` triggers that accumulate state',
   '    (deduplication, tracking a last-run cursor, appending to a running log), add a `workflow_store` read',
   '    node near the start and a `workflow_store` write node near the end so each run builds on the last.',
+  '14. HAL Requirements Are Hard Routing - `requires` on an agent node is ONLY for native runtime',
+  '    powers advertised by AgentAdapter.capabilities(). Web search and URL reading are specialist tools;',
+  '    screenshots/rendering/live page work belongs in a `browser` workflow node unless the agent itself',
+  '    must control a native browser or computer-use runtime.',
   'Set agent_task.agentRole to the minimum-sufficient specialist by tool need (see SPECIALIST ROLES).',
   'Add a one-sentence `castingReason` to each agent_task config explaining the role choice.',
   '',
 ].join('\n');
-
-interface DeterministicCompileResult {
-  graph: WorkflowGraph;
-  detail: string;
-}
-
-function tryCompileDeterministicWorkflow(description: string): DeterministicCompileResult | null {
-  // NOTE: there is intentionally NO connector-specific compiler here (e.g. a
-  // hardcoded "email" graph). Real requests — email, Slack, HTTP, anything —
-  // go through the general synthesis path so the platform stays domain-agnostic.
-  // These two remain only as tiny, content-free fast-paths for genuinely
-  // trivial shapes (a fixed output, a generic research report).
-  return compileFixedOutputWorkflow(description)
-    ?? compileResearchReportWorkflow(description);
-}
-
-function compileFixedOutputWorkflow(description: string): DeterministicCompileResult | null {
-  const lower = description.toLowerCase();
-  if (!/\b(return|returns|output|hello world|fixed)\b/.test(lower)) return null;
-  const text = description.match(/\btext\s*:\s*["']([^"']+)["']/i)?.[1]
-    ?? description.match(/\b(?:return|returns|output)\s+["']([^"']+)["']/i)?.[1]
-    ?? (/hello world/i.test(description) ? 'Workflow is working' : null);
-  if (!text) return null;
-  const graph: WorkflowGraph = {
-    version: 1,
-    viewport: { x: 0, y: 0, zoom: 1 },
-    nodes: [
-      { id: 'trigger', type: 'trigger', title: 'Manual Trigger', position: { x: 0, y: 80 }, config: { kind: 'trigger', triggerType: 'manual' } },
-      { id: 'produce_output', type: 'transform', title: 'Produce Output', position: { x: 280, y: 80 }, config: { kind: 'transform', expression: JSON.stringify({ text }) } },
-      { id: 'return_output', type: 'return_output', title: 'Return Output', position: { x: 560, y: 80 }, config: { kind: 'return_output', renderAs: 'text' } },
-    ],
-    edges: [
-      { id: 'edge_trigger_produce_output', source: 'trigger', target: 'produce_output' },
-      { id: 'edge_produce_output_return_output', source: 'produce_output', target: 'return_output' },
-    ],
-  };
-  return { graph, detail: 'Compiled fixed-output workflow' };
-}
-
-function compileResearchReportWorkflow(description: string): DeterministicCompileResult | null {
-  const lower = description.toLowerCase();
-  if (!/\bresearch\b/.test(lower) || !/\b(report|brief|summar)/.test(lower)) return null;
-  const trigger = inferTriggerConfig(lower);
-  const graph: WorkflowGraph = {
-    version: 1,
-    viewport: { x: 0, y: 0, zoom: 1 },
-    nodes: [
-      { id: 'trigger', type: 'trigger', title: triggerTitle(trigger), position: { x: 0, y: 80 }, config: trigger },
-      {
-        id: 'research',
-        type: 'agent_task',
-        title: 'Research Sources',
-        position: { x: 280, y: 80 },
-        config: {
-          kind: 'agent_task',
-          agentRole: 'researcher',
-          prompt: `Research the source material for this request:\n${description}`,
-          inputKeys: ['trigger'],
-          outputKeys: ['findings'],
-          capabilityTags: ['research'],
-        },
-      },
-      {
-        id: 'analyze',
-        type: 'agent_task',
-        title: 'Analyze Findings',
-        position: { x: 560, y: 80 },
-        config: {
-          kind: 'agent_task',
-          agentRole: 'analyst',
-          prompt: 'Analyze the research findings and identify the most important moves, risks, and opportunities.',
-          inputKeys: ['research'],
-          outputKeys: ['analysis'],
-          capabilityTags: ['analysis'],
-          skills: ['aarrr-framework'],
-        },
-      },
-      {
-        id: 'write_report',
-        type: 'agent_task',
-        title: 'Write Report',
-        position: { x: 840, y: 80 },
-        config: {
-          kind: 'agent_task',
-          agentRole: 'writer',
-          prompt: 'Write a concise report from the analysis with a summary, key points, and recommended next actions.',
-          inputKeys: ['analyze'],
-          outputKeys: ['report'],
-          capabilityTags: ['writing'],
-        },
-      },
-      { id: 'return_output', type: 'return_output', title: 'Return Report', position: { x: 1120, y: 80 }, config: { kind: 'return_output', renderAs: 'markdown' } },
-    ],
-    edges: [
-      { id: 'edge_trigger_research', source: 'trigger', target: 'research' },
-      { id: 'edge_research_analyze', source: 'research', target: 'analyze' },
-      { id: 'edge_analyze_write_report', source: 'analyze', target: 'write_report' },
-      { id: 'edge_write_report_return_output', source: 'write_report', target: 'return_output' },
-    ],
-  };
-  return { graph, detail: 'Compiled specialist research-report workflow' };
-}
 
 /** Render the creation brief (caller domain + classification) for the user prompt. */
 function renderCreationBrief(brief: CreationBrief): string {
@@ -2227,7 +2541,12 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '                  a specialist: a built-in (planner|researcher|coder|reviewer|analyst|writer|monitor|architect|debugger|deployer)',
   '                  OR a custom slug (e.g. "frontend_architect", "tax_analyst") which is auto-created as an on-demand specialist.',
   '                  Prefer agentRole over a blank agentId so the task is runnable without manual binding. Set useRoleTools:false',
-  '                  ONLY for a pure one-shot rewrite/format with no reasoning. requires = hard affordances e.g. { "browser": true }.',
+  '                  ONLY for a pure one-shot rewrite/format with no reasoning. `requires` is hard HAL runtime routing,',
+  '                  not normal tool intent. Do not set requires.browser for research, web search, URL reading, scraping,',
+  '                  qualification, curation, analysis, or writing. For ordinary web automation — open a page, log in, fill a',
+  '                  form, scrape, screenshot, or render a PDF — use a `browser` node (platform headless Chromium), NOT',
+  '                  requires.browser. Set requires.browser/computerUse only when this agent task itself must drive a native,',
+  '                  stateful browser/desktop/GUI/computer-use runtime that the operator has actually connected.',
   '  agent_session:  { kind: "agent_session", prompt, agentRole, inputKeys, outputKeys, capabilityTags, maxSteps? }',
   '                  A PERSISTENT autonomous agent for longer, multi-step missions: it keeps memory across steps, can DELEGATE',
   '                  sub-tasks to other specialists and await their results, wait for events, and pause for approval — sleeping',
@@ -2294,6 +2613,8 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '- Use `artifact_save` to persist a file (report.html, data.csv) the operator can download.',
   '- For "open a browser" / "screenshot" / live page rendering, use a `browser` node:',
   '  produce HTML in a transform, then browser serve_html with htmlPath:"content", then return_output renderAs:"html".',
+  '- HAL runtime requirements (`requires`) are rare. Web search uses specialist tools; URL fetch/scrape uses',
+  '  http_request/browser nodes; only native browser/computer-control agent tasks need requires.browser/computerUse.',
   '- Use skill_task only with a real skillId from AVAILABLE SKILLS. Never invent skill IDs.',
   '- Choosing the intelligence node: default to `agent_task` (a capable tool-using agent) for a focused reasoning task.',
   '  Use `agent_session` when the work must delegate to sub-specialists, run many steps, or keep memory across steps;',

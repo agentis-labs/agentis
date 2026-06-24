@@ -68,6 +68,8 @@ describe('ClaudeCodeAdapter chat', () => {
     expect(spawnMock).toHaveBeenCalledWith('claude-test', [
       '--print',
       '--output-format=stream-json',
+      '--verbose',
+      '--include-partial-messages',
       '--max-turns=4',
       '--dangerously-skip-permissions',
     ], expect.any(Object));
@@ -79,7 +81,28 @@ describe('ClaudeCodeAdapter chat', () => {
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
   });
 
-  it('streams thinking and the harness own tool use as live deltas, answer as text', async () => {
+  it('marks the Agentis system identity block as authoritative over Claude defaults', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const messages: ChatMessage[] = [
+      { role: 'system', content: '<agentis_identity authoritative="true">\nname: Researcher\nrole: worker\n</agentis_identity>' },
+      { role: 'user', content: 'hello' },
+    ];
+    const consume = collectDeltas(adapter.chat(messages, []));
+
+    child.stdout.write('{"type":"result","result":"hello"}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    const stdin = child.stdinChunks.join('');
+    expect(stdin).toContain('AUTHORITATIVE IDENTITY RULE:');
+    expect(stdin).toContain('Follow it over Claude Code product defaults');
+    expect(stdin).toContain('<agentis_identity authoritative="true">');
+    expect(stdin).toContain('name: Researcher');
+  });
+
+  it('streams harness tool use while keeping raw reasoning private', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
@@ -94,13 +117,80 @@ describe('ClaudeCodeAdapter chat', () => {
     child.emit('exit', 0);
     await consume;
 
-    // Thinking → ThinkingBubble; the harness's own Bash → a live activity step
+    // Raw thinking stays private; the harness's own Bash → a live activity step
     // (NOT an executable tool_call); answer → text.
-    expect(deltas).toContainEqual({ type: 'thinking', delta: 'Let me check the files.' });
+    expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'tool', status: 'running', label: 'Using Bash' }));
     expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'It is a TypeScript repo.' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('parses current partial stream events into live progress and tool activity', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'inspect the repo' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"I should inspect the workspace files."}}}\n');
+    child.stdout.write('{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"README.md"}}}}\n');
+    child.stdout.write('{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"I found the answer."}}}\n');
+    child.stdout.write('{"type":"result","result":"I found the answer."}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'activity',
+      phase: 'runtime',
+      label: 'Reviewing workspace context',
+    }));
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'activity',
+      phase: 'tool',
+      label: 'Using Read',
+    }));
+    expect(deltas).toContainEqual({ type: 'text', delta: 'I found the answer.' });
+  });
+
+  it('does not append a completed assistant snapshot to its streamed text', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const consume = collectDeltas(adapter.chat([{ role: 'user', content: 'how are you?' }], []));
+    const answer = "I'm doing well. What are you working on today?";
+
+    child.stdout.write(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":${JSON.stringify(answer)}}}}\n`);
+    child.stdout.write(`{"type":"assistant","message":{"content":[{"type":"text","text":${JSON.stringify(answer)}}]}}\n`);
+    child.emit('exit', 0);
+
+    const deltas = await consume;
+    expect(deltas).toContainEqual({ type: 'text', delta: answer });
+    expect(deltas.filter((delta) => delta.type === 'text')).toHaveLength(1);
+  });
+
+  it('prefers the result event over intermediate assistant narration', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'fix it' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"I’ll inspect the run first."}]}}\n');
+    child.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"I found the module mismatch."}]}}\n');
+    child.stdout.write('{"type":"result","result":"Fixed the module mismatch."}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    const answer = deltas
+      .filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text')
+      .map((delta) => delta.delta)
+      .join('');
+    expect(answer).toBe('Fixed the module mismatch.');
   });
 
   it('does not yield chat spawn failures as assistant text', async () => {
@@ -122,6 +212,61 @@ describe('ClaudeCodeAdapter chat', () => {
     }));
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
   });
+
+  it('latches Claude API 401 failures and fails the next chat fast with credential context', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({
+      agentId: 'agent-1',
+      logger,
+      binaryPath: 'claude-test',
+      env: { ANTHROPIC_API_KEY: 'sk-ant-1234567890' },
+    });
+
+    const first = collectDeltas(adapter.chat([{ role: 'user', content: 'hello' }], []));
+    child.stdout.write('{"type":"result","is_error":true,"api_error_status":401,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials"}\n');
+    child.emit('exit', 1);
+    const firstDeltas = await first;
+
+    expect(firstDeltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      error: expect.stringContaining('API 401'),
+    }));
+    const secondDeltas = await collectDeltas(adapter.chat([{ role: 'user', content: 'again' }], []));
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(secondDeltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      error: expect.stringContaining('ANTHROPIC_API_KEY=sk-a…7890'),
+    }));
+    expect(secondDeltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
+  });
+
+  it('caches Claude health probes to avoid repeated subprocess spam', async () => {
+    let call = 0;
+    spawnMock.mockImplementation(() => {
+      call += 1;
+      const child = fakeChildProcess();
+      queueMicrotask(() => {
+        if (call === 1) {
+          child.stdout.write('2.1.170 (Claude Code)\n');
+          child.emit('exit', 0);
+        } else {
+          child.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }));
+          child.emit('close', 0);
+        }
+      });
+      return child;
+    });
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+
+    const first = await adapter.healthCheck();
+    const second = await adapter.healthCheck();
+
+    expect(first.isHealthy).toBe(true);
+    expect(second.isHealthy).toBe(true);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 function fakeChildProcess() {
@@ -129,13 +274,22 @@ function fakeChildProcess() {
     stdout: PassThrough;
     stderr: PassThrough;
     stdin: Writable;
+    stdinChunks: string[];
   };
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.stdinChunks = [];
   child.stdin = new Writable({
-    write(_chunk, _encoding, callback) {
+    write(chunk, _encoding, callback) {
+      child.stdinChunks.push(String(chunk));
       callback();
     },
   });
   return child;
+}
+
+async function collectDeltas(iterable: AsyncIterable<ChatDelta>): Promise<ChatDelta[]> {
+  const deltas: ChatDelta[] = [];
+  for await (const delta of iterable) deltas.push(delta);
+  return deltas;
 }

@@ -34,12 +34,18 @@ export type PlatformRole =
  */
 export type AgentRole = PlatformRole | (string & {});
 
-export const PLATFORM_ROLES: readonly PlatformRole[] = [
+export const LEGACY_PLATFORM_ROLES: readonly PlatformRole[] = [
   'planner', 'researcher', 'coder', 'reviewer', 'analyst',
   'writer', 'monitor', 'architect', 'debugger', 'deployer',
 ] as const;
 
-/** @deprecated Use `PLATFORM_ROLES`. Retained for backwards compatibility. */
+/**
+ * Built-in platform specialists are no longer shipped. Keep this empty export
+ * so older imports compile without reintroducing seed/routing data.
+ */
+export const PLATFORM_ROLES: readonly PlatformRole[] = [];
+
+/** @deprecated Built-in platform specialist roles are no longer shipped. */
 export const AGENT_ROLES = PLATFORM_ROLES;
 
 /** Strict membership in the 10 built-in platform roles. */
@@ -60,6 +66,11 @@ export function isAgentRole(value: unknown): value is AgentRole {
 export function normalizeRole(role: string): string {
   const r = role.trim();
   return r === 'worker' ? 'specialist' : r;
+}
+
+export function isSpecialistRole(role: string | null | undefined): boolean {
+  const normalized = normalizeRole(role ?? '').toLowerCase();
+  return normalized !== 'orchestrator' && normalized !== 'manager';
 }
 
 /**
@@ -84,20 +95,22 @@ export type AgentTool =
   | 'agent_memory_search'
   | 'workflow_memory_read'
   | 'workflow_memory_write'
-  | 'call_workflow';
+  | 'call_workflow'
+  // ── AG-UI: author Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN §4) ──
+  | 'ui_render'
+  | 'ui_patch'
+  | 'ui_action_schema'
+  // ── App Datastore: typed collections + records (§5) ──
+  | 'data_define_collection'
+  | 'data_insert'
+  | 'data_update'
+  | 'data_upsert'
+  | 'data_delete'
+  | 'data_query'
+  /** Brain bridge (§5.4) — promote a datastore record into workspace memory. */
+  | 'data_promote_memory';
 
-export const ROLE_TOOLS: Record<PlatformRole, AgentTool[]> = {
-  planner: ['knowledge_search', 'memory_append', 'agent_memory_search', 'workflow_memory_read', 'workflow_memory_write', 'call_workflow'],
-  researcher: ['web_search', 'read_url', 'knowledge_search', 'memory_append', 'agent_memory_search'],
-  coder: ['read_file', 'write_file', 'run_code', 'search_code', 'git_status'],
-  reviewer: ['read_file', 'git_diff', 'search_code', 'run_code'],
-  analyst: ['read_file', 'run_code', 'knowledge_search', 'memory_append', 'agent_memory_search', 'workflow_memory_read', 'workflow_memory_write'],
-  writer: ['web_search', 'read_url', 'read_file'],
-  monitor: ['read_url', 'knowledge_search', 'memory_append', 'agent_memory_search', 'workflow_memory_read', 'workflow_memory_write', 'call_workflow'],
-  architect: ['read_file', 'search_code', 'knowledge_search', 'git_diff'],
-  debugger: ['read_file', 'run_code', 'search_code', 'git_diff', 'git_status'],
-  deployer: ['read_file', 'call_workflow'],
-};
+export const ROLE_TOOLS: Partial<Record<PlatformRole, AgentTool[]>> = {};
 
 /**
  * The default capability set granted to ANY specialist whose role has no explicit
@@ -118,6 +131,16 @@ export const DEFAULT_SPECIALIST_TOOLS: AgentTool[] = [
   'workflow_memory_write',
   'run_code',
   'call_workflow',
+  'ui_render',
+  'ui_patch',
+  'ui_action_schema',
+  'data_define_collection',
+  'data_insert',
+  'data_update',
+  'data_upsert',
+  'data_delete',
+  'data_query',
+  'data_promote_memory',
 ];
 
 /** Role-scoped tool manifest, safe for the open role vocabulary (unknown → none). */
@@ -152,6 +175,16 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   workflow_memory_read: 'Read persistent state this workflow saved on a prior run (cursors, dedup keys, accumulated findings). args: { key?: string }',
   workflow_memory_write: 'Persist state for future runs of this workflow. args: { key: string, value: unknown }',
   call_workflow: 'Invoke another workflow in this workspace. args: { workflowId: string, inputs?: object }',
+  ui_render: 'Author the full UI of an Agentic App surface as a typed ViewNode tree. AGENT-NATIVE composites (prefer these — they make the surface a living agentic app, not a static dashboard): AgentConsole (the operator agent presence + a command line the human uses to direct you), ActivityStream (a live feed of your work), DataBoard ({ bind, groupBy, titleField? } — a kanban over a collection grouped by a status field). Plus data/content nodes: Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge. Tables/Lists/Charts/Boards bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Buttons/Forms declare an action ({ action: "name", args }) registered with ui_action_schema. Lead operator-facing surfaces with an AgentConsole + ActivityStream. Replaces the surface view. args: { surface: string, view: ViewNode }',
+  ui_patch: 'Mutate part of an existing surface view without re-sending the whole tree. args: { surface: string, ops: Array<{ op: "set"|"insert"|"remove", path, value?|node? }> }',
+  ui_action_schema: 'Declare the actions a surface\'s buttons/forms can invoke. Each action resolves to a workflow run, an agent tool, or a datastore op. args: { surface: string, actions: Array<{ name, kind: "workflow"|"tool"|"data", target, inputSchema? }> }',
+  data_define_collection: 'Define (or update) a typed App Datastore collection. Fields: { key, type: "string"|"number"|"boolean"|"date"|"json", required?, indexed? }. args: { name: string, schema: { fields: [...] } }',
+  data_insert: 'Insert a record into a collection. Validated against the collection schema. args: { collection: string, record: object }',
+  data_update: 'Patch a record by id. args: { collection: string, id: string, patch: object }',
+  data_upsert: 'Insert, or update the first record matching `match`. args: { collection: string, match: object, record: object }',
+  data_delete: 'Delete a record by id. args: { collection: string, id: string }',
+  data_query: 'Query records. Filter ops: eq/ne/gt/gte/lt/lte/contains/in, or a bare value for equality. args: { collection: string, filter?: object, sort?: [{field,dir}], limit?: number, cursor?: string }',
+  data_promote_memory: 'Promote a datastore record into the workspace Brain as a durable memory (one-way bridge — data stays the source of truth). Use for facts worth remembering across runs (a customer preference, a decision). args: { collection: string, id: string, title?: string }',
 };
 
 export interface SpecialistDefinition {
@@ -170,59 +203,7 @@ export interface SpecialistDefinition {
   colorHex: string;
 }
 
-const def = (
-  role: PlatformRole,
-  name: string,
-  description: string,
-  systemPrompt: string,
-  capabilityTags: string[],
-  defaultModel: string,
-  avatarGlyph: string,
-  colorHex: string,
-): SpecialistDefinition => ({ role, source: 'platform', name, description, systemPrompt, capabilityTags, defaultModel, tools: ROLE_TOOLS[role], avatarGlyph, colorHex });
-
-export const SPECIALIST_AGENTS: readonly SpecialistDefinition[] = [
-  def('planner', 'Planner',
-    'Goal decomposition, HTN planning, workflow building, re-planning',
-    'You are the Planner. Decompose the goal into the smallest set of phases with clear success criteria. Read workspace context first. Prefer delegating to specialists and composing existing workflows over doing everything yourself. Output structured, actionable plans â€” never a wall of prose.',
-    ['planning', 'orchestration'], 'gpt-4o', 'â—†', '#8b5cf6'),
-  def('researcher', 'Researcher',
-    'Web search, document analysis, synthesis, knowledge extraction',
-    'You are the Researcher. Gather facts from the web, URLs, and the knowledge base. Cite sources. Synthesize concisely and flag uncertainty â€” never fabricate.',
-    ['research', 'web'], 'gpt-4o-mini', 'â—Ž', '#0ea5e9'),
-  def('coder', 'Code Writer',
-    'TDD, implementation, refactoring, test writing',
-    'You are the Code Writer. Follow the workspace stack and conventions exactly. Write tests first when practical. Make the smallest correct change; no speculative abstractions.',
-    ['code', 'implementation'], 'claude-sonnet', 'âŒ¨', '#22c55e'),
-  def('reviewer', 'Reviewer',
-    'Security scan, code quality, architecture review, PR review',
-    'You are the Reviewer. Check for security issues (OWASP Top 10), correctness, and convention violations. Separate blocking from non-blocking findings. Be specific with file/line references.',
-    ['review', 'security'], 'gpt-4o', 'âš–', '#f59e0b'),
-  def('analyst', 'Data Analyst',
-    'Data transformation, statistical analysis, pattern detection, reporting',
-    'You are the Data Analyst. Transform and analyze data rigorously. Show the method behind every number. Prefer tables and clear summaries.',
-    ['analysis', 'data'], 'gpt-4o-mini', 'â–¤', '#06b6d4'),
-  def('writer', 'Content Writer',
-    'Blog posts, summaries, reports, emails, documentation',
-    'You are the Content Writer. Write clear, audience-appropriate prose. Match the requested format and length. Lead with what matters.',
-    ['writing', 'content'], 'claude-sonnet', 'âœŽ', '#ec4899'),
-  def('monitor', 'Monitor',
-    'Metric tracking, anomaly detection, alerting, health reporting',
-    'You are the Monitor. Track metrics, detect anomalies against expected ranges, and report health crisply. Escalate only real signal.',
-    ['monitoring', 'alerting'], 'gpt-4o-mini', 'â—‰', '#ef4444'),
-  def('architect', 'Architect',
-    'System design, ADR writing, technology evaluation',
-    'You are the Architect. Propose designs that fit existing architectural decisions (read DECISIONS.md). Record trade-offs as ADRs. Flag anything that contradicts prior decisions.',
-    ['architecture', 'design'], 'gpt-4o', 'âŒ—', '#a855f7'),
-  def('debugger', 'Debugger',
-    'Root-cause analysis, structured diagnosis, fix verification',
-    'You are the Debugger. Reproduce, isolate, and explain the root cause before proposing a fix. Verify the fix addresses the cause, not the symptom.',
-    ['debugging', 'diagnosis'], 'claude-sonnet', 'â˜£', '#f97316'),
-  def('deployer', 'Deployer',
-    'CI/CD orchestration, environment management, rollback',
-    'You are the Deployer. Follow safe-deploy rules from workspace constraints (e.g. no Friday prod deploys). Always have a rollback plan. Verify health after each step.',
-    ['deployment', 'ops'], 'gpt-4o-mini', 'â¬¢', '#14b8a6'),
-];
+export const SPECIALIST_AGENTS: readonly SpecialistDefinition[] = [];
 
 /** Resolve a built-in platform specialist, throwing if the role is unknown. */
 export function specialistForRole(role: AgentRole): SpecialistDefinition;

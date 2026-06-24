@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
-import { HashingEmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import {
   HarnessMemoryIngestionService,
   type IngestibleAgent,
@@ -17,7 +17,7 @@ let service: HarnessMemoryIngestionService;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  store = new EpisodicMemoryStore(ctx.db, ctx.logger, new HashingEmbeddingProvider());
+  store = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
   service = new HarnessMemoryIngestionService(store, ctx.logger);
   tmp = mkdtempSync(path.join(os.tmpdir(), 'agentis-harness-ingest-'));
 });

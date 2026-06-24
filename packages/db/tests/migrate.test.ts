@@ -10,6 +10,8 @@ import {
 } from '../src/index.js';
 import { openSqlite } from '../src/sqlite/index.js';
 import { EMBEDDED_INIT_SQL } from '../src/sqlite/embedded-sql.js';
+import * as sqliteSchema from '../src/sqlite/schema.js';
+import * as pgSchema from '../src/pg/schema.js';
 
 function tempDbPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'agentis-db-test-'));
@@ -17,6 +19,48 @@ function tempDbPath(): string {
 }
 
 describe('runSqliteMigrations', () => {
+  it('reserves the Agentic App migration versions and mirrors schema exports', () => {
+    expect(SQLITE_MIGRATIONS.slice(-7).map((migration) => [migration.version, migration.name])).toEqual([
+      [82, 'agentic_apps'],
+      [83, 'app_datastore'],
+      [84, 'app_surfaces'],
+      [85, 'app_lifecycle_snapshots'],
+      [86, 'app_hub_ready_seams'],
+      [87, 'app_lifecycle_origin_checksum'],
+      [88, 'app_domain_and_owner'],
+    ]);
+
+    for (const table of ['apps', 'appMembers', 'appCollections', 'appRecords', 'appRecordIndex', 'appSurfaces', 'appLifecycleSnapshots', 'appEnvironments'] as const) {
+      expect(sqliteSchema[table]).toBeDefined();
+      expect(pgSchema[table]).toBeDefined();
+    }
+  });
+
+  it('creates the Agentic App tables and nullable workflow adoption column', () => {
+    const path = tempDbPath();
+    const sqlite = new Database(path);
+    try {
+      runSqliteMigrations(sqlite);
+
+      for (const table of ['apps', 'app_members', 'app_collections', 'app_records', 'app_record_index', 'app_surfaces', 'app_lifecycle_snapshots', 'app_environments']) {
+        expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(table)).toBeDefined();
+      }
+
+      const appColumns = sqlite.prepare("PRAGMA table_info('apps')").all() as Array<{ name: string }>;
+      expect(appColumns.map((column) => column.name)).toEqual(expect.arrayContaining(['source_json', 'installed_checksum', 'domain_id', 'owner_agent_id']));
+
+      const workflowColumns = sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{
+        name: string;
+        notnull: number;
+      }>;
+      const appId = workflowColumns.find((column) => column.name === 'app_id');
+      expect(appId).toBeDefined();
+      expect(appId?.notnull).toBe(0);
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('applies all registered migrations on a fresh database', () => {
     const path = tempDbPath();
     const sqlite = new Database(path);
@@ -226,7 +270,7 @@ CREATE TABLE workflows (
     }
   });
 
-  it('reconciles legacy spaces columns to the current schema', () => {
+  it('reconciles legacy domains columns to the current schema', () => {
     const path = tempDbPath();
     const legacy = new Database(path);
     try {
@@ -252,7 +296,10 @@ VALUES ('space-1', 'ws-1', 'user-1', 'Revenue Ops', '#123456', 'R', 'team-1');
 
     const { sqlite } = openSqlite({ path });
     try {
-      const columns = sqlite.prepare("PRAGMA table_info('spaces')").all() as Array<{ name: string }>;
+      const legacyTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='spaces'").get();
+      expect(legacyTable).toBeUndefined();
+
+      const columns = sqlite.prepare("PRAGMA table_info('domains')").all() as Array<{ name: string }>;
       const names = columns.map((column) => column.name);
       expect(names).toContain('slug');
       expect(names).toContain('description');
@@ -261,10 +308,11 @@ VALUES ('space-1', 'ws-1', 'user-1', 'Revenue Ops', '#123456', 'R', 'team-1');
       expect(names).toContain('manager_id');
       const agentColumns = sqlite.prepare("PRAGMA table_info('agents')").all() as Array<{ name: string }>;
       const workflowColumns = sqlite.prepare("PRAGMA table_info('workflows')").all() as Array<{ name: string }>;
-      expect(agentColumns.map((column) => column.name)).toContain('space_id');
-      expect(workflowColumns.map((column) => column.name)).toContain('space_id');
+      expect(agentColumns.map((column) => column.name)).toContain('domain_id');
+      expect(agentColumns.map((column) => column.name)).toContain('domain_tag');
+      expect(workflowColumns.map((column) => column.name)).toContain('domain_id');
 
-      const row = sqlite.prepare("SELECT slug, color_hex AS colorHex, icon_emoji AS iconEmoji FROM spaces WHERE id = 'space-1'").get() as {
+      const row = sqlite.prepare("SELECT slug, color_hex AS colorHex, icon_emoji AS iconEmoji FROM domains WHERE id = 'space-1'").get() as {
         slug: string;
         colorHex: string;
         iconEmoji: string;
@@ -272,6 +320,73 @@ VALUES ('space-1', 'ws-1', 'user-1', 'Revenue Ops', '#123456', 'R', 'team-1');
       expect(row.slug).toBe('revenue-ops');
       expect(row.colorHex).toBe('#123456');
       expect(row.iconEmoji).toBe('R');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('normalizes legacy room team fields away from the current schema', () => {
+    const path = tempDbPath();
+    const legacy = new Database(path);
+    try {
+      legacy.exec(EMBEDDED_INIT_SQL);
+      legacy.exec(`
+CREATE TABLE teams (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  ambient_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE team_context (
+  id TEXT PRIMARY KEY,
+  team_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+DROP TABLE rooms;
+CREATE TABLE rooms (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  team_id TEXT,
+  kind TEXT NOT NULL DEFAULT 'team',
+  name TEXT NOT NULL,
+  description TEXT,
+  is_team_default INTEGER NOT NULL DEFAULT 1,
+  visibility TEXT NOT NULL DEFAULT 'team',
+  pinned_at TEXT,
+  last_message_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT INTO rooms (id, workspace_id, user_id, team_id, kind, name, is_team_default, visibility)
+VALUES ('room-1', 'ws-1', 'user-1', 'team-1', 'team', 'Ops', 1, 'team');
+`);
+    } finally {
+      legacy.close();
+    }
+
+    const { sqlite } = openSqlite({ path });
+    try {
+      const columns = sqlite.prepare("PRAGMA table_info('rooms')").all() as Array<{ name: string }>;
+      const names = columns.map((column) => column.name);
+      expect(names).not.toContain('team_id');
+      expect(names).not.toContain('is_team_default');
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='teams'").get()).toBeUndefined();
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='team_context'").get()).toBeUndefined();
+
+      const row = sqlite.prepare("SELECT kind, visibility FROM rooms WHERE id = 'room-1'").get() as {
+        kind: string;
+        visibility: string;
+      };
+      expect(row.kind).toBe('workspace');
+      expect(row.visibility).toBe('workspace');
     } finally {
       sqlite.close();
     }

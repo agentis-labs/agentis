@@ -35,6 +35,32 @@ describe('ConversationStore', () => {
     expect(store.list('ws1')).toHaveLength(1);
   });
 
+  it('separates desktop and channel-scoped conversations for the same agent', () => {
+    const desktop = store.getOrCreateByAgent(baseGet);
+    const channelA = store.getOrCreateByChannel({
+      ...baseGet,
+      channelConnectionId: 'conn-1',
+      channelChatId: 'chat-1',
+    });
+    const channelAAgain = store.getOrCreateByChannel({
+      ...baseGet,
+      channelConnectionId: 'conn-1',
+      channelChatId: 'chat-1',
+    });
+    const channelB = store.getOrCreateByChannel({
+      ...baseGet,
+      channelConnectionId: 'conn-1',
+      channelChatId: 'chat-2',
+    });
+    const desktopAgain = store.getOrCreateByAgent(baseGet);
+
+    expect(desktopAgain.id).toBe(desktop.id);
+    expect(channelAAgain.id).toBe(channelA.id);
+    expect(channelA.id).not.toBe(desktop.id);
+    expect(channelB.id).not.toBe(channelA.id);
+    expect(store.list('ws1')).toHaveLength(3);
+  });
+
   it('appendOutbound writes a message and emits MESSAGE_SENT', () => {
     const conv = store.getOrCreateByAgent(baseGet);
     const events: string[] = [];

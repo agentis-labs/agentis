@@ -344,7 +344,7 @@ export function validateGraphTypes(graph: WorkflowGraph): TypeValidationError[] 
     }
   }
 
-  // Check for orphan required inputs (wired but has no source)
+  // Check for dangling required inputs (wired but has no source)
   for (const node of graph.nodes) {
     const catalog = NODE_PORT_CATALOG[node.config.kind];
     if (!catalog) continue;

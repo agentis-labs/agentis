@@ -13,6 +13,7 @@ import { ManagerGlyph, OrchestratorGlyph } from '../agents/AgentRoleGlyphs';
 import { api, apiErrorMessage } from '../../lib/api';
 import { refreshWorkspaceSnapshot, useWorkspaceData } from '../../lib/workspaceData';
 import { useToast } from './Toast';
+import { openRunModal } from '../../lib/runModal';
 
 export interface AgentisNotification {
   id: string;
@@ -23,6 +24,7 @@ export interface AgentisNotification {
   workflowId?: string;
   workflowName?: string;
   runId?: string;
+  failedNodeId?: string;
   agentName?: string;
   approvalId?: string;
   actionLabel?: string;
@@ -51,6 +53,7 @@ export function NotificationPanel() {
   const nav = useNavigate();
   const toast = useToast();
   const [acknowledgedIds, setAcknowledgedIds] = useState<Set<string>>(new Set());
+  const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const currentIds = new Set(items.map((item) => item.id));
@@ -61,9 +64,23 @@ export function NotificationPanel() {
     writeAcknowledgedNotificationIds(workspaceId, next);
   }, [items, workspaceId]);
 
-  const visibleItems = useMemo(
+  useEffect(() => {
+    const currentIds = new Set(items.map((item) => item.id));
+    const next = new Set(
+      [...readSeenNotificationIds(workspaceId)].filter((id) => currentIds.has(id)),
+    );
+    setSeenIds(next);
+    writeSeenNotificationIds(workspaceId, next);
+  }, [items, workspaceId]);
+
+  const panelItems = useMemo(
     () => items.filter((item) => !acknowledgedIds.has(item.id)),
     [acknowledgedIds, items],
+  );
+
+  const unseenItems = useMemo(
+    () => panelItems.filter((item) => !seenIds.has(item.id)),
+    [panelItems, seenIds],
   );
 
   function acknowledgeNotifications(ids: string[]) {
@@ -75,6 +92,22 @@ export function NotificationPanel() {
       return next;
     });
   }
+
+  function markNotificationsSeen(ids: string[]) {
+    if (ids.length === 0) return;
+    setSeenIds((current) => {
+      const next = new Set(current);
+      for (const id of ids) next.add(id);
+      writeSeenNotificationIds(workspaceId, next);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    const unseen = panelItems.filter((item) => !seenIds.has(item.id)).map((item) => item.id);
+    if (unseen.length > 0) markNotificationsSeen(unseen);
+  }, [open, panelItems, seenIds]);
 
   // Click outside to close
   useEffect(() => {
@@ -133,7 +166,7 @@ export function NotificationPanel() {
     }
   }
 
-  const count = visibleItems.length;
+  const count = unseenItems.length;
 
   return (
     <div className="relative" ref={ref}>
@@ -165,7 +198,7 @@ export function NotificationPanel() {
             <button
               type="button"
               onClick={() => {
-                acknowledgeNotifications(visibleItems.map((item) => item.id));
+                acknowledgeNotifications(panelItems.map((item) => item.id));
                 setOpen(false);
                 nav('/history?tab=activity');
               }}
@@ -176,10 +209,10 @@ export function NotificationPanel() {
           </div>
 
           <div className="max-h-[420px] overflow-y-auto">
-            {loading && visibleItems.length === 0 && (
+            {loading && panelItems.length === 0 && (
               <div className="px-4 py-6 text-center text-[12px] text-text-muted">Loading…</div>
             )}
-            {!loading && visibleItems.length === 0 && (
+            {!loading && panelItems.length === 0 && (
               <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
                 <Bell size={32} className="text-text-muted opacity-50" />
                 <span className="text-subheading text-text-primary">All caught up</span>
@@ -187,7 +220,7 @@ export function NotificationPanel() {
               </div>
             )}
 
-            {visibleItems.map((n) => (
+            {panelItems.map((n) => (
               <div key={n.id} className="border-b border-line/60 px-4 py-3 last:border-b-0">
                 <div className="flex items-start gap-2.5">
                   {n.type === 'approval' && <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warn" />}
@@ -227,11 +260,16 @@ export function NotificationPanel() {
                               onClick={() => {
                                 acknowledgeNotifications([n.id]);
                                 setOpen(false);
-                                nav(`/runs/${n.runId}`);
+                                openRunModal({
+                                  runId: n.runId,
+                                  workflowId: n.workflowId,
+                                  focusNodeId: n.failedNodeId,
+                                  source: 'notification',
+                                });
                               }}
                               className="inline-flex h-7 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary"
                             >
-                              <Eye size={11} /> View run
+                              <Eye size={11} /> Inspect
                             </button>
                           )}
                           <button
@@ -274,6 +312,10 @@ function notificationStorageKey(workspaceId: string | null): string | null {
   return workspaceId ? `agentis.notifications.ack.${workspaceId}` : null;
 }
 
+function seenNotificationStorageKey(workspaceId: string | null): string | null {
+  return workspaceId ? `agentis.notifications.seen.${workspaceId}` : null;
+}
+
 function readAcknowledgedNotificationIds(workspaceId: string | null): Set<string> {
   const key = notificationStorageKey(workspaceId);
   if (!key) return new Set();
@@ -291,6 +333,31 @@ function readAcknowledgedNotificationIds(workspaceId: string | null): Set<string
 
 function writeAcknowledgedNotificationIds(workspaceId: string | null, ids: Set<string>): void {
   const key = notificationStorageKey(workspaceId);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify([...ids]));
+  } catch {
+    /* ignore */
+  }
+}
+
+function readSeenNotificationIds(workspaceId: string | null): Set<string> {
+  const key = seenNotificationStorageKey(workspaceId);
+  if (!key) return new Set();
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((value): value is string => typeof value === 'string' && value.length > 0))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function writeSeenNotificationIds(workspaceId: string | null, ids: Set<string>): void {
+  const key = seenNotificationStorageKey(workspaceId);
   if (!key) return;
   try {
     localStorage.setItem(key, JSON.stringify([...ids]));

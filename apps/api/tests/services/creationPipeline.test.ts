@@ -43,8 +43,9 @@ describe('buildWorkspaceInventory', () => {
     expect(inv.availableAgents.map((a) => a.name)).toContain('Mailer');
     expect(inv.wireableIntegrations).toContain('gmail');
     expect(inv.configuredCredentials[0]!.integrationSlug).toBe('gmail');
-    expect(inv.specialistRoles.length).toBeGreaterThanOrEqual(10);
-    expect(inv.specialistRoles.find((r) => r.role === 'researcher')!.tools).toContain('read_url');
+    // Built-in specialists were retired; only custom roles (agents/custom/*.md)
+    // are reported — none seeded here, so no built-in 'researcher' appears.
+    expect(inv.specialistRoles.find((r) => r.role === 'researcher')).toBeUndefined();
   });
 });
 
@@ -149,8 +150,9 @@ describe('preflightAndEnrich', () => {
     const graph = base(
       [
         { id: 'T', type: 'trigger', title: 'M', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
-        // writer has no run_code; a scoring task needs it.
-        { id: 'A', type: 'agent_task', title: 'Score threats', position: { x: 200, y: 0 }, config: { kind: 'agent_task', agentRole: 'writer', capabilityTags: [], prompt: 'run code to compute and score each item statistically', inputKeys: [], outputKeys: [] } },
+        // A specialist gets the universal floor but NOT file/git tools; a task
+        // that must write a file needs write_file, which is outside that floor.
+        { id: 'A', type: 'agent_task', title: 'Export report', position: { x: 200, y: 0 }, config: { kind: 'agent_task', agentRole: 'writer', capabilityTags: [], prompt: 'save file with the final report in the workspace', inputKeys: [], outputKeys: [] } },
         { id: 'R', type: 'return_output', title: 'Out', position: { x: 400, y: 0 }, config: { kind: 'return_output', renderAs: 'json' } },
       ],
       [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'R' }],
@@ -158,7 +160,7 @@ describe('preflightAndEnrich', () => {
     const res = preflightAndEnrich(graph, inv);
     const mismatch = res.warnings.find((w) => w.code === 'CAPABILITY_MISMATCH');
     expect(mismatch).toBeTruthy();
-    expect(mismatch!.message).toMatch(/analyst|coder/);
+    expect(mismatch!.message).toMatch(/lacks write_file/);
   });
 
   it('flags agent_task nodes that bury source work inside language work', async () => {

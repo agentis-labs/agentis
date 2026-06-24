@@ -126,17 +126,9 @@ export class WorkspaceIntelligenceService {
 
   /** The operator charter atom for a section, or null when not authored. */
   #findDoc(workspaceId: string, section: CharterSpec['section']) {
-    const rows = this.db.select().from(schema.workspaceMemory)
-      .where(and(
-        eq(schema.workspaceMemory.workspaceId, workspaceId),
-        isNull(schema.workspaceMemory.scopeId),
-        eq(schema.workspaceMemory.source, 'operator'),
-      ))
-      .all();
-    return rows.find((row) => {
-      const tags = parseTags(row.tags);
-      return tags.includes('charter') && tags.includes(section);
-    }) ?? null;
+    // §B4 — read through the unified MemoryStore facade (one substrate).
+    const rows = this.memory.list({ workspaceId, scopeId: null, source: 'operator', limit: 200 });
+    return rows.find((row) => row.tags.includes('charter') && row.tags.includes(section)) ?? null;
   }
 
   /**
@@ -148,7 +140,10 @@ export class WorkspaceIntelligenceService {
     if (!query || !opts.knowledgeBases) return null;
     const topK = Math.max(1, Math.min(opts.knowledgeTopK ?? 3, 8));
     try {
-      const bases = opts.knowledgeBases.listKnowledgeBases(workspaceId);
+      const bases = opts.knowledgeBases.listKnowledgeBases(workspaceId, {
+        scopeId: opts.workflowId ?? null,
+        includeWorkspace: Boolean(opts.workflowId),
+      });
       if (!bases.length) return null;
       const hits = (await Promise.all(bases
         .map((b) => opts.knowledgeBases!.search({ workspaceId, knowledgeBaseId: b.id, query, topK }))))

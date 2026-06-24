@@ -105,6 +105,16 @@ export class AdapterManager {
     return reg?.adapter.capabilities?.() ?? null;
   }
 
+  /**
+   * The agent adapter's configured working directory, if it spawns local
+   * processes. The engine uses this as the BASE from which it derives an
+   * isolated per-task `workdir` for parallel subtasks. Returns undefined for
+   * gateway/remote adapters (no local cwd) or unregistered agents.
+   */
+  workdirOf(agentId: string): string | undefined {
+    return this.#adapters.get(agentId)?.adapter.getWorkdir?.();
+  }
+
   async dispatchTask(task: NormalizedTask, agentId: string): Promise<void> {
     const reg = this.#adapters.get(agentId);
     if (!reg) {

@@ -58,7 +58,7 @@ function graphWithTrigger(config: WorkflowGraph['nodes'][number]['config']): Wor
 }
 
 describe('WorkflowTriggerDeploymentService', () => {
-  it('publishes a cron node through the existing trigger runtime and links the graph', async () => {
+  it('activates a cron node through the existing trigger runtime and links the graph', async () => {
     const workflowId = seedWorkflow(graphWithTrigger({
       kind: 'trigger',
       triggerType: 'cron',
@@ -66,7 +66,7 @@ describe('WorkflowTriggerDeploymentService', () => {
       timezone: 'UTC',
     }));
 
-    const deployment = await service.publish({
+    const deployment = await service.activate({
       workspaceId: ctx.workspace.id,
       workflowId,
       ambientId: ctx.ambient.id,
@@ -84,7 +84,7 @@ describe('WorkflowTriggerDeploymentService', () => {
     expect(trigger).toMatchObject({ triggerId: deployment.triggerId, schedule: '*/5 * * * *' });
   });
 
-  it('publishes an extension-backed persistent listener and exposes health', async () => {
+  it('activates an extension-backed persistent listener and exposes health', async () => {
     const extensionId = crypto.randomUUID();
     ctx.db.insert(schema.extensions).values({
       id: extensionId,
@@ -125,7 +125,7 @@ describe('WorkflowTriggerDeploymentService', () => {
       },
     }));
 
-    const deployment = await service.publish({
+    const deployment = await service.activate({
       workspaceId: ctx.workspace.id,
       workflowId,
       ambientId: ctx.ambient.id,
@@ -156,12 +156,35 @@ describe('WorkflowTriggerDeploymentService', () => {
       userId: ctx.user.id,
     };
 
-    const first = await service.publish(args);
-    const second = await service.publish(args);
+    const first = await service.activate(args);
+    const second = await service.activate(args);
 
     expect(first.webhookSecret).toBeTruthy();
     expect(first.webhookUrl).toContain(first.triggerId);
     expect(second.webhookSecret).toBeUndefined();
     expect(second.triggerId).toBe(first.triggerId);
+  });
+
+  it('activates a manual workflow without invoking trigger runtime', async () => {
+    const workflowId = seedWorkflow(graphWithTrigger({
+      kind: 'trigger',
+      triggerType: 'manual',
+    }));
+
+    const deployment = await service.activate({
+      workspaceId: ctx.workspace.id,
+      workflowId,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+    });
+
+    expect(deployment).toMatchObject({
+      triggerType: 'manual',
+      status: 'active',
+      config: {},
+    });
+    expect(activate).not.toHaveBeenCalled();
+    const row = ctx.db.select().from(schema.triggers).where(eq(schema.triggers.workflowId, workflowId)).get();
+    expect(row).toMatchObject({ triggerType: 'manual', status: 'active' });
   });
 });

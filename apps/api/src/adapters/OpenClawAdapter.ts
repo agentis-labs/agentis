@@ -1,22 +1,12 @@
 /**
- * OpenClawAdapter — bridge to OpenClaw Gateway over WebSocket.
+ * OpenClawAdapter — bridge Agentis to OpenClaw through OpenClaw's official ACP
+ * CLI server (`openclaw acp`).
  *
- * Inbound:
- *   agent.heartbeat              → updates lastHeartbeatAt
- *   session.message              → CONVERSATION_MESSAGE_RECEIVED + mirror to conversation_messages
- *   session.tool                 → AGENT_TERMINAL_TOOL_CALL
- *   exec.approval.requested      → ApprovalInbox.create(source='openclaw_exec')
- *   agent.status.changed         → AGENT_STATUS event + DB update
- *   task.completed / task.failed → engine.notifyTaskCompleted / notifyTaskFailed
- *
- * Outbound:
- *   dispatchTask  → ws send {kind:'task.dispatch', task}
- *   cancelTask    → ws send {kind:'task.cancel', taskId}
- *   sendMessage   → ws send {kind:'session.send', sessionId?, body}
- *
- * The connection is wrapped in a CircuitBreaker. Three consecutive send/recv
- * failures open the breaker for 30s; the gateway surfaces this in its
- * health snapshot.
+ * The previous implementation spoke an ad-hoc WebSocket dialect directly to the
+ * gateway. OpenClaw's gateway protocol now requires a connect/challenge flow and
+ * exposes chat through ACP, so the stable boundary for Agentis is the ACP bridge:
+ * initialize -> session/new -> session/prompt with streaming session/update
+ * notifications.
  */
 
 import type {
@@ -28,58 +18,39 @@ import type {
   ChatMessage,
   NormalizedAgentEvent,
   NormalizedTask,
+  RuntimeContext,
+  RuntimeDescriptor,
+  RuntimeSessionInfo,
   ToolDefinition,
   TriggerConfig,
   TriggerListenerHandle,
-  RuntimeContext,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { CircuitBreaker } from './CircuitBreaker.js';
-import { clampChatTimeout, createChatQueue, DEFAULT_CHAT_TURN_TIMEOUT_MS } from './cliChatRuntime.js';
+import {
+  AcpClient,
+  type AcpModelInfo,
+  type AcpSessionUpdate,
+} from './acpClient.js';
+import {
+  chatHardCeilingMs,
+  clampChatTimeout,
+  createChatQueue,
+  DEFAULT_CHAT_TURN_TIMEOUT_MS,
+} from './cliChatRuntime.js';
+import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { runtimeProgressActivity } from './runtimeProgress.js';
 
-/**
- * A single in-flight chat turn's view of the gateway's async event stream.
- * OpenClaw doesn't answer a request synchronously — its reply arrives later as a
- * `session.message`. A turn registers one of these so {@link OpenClawAdapter.chat}
- * can stream live thinking and resolve on the agent's reply (or time out).
- */
-interface OpenClawChatListener {
-  onThinking(text: string): void;
-  onAgentMessage(body: string): void;
-  onError(message: string): void;
-}
-
-interface WebSocketLike {
-  readonly readyState: number;
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  on(event: 'open', cb: () => void): void;
-  on(event: 'message', cb: (data: Buffer | string) => void): void;
-  on(event: 'close', cb: () => void): void;
-  on(event: 'error', cb: (err: Error) => void): void;
-}
-
-interface WebSocketCtor {
-  new (url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }): WebSocketLike;
-  readonly OPEN: number;
-}
-
-let cachedWS: { kind: 'available'; WS: WebSocketCtor } | { kind: 'unavailable'; reason: string } | undefined;
-async function loadWs() {
-  if (cachedWS) return cachedWS;
-  try {
-    const mod = (await import('ws' as string)) as { WebSocket: WebSocketCtor; default?: WebSocketCtor };
-    const WS = (mod.WebSocket ?? mod.default) as WebSocketCtor;
-    cachedWS = { kind: 'available', WS };
-  } catch (err) {
-    cachedWS = { kind: 'unavailable', reason: (err as Error).message };
-  }
-  return cachedWS;
-}
+const DEFAULT_OPENCLAW_STARTUP_TIMEOUT_MS = 60_000;
+const MAX_OPENCLAW_STARTUP_TIMEOUT_MS = 180_000;
 
 export interface OpenClawAdapterOptions {
   agentId: string;
   gatewayUrl: string;
+  /** Path to the `openclaw` binary. Falls back to `openclaw` on PATH. */
+  binaryPath?: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  model?: string;
   /** Decrypted device token. NEVER persisted in plaintext. */
   deviceToken?: string;
   headers?: Record<string, string>;
@@ -90,7 +61,7 @@ export interface OpenClawAdapterOptions {
   disableDeviceAuth?: boolean;
   timeoutSec?: number;
   payloadTemplate?: Record<string, unknown>;
-  /** Optional: the gateway-side session id to bind to (for mirrored conversations). */
+  /** Optional: the gateway-side session id/key to bind to. */
   defaultSessionId?: string;
   logger: Logger;
 }
@@ -98,59 +69,52 @@ export interface OpenClawAdapterOptions {
 export class OpenClawAdapter implements AgentAdapter {
   readonly adapterType = 'openclaw' as const;
   readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
-  readonly #chatListeners = new Set<OpenClawChatListener>();
-  readonly #breaker = new CircuitBreaker({ failureThreshold: 3, cooldownMs: 30_000 });
-  #ws: WebSocketLike | undefined;
-  #closed = false;
+  readonly #activeClients = new Map<string, AcpClient>();
+  readonly #taskSessionKeys = new Map<string, string>();
+  readonly #sessions = new Map<string, {
+    runtimeSessionId: string;
+    createdAt: string;
+    updatedAt: string;
+  }>();
+  #version: string | null = null;
+  #models: AcpModelInfo[] = [];
 
   constructor(private readonly opts: OpenClawAdapterOptions) {}
 
   async connect(): Promise<void> {
-    const loaded = await loadWs();
-    if (loaded.kind === 'unavailable') {
-      this.opts.logger.warn('openclaw.ws_unavailable', { reason: loaded.reason });
-      return;
-    }
-    const { WS } = loaded;
-    this.#ws = new WS(this.opts.gatewayUrl, undefined, {
-      headers: this.#authHeaders(),
-    });
-    this.#ws.on('open', () => this.opts.logger.info('openclaw.ws_open', { agentId: this.opts.agentId }));
-    this.#ws.on('message', (raw) => this.#handleMessage(typeof raw === 'string' ? raw : raw.toString('utf8')));
-    this.#ws.on('close', () => {
-      this.opts.logger.warn('openclaw.ws_close', { agentId: this.opts.agentId });
-      if (!this.#closed) {
-          this.#emit({
-            eventType: 'agent.heartbeat',
-            agentId: this.opts.agentId,
-            connected: false,
-            timestamp: new Date().toISOString(),
-          });
-        }
-    });
-    this.#ws.on('error', (err) => {
-      this.opts.logger.error('openclaw.ws_error', { agentId: this.opts.agentId, err: err.message });
-    });
+    // The ACP child is started lazily per turn. This keeps commissioning fast and
+    // avoids a long-lived bridge process when the chat is idle.
   }
 
   async disconnect(): Promise<void> {
-    this.#closed = true;
-    this.#ws?.close();
+    for (const client of this.#activeClients.values()) client.dispose();
+    this.#activeClients.clear();
   }
 
   async healthCheck(): Promise<AdapterHealthStatus> {
-    return {
-      isHealthy: this.#ws?.readyState === 1 && this.#breaker.state() !== 'open',
-      checkedAt: new Date().toISOString(),
-      ...(this.#breaker.state() === 'open' ? { error: 'circuit_breaker_open' } : {}),
-    };
+    if (!this.opts.gatewayUrl?.trim()) {
+      return {
+        isHealthy: false,
+        checkedAt: new Date().toISOString(),
+        error: 'openclaw gatewayUrl is required',
+      };
+    }
+    const result = await probeCliRuntime({
+      binary: this.opts.binaryPath || 'openclaw',
+      cwd: this.opts.cwd,
+      env: this.#bridgeEnv(),
+      logger: this.opts.logger,
+      logTag: 'openclaw',
+    });
+    this.#version = result.version;
+    return result.health;
   }
 
   capabilities(): AdapterCapabilities {
     return {
       interactiveChat: true,
-      // The gateway agent runs its OWN tool loop remotely; Agentis relays the
-      // operator's message and streams the reply rather than executing tools here.
+      // OpenClaw owns its remote tool loop. Agentis shows tool activity from ACP
+      // but does not execute those tools locally.
       toolCalling: false,
       toolForwarding: 'session_event',
       execution: {
@@ -167,24 +131,62 @@ export class OpenClawAdapter implements AgentAdapter {
         injectable: true,
       },
       limitations: [
-        'OpenClaw chats through its gateway session; Agentis platform tools run on the gateway agent, not in the local chat tool loop.',
+        'OpenClaw runs tools inside the gateway agent. Agentis streams its ACP activity instead of re-running those tools locally.',
       ],
     };
   }
 
   async getRuntimeContext(): Promise<RuntimeContext> {
+    const models = this.#models.length > 0
+      ? this.#models.map((model) => ({
+        id: model.modelId,
+        label: model.name ?? model.modelId,
+        source: 'runtime' as const,
+        verified: true,
+      }))
+      : [{ id: 'openclaw-gateway', label: 'OpenClaw Gateway', source: 'fallback' as const, verified: false }];
     return {
       provider: 'openclaw',
-      models: [{ id: 'openclaw-gateway', label: 'OpenClaw Gateway' }],
-      currentModel: 'openclaw-gateway',
+      models,
+      currentModel: this.opts.model ?? models[0]?.id ?? 'openclaw-gateway',
+      currentModelSource: this.opts.model ? 'agent_config' : (this.#models.length ? 'runtime' : 'fallback'),
+      currentModelVerified: this.#models.length > 0,
       fastModeSupported: false,
     };
   }
 
+  async describeRuntime(): Promise<Partial<RuntimeDescriptor>> {
+    const observedAt = new Date().toISOString();
+    return {
+      version: this.#version
+        ? { value: this.#version, source: 'runtime', observedAt, verified: true }
+        : null,
+      process: {
+        warm: this.#activeClients.size > 0,
+        activeSessions: this.#sessions.size,
+      },
+    };
+  }
+
+  async listRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
+    return [...this.#sessions.entries()].map(([sessionKey, session]) => ({
+      id: `${this.opts.agentId}:${sessionKey}`,
+      sessionKey,
+      runtimeSessionId: session.runtimeSessionId,
+      status: this.#activeClients.has(sessionKey) ? 'active' : 'idle',
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      lastUsedAt: session.updatedAt,
+    }));
+  }
+
+  async closeRuntimeSession(sessionKey: string): Promise<void> {
+    this.#sessions.delete(sessionKey);
+    this.#activeClients.get(sessionKey)?.dispose();
+    this.#activeClients.delete(sessionKey);
+  }
+
   async createPersistentListener(trigger: TriggerConfig): Promise<TriggerListenerHandle> {
-    // Persistent listeners share the same WS — we simply tag inbound events
-    // with the workflowId at the AdapterManager layer. Closing the handle
-    // is a no-op because closing would terminate the agent itself.
     return {
       triggerId: trigger.triggerId,
       startedAt: new Date().toISOString(),
@@ -197,279 +199,446 @@ export class OpenClawAdapter implements AgentAdapter {
   }
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
-    await this.#breaker.exec(async () => {
-      this.#sendOrThrow({
-        ...(this.opts.payloadTemplate ?? {}),
-        kind: 'task.dispatch',
-        task,
-        ...(this.opts.agentName ? { agentName: this.opts.agentName } : {}),
-        sessionKey: this.#sessionKeyFor(task),
-      });
+    const at = () => new Date().toISOString();
+    this.#emit({
+      eventType: 'task.started',
+      agentId: this.opts.agentId,
+      taskId: task.taskId,
+      runId: task.runId,
+      workflowId: task.workflowId,
+      timestamp: at(),
     });
-  }
 
-  async cancelTask(taskId: string): Promise<void> {
+    let failed = false;
+    let transcript = '';
+    const sessionKey = this.#taskSessionKey(task);
+    this.#taskSessionKeys.set(task.taskId, sessionKey);
     try {
-      await this.#breaker.exec(async () => {
-        this.#sendOrThrow({ kind: 'task.cancel', taskId });
-      });
-    } catch {
-      // best-effort
+      for await (const delta of this.#runAcpTurn({
+        sessionKey,
+        prompt: buildTaskPrompt(task),
+        signal: task.signal,
+        timeoutMs: this.opts.timeoutSec ? this.opts.timeoutSec * 1000 : undefined,
+      })) {
+        if (delta.type === 'text') {
+          transcript += delta.delta;
+          this.#emit({
+            eventType: 'task.progress',
+            agentId: this.opts.agentId,
+            taskId: task.taskId,
+            runId: task.runId,
+            workflowId: task.workflowId,
+            message: delta.delta,
+            timestamp: at(),
+          });
+        } else if (delta.type === 'activity' && delta.phase === 'tool') {
+          this.#emit({
+            eventType: 'agent.tool_call',
+            agentId: this.opts.agentId,
+            taskId: task.taskId,
+            runId: task.runId,
+            workflowId: task.workflowId,
+            tool: delta.label,
+            input: {},
+            timestamp: at(),
+          });
+        } else if (delta.type === 'tool_result' && delta.error) {
+          failed = true;
+          this.#emitFailure(task, delta.error);
+        }
+      }
+      if (!failed) {
+        this.#emit({
+          eventType: 'task.completed',
+          agentId: this.opts.agentId,
+          taskId: task.taskId,
+          runId: task.runId,
+          workflowId: task.workflowId,
+          output: { text: transcript.trim() },
+          timestamp: at(),
+        });
+      }
+    } catch (err) {
+      this.#emitFailure(task, (err as Error).message);
+    } finally {
+      this.#taskSessionKeys.delete(task.taskId);
     }
   }
 
-  /** Send an operator message into a mirrored session. */
+  async cancelTask(taskId: string): Promise<void> {
+    const sessionKey = this.#taskSessionKeys.get(taskId);
+    if (sessionKey) {
+      this.#activeClients.get(sessionKey)?.dispose();
+      this.#activeClients.delete(sessionKey);
+    }
+  }
+
+  /** Best-effort operator message relay for legacy mirrored-session routes. */
   async sendSessionMessage(args: { sessionId?: string; body: string }): Promise<void> {
-    await this.#breaker.exec(async () => {
-      this.#sendOrThrow({
-        kind: 'session.send',
-        sessionId: args.sessionId ?? this.opts.defaultSessionId,
-        body: args.body,
-      });
-    });
+    const sessionKey = args.sessionId?.trim() || this.#chatSessionKey(undefined);
+    void (async () => {
+      try {
+        for await (const delta of this.#runAcpTurn({
+          sessionKey,
+          prompt: args.body,
+          timeoutMs: this.opts.timeoutSec ? this.opts.timeoutSec * 1000 : undefined,
+        })) {
+          if (delta.type === 'tool_result' && delta.error) {
+            this.opts.logger.warn('openclaw.session_send_failed', { error: delta.error });
+          }
+        }
+      } catch (err) {
+        this.opts.logger.warn('openclaw.session_send_failed', { error: (err as Error).message });
+      }
+    })();
   }
 
-  breakerState() {
-    return this.#breaker.state();
-  }
-
-  /**
-   * Interactive chat over the mirrored gateway session. Unlike the CLI adapters,
-   * OpenClaw has no synchronous response: we relay the operator's latest message
-   * and stream the gateway's async reply (live `agent.thinking` → ThinkingBubble,
-   * the agent's `session.message` → the answer) until it replies or times out.
-   * Agentis tools are not executed here — the gateway agent owns its own loop.
-   */
   async *chat(
     messages: ChatMessage[],
     _tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user') ?? messages.at(-1);
-    const body = typeof lastUser?.content === 'string' ? lastUser.content : String(lastUser?.content ?? '');
+    const sessionKey = this.#chatSessionKey(options?.sessionKey);
+    yield* this.#runAcpTurn({
+      sessionKey,
+      prompt: formatChatPrompt(messages),
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async *#runAcpTurn(args: {
+    sessionKey: string;
+    prompt: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): AsyncIterable<ChatDelta> {
     const queue = createChatQueue();
-    const timeoutMs = clampChatTimeout(
-      this.opts.timeoutSec && this.opts.timeoutSec > 0 ? this.opts.timeoutSec * 1000 : DEFAULT_CHAT_TURN_TIMEOUT_MS,
+    const idleTimeoutMs = clampChatTimeout(args.timeoutMs ?? (this.opts.timeoutSec ? this.opts.timeoutSec * 1000 : DEFAULT_CHAT_TURN_TIMEOUT_MS));
+    const hardCeilingMs = chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_OPENCLAW_CHAT_HARD_CEILING_MS');
+    const startupTimeoutMs = boundedTimeout(
+      process.env.AGENTIS_OPENCLAW_STARTUP_TIMEOUT_MS,
+      DEFAULT_OPENCLAW_STARTUP_TIMEOUT_MS,
+      MAX_OPENCLAW_STARTUP_TIMEOUT_MS,
     );
-
+    const turnState: OpenClawAcpTurnState = {
+      sessionKey: args.sessionKey,
+      agentId: this.opts.agentId,
+      thoughtText: '',
+      toolLabels: new Map(),
+    };
     let settled = false;
-    const listener: OpenClawChatListener = {
-      onThinking: (text) => {
-        if (settled || !text) return;
-        queue.push({ type: 'thinking', delta: text });
-      },
-      onAgentMessage: (replyBody) => {
-        if (settled || !replyBody.trim()) return;
-        settle();
-        queue.push({ type: 'text', delta: replyBody });
-        queue.push({ type: 'done', finishReason: 'stop' });
-        queue.close();
-      },
-      onError: (message) => {
-        if (settled) return;
-        settle();
-        queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message });
-        queue.push({ type: 'done', finishReason: 'error' });
-        queue.close();
-      },
-    };
-    const timer = setTimeout(
-      () => listener.onError(`OpenClaw did not reply within ${Math.round(timeoutMs / 1000)}s`),
-      timeoutMs,
-    );
-    timer.unref?.();
-    const settle = () => {
-      settled = true;
-      clearTimeout(timer);
-      this.#chatListeners.delete(listener);
-    };
-    const onAbort = () => listener.onError('OpenClaw request was canceled');
-    options?.signal?.addEventListener('abort', onAbort, { once: true });
+    let client: AcpClient | undefined;
+    let sessionId = '';
+    let hardTimer: NodeJS.Timeout | undefined;
+    let abortHandler: (() => void) | undefined;
 
-    this.#chatListeners.add(listener);
-    try {
-      await this.sendSessionMessage({ sessionId: this.opts.defaultSessionId, body });
-    } catch (err) {
-      listener.onError(`OpenClaw send failed: ${(err as Error).message}`);
-    }
+    const finish = (deltas: ChatDelta[]) => {
+      if (settled) return;
+      settled = true;
+      if (hardTimer) clearTimeout(hardTimer);
+      for (const delta of deltas) queue.push(delta);
+      queue.close();
+    };
+    const fail = (message: string) => {
+      if (client && sessionId) void client.cancel(sessionId);
+      finish([
+        { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message },
+        { type: 'done', finishReason: 'error' },
+      ]);
+    };
+
+    void (async () => {
+      try {
+        queue.push({
+          type: 'activity',
+          id: `openclaw-runtime-${args.sessionKey}`,
+          label: 'Starting OpenClaw',
+          detail: 'Connecting through openclaw acp.',
+          phase: 'runtime',
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
+        client = this.#createClient(args.sessionKey);
+        this.#activeClients.set(args.sessionKey, client);
+        client.start();
+        await withDeadline(client.initialize(), startupTimeoutMs, 'openclaw_handshake_timeout');
+        const session = await withDeadline(
+          client.sessionNew({ cwd: this.opts.cwd ?? process.cwd(), mcpServers: [] }),
+          startupTimeoutMs,
+          'openclaw_session_timeout',
+        );
+        sessionId = session.sessionId;
+        if (session.models?.length) this.#models = session.models;
+        this.#rememberSession(args.sessionKey, sessionId);
+        queue.push({
+          type: 'activity',
+          id: `openclaw-runtime-${args.sessionKey}`,
+          label: 'OpenClaw ready',
+          phase: 'runtime',
+          status: 'success',
+          completedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
+
+        hardTimer = setTimeout(
+          () => fail(`OpenClaw exceeded the ${Math.round(hardCeilingMs / 1000)} second turn ceiling.`),
+          hardCeilingMs,
+        );
+        hardTimer.unref?.();
+        abortHandler = () => fail('OpenClaw request was canceled');
+        args.signal?.addEventListener('abort', abortHandler, { once: true });
+
+        const result = await client.sessionPrompt(
+          { sessionId, prompt: [{ type: 'text', text: args.prompt }] },
+          (update) => {
+            const delta = openClawUpdateToDelta(update, turnState);
+            if (delta && !settled) queue.push(delta);
+          },
+        );
+        const finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] =
+          result.stopReason === 'max_tokens' || result.stopReason === 'max_turn_requests' ? 'max_turns' : 'stop';
+        finish([{ type: 'done', finishReason }]);
+      } catch (err) {
+        fail((err as Error).message);
+      } finally {
+        if (abortHandler) args.signal?.removeEventListener('abort', abortHandler);
+        if (hardTimer) clearTimeout(hardTimer);
+        this.#activeClients.delete(args.sessionKey);
+        client?.dispose();
+      }
+    })();
 
     try {
       yield* queue.iterate();
     } finally {
-      settle();
-      options?.signal?.removeEventListener('abort', onAbort);
-    }
-  }
-
-  // ─────────────────────────────────────────────
-
-  #notifyChatListeners(fn: (listener: OpenClawChatListener) => void): void {
-    for (const listener of this.#chatListeners) {
-      try {
-        fn(listener);
-      } catch (err) {
-        this.opts.logger.warn('openclaw.chat_listener_threw', { err: (err as Error).message });
+      if (!settled) {
+        if (client && sessionId) void client.cancel(sessionId);
+        client?.dispose();
+        this.#activeClients.delete(args.sessionKey);
       }
     }
   }
 
-  #sendOrThrow(payload: unknown): void {
-    if (!this.#ws || this.#ws.readyState !== 1 /* OPEN */) {
-      throw new Error('openclaw_ws_not_open');
-    }
-    this.#ws.send(JSON.stringify(payload));
+  #createClient(sessionKey: string): AcpClient {
+    return new AcpClient({
+      command: this.opts.binaryPath || 'openclaw',
+      args: this.#acpArgs(sessionKey),
+      cwd: this.opts.cwd,
+      env: this.#bridgeEnv(),
+      logger: this.opts.logger,
+      logTag: 'openclaw.acp',
+      onPermission: () => null,
+    });
   }
 
-  #handleMessage(text: string): void {
-    let msg: { kind: string; [k: string]: unknown };
-    try {
-      msg = JSON.parse(text) as { kind: string; [k: string]: unknown };
-    } catch {
-      this.opts.logger.warn('openclaw.bad_json', { agentId: this.opts.agentId });
-      return;
-    }
-    const at = new Date().toISOString();
-    switch (msg.kind) {
-      case 'agent.heartbeat':
-        this.#emit({
-          eventType: 'agent.heartbeat',
-          agentId: this.opts.agentId,
-          connected: true,
-          timestamp: at,
-        });
-        return;
-      case 'connect.challenge':
-        this.#sendConnectResponse(msg);
-        return;
-      case 'agent.thinking':
-        this.#emit({
-          eventType: 'agent.thinking',
-          agentId: this.opts.agentId,
-          runId: String(msg.runId ?? ''),
-          workflowId: String(msg.workflowId ?? ''),
-          taskId: String(msg.taskId ?? ''),
-          text: String(msg.text ?? ''),
-          timestamp: at,
-        });
-        this.#notifyChatListeners((l) => l.onThinking(String(msg.text ?? '')));
-        return;
-      case 'agent.tool_call':
-      case 'session.tool':
-        this.#emit({
-          eventType: 'agent.tool_call',
-          agentId: this.opts.agentId,
-          runId: String(msg.runId ?? ''),
-          workflowId: String(msg.workflowId ?? ''),
-          taskId: String(msg.taskId ?? ''),
-          tool: String(msg.tool ?? ''),
-          input: msg.args ?? {},
-          result: msg.result,
-          timestamp: at,
-        });
-        return;
-      case 'task.completed':
-        this.#emit({
-          eventType: 'task.completed',
-          agentId: this.opts.agentId,
-          runId: String(msg.runId ?? ''),
-          workflowId: String(msg.workflowId ?? ''),
-          taskId: String(msg.taskId ?? ''),
-          output: (msg.output as Record<string, unknown>) ?? {},
-          timestamp: at,
-        });
-        return;
-      case 'task.failed':
-        this.#emit({
-          eventType: 'task.failed',
-          agentId: this.opts.agentId,
-          runId: String(msg.runId ?? ''),
-          workflowId: String(msg.workflowId ?? ''),
-          taskId: String(msg.taskId ?? ''),
-          error: String(msg.error ?? 'agent task failed'),
-          timestamp: at,
-        });
-        this.#notifyChatListeners((l) => l.onError(String(msg.error ?? 'OpenClaw agent task failed')));
-        return;
-      case 'session.message': {
-        const authorType = String(msg.authorType ?? 'agent') as 'agent' | 'operator' | 'system';
-        this.#emit({
-          eventType: 'agent.session_message',
-          agentId: this.opts.agentId,
-          sessionId: String(msg.sessionId ?? ''),
-          sessionMessageId: String(msg.id ?? ''),
-          authorType,
-          body: String(msg.body ?? ''),
-          timestamp: at,
-        });
-        // The agent's reply resolves the in-flight chat turn (ignore the echo of
-        // the operator's own message and any system notices).
-        if (authorType === 'agent') {
-          this.#notifyChatListeners((l) => l.onAgentMessage(String(msg.body ?? '')));
-        }
-        return;
-      }
-      case 'exec.approval.requested':
-        this.#emit({
-          eventType: 'agent.approval_requested',
-          agentId: this.opts.agentId,
-          ...(msg.runId ? { runId: String(msg.runId) } : {}),
-          ...(msg.taskId ? { taskId: String(msg.taskId) } : {}),
-          title: String(msg.title ?? 'OpenClaw exec approval'),
-          summary: String(msg.summary ?? ''),
-          command: msg.command,
-          timestamp: at,
-        });
-        return;
-      case 'agent.status.changed':
-        this.#emit({
-          eventType: 'agent.status',
-          agentId: this.opts.agentId,
-          status: (String(msg.status ?? 'offline') as 'online' | 'busy' | 'offline' | 'error'),
-          timestamp: at,
-        });
-        return;
-      default:
-        this.opts.logger.debug?.('openclaw.unhandled_kind', { kind: msg.kind });
-    }
+  #acpArgs(sessionKey: string): string[] {
+    return [
+      'acp',
+      '--url', this.opts.gatewayUrl,
+      '--session', sessionKey,
+    ];
+  }
+
+  #bridgeEnv(): Record<string, string> {
+    const headerToken = openClawTokenFromHeaders(this.opts.headers);
+    const headerPassword = this.opts.headers?.['x-openclaw-password'] ?? this.opts.headers?.['X-OpenClaw-Password'];
+    return {
+      ...(this.opts.env ?? {}),
+      OPENCLAW_HIDE_BANNER: this.opts.env?.OPENCLAW_HIDE_BANNER ?? '1',
+      OPENCLAW_SUPPRESS_NOTES: this.opts.env?.OPENCLAW_SUPPRESS_NOTES ?? '1',
+      ...(this.opts.deviceToken || headerToken ? { OPENCLAW_GATEWAY_TOKEN: this.opts.deviceToken ?? headerToken } : {}),
+      ...(this.opts.password || headerPassword ? { OPENCLAW_GATEWAY_PASSWORD: this.opts.password ?? headerPassword } : {}),
+    };
+  }
+
+  #chatSessionKey(sessionKey: string | undefined): string {
+    if (this.opts.defaultSessionId) return this.opts.defaultSessionId;
+    if (this.opts.sessionKeyStrategy === 'fixed' && this.opts.sessionKey) return this.opts.sessionKey;
+    const leaf = sanitizeSessionSegment(sessionKey ?? 'main');
+    const agent = sanitizeSessionSegment(this.opts.agentName ?? this.opts.agentId);
+    return `agent:${agent}:${leaf}`;
+  }
+
+  #taskSessionKey(task: NormalizedTask): string {
+    if (this.opts.sessionKeyStrategy === 'fixed' && this.opts.sessionKey) return this.opts.sessionKey;
+    if (this.opts.sessionKeyStrategy === 'run') return `agentis-run-${sanitizeSessionSegment(task.runId)}`;
+    const issueId = typeof task.inputData.issueId === 'string' ? task.inputData.issueId : task.runId;
+    return `agentis-issue-${sanitizeSessionSegment(issueId)}`;
+  }
+
+  #rememberSession(sessionKey: string, runtimeSessionId: string): void {
+    const now = new Date().toISOString();
+    const existing = this.#sessions.get(sessionKey);
+    this.#sessions.set(sessionKey, {
+      runtimeSessionId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
   }
 
   #emit(event: NormalizedAgentEvent): void {
-    for (const h of this.#handlers) {
+    for (const handler of this.#handlers) {
       try {
-        h(event);
+        handler(event);
       } catch (err) {
         this.opts.logger.error('openclaw.handler_threw', { err: (err as Error).message });
       }
     }
   }
 
-  #authHeaders(): Record<string, string> {
-    return {
-      ...(this.opts.headers ?? {}),
-      ...(this.opts.deviceToken ? { authorization: `Bearer ${this.opts.deviceToken}`, 'x-openclaw-token': this.opts.deviceToken } : {}),
-      ...(this.opts.password ? { 'x-openclaw-password': this.opts.password } : {}),
-    };
+  #emitFailure(task: NormalizedTask, message: string): void {
+    this.#emit({
+      eventType: 'task.failed',
+      agentId: this.opts.agentId,
+      taskId: task.taskId,
+      runId: task.runId,
+      workflowId: task.workflowId,
+      error: message,
+      timestamp: new Date().toISOString(),
+    });
   }
+}
 
-  #sessionKeyFor(task: NormalizedTask): string {
-    if (this.opts.sessionKeyStrategy === 'fixed' && this.opts.sessionKey) return this.opts.sessionKey;
-    if (this.opts.sessionKeyStrategy === 'run') return `agentis-run-${task.runId}`;
-    const issueId = typeof task.inputData.issueId === 'string' ? task.inputData.issueId : task.runId;
-    return `agentis-issue-${issueId}`;
-  }
+interface OpenClawAcpTurnState {
+  sessionKey: string;
+  agentId: string;
+  thoughtText: string;
+  toolLabels: Map<string, string>;
+}
 
-  #sendConnectResponse(challenge: Record<string, unknown>): void {
-    try {
-      this.#sendOrThrow({
-        kind: 'req.connect',
-        clientId: `agentis-${this.opts.agentId}`,
-        role: 'operator',
-        scopes: ['agent:request', 'session:read', 'session:write'],
-        challenge: challenge.challenge,
-        device: this.opts.disableDeviceAuth ? null : { mode: 'ephemeral' },
+function openClawUpdateToDelta(update: AcpSessionUpdate, state: OpenClawAcpTurnState): ChatDelta | null {
+  switch (update.sessionUpdate) {
+    case 'agent_thought_chunk': {
+      const text = textOf(update.content);
+      if (!text) return null;
+      state.thoughtText += text;
+      return runtimeProgressActivity({
+        id: `openclaw-thought-${state.sessionKey}`,
+        runtimeName: 'OpenClaw',
+        text: state.thoughtText,
+        reasoning: true,
+        agentId: state.agentId,
       });
-    } catch (err) {
-      this.opts.logger.warn('openclaw.connect_response_failed', { agentId: this.opts.agentId, err: (err as Error).message });
     }
+    case 'agent_message_chunk': {
+      const text = textOf(update.content);
+      state.thoughtText = '';
+      return text ? { type: 'text', delta: text } : null;
+    }
+    case 'tool_call': {
+      const u = update as { toolCallId?: string; title?: string; kind?: string; status?: string };
+      const toolCallId = u.toolCallId ?? `tool-${Math.random().toString(36).slice(2)}`;
+      const label = u.title?.trim() || prettyToolName(u.kind) || 'a tool';
+      state.toolLabels.set(toolCallId, label);
+      return openClawToolActivity(toolCallId, label, u.status ?? 'running');
+    }
+    case 'tool_call_update': {
+      const u = update as { toolCallId?: string; title?: string; status?: string };
+      const toolCallId = u.toolCallId ?? `tool-${Math.random().toString(36).slice(2)}`;
+      const label = u.title?.trim() || state.toolLabels.get(toolCallId) || 'a tool';
+      state.toolLabels.set(toolCallId, label);
+      return openClawToolActivity(toolCallId, label, u.status ?? 'running');
+    }
+    default:
+      return null;
   }
+}
+
+function openClawToolActivity(toolCallId: string, label: string, rawStatus: string): Extract<ChatDelta, { type: 'activity' }> {
+  const status = rawStatus.toLowerCase();
+  const failed = /fail|error|cancel/.test(status);
+  const completed = failed || /complete|success|done|finished/.test(status);
+  return {
+    type: 'activity',
+    id: `openclaw-${toolCallId}`,
+    phase: 'tool',
+    status: failed ? 'error' : completed ? 'success' : 'running',
+    label: failed ? `Failed ${label}` : completed ? `Used ${label}` : `Using ${label}`,
+    ...(completed
+      ? { completedAt: new Date().toISOString() }
+      : { startedAt: new Date().toISOString() }),
+  };
+}
+
+function formatChatPrompt(messages: ChatMessage[]): string {
+  return messages.map((message) => {
+    const content = typeof message.content === 'string' ? message.content : safeJson(message.content);
+    if (message.role === 'tool') return `TOOL RESULT (${message.toolCallId ?? 'unknown'}):\n${content}`;
+    if (message.role === 'assistant' && message.toolCalls?.length) {
+      return ['ASSISTANT:', content, 'REQUESTED TOOLS:', safeJson(message.toolCalls)].join('\n');
+    }
+    return `${message.role.toUpperCase()}:\n${content}`;
+  }).join('\n\n');
+}
+
+function buildTaskPrompt(task: NormalizedTask): string {
+  return [
+    `Task: ${task.title}`,
+    '',
+    task.description,
+    '',
+    'Input data:',
+    safeJson(task.inputData),
+    '',
+    'Scratchpad snapshot:',
+    safeJson(task.scratchpadSnapshot),
+  ].join('\n');
+}
+
+function sanitizeSessionSegment(value: string): string {
+  const sanitized = value.trim().replace(/[^a-zA-Z0-9_.:-]+/g, '-').replace(/^-+|-+$/g, '');
+  return sanitized || 'main';
+}
+
+function boundedTimeout(raw: string | undefined, fallback: number, maximum: number): number {
+  const parsed = Number(raw);
+  const value = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Math.max(1_000, Math.min(Math.floor(value), maximum));
+}
+
+async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${code}: exceeded ${Math.round(timeoutMs / 1000)} seconds`)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function textOf(content: unknown): string {
+  if (content && typeof content === 'object' && 'text' in content) {
+    const text = (content as { text?: unknown }).text;
+    return typeof text === 'string' ? text : '';
+  }
+  return '';
+}
+
+function prettyToolName(raw: unknown): string {
+  return typeof raw === 'string'
+    ? raw.replace(/^mcp__[^_]+__/, '').replace(/[._-]/g, ' ').trim()
+    : '';
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function openClawTokenFromHeaders(headers: Record<string, string> | undefined): string | undefined {
+  const direct = headers?.['x-openclaw-token'] ?? headers?.['X-OpenClaw-Token'];
+  if (direct?.trim()) return direct.trim();
+  const auth = headers?.authorization ?? headers?.Authorization;
+  const match = auth?.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim();
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@agentis/db/sqlite';
-import { HashingEmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { PersonalBrainService } from '../../src/services/personalBrain.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -10,7 +10,7 @@ let brain: PersonalBrainService;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  brain = new PersonalBrainService(ctx.db, new HashingEmbeddingProvider());
+  brain = new PersonalBrainService(ctx.db, new StubEmbeddingProvider());
 });
 
 afterEach(() => ctx.close());

@@ -6,10 +6,11 @@
  * project, with the Agentis overlay shown as one explicit context layer.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine } from 'lucide-react';
 import { api, apiErrorMessage } from '../lib/api';
+import { openRunModal } from '../lib/runModal';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 import { Tabs } from '../components/shared/Tabs';
@@ -21,6 +22,8 @@ import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
 import { AgentChannelsTab } from '../components/agents/AgentChannelsTab';
 import { AgentInteractionFeed } from '../components/agents/AgentInteractionFeed';
 import { RuntimeNativePanel } from '../components/agents/RuntimeNativePanel';
+import { DeleteAgentDialog } from '../components/agents/DeleteAgentDialog';
+import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
 import { useAgentInstallSession } from '../hooks/useBackgroundInstall';
 
 type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'interactions' | 'history';
@@ -107,13 +110,13 @@ export function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const toast = useToast();
-  const confirm = useConfirm();
   const [searchParams] = useSearchParams();
   const tab = normalizeTab(searchParams.get('tab'));
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [allAgents, setAllAgents] = useState<AgentSummary[]>([]);
-  const [allSpaces, setAllSpaces] = useState<Array<{ id: string; name: string }>>([]);
+  const [allSpaces, setAllSpaces] = useState<Array<{ id: string; name: string; parentDomainId?: string | null }>>([]);
   const [loading, setLoading] = useState(true);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const installSession = useAgentInstallSession(agent?.id);
 
   async function refresh() {
@@ -123,39 +126,21 @@ export function AgentDetailPage() {
       const [agentResult, agentsResult, spacesResult] = await Promise.allSettled([
         api<{ agent: AgentDetail }>(`/v1/agents/${id}`),
         api<{ agents: AgentSummary[] }>('/v1/agents'),
-        api<{ spaces: Array<{ id: string; name: string }> }>('/v1/spaces'),
+        api<{ data: Array<{ id: string; name: string }> }>('/v1/domains'),
       ]);
       if (agentResult.status === 'fulfilled') setAgent(agentResult.value.agent);
       else setAgent(null);
       if (agentsResult.status === 'fulfilled') setAllAgents(agentsResult.value.agents ?? []);
-      if (spacesResult.status === 'fulfilled') setAllSpaces(spacesResult.value.spaces ?? []);
+      if (spacesResult.status === 'fulfilled') setAllSpaces(spacesResult.value.data ?? []);
     } catch { setAgent(null); }
     finally { setLoading(false); }
   }
 
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [id]);
 
-  async function handleDelete() {
+  function handleDelete() {
     if (!agent) return;
-    const ok = await confirm({
-      title: `Delete agent "${agent.name}"?`,
-      body: 'This will remove the agent from this workspace. This action cannot be undone.',
-      confirmLabel: 'Delete agent',
-      tone: 'danger',
-      typeToConfirm: agent.name,
-    });
-    if (!ok) return;
-    try {
-      await api(`/v1/agents/${agent.id}`, { method: 'DELETE' });
-      toast.undo(`Deleted ${agent.name}`, async () => {
-        try {
-          await api(`/v1/agents/${agent.id}/restore`, { method: 'POST' });
-          toast.success(`Restored ${agent.name}`);
-          void refresh();
-        } catch { toast.error('Failed to restore'); }
-      });
-      nav('/agents');
-    } catch (e) { toast.error('Failed to delete', String(e)); }
+    setDeleteOpen(true);
   }
 
   async function handlePackageAgent() {
@@ -246,7 +231,16 @@ export function AgentDetailPage() {
             </div>
           </div>
           <div className="flex shrink-0 gap-1.5">
-            <Button variant="secondary" size="sm" iconLeft={<MessageCircle size={12} />} onClick={() => nav(`/chat/agent/${agent.id}`)}>Talk</Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              iconLeft={<MessageCircle size={12} />}
+              onClick={() => window.dispatchEvent(new CustomEvent('agentis:chat-panel-open', {
+                detail: { agentId: agent.id, name: agent.name, mode: 'fullscreen' },
+              }))}
+            >
+              Talk
+            </Button>
             <Button variant="secondary" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => void handlePackageAgent()}>Package</Button>
             <Button variant="danger" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => void handleDelete()}>Delete</Button>
           </div>
@@ -278,6 +272,14 @@ export function AgentDetailPage() {
         {tab === 'interactions' && <AgentInteractionFeed agentId={agent.id} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
       </div>
+      {deleteOpen && (
+        <DeleteAgentDialog
+          agent={{ id: agent.id, name: agent.name }}
+          allAgents={allAgents.map((a) => ({ id: a.id, name: a.name }))}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={() => { setDeleteOpen(false); toast.success(`Deleted ${agent.name}`); nav('/agents'); }}
+        />
+      )}
     </div>
   );
 }
@@ -285,7 +287,7 @@ export function AgentDetailPage() {
 const ROLE_OPTIONS = [
   { value: 'orchestrator', label: 'Orchestrator' },
   { value: 'manager', label: 'Manager' },
-  { value: 'worker', label: 'Worker' },
+  { value: 'worker', label: 'Specialist' },
 ] as const;
 
 const IDENTITY_INPUT_CLS =
@@ -304,7 +306,7 @@ function IdentityTab({
 }: {
   agent: AgentDetail;
   allAgents: AgentSummary[];
-  allSpaces: Array<{ id: string; name: string }>;
+  allSpaces: Array<{ id: string; name: string; parentDomainId?: string | null }>;
   onChange: () => void;
 }) {
   const toast = useToast();
@@ -315,8 +317,16 @@ function IdentityTab({
   const [description, setDescription] = useState(agent.description ?? '');
   const [reportsTo, setReportsTo] = useState(agent.reportsTo ?? '');
   const [spaceId, setSpaceId] = useState(agent.spaceId ?? '');
+  const [spaces, setSpaces] = useState<DomainOption[]>(() => allSpaces.map((space) => ({ id: space.id, name: space.name, parentDomainId: space.parentDomainId ?? null })));
   const [avatarUrl, setAvatarUrl] = useState(agent.avatarUrl ?? '');
+  const [domainEditorOpen, setDomainEditorOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const managers = useMemo(
+    () => allAgents
+      .filter((candidate) => candidate.id !== agent.id && candidate.role === 'manager')
+      .map((candidate) => ({ id: candidate.id, name: candidate.name, role: candidate.role ?? null })),
+    [agent.id, allAgents],
+  );
 
   useEffect(() => {
     setName(agent.name);
@@ -326,6 +336,10 @@ function IdentityTab({
     setSpaceId(agent.spaceId ?? '');
     setAvatarUrl(agent.avatarUrl ?? '');
   }, [agent]);
+
+  useEffect(() => {
+    setSpaces(allSpaces.map((space) => ({ id: space.id, name: space.name, parentDomainId: space.parentDomainId ?? null })));
+  }, [allSpaces]);
 
   function handleAvatarInput(file: File | undefined) {
     if (!file) return;
@@ -340,6 +354,14 @@ function IdentityTab({
     const reader = new FileReader();
     reader.onload = (event) => setAvatarUrl(String(event.target?.result ?? ''));
     reader.readAsDataURL(file);
+  }
+
+  function handleSpaceChange(value: string) {
+    if (value === '__create__') {
+      setDomainEditorOpen(true);
+      return;
+    }
+    setSpaceId(value);
   }
 
   const needsSupervisor = role === 'manager' || role === 'worker';
@@ -477,12 +499,14 @@ function IdentityTab({
                 ))}
             </select>
           </IdentityField>
-          <IdentityField label="Space">
-            <select value={spaceId} onChange={(event) => setSpaceId(event.target.value)} className={IDENTITY_INPUT_CLS}>
-              <option value="">No space</option>
-              {allSpaces.map((space) => (
-                <option key={space.id} value={space.id}>{space.name}</option>
-              ))}
+          <IdentityField label="Domain">
+            <select value={spaceId} onChange={(event) => handleSpaceChange(event.target.value)} className={IDENTITY_INPUT_CLS}>
+              <option value="">No domain</option>
+              {spaces.map((space) => {
+                const parent = space.parentDomainId ? spaces.find((d) => d.id === space.parentDomainId) : null;
+                return <option key={space.id} value={space.id}>{parent ? `${parent.name} › ${space.name}` : space.name}</option>;
+              })}
+              <option value="__create__">Create new domain...</option>
             </select>
           </IdentityField>
         </>
@@ -491,6 +515,17 @@ function IdentityTab({
       <Button variant="primary" size="md" iconLeft={<Save size={13} />} disabled={saving || !dirty} onClick={() => void save()}>
         {saving ? 'Saving…' : 'Save identity'}
       </Button>
+      <DomainEditorSheet
+        open={domainEditorOpen}
+        managers={managers}
+        onClose={() => setDomainEditorOpen(false)}
+        onSaved={(domain) => {
+          if (!domain) return;
+          setSpaces((current) => [...current.filter((item) => item.id !== domain.id), domain].sort((a, b) => a.name.localeCompare(b.name)));
+          setSpaceId(domain.id);
+          onChange();
+        }}
+      />
     </div>
   );
 }
@@ -514,7 +549,7 @@ function IdentityField({ label, hint, children }: { label: string; hint?: string
 function RuntimeTab({ agent, allAgents, onChange }: { agent: AgentDetail; allAgents: AgentSummary[]; onChange: () => void }) {
   return (
     <div className="space-y-6">
-      <RuntimeNativePanel agentId={agent.id} />
+      <RuntimeNativePanel agentId={agent.id} onRuntimeChanged={onChange} />
       <div className="rounded-card border border-line bg-surface p-5">
         <div className="mb-4">
           <h2 className="text-heading text-text-primary">Agentis runtime policy</h2>
@@ -569,7 +604,6 @@ function harnessLabel(adapterType: string) {
 }
 
 function HistoryTab({ agent }: { agent: AgentDetail }) {
-  const nav = useNavigate();
   const [runs, setRuns] = useState<RunHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -602,7 +636,7 @@ function HistoryTab({ agent }: { agent: AgentDetail }) {
         <button
           key={r.id}
           type="button"
-          onClick={() => nav(`/runs/${r.id}`)}
+          onClick={() => openRunModal({ runId: r.id, source: 'agent-history' })}
           className="flex w-full items-center gap-3 rounded-md border border-line bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-2"
         >
           <StatusBadge status={r.status} size="sm" />
@@ -725,3 +759,4 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
     </div>
   );
 }
+

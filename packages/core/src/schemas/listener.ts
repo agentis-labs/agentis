@@ -90,6 +90,24 @@ const workflowEventSourceSchema = z.object({
   sourceNodeId: z.string().optional(),
 });
 
+const rssSourceSchema = z.object({
+  kind: z.literal('rss'),
+  feedUrl: z.string().url(),
+  intervalMs: z.number().int().min(5_000).optional(),
+  headers: z.record(z.string()).optional(),
+});
+
+const emailImapSourceSchema = z.object({
+  kind: z.literal('email_imap'),
+  host: z.string().min(1),
+  port: z.number().int().positive().optional(),
+  secure: z.boolean().optional(),
+  credentialId: z.string().optional(),
+  mailbox: z.string().optional(),
+  search: z.string().optional(),
+  pollIntervalMs: z.number().int().min(5_000).optional(),
+});
+
 export const listenerSourceSchema = z.union([
   websocketSourceSchema,
   sseSourceSchema,
@@ -100,6 +118,8 @@ export const listenerSourceSchema = z.union([
   extensionSourceSchema,
   agentEventSourceSchema,
   workflowEventSourceSchema,
+  rssSourceSchema,
+  emailImapSourceSchema,
 ]);
 
 export const listenerPredicateSchema = z.union([

@@ -1,8 +1,7 @@
 /**
  * AgentLibraryService — Principle #11: "an agent is a file, not a record."
  *
- * Mirrors `ExtensionLibraryService` for agents. Platform specialists are exported to
- * `agents/platform/<role>.md` (read-only defaults); operators add `agents/custom/*.md`
+ * Mirrors `ExtensionLibraryService` for agents. Operators add `agents/custom/*.md`
  * and marketplace installs land in `agents/community/`. The creation engine reads
  * these so a workspace's *trained* specialists (or custom roles like
  * `compliance_analyst`) flow into synthesis casting — without any engine change.
@@ -11,7 +10,7 @@
  * filesystem defines what they *are*.
  */
 
-import { SPECIALIST_AGENTS, ROLE_TOOLS, roleTools, type AgentRole } from '@agentis/core';
+import { isAgentRole, type AgentRole } from '@agentis/core';
 import type { WorkspaceVolumeService } from './workspaceVolume.js';
 
 const AGENTS_DIR = 'agents';
@@ -30,7 +29,7 @@ export interface AgentDefinition {
 }
 
 /** On-disk source folders, in resolution order (later overrides earlier). */
-const SOURCES = ['platform', 'community', 'custom', 'generated'] as const;
+const SOURCES = ['community', 'custom', 'generated'] as const;
 type LibrarySource = (typeof SOURCES)[number];
 
 export class AgentLibraryService {
@@ -53,17 +52,9 @@ export class AgentLibraryService {
     return this.#cache.get(this.#cacheKey(workspaceId, role)) ?? null;
   }
 
-  /** Export the platform specialists to `agents/platform/<role>.md` (idempotent). */
+  /** Platform specialists are no longer shipped; retained as a no-op for callers. */
   async ensurePlatformAgents(workspaceId: string): Promise<void> {
-    for (const s of SPECIALIST_AGENTS) {
-      const rel = `${AGENTS_DIR}/platform/${s.role}.md`;
-      if (!(await this.volume.exists(workspaceId, rel))) {
-        await this.volume.write(workspaceId, rel, serialize({
-          name: s.name, role: s.role, model: s.defaultModel, tools: roleTools(s.role),
-          capabilityTags: s.capabilityTags, colorHex: s.colorHex, body: s.systemPrompt, source: 'platform',
-        }));
-      }
-    }
+    void workspaceId;
   }
 
   /** Read every agent `.md` across platform/community/custom/generated. */
@@ -88,8 +79,7 @@ export class AgentLibraryService {
   /** Custom (non-platform) roles available for casting — expands the creation vocabulary. */
   async listCustomRoles(workspaceId: string): Promise<Array<{ role: string; tools: string[]; defaultModel: string; name: string }>> {
     const all = await this.list(workspaceId);
-    const platformRoles = new Set<string>(SPECIALIST_AGENTS.map((s) => s.role as string));
-    return all.filter((a) => a.source !== 'platform' && !platformRoles.has(a.role))
+    return all.filter((a) => a.source !== 'platform')
       .map((a) => ({ role: a.role, tools: a.tools, defaultModel: a.model, name: a.name }));
   }
 
@@ -161,5 +151,5 @@ function list(v: string): string[] {
 }
 
 export function knownRole(role: string): role is AgentRole {
-  return (Object.keys(ROLE_TOOLS) as string[]).includes(role);
+  return isAgentRole(role);
 }

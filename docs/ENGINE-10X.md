@@ -10,7 +10,7 @@
 
 ## ✅ 0. North Star
 
-A user opens the canvas. They hit **Run**. The graph **breathes**: edges glow with traveling data packets, nodes pulse on receipt, retry attempts ripple as concentric rings, scheduled children appear as ghost nodes counting down, and a failure cascades a desaturation wave across orphaned branches. Every state transition is a visible animation — not a re-render flicker. The user feels they are *piloting a system*, not staring at a flowchart.
+A user opens the canvas. They hit **Run**. The graph **breathes**: edges glow with traveling data packets, nodes pulse on receipt, retry attempts ripple as concentric rings, scheduled children appear as ghost nodes counting down, and a failure cascades a desaturation wave across abandoned branches. Every state transition is a visible animation — not a re-render flicker. The user feels they are *piloting a system*, not staring at a flowchart.
 
 Everything below exists in service of that moment.
 

@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type RealtimeEventName } from '@agentis/core';
@@ -48,6 +48,8 @@ export class ConversationStore {
         and(
           eq(schema.conversations.workspaceId, args.workspaceId),
           eq(schema.conversations.agentId, args.agentId),
+          isNull(schema.conversations.channelConnectionId),
+          isNull(schema.conversations.channelChatId),
           isNull(schema.conversations.archivedAt),
         ),
       )
@@ -71,6 +73,54 @@ export class ConversationStore {
       userId: args.userId,
       agentId: args.agentId,
       mirroredSessionId: args.mirroredSessionId ?? null,
+      channelConnectionId: null,
+      channelChatId: null,
+      title: null,
+      archivedAt: null,
+      unreadCount: 0,
+      lastMessageAt: null,
+    };
+    this.deps.db.insert(schema.conversations).values(row).run();
+    return this.deps.db
+      .select()
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, row.id))
+      .get()!;
+  }
+
+  getOrCreateByChannel(args: {
+    workspaceId: string;
+    ambientId: string | null;
+    userId: string;
+    agentId: string;
+    channelConnectionId: string;
+    channelChatId: string;
+  }) {
+    const existing = this.deps.db
+      .select()
+      .from(schema.conversations)
+      .where(
+        and(
+          eq(schema.conversations.workspaceId, args.workspaceId),
+          eq(schema.conversations.agentId, args.agentId),
+          eq(schema.conversations.channelConnectionId, args.channelConnectionId),
+          eq(schema.conversations.channelChatId, args.channelChatId),
+          isNull(schema.conversations.archivedAt),
+        ),
+      )
+      .orderBy(desc(schema.conversations.createdAt), desc(schema.conversations.lastMessageAt))
+      .get();
+    if (existing) return existing;
+
+    const row = {
+      id: randomUUID(),
+      workspaceId: args.workspaceId,
+      ambientId: args.ambientId,
+      userId: args.userId,
+      agentId: args.agentId,
+      mirroredSessionId: null,
+      channelConnectionId: args.channelConnectionId,
+      channelChatId: args.channelChatId,
       title: null,
       archivedAt: null,
       unreadCount: 0,
@@ -142,6 +192,97 @@ export class ConversationStore {
       { message, conversationId: args.conversationId, agentId: conversation.agentId },
     );
     return message;
+  }
+
+  rewriteFromMessage(args: {
+    workspaceId: string;
+    conversationId: string;
+    messageId: string;
+    body: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    if (!args.body || args.body.length === 0) {
+      throw new AgentisError('VALIDATION_FAILED', 'Conversation message body required');
+    }
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const existing = this.deps.db
+      .select()
+      .from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, args.conversationId),
+        eq(schema.conversationMessages.id, args.messageId),
+      ))
+      .get();
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `message ${args.messageId} not found`);
+    if (existing.authorType !== 'operator') {
+      throw new AgentisError('VALIDATION_FAILED', 'Only operator messages can be rewritten');
+    }
+
+    const descendants = this.deps.db
+      .select()
+      .from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, args.conversationId),
+        or(
+          gt(schema.conversationMessages.createdAt, existing.createdAt),
+          and(
+            eq(schema.conversationMessages.createdAt, existing.createdAt),
+            gt(schema.conversationMessages.id, existing.id),
+          ),
+        )!,
+      ))
+      .orderBy(schema.conversationMessages.createdAt, schema.conversationMessages.id)
+      .all();
+
+    const metadata = {
+      ...(existing.metadata && typeof existing.metadata === 'object' ? existing.metadata as Record<string, unknown> : {}),
+      ...(args.metadata ?? {}),
+    };
+    this.deps.db
+      .update(schema.conversationMessages)
+      .set({ body: args.body, metadata, deliveryStatus: 'sent' })
+      .where(eq(schema.conversationMessages.id, args.messageId))
+      .run();
+
+    for (const descendant of descendants) {
+      this.deps.db
+        .delete(schema.conversationMessages)
+        .where(eq(schema.conversationMessages.id, descendant.id))
+        .run();
+    }
+
+    const latest = this.deps.db
+      .select()
+      .from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, args.conversationId),
+      ))
+      .orderBy(desc(schema.conversationMessages.createdAt), desc(schema.conversationMessages.id))
+      .limit(1)
+      .get();
+    this.deps.db
+      .update(schema.conversations)
+      .set({ lastMessageAt: latest?.createdAt ?? null, updatedAt: new Date().toISOString() })
+      .where(eq(schema.conversations.id, args.conversationId))
+      .run();
+
+    const message = { ...existing, body: args.body, metadata, deliveryStatus: 'sent' as const };
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+      { message, conversationId: args.conversationId, agentId: conversation.agentId },
+    );
+    for (const descendant of descendants) {
+      this.deps.bus.publish(
+        REALTIME_ROOMS.conversation(conversation.agentId),
+        REALTIME_EVENTS.CONVERSATION_MESSAGE_DELETED,
+        { id: descendant.id, conversationId: args.conversationId, agentId: conversation.agentId },
+      );
+    }
+    return { message, deletedIds: descendants.map((row) => row.id) };
   }
 
   deleteMessage(args: { workspaceId: string; conversationId: string; messageId: string }) {
@@ -288,6 +429,8 @@ export class ConversationStore {
       userId: args.userId,
       agentId: args.agentId,
       mirroredSessionId: null,
+      channelConnectionId: null,
+      channelChatId: null,
       title: null,
       archivedAt: null,
       unreadCount: 0,

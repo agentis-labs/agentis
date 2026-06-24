@@ -30,6 +30,7 @@ import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { extractMarkerToolCalls, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
 import { linkAbortSignal } from './abort.js';
+import { runtimeProgressActivity } from './runtimeProgress.js';
 
 /** Default safety cap for one chat turn when no explicit timeout is configured. */
 export const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
@@ -60,11 +61,11 @@ export function chatHardCeilingMs(idleTimeoutMs: number, envVar?: string): numbe
 
 /** One interpreted contribution from a parsed CLI stdout event. */
 export type CliChatPart =
-  /** Answer text — accumulated into the transcript, marker tool-calls stripped at exit. */
+  /** Assistant text candidate. Only the latest/final candidate becomes the answer. */
   | { kind: 'text'; text: string }
   /** A fallback final answer, used only when no streamed `text` arrived. */
   | { kind: 'final'; text: string }
-  /** Reasoning — streamed live into the ThinkingBubble, kept out of the answer. */
+  /** Reasoning signal. Its raw contents are never exposed or persisted. */
   | { kind: 'thinking'; text: string }
   /** The harness's OWN tool/shell action — surfaced live, never re-executed. */
   | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> }
@@ -180,6 +181,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
 
   let buffer = '';
   let transcript = '';
+  let latestAssistantText = '';
   // The runtime's reported final answer, used only when no streamed text arrived
   // (so we never duplicate the answer when both a stream and a final event come).
   let lastAgentMessage = '';
@@ -190,7 +192,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   // On a stall, surface whatever was already produced as a real (paused) answer
   // instead of throwing the work away as a hard failure.
   const flushPartialOnTimeout = (): boolean => {
-    const partial = transcript.trim() || lastAgentMessage.trim() || stripProcessNoise(rawFallback);
+    const partial = lastAgentMessage.trim() || latestAssistantText.trim() || stripProcessNoise(rawFallback);
     if (!partial) return false;
     const { cleaned } = extractMarkerToolCalls(partial);
     const body = (cleaned || partial).trim();
@@ -251,17 +253,33 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
         switch (part.kind) {
           case 'text':
             transcript += part.text;
+            latestAssistantText += part.text;
+            queue.push(runtimeProgressActivity({
+              id: `runtime-progress-${cfg.logTag.replace(/[^a-z0-9]+/gi, '-')}`,
+              runtimeName: cfg.displayName,
+              text: latestAssistantText,
+            }));
             break;
           case 'final':
             if (part.text) lastAgentMessage = part.text;
             break;
           case 'thinking':
-            if (part.text) queue.push({ type: 'thinking', delta: part.text });
+            if (part.text) {
+              latestAssistantText = '';
+              queue.push(runtimeProgressActivity({
+                id: `runtime-progress-${cfg.logTag.replace(/[^a-z0-9]+/gi, '-')}`,
+                runtimeName: cfg.displayName,
+                text: part.text,
+                reasoning: true,
+              }));
+            }
             break;
           case 'activity':
+            latestAssistantText = '';
             queue.push(part.delta);
             break;
           case 'tool':
+            latestAssistantText = '';
             pendingToolCalls.push({ type: 'tool_call', id: randomUUID(), name: part.name, args: part.args });
             break;
           case 'error':
@@ -298,15 +316,18 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       return;
     }
 
-    // Prefer streamed assistant text; fall back to the runtime's final message;
-    // only then to any non-JSON noise. This keeps mcp_native turns (which do their
-    // work over MCP and stream little text) from coming back empty.
-    const source = transcript.trim().length > 0
-      ? transcript
-      : lastAgentMessage.trim().length > 0
-        ? lastAgentMessage
+    // CLI harnesses may emit several assistant messages while working. Activity
+    // and tool boundaries reset the candidate so earlier progress narration does
+    // not become answer paragraphs, while token chunks in one message still join.
+    // Prefer an explicit completion payload when the harness provides one.
+    const source = lastAgentMessage.trim().length > 0
+      ? lastAgentMessage
+      : latestAssistantText.trim().length > 0
+        ? latestAssistantText
         : stripProcessNoise(rawFallback);
-    const { calls: markerCalls, cleaned } = extractMarkerToolCalls(source);
+    const markerSource = `${transcript}\n${lastAgentMessage}`.trim();
+    const { calls: markerCalls } = extractMarkerToolCalls(markerSource);
+    const { cleaned } = extractMarkerToolCalls(source);
     if (cleaned) queue.push({ type: 'text', delta: cleaned });
     const allToolCalls: ChatDelta[] = [
       ...pendingToolCalls,

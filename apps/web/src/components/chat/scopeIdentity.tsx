@@ -12,7 +12,7 @@ export function formatChatScopeName(scope: ChatScopeIdentityInput): string {
   if (trimmedName) return trimmedName;
   if (scope.role === 'orchestrator') return 'Orchestrator';
   if (scope.role === 'manager') return 'Manager';
-  return 'Worker';
+  return 'Specialist';
 }
 
 export function formatChatScopeDescriptor(
@@ -23,7 +23,7 @@ export function formatChatScopeDescriptor(
     const trimmedWorkspaceName = workspaceName?.trim();
     return trimmedWorkspaceName ? `${trimmedWorkspaceName} Orchestrator` : 'Orchestrator';
   }
-  return scope.role === 'manager' ? 'Manager' : 'Worker';
+  return scope.role === 'manager' ? 'Manager' : 'Specialist';
 }
 
 export function formatChatScopePlaceholder(name: string, hasPendingApproval = false): string {

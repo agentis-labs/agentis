@@ -19,8 +19,19 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { schemas, type WorkflowGraph } from '@agentis/core';
+import {
+  affordanceLabel,
+  configuredAffordances,
+  normalizeAgentRequirements,
+  potentialAffordances,
+  requiredAffordanceKeys,
+  schemas,
+  type AgentAffordance,
+  type WorkflowGraph,
+} from '@agentis/core';
 import { listIntegrationManifests } from './integrationRegistry.js';
+
+const HAL_AGENT_NODE_KINDS = new Set(['agent_task', 'agent_session', 'agent_swarm', 'dynamic_swarm']);
 
 export interface SetupRequirement {
   nodeId: string;
@@ -64,6 +75,21 @@ export function analyzeWorkflowReadiness(
       .all()
       .map((row) => String(row.type).toLowerCase()),
   );
+
+  // HAL supply view: what each workspace agent's runtime can provide by config
+  // (and could provide if enabled) — derived from the agent row, no live adapter
+  // needed. Lets us flag a node whose HAL `requires` no runtime can satisfy
+  // BEFORE the run dies, with an actionable remediation.
+  const halAgents = db
+    .select({ name: schema.agents.name, adapterType: schema.agents.adapterType, config: schema.agents.config })
+    .from(schema.agents)
+    .where(eq(schema.agents.workspaceId, workspaceId))
+    .all()
+    .map((row) => ({
+      name: row.name,
+      configured: configuredAffordances(row.adapterType, objectRecord(row.config)),
+      potential: potentialAffordances(row.adapterType),
+    }));
 
   const requirements: SetupRequirement[] = [];
 
@@ -127,6 +153,7 @@ export function analyzeWorkflowReadiness(
       const satisfied = Boolean(cfg.credentialId)
         || credentialTypes.has(slug)
         || credentialTypes.has(`integration_${slug}`)
+        || credentialTypes.has(`oauth_${slug}`)
         || envFallbackPresent(slug);
       if (!satisfied) {
         const label = manifest?.name ?? slug;
@@ -148,6 +175,24 @@ export function analyzeWorkflowReadiness(
           message: `Add the credential for the “${title}” HTTP step (it uses ${auth.type} auth).`,
         });
       }
+    } else if (HAL_AGENT_NODE_KINDS.has(String(cfg.kind ?? ''))) {
+      // `fileSystem` is covered by the platform tool loop itself; every other HAL
+      // affordance needs a real connected runtime that advertises it.
+      const required = requiredAffordanceKeys(normalizeAgentRequirements(cfg.requires))
+        .filter((key): key is AgentAffordance => key !== 'fileSystem');
+      if (required.length === 0) continue;
+      const labels = required.map(affordanceLabel).join(', ');
+      const satisfiable = halAgents.some((agent) => required.every((key) => agent.configured[key] === true));
+      if (satisfiable) continue;
+      const enablable = halAgents.find((agent) => required.every((key) => agent.potential[key] === true));
+      requirements.push({
+        nodeId: node.id,
+        nodeTitle: title,
+        kind: 'config',
+        message: enablable
+          ? `The “${title}” step needs ${labels}. Enable it on “${enablable.name}” (its runtime supports it) or connect an OpenClaw agent — or replace this step with a Browser node.`
+          : `No connected runtime can provide ${labels} for the “${title}” step. Connect an OpenClaw agent or enable native browser on a Codex agent — or use a Browser node instead.`,
+      });
     }
   }
 

@@ -18,11 +18,12 @@ import type { UpstreamNode } from './VariablePicker';
 import type { AdapterType } from '../agents/RuntimePicker';
 import {
   AGENT_AFFORDANCES,
-  connectedAgentMatches,
+  agentRequirementMatches,
   hasAgentRequirements,
   normalizeAgentRequirements,
   withRequirement,
   type AdapterCapabilitiesLite,
+  type AgentAffordanceKey,
 } from '../../lib/agentCapabilities';
 import {
   evaluateNodeReadiness,
@@ -67,12 +68,20 @@ export interface InspectorSelection {
   title?: string;
 }
 
-interface AgentRow { id: string; name: string; adapterType?: string; status?: string; role?: string | null; adapterCapabilities?: AdapterCapabilitiesLite | null; }
+interface AgentRow { id: string; name: string; adapterType?: string; status?: string; role?: string | null; config?: Record<string, unknown> | null; adapterCapabilities?: AdapterCapabilitiesLite | null; configuredAffordances?: Partial<Record<AgentAffordanceKey, boolean>> | null; potentialAffordances?: Partial<Record<AgentAffordanceKey, boolean>> | null; }
 interface SkillRow { id: string; slug: string; name: string; runtime?: string; }
 interface WorkflowRow { id: string; title?: string; name?: string; isReusable?: boolean; }
 interface KnowledgeBaseRow { id: string; name: string; description?: string | null; }
 interface CredentialRow { id: string; name: string; credentialType: string; }
 interface OAuthProvider { id: string; label: string; slugs: string[]; configured?: boolean; mode?: string; }
+
+function credentialMatchesIntegration(credential: CredentialRow, slug: string): boolean {
+  const normalized = slug.toLowerCase();
+  const haystack = `${credential.credentialType} ${credential.name}`.toLowerCase();
+  return haystack.includes(normalized)
+    || credential.credentialType.toLowerCase() === `integration_${normalized}`
+    || credential.credentialType.toLowerCase() === `oauth_${normalized}`;
+}
 
 const KIND_LABEL: Record<string, string> = {
   trigger: 'Trigger',
@@ -245,7 +254,9 @@ export function ContextInspector({
   // Prefer a config-specific explanation ("Emails the digest to you, 0 9 * * *")
   // over the generic per-kind blurb so the node explains itself in context.
   const nodeReason = selection.kind === 'node' ? (explainNode(kind, editData) || meta.reason) : null;
-  const readiness = selection.kind === 'node' ? evaluateNodeReadiness(editData, { integrations }) : null;
+  const readiness = selection.kind === 'node'
+    ? evaluateNodeReadiness(editData, { integrations, credentialTypes: credentials.map((credential) => credential.credentialType) })
+    : null;
 
   return (
     <aside className={clsx('flex w-[360px] shrink-0 flex-col border-l border-line bg-surface text-xs', className)}>
@@ -373,6 +384,11 @@ export function ContextInspector({
                   .then((d) => setSkills(d.skills ?? []))
                   .catch(() => {});
               }}
+              onAgentsChange={() => {
+                void api<{ agents: AgentRow[] }>('/v1/agents')
+                  .then((d) => setAgents(d.agents ?? []))
+                  .catch(() => {});
+              }}
             />
             {selection.nodeId && (
               <div className="mb-4 rounded-input border border-line bg-surface-2 p-3">
@@ -439,16 +455,17 @@ interface NodeFormProps {
   /** Other nodes in the same workflow — populates the variable picker. */
   upstream?: UpstreamNode[];
   onSkillsChange?: () => void;
+  onAgentsChange?: () => void;
 }
 
-function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, integrations, refreshCredentials, refreshIntegrations, upstream, onSkillsChange }: NodeFormProps) {
+function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, integrations, refreshCredentials, refreshIntegrations, upstream, onSkillsChange, onAgentsChange }: NodeFormProps) {
   switch (kind) {
     case 'trigger':
       return <TriggerForm data={data} update={update} />;
     case 'agent_task':
-      return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} />;
+      return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} onAgentsChange={onAgentsChange} />;
     case 'agent_session':
-      return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} session />;
+      return <AgentTaskForm data={data} update={update} agents={agents} upstream={upstream} session onAgentsChange={onAgentsChange} />;
     case 'agent_swarm':
       return <AgentSwarmForm data={data} update={update} />;
     case 'skill':
@@ -671,7 +688,7 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
 
 const SPECIALIST_ROLES = ['planner', 'researcher', 'coder', 'reviewer', 'analyst', 'writer', 'monitor', 'architect', 'debugger', 'deployer'] as const;
 
-function AgentTaskForm({ data, update, agents, upstream, session = false }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[]; session?: boolean }) {
+function AgentTaskForm({ data, update, agents, upstream, session = false, onAgentsChange }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[]; session?: boolean; onAgentsChange?: () => void }) {
   const agentId = asStr(data.agentId);
   const agentRole = asStr(data.agentRole);
   const boundAgent = agents.find((a) => a.id === agentId);
@@ -726,7 +743,7 @@ function AgentTaskForm({ data, update, agents, upstream, session = false }: { da
           </p>
         )}
       </Field>
-      <CapabilityRequirements data={data} update={update} agents={agents} />
+      <CapabilityRequirements data={data} update={update} agents={agents} onAgentsChange={onAgentsChange} />
       <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
       {session && (
         <Field label="Session behavior" hint="Persistent sessions can pause for input and resume without losing context.">
@@ -754,17 +771,49 @@ function AgentTaskForm({ data, update, agents, upstream, session = false }: { da
   );
 }
 
-function CapabilityRequirements({ data, update, agents }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[] }) {
+function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; onAgentsChange?: () => void }) {
+  const [enabling, setEnabling] = useState<string | null>(null);
   const requirements = normalizeAgentRequirements(data.requires);
-  const matches = connectedAgentMatches(agents, requirements);
+  const matches = agentRequirementMatches(agents, requirements);
+  // Agents that can actually help (now, when connected, or after a config change).
+  const helpful = matches.filter((m) => m.state !== 'incapable');
+  const hasReadyOrCapable = matches.some((m) => m.state === 'ready' || m.state === 'offline_capable');
+  const browserRequired = requirements.browser === true || requirements.computerUse === true;
+  const showBrowserNodeSteer = browserRequired && !hasReadyOrCapable;
+
+  // Enable a runtime's latent native-browser power (Codex `browser`). This
+  // re-registers (reconnects) the agent, so it is gated behind an explicit
+  // confirm rather than hot-applied. Preserves the rest of the agent's config.
+  async function enableBrowser(agent: AgentRow) {
+    const ok = window.confirm(
+      `Enable Native browser on “${agent.name}”?\n\nThis updates the agent's runtime config (browser = on) and reconnects it so it can take native-browser tasks.`,
+    );
+    if (!ok) return;
+    setEnabling(agent.id);
+    try {
+      const nextConfig = { ...(agent.config ?? {}), browser: true };
+      await api(`/v1/agents/${agent.id}`, { method: 'PATCH', body: JSON.stringify({ config: nextConfig }) });
+      onAgentsChange?.();
+    } catch {
+      /* surfaced by the unchanged match row staying amber */
+    } finally {
+      setEnabling(null);
+    }
+  }
+
   return (
-    <Accordion title="Required capabilities" defaultOpen>
+    <Accordion title="HAL runtime requirements" defaultOpen>
       <p className="mb-2 text-[10px] leading-relaxed text-text-muted">
-        Route this task only to connected agents that expose the tools it needs.
+        Hard routing: only runtimes that advertise these native powers can take this task. For ordinary web
+        automation (open a page, log in, scrape, screenshot) prefer a <strong>Browser node</strong> instead.
       </p>
       <div className="grid grid-cols-2 gap-1.5">
         {AGENT_AFFORDANCES.map((affordance) => (
-          <label key={affordance.key} className="flex items-center gap-1.5 rounded-md border border-line bg-canvas px-2 py-1.5 text-[11px] text-text-secondary">
+          <label
+            key={affordance.key}
+            className="flex items-center gap-1.5 rounded-md border border-line bg-canvas px-2 py-1.5 text-[11px] text-text-secondary"
+            title={affordance.description}
+          >
             <input
               type="checkbox"
               aria-label={affordance.label}
@@ -777,16 +826,37 @@ function CapabilityRequirements({ data, update, agents }: { data: Record<string,
       </div>
       {hasAgentRequirements(requirements) && (
         <div className="mt-2 space-y-1 border-t border-line/70 pt-2">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Connected agent match</div>
-          {matches.length === 0 && <p className="text-[10px] text-warn">No connected agents are available.</p>}
-          {matches.map((match) => (
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Agent match</div>
+          {helpful.length === 0 && (
+            <p className="text-[10px] text-warn">No runtime in this workspace can provide these powers.</p>
+          )}
+          {helpful.map((match) => (
             <div key={match.id} className="flex items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2 py-1.5 text-[10px]">
               <span className="truncate text-text-primary">{match.name}</span>
-              <span className={match.satisfied ? 'text-success' : 'text-warn'}>
-                {match.satisfied ? 'ready' : `missing ${match.missing.join(', ')}`}
-              </span>
+              {match.state === 'ready' ? (
+                <span className="text-success">ready</span>
+              ) : match.state === 'offline_capable' ? (
+                <span className="text-text-muted" title="Configured for these powers — connect the runtime to use it.">configured · offline</span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={enabling === match.id}
+                  onClick={() => void enableBrowser(agents.find((a) => a.id === match.id)!)}
+                  className="shrink-0 rounded-btn border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent hover:bg-accent/20 disabled:opacity-50"
+                  title={`Turn on ${match.enablable.join(', ')} for this runtime`}
+                >
+                  {enabling === match.id ? 'Enabling…' : `Enable ${match.enablable.join(', ')}`}
+                </button>
+              )}
             </div>
           ))}
+          {showBrowserNodeSteer && (
+            <div className="rounded-md border border-warn/35 bg-warn/10 px-2 py-1.5 text-[10px] leading-relaxed text-warn">
+              No runtime advertises {requirements.browser ? 'Native browser' : 'Computer use'} yet. The simplest fix:
+              uncheck it here and add a <strong>Browser node</strong> (platform headless Chromium — no runtime setup).
+              For genuine agent-driven browser control, enable it on a Codex agent above or connect OpenClaw.
+            </div>
+          )}
         </div>
       )}
     </Accordion>
@@ -1237,7 +1307,7 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
   const manifest = integrations.find((item) => item.service === slug || item.id === slug);
   const operationId = asStr(data.operationId) || manifest?.operations[0] || '';
   const matching = slug
-    ? credentials.filter((credential) => `${credential.credentialType} ${credential.name}`.toLowerCase().includes(slug.toLowerCase()))
+    ? credentials.filter((credential) => credentialMatchesIntegration(credential, slug))
     : [];
   const bound = credentials.find((credential) => credential.id === credentialId);
   const provider = slug ? oauthProviders.find((item) => item.slugs.includes(slug.toLowerCase())) : undefined;
@@ -1268,10 +1338,11 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
   }, [integrationQuery, integrations, slug]);
 
   function chooseIntegration(next: IntegrationManifestLite) {
+    const savedCredential = credentials.find((credential) => credentialMatchesIntegration(credential, next.service));
     update({
       integrationId: next.service,
       operationId: next.operations[0] ?? undefined,
-      credentialId: undefined,
+      credentialId: savedCredential?.id,
     });
     setSecretValues({});
   }
@@ -1384,8 +1455,16 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
             </>
           ) : (
             <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
-              Connect this service with an API key from its dashboard. It's encrypted in your workspace vault, never stored on the node.
+              Connect this service once in Settings. Saved workspace credentials are encrypted and reused by every workflow.
             </p>
+          )}
+          {!isOAuth && (
+            <a
+              href="/settings?tab=integrations"
+              className="mt-2 inline-flex h-8 w-full items-center justify-center rounded-btn border border-line bg-surface px-2 text-[11px] font-semibold text-text-secondary hover:border-accent/50 hover:text-text-primary"
+            >
+              Open integration settings
+            </a>
           )}
           {matching.length > 0 && (
             <div className="mt-2 space-y-1">

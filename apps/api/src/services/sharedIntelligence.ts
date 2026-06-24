@@ -21,7 +21,9 @@ import {
   cosineSimilarity,
   embedText,
   selectEmbeddingProvider,
+  vectorIsComparable,
 } from './embeddingProvider.js';
+import type { EmbeddingProviderRegistry } from './embeddingProviderRegistry.js';
 import {
   extractCandidateStatements,
   isRejectable,
@@ -39,13 +41,25 @@ import {
   type PacerClass,
   type SourceSurface,
 } from './brainPacer.js';
+import {
+  clamp01,
+  compactValue,
+  estimateTokens,
+  parseJsonArray,
+  parseJsonRecord,
+  similarity,
+  synthesizePreTaskContext,
+  tokenize,
+  truncate,
+  uniqueByNormalized,
+} from './brain/sharedIntelligenceUtils.js';
 
 /**
- * Structural seam for the CORA organizational-context layer (apps/api/src/cora).
+ * Structural seam for the Grounding organizational-context layer (apps/api/src/grounding).
  * Kept structural (not an import) so the Brain composer has no hard dependency
- * on the CORA module — bootstrap wires the real composer via setCoraComposer.
+ * on the Grounding module — bootstrap wires the real composer via setGroundingComposer.
  */
-export interface CoraDispatchComposer {
+export interface GroundingDispatchComposer {
   composeForDispatch(args: {
     workspaceId: string;
     agentId: string;
@@ -87,6 +101,13 @@ export interface BrainGraphOptions {
   kinds?: KnowledgeAtomKind[];
   minConfidence?: number;
   limit?: number;
+  /**
+   * §C7 — row-level access. When set, retrieval enforces team privacy: an
+   * episode is visible only if it is `shared` OR belongs to this requester's own
+   * scope. A private atom of ANY other scope is never surfaced. Leave undefined
+   * to disable RLS (graph/admin views).
+   */
+  requesterScopeId?: string | null;
 }
 
 export interface KnowledgeLinkInput {
@@ -166,6 +187,12 @@ const EMBED_HIGH_SIMILARITY = 0.88;
 /** Minimum cosine relevance for an atom to enter a dispatch context block. */
 const DISPATCH_MIN_RELEVANCE = 0.32;
 /**
+ * §B2.2 — MMR diversity weight. 1.0 = pure relevance (today's behavior); lower
+ * values trade a little relevance for diversity so a single dispatch never gets
+ * five near-duplicate atoms eating the budget. 0.72 keeps relevance dominant.
+ */
+const MMR_LAMBDA = 0.72;
+/**
  * Max slots reserved for the always-on constitutional tier (operator-authored
  * rules + charter) within a single dispatch. Bounds the charter so it can never
  * crowd out relevance retrieval; the rest of the budget goes to relevance.
@@ -178,14 +205,6 @@ const EVAL_DELTA_FAIL = -0.06;
 /** Atoms below this confidence are auto-archived. */
 const ARCHIVE_CONFIDENCE_FLOOR = 0.05;
 
-const STOP_WORDS = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from', 'has', 'have',
-  'i', 'in', 'into', 'is', 'it', 'its', 'of', 'on', 'or', 'that', 'the', 'their', 'this',
-  'to', 'was', 'were', 'will', 'with', 'you', 'your', 'we', 'our', 'they', 'them', 'these',
-  'those', 'do', 'does', 'did', 'if', 'then', 'than', 'so', 'too', 'can', 'could', 'would',
-  'should', 'about', 'after', 'before', 'between', 'during', 'over', 'under', 'out', 'off',
-]);
-
 export class SharedIntelligenceService {
   /** Per-workspace embedding provider cache (resolved from workspace config). */
   readonly #embeddingProviders = new Map<string, EmbeddingProvider>();
@@ -197,21 +216,24 @@ export class SharedIntelligenceService {
    * decay. Wired from the configured evaluator runtime in bootstrap.
    */
   #formationCompleter: StructuredCompleter | null = null;
+  #modelAssistedRuntimeEnabled: (workspaceId: string) => boolean = () => true;
 
   /**
-   * Optional CORA layer (the Workspace Brain's organizational reasoning
+   * Optional Grounding layer (the Workspace Brain's organizational reasoning
    * engine). When set, buildDispatchContext appends grant-gated, audited
    * organizational claims after the existing Brain tiers. Same extension
-   * pattern as the Formation Judge: CORA extends this composer, it never
+   * pattern as the Formation Judge: Grounding extends this composer, it never
    * forks it (RFC §12.2).
    */
-  #coraComposer: CoraDispatchComposer | null = null;
+  #groundingComposer: GroundingDispatchComposer | null = null;
 
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly bus: EventBus,
     private readonly episodes: EpisodicMemoryStore,
     private readonly logger: Logger,
+    /** §B1.1 — the single provider owner. When present, resolution delegates here. */
+    private readonly embeddingRegistry?: EmbeddingProviderRegistry,
   ) {}
 
   /** Wire (or clear) the Formation Judge model. */
@@ -219,9 +241,24 @@ export class SharedIntelligenceService {
     this.#formationCompleter = completer;
   }
 
-  /** Wire (or clear) the CORA organizational-context layer. */
-  setCoraComposer(composer: CoraDispatchComposer | null): void {
-    this.#coraComposer = composer;
+  setModelAssistedRuntimeEnabled(resolver: (workspaceId: string) => boolean): void {
+    this.#modelAssistedRuntimeEnabled = resolver;
+  }
+
+  /**
+   * §B2.2 — OPTIONAL model reranker. Off by default (null) so retrieval has zero
+   * per-dispatch model latency; the cheap MMR+feature reranker already orders
+   * results. When an operator opts in, retrieval does a second structured pass
+   * that reorders the top candidates by task relevance. Model-agnostic.
+   */
+  setRerankCompleter(completer: StructuredCompleter | null): void {
+    this.#rerankCompleter = completer;
+  }
+  #rerankCompleter: StructuredCompleter | null = null;
+
+  /** Wire (or clear) the Grounding organizational-context layer. */
+  setGroundingComposer(composer: GroundingDispatchComposer | null): void {
+    this.#groundingComposer = composer;
   }
 
   /**
@@ -229,9 +266,12 @@ export class SharedIntelligenceService {
    * `embedding_provider_type` column. Appendix A: provider is user-selectable.
    */
   #resolveEmbeddingProvider(workspaceId: string): EmbeddingProvider {
+    // §B1.1 — delegate to the single registry when wired; the local cache below
+    // is the legacy fallback for code paths/tests constructed without one.
+    if (this.embeddingRegistry) return this.embeddingRegistry.resolve(workspaceId);
     const cached = this.#embeddingProviders.get(workspaceId);
     if (cached) return cached;
-    let type = 'hashing';
+    let type = 'local';
     let config: Record<string, unknown> = {};
     try {
       const row = this.db
@@ -254,6 +294,7 @@ export class SharedIntelligenceService {
 
   /** Drop a cached provider — call after the operator changes workspace config. */
   invalidateEmbeddingProvider(workspaceId: string): void {
+    this.embeddingRegistry?.invalidate(workspaceId);
     this.#embeddingProviders.delete(workspaceId);
   }
 
@@ -278,8 +319,10 @@ export class SharedIntelligenceService {
       ? settings.embeddingMigration as Record<string, unknown>
       : null;
     return {
-      type: row?.type ?? 'hashing',
-      degraded: (row?.type ?? 'hashing') === 'hashing',
+      type: row?.type ?? 'local',
+      // No non-semantic provider exists anymore; "degraded" only ever meant the
+      // legacy hashing fallback, which is gone.
+      degraded: false,
       retrievalPaused: migration?.status === 'running',
       migration,
     };
@@ -320,11 +363,12 @@ export class SharedIntelligenceService {
     const existing = this.#loadEpisodeVectors(input.workspaceId, input.scopeId ?? null);
 
     // Preferred path: a Formation Judge model forms typed, durable memory.
-    if (this.#formationCompleter) {
+    if (this.#formationCompleter && this.#modelAssistedRuntimeEnabled(input.workspaceId)) {
       try {
         const neighbors = await this.#formationNeighbors(input, candidates);
         const judge = new FormationJudge(this.#formationCompleter);
         const formed = await judge.judge(candidates, {
+          workspaceId: input.workspaceId,
           taskTitle: input.taskTitle ?? null,
           agentScopeId: input.scopeId ?? null,
           neighbors,
@@ -660,6 +704,9 @@ export class SharedIntelligenceService {
     runId?: string | null;
     taskDescription: string;
     limit?: number;
+    /** §C5 — surface hint for multi-scale budget allocation (chat leans working+
+     * semantic; a workflow node leans episodic+semantic). Default 'dispatch'. */
+    surface?: 'chat' | 'dispatch';
   }): Promise<{ block: string; atomIds: string[] }> {
     const limit = Math.min(Math.max(args.limit ?? 6, 1), 12);
     const scopeId = args.scopeId ?? null;
@@ -683,6 +730,11 @@ export class SharedIntelligenceService {
     // budget the charter did not consume. Deduped against the charter.
     const remaining = Math.max(0, limit - charter.length);
     let relevant: BrainSearchResult[] = [];
+    // §B2.3 — abstention: when candidates existed but none cleared the grounding
+    // floor, we say so explicitly instead of injecting marginal lexical noise as
+    // "relevant knowledge". A confident-looking but ungrounded memory is worse
+    // than an honest "nothing matched".
+    let relevanceAbstained = false;
     if (remaining > 0) {
       const rawHits = await this.searchAtoms({
         workspaceId: args.workspaceId,
@@ -691,17 +743,49 @@ export class SharedIntelligenceService {
         scope: scopeId ? 'both' : 'workspace',
         limit: Math.max(remaining * 3, remaining),
         minConfidence: 0,
+        // §C7 — the dispatched agent sees shared knowledge + its own private memory.
+        requesterScopeId: scopeId,
       });
-      relevant = rawHits
-        .filter((hit) => !charterIds.has(hit.id))
-        .filter((hit) => hit.score >= DISPATCH_MIN_RELEVANCE || hit.confidence >= 0.74)
-        .slice(0, remaining);
+      const candidates = rawHits.filter((hit) => !charterIds.has(hit.id));
+      const cleared = candidates.filter((hit) => hit.score >= DISPATCH_MIN_RELEVANCE || hit.confidence >= 0.74);
+      // §C5 — fill the budget across temporal SCALES (working/episodic/semantic)
+      // so recency never crowds out durable rules (or vice versa), per surface.
+      relevant = selectAcrossScales(cleared, remaining, args.surface ?? 'dispatch');
+      relevanceAbstained = candidates.length > 0 && relevant.length === 0;
+
+      // §C2 — Tier-0: when live retrieval left spare budget, backfill with the
+      // precomputed working set's query-relevant core atoms (a cheap single-row
+      // read, no embedding round-trip). The scope's core knowledge is present
+      // even when the live retriever was thin.
+      if (relevant.length < remaining) {
+        const injected = new Set<string>([...charterIds, ...relevant.map((r) => r.id)]);
+        for (const a of this.getWorkingSet(args.workspaceId, scopeId)) {
+          if (relevant.length >= remaining) break;
+          if (injected.has(a.id)) continue;
+          if (similarity(args.taskDescription, `${a.title} ${a.content}`) < 0.08) continue;
+          relevant.push({
+            id: a.id,
+            kind: (a.kind as KnowledgeAtomKind) ?? 'episode',
+            title: a.title,
+            content: a.content,
+            confidence: clamp01(a.score),
+            score: a.score,
+            scopeId,
+            tags: ['working_set'],
+            status: null,
+            managed: null,
+            updatedAt: new Date().toISOString(),
+          });
+          injected.add(a.id);
+          relevanceAbstained = false;
+        }
+      }
     }
 
-    // With no classic atoms AND no CORA layer there is nothing to compose.
-    // When CORA is wired, fall through — organizational claims can ground a
+    // With no classic atoms AND no Grounding layer there is nothing to compose.
+    // When Grounding is wired, fall through — organizational claims can ground a
     // dispatch even before the workspace Brain has formed any atoms.
-    if (charter.length === 0 && relevant.length === 0 && !(this.#coraComposer && args.agentId)) {
+    if (charter.length === 0 && relevant.length === 0 && !(this.#groundingComposer && args.agentId)) {
       return { block: '', atomIds: [] };
     }
 
@@ -718,7 +802,10 @@ export class SharedIntelligenceService {
         metadata: { atomKind: entry.kind, confidence: entry.confidence, retrievalScore: entry.score, tier },
       });
     };
-    const renderLine = (entry: BrainSearchResult) => `- [${entry.kind}] ${entry.title}: ${entry.content.split('\n').join(' - ')}`;
+    // §B2.4 — every injected atom carries a stable citation tag [mem:<id8>] so
+    // the agent can attribute a claim to the memory it came from (foundation for
+    // cited-answer recall, C4).
+    const renderLine = (entry: BrainSearchResult) => `- [${entry.kind} · mem:${entry.id.slice(0, 8)}] ${entry.title}: ${entry.content.split('\n').join(' - ')}`;
 
     const scopeLabel = scopeId ? 'scope + workspace' : 'workspace';
     const capacity = this.#capacityStatus(args.workspaceId);
@@ -734,7 +821,12 @@ export class SharedIntelligenceService {
     if (relevant.length > 0) {
       for (const entry of relevant) recordInjected(entry, 'relevance');
       const synthesis = synthesizePreTaskContext(relevant.map((r) => `${r.title}\n${r.content}`));
-      sections.push(`PRE-TASK SYNTHESIS\n${synthesis}\n\nRelevant knowledge from past runs — apply it, but verify against the current task:\n${relevant.map(renderLine).join('\n')}`);
+      sections.push(`PRE-TASK SYNTHESIS\n${synthesis}\n\nRelevant knowledge from past runs — apply it, but verify against the current task (cite as [mem:id] when you rely on one):\n${relevant.map(renderLine).join('\n')}`);
+    } else if (relevanceAbstained) {
+      // §B2.3 — honest absence. Only emit when something else (charter/Grounding) is
+      // present so the block isn't header-only; the agent is told the brain
+      // looked and found nothing, so it won't treat silence as "no rules".
+      sections.push('PRE-TASK MEMORY: no durable memory matched this task — proceed from first principles and the current inputs; do not assume prior context exists.');
     }
     // Surfacing an episode into a live dispatch is the strongest possible signal
     // that it is still useful. Bump lastAccessedAt so adaptive forgetting
@@ -743,28 +835,28 @@ export class SharedIntelligenceService {
     // that should count as "accessed".
     this.#markEpisodesAccessed(relevant.filter((entry) => entry.kind === 'episode').map((entry) => entry.id));
 
-    // Tier 3 — CORA organizational layer (workspace claims, grant-gated +
+    // Tier 3 — Grounding organizational layer (workspace claims, grant-gated +
     // influence-audited). Sits BELOW the constitutional and relevance tiers in
     // the §12.2 composition order: workspace policy > owner instruction >
     // organizational knowledge. Failure here never breaks dispatch.
-    if (this.#coraComposer && args.agentId) {
+    if (this.#groundingComposer && args.agentId) {
       try {
-        const cora = this.#coraComposer.composeForDispatch({
+        const grounding = this.#groundingComposer.composeForDispatch({
           workspaceId: args.workspaceId,
           agentId: args.agentId,
           runId: args.runId ?? null,
           taskDescription: args.taskDescription,
         });
-        if (cora.block) sections.push(cora.block);
+        if (grounding.block) sections.push(grounding.block);
       } catch (error) {
-        this.logger.warn('brain.cora_context_failed', {
+        this.logger.warn('brain.grounding_context_failed', {
           workspaceId: args.workspaceId,
           agentId: args.agentId,
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
-    // Header-only (no atoms, no CORA content) composes to nothing.
+    // Header-only (no atoms, no Grounding content) composes to nothing.
     if (charter.length === 0 && relevant.length === 0 && sections.length <= 1) {
       return { block: '', atomIds: [] };
     }
@@ -785,6 +877,96 @@ export class SharedIntelligenceService {
   }
 
   /**
+   * §B2.2 — structured model rerank. Reorders the cheap-ranked candidates by how
+   * directly each helps the task. Robust to a bad/partial model response: any
+   * candidate the model omits is appended in its original order, and any failure
+   * returns the input unchanged. Only invoked when a rerank completer is wired.
+   */
+  async #modelRerank<T extends { atom: { node: { label: string } }; text: string }>(query: string, items: T[]): Promise<T[]> {
+    const completer = this.#rerankCompleter;
+    if (!completer) return items;
+    const block = items.map((it, i) => `[${i}] ${it.atom.node.label}: ${it.text.replace(/\s+/g, ' ').slice(0, 160)}`).join('\n');
+    try {
+      const parsed = await completer.completeStructured<{ order?: number[] }>({
+        system: 'You rerank retrieved memory candidates by how DIRECTLY each helps the given task. Return JSON {"order":[indices]} — candidate indices best-first. Use only the indices provided.',
+        user: `TASK: ${query}\n\nCANDIDATES:\n${block}\n\nReturn JSON only: {"order":[<indices best-first>]}`,
+        maxTokens: 200,
+        maxAttempts: 2,
+      });
+      const order = Array.isArray(parsed?.order) ? parsed!.order : null;
+      if (!order) return items;
+      const seen = new Set<number>();
+      const reordered: T[] = [];
+      for (const idx of order) {
+        if (Number.isInteger(idx) && idx >= 0 && idx < items.length && !seen.has(idx)) {
+          seen.add(idx);
+          reordered.push(items[idx]!);
+        }
+      }
+      for (let i = 0; i < items.length; i++) if (!seen.has(i)) reordered.push(items[i]!);
+      return reordered;
+    } catch {
+      return items;
+    }
+  }
+
+  /**
+   * §B1.3 — flag episodes whose stored vector no longer matches the workspace
+   * provider so the re-embed sweep (§B1.4) repairs them. Best-effort; never
+   * throws into the retrieval path.
+   */
+  #flagNeedsReembed(workspaceId: string, episodeIds: string[]): void {
+    if (episodeIds.length === 0) return;
+    try {
+      this.db.update(schema.memoryEpisodes)
+        .set({ needsReembed: true })
+        .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), inArray(schema.memoryEpisodes.id, episodeIds)))
+        .run();
+    } catch (err) {
+      this.logger.warn('brain.flag_reembed_failed', { workspaceId, message: (err as Error).message });
+    }
+  }
+
+  /**
+   * §B1.4 — re-embed only the episodes flagged `needsReembed` (incremental sweep,
+   * called by BrainMaintenanceService). Stamps the current provider identity and
+   * clears the flag. Bounded per call so it never stalls maintenance.
+   */
+  async reembedPending(workspaceId: string, limit = 200): Promise<{ reembedded: number; failed: number }> {
+    const provider = this.#resolveEmbeddingProvider(workspaceId);
+    const rows = this.db.select().from(schema.memoryEpisodes)
+      .where(and(
+        eq(schema.memoryEpisodes.workspaceId, workspaceId),
+        eq(schema.memoryEpisodes.needsReembed, true),
+        isNull(schema.memoryEpisodes.archivedAt),
+      ))
+      .limit(limit)
+      .all();
+    let reembedded = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const embedding = await embedText(provider, `${row.title} ${row.summary}`);
+        this.db.update(schema.memoryEpisodes)
+          .set({
+            embedding: embedding as unknown as null,
+            embeddingModel: provider.modelId,
+            embeddingDims: provider.dimension,
+            needsReembed: false,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(schema.memoryEpisodes.id, row.id))
+          .run();
+        reembedded += 1;
+      } catch (err) {
+        failed += 1;
+        this.logger.warn('brain.reembed_pending_failed', { workspaceId, atomId: row.id, message: (err as Error).message });
+      }
+    }
+    return { reembedded, failed };
+  }
+
+  /**
    * Constitutional atoms — operator-authored binding context that injects on
    * every dispatch. An atom qualifies when it is operator-sourced AND governing:
    * a hard `rule`, a high-importance statement (≥0.8), or tagged `charter`
@@ -793,21 +975,37 @@ export class SharedIntelligenceService {
    */
   #loadConstitutionalAtoms(workspaceId: string, cap: number): BrainSearchResult[] {
     if (cap <= 0) return [];
-    const rows = this.db.select().from(schema.workspaceMemory)
-      .where(and(
-        eq(schema.workspaceMemory.workspaceId, workspaceId),
-        isNull(schema.workspaceMemory.scopeId),
-        eq(schema.workspaceMemory.source, 'operator'),
-      ))
-      .orderBy(desc(schema.workspaceMemory.updatedAt))
-      .limit(200)
-      .all();
     const now = Date.now();
-    return rows
+
+    // §B4 — one substrate. Operator-authored / governing episodes (workspace
+    // memory now lives here too) inject as constitutional, so a hard rule is
+    // honored on every dispatch regardless of how it was authored.
+    const epRows = this.db.select().from(schema.memoryEpisodes)
+      .where(and(
+        eq(schema.memoryEpisodes.workspaceId, workspaceId),
+        isNull(schema.memoryEpisodes.scopeId),
+        isNull(schema.memoryEpisodes.archivedAt),
+        inArray(schema.memoryEpisodes.source, ['operator_write', 'seed', 'system_write']),
+      ))
+      .orderBy(desc(schema.memoryEpisodes.updatedAt))
+      .limit(300)
+      .all();
+
+    const seen = new Set<string>();
+    const candidates = epRows
+      .filter((r) => r.status !== 'archived')
       .filter((r) => {
         const tags = parseJsonArray<string>(r.tags);
-        return (Number(r.importance) || 0) >= 0.8 || r.kind === 'rule' || tags.includes('charter');
+        return Boolean(r.governing) || (Number(r.importance) || 0) >= 0.8 || tags.includes('charter') || tags.includes('rule');
       })
+      .filter((r) => {
+        const key = tokenize(r.summary).slice(0, 16).join(' ');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+    return candidates
       .map((r) => {
         const importance = Number(r.importance) || 0;
         const trust = Number(r.trust) || 0;
@@ -822,8 +1020,8 @@ export class SharedIntelligenceService {
         id: r.id,
         kind: 'memory' as const,
         title: r.title,
-        content: r.content,
-        confidence: clamp01(Number(r.trust)),
+        content: r.summary,
+        confidence: clamp01(Number(r.trust) || 0),
         score: 1,
         scopeId: r.scopeId ?? null,
         tags: parseJsonArray<string>(r.tags),
@@ -895,32 +1093,7 @@ export class SharedIntelligenceService {
         });
         return;
       }
-
-      const memory = this.db.select().from(schema.workspaceMemory)
-        .where(and(eq(schema.workspaceMemory.workspaceId, args.workspaceId), eq(schema.workspaceMemory.id, atomId)))
-        .get();
-      if (!memory) return;
-      const nextTrust = clamp01(Number(memory.trust) + delta);
-      const nextGlobalConfidence = clamp01(Number(memory.globalConfidence ?? 0) + delta);
-      this.db.update(schema.workspaceMemory)
-        .set({
-          trust: String(nextTrust),
-          globalConfidence: String(Math.max(nextGlobalConfidence, nextTrust * 0.75)),
-          updatedAt: now,
-        })
-        .where(eq(schema.workspaceMemory.id, atomId))
-        .run();
-      adjusted += 1;
-      this.recordQualityEvent({
-        workspaceId: args.workspaceId,
-        scopeId: args.scopeId ?? null,
-        agentId: args.agentId ?? null,
-        runId: args.runId,
-        eventType: 'atom_confidence_delta',
-        atomId,
-        delta,
-        metadata: { atomKind: 'memory' },
-      });
+      // §B4 — all atoms are episodes now; an unmatched id is simply gone.
     });
 
     this.recordQualityEvent({
@@ -974,6 +1147,53 @@ export class SharedIntelligenceService {
     }
   }
 
+  /**
+   * §C2 — sleep-time precompute. Rebuild the per-scope working set: the top
+   * durable atoms by importance×trust×recency (query-free), cached so the
+   * injector can serve a scope's core knowledge cheaply. Called from the
+   * reflection pass, off the hot path. Returns the cached count.
+   */
+  rebuildWorkingSet(workspaceId: string, scopeId: string | null, limit = 10): number {
+    const conds = [
+      eq(schema.memoryEpisodes.workspaceId, workspaceId),
+      isNull(schema.memoryEpisodes.archivedAt),
+      isNull(schema.memoryEpisodes.supersededBy),
+      eq(schema.memoryEpisodes.status, 'active'),
+      scopeId ? eq(schema.memoryEpisodes.scopeId, scopeId) : isNull(schema.memoryEpisodes.scopeId),
+    ];
+    const rows = this.db.select().from(schema.memoryEpisodes).where(and(...conds)).limit(400).all()
+      .filter((r) => !parseJsonArray<string>(r.tags).includes('plane:workspace_memory'));
+    const now = Date.now();
+    const scored = rows.map((r) => {
+      const trust = Number(r.trust) || 0;
+      const importance = Number(r.importance) || 0;
+      const ageDays = (now - Date.parse(r.reinforcedAt ?? r.updatedAt)) / 86_400_000;
+      const freshness = Number.isFinite(ageDays) ? Math.max(0.3, Math.exp(-ageDays / 180)) : 0.9;
+      return { r, score: trust * (0.5 + 0.5 * importance) * freshness };
+    }).sort((a, b) => b.score - a.score).slice(0, limit);
+    const atoms = scored.map(({ r, score }) => ({ id: r.id, title: r.title, content: r.summary, kind: 'episode', score: Number(score.toFixed(4)) }));
+    const now2 = new Date().toISOString();
+    const existing = this.db.select({ id: schema.brainWorkingSet.id }).from(schema.brainWorkingSet)
+      .where(and(eq(schema.brainWorkingSet.workspaceId, workspaceId), scopeId ? eq(schema.brainWorkingSet.scopeId, scopeId) : isNull(schema.brainWorkingSet.scopeId)))
+      .get();
+    if (existing) {
+      this.db.update(schema.brainWorkingSet).set({ atoms, atomCount: atoms.length, builtAt: now2 }).where(eq(schema.brainWorkingSet.id, existing.id)).run();
+    } else {
+      this.db.insert(schema.brainWorkingSet).values({ id: randomUUID(), workspaceId, scopeId, atoms, atomCount: atoms.length, builtAt: now2 }).run();
+    }
+    return atoms.length;
+  }
+
+  /** §C2 — read the cached working set for a scope (Tier-0 core knowledge). */
+  getWorkingSet(workspaceId: string, scopeId: string | null): Array<{ id: string; title: string; content: string; kind: string; score: number }> {
+    const row = this.db.select({ atoms: schema.brainWorkingSet.atoms }).from(schema.brainWorkingSet)
+      .where(and(eq(schema.brainWorkingSet.workspaceId, workspaceId), scopeId ? eq(schema.brainWorkingSet.scopeId, scopeId) : isNull(schema.brainWorkingSet.scopeId)))
+      .get();
+    if (!row) return [];
+    const atoms = row.atoms;
+    return Array.isArray(atoms) ? atoms as Array<{ id: string; title: string; content: string; kind: string; score: number }> : [];
+  }
+
   async searchAtoms(args: {
     workspaceId: string;
     scopeId?: string | null;
@@ -981,6 +1201,8 @@ export class SharedIntelligenceService {
     scope?: 'workspace' | 'scoped' | 'both';
     limit?: number;
     minConfidence?: number;
+    /** §C7 — when set, retrieval enforces team RLS (shared + own-scope only). */
+    requesterScopeId?: string | null;
   }): Promise<BrainSearchResult[]> {
     if (this.embeddingStatus(args.workspaceId).retrievalPaused) return [];
     const limit = Math.min(Math.max(args.limit ?? 5, 1), 25);
@@ -992,38 +1214,69 @@ export class SharedIntelligenceService {
       includeWorkspace: args.scope === 'both' || graphScope === 'workspace',
       limit: MAX_GRAPH_LIMIT,
       minConfidence: args.minConfidence ?? 0,
+      ...('requesterScopeId' in args ? { requesterScopeId: args.requesterScopeId } : {}),
     });
     if (atoms.length === 0) return [];
 
+    const provider = this.#resolveEmbeddingProvider(args.workspaceId);
+    const semantic = !provider.modelId.startsWith('hashing');
     let queryVec: number[] | null = null;
     try {
-      queryVec = await embedText(this.#resolveEmbeddingProvider(args.workspaceId), args.query);
+      queryVec = await embedText(provider, args.query);
     } catch {
       queryVec = null;
     }
 
+    // §B1.2/§B1.3 — only use a stored vector when it is COMPARABLE to the query
+    // provider (same model + dims). On a semantic provider, any episode whose
+    // vector is stale-embedded is flagged for re-embed and counted — never
+    // silently degraded to lexical without it being observable.
     const episodeVecs = new Map<string, number[]>();
+    const staleIds: string[] = [];
     if (queryVec) {
       for (const row of this.db.select({
         id: schema.memoryEpisodes.id,
         embedding: schema.memoryEpisodes.embedding,
+        embeddingModel: schema.memoryEpisodes.embeddingModel,
+        embeddingDims: schema.memoryEpisodes.embeddingDims,
       }).from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, args.workspaceId)).all()) {
-        const vec = parseEmbedding(row.embedding);
-        if (vec) episodeVecs.set(row.id, vec);
+        if (vectorIsComparable(row.embeddingModel, row.embeddingDims, provider)) {
+          const vec = parseEmbedding(row.embedding);
+          if (vec) episodeVecs.set(row.id, vec);
+        } else if (semantic) {
+          staleIds.push(row.id);
+        }
       }
     }
+    if (staleIds.length > 0) {
+      this.#flagNeedsReembed(args.workspaceId, staleIds);
+      this.recordQualityEvent({
+        workspaceId: args.workspaceId,
+        scopeId,
+        eventType: 'retrieval_degraded',
+        metadata: { reason: 'mixed_dims', staleCount: staleIds.length, provider: provider.modelId },
+      });
+    }
 
-    const ranked = atoms
+    const scored = atoms
       .map((atom) => {
         const vec = atom.kind === 'episode' ? episodeVecs.get(atom.id) ?? null : null;
         const score = queryVec && vec && vec.length === queryVec.length
           ? cosineSimilarity(queryVec, vec)
-          : similarity(args.query, atom.text);
-        return { atom, score };
+          // No comparable vector (e.g. not yet re-embedded) → not semantically
+          // relevant. We do NOT fall back to lexical scoring — recall is purely
+          // semantic now; un-embedded atoms are picked up after the re-embed sweep.
+          : 0;
+        return { atom, score, text: atom.text };
       })
       .filter((r) => r.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+      .sort((a, b) => b.score - a.score);
+    // §B2.2 — diversify the top-K so near-duplicate atoms don't eat the budget.
+    let ranked = mmrSelect(scored, limit, MMR_LAMBDA);
+    // §B2.2 — optional model rerank (off unless an operator wired a completer).
+    if (this.#rerankCompleter && ranked.length > 2) {
+      ranked = await this.#modelRerank(args.query, ranked);
+    }
 
     this.#markEpisodesAccessed(ranked.filter(({ atom }) => atom.kind === 'episode').map(({ atom }) => atom.id));
 
@@ -1057,6 +1310,8 @@ export class SharedIntelligenceService {
     metadata?: Record<string, unknown>;
     compressionTier?: number | null;
     compressedFrom?: string[] | null;
+    /** §C7 — team visibility. Default shared; pass false for private memory. */
+    shared?: boolean;
   }): Promise<BrainSearchResult> {
     const provider = this.#resolveEmbeddingProvider(args.workspaceId);
     let embedding: number[] | null = null;
@@ -1090,6 +1345,7 @@ export class SharedIntelligenceService {
       ...(embedding ? { embedding } : {}),
       ...(args.compressionTier ? { compressionTier: args.compressionTier } : {}),
       ...(args.compressedFrom ? { compressedFrom: args.compressedFrom } : {}),
+      ...(args.shared === false ? { shared: false } : {}),
     };
     this.db.update(schema.memoryEpisodes)
       .set(update)
@@ -1139,7 +1395,13 @@ export class SharedIntelligenceService {
       try {
         const embedding = await embedText(provider, `${row.title} ${row.summary}`);
         this.db.update(schema.memoryEpisodes)
-          .set({ embedding, updatedAt: new Date().toISOString() })
+          .set({
+            embedding,
+            embeddingModel: provider.modelId,
+            embeddingDims: provider.dimension,
+            needsReembed: false,
+            updatedAt: new Date().toISOString(),
+          })
           .where(eq(schema.memoryEpisodes.id, row.id))
           .run();
         atomsReembedded += 1;
@@ -1756,23 +2018,15 @@ export class SharedIntelligenceService {
     const now = new Date().toISOString();
     let changes = 0;
     switch (kind) {
-      case 'episode': {
+      // §B4 — memory atoms are episodes now; both cases target the substrate.
+      case 'episode':
+      case 'memory': {
         const update: Record<string, unknown> = { updatedAt: now };
         if (patch.title !== undefined) update.title = patch.title;
         if (patch.content !== undefined) update.summary = patch.content;
         changes = this.db.update(schema.memoryEpisodes)
           .set(update)
           .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
-          .run().changes;
-        break;
-      }
-      case 'memory': {
-        const update: Record<string, unknown> = { updatedAt: now };
-        if (patch.title !== undefined) update.title = patch.title;
-        if (patch.content !== undefined) update.content = patch.content;
-        changes = this.db.update(schema.workspaceMemory)
-          .set(update)
-          .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, id)))
           .run().changes;
         break;
       }
@@ -1824,15 +2078,12 @@ export class SharedIntelligenceService {
     const now = new Date().toISOString();
     let changes = 0;
     switch (kind) {
+      // §B4 — memory atoms are episodes now; archive both via the substrate.
       case 'episode':
+      case 'memory':
         changes = this.db.update(schema.memoryEpisodes)
           .set({ archivedAt: now, status: 'archived', updatedAt: now })
           .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
-          .run().changes;
-        break;
-      case 'memory':
-        changes = this.db.delete(schema.workspaceMemory)
-          .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, id)))
           .run().changes;
         break;
       case 'pattern':
@@ -1866,8 +2117,8 @@ export class SharedIntelligenceService {
       };
     }
     if (node.atomKind === 'warning' || node.atomKind === 'gap') return null;
-    // Organizational overlay nodes resolve through /v1/cora, not the atom store.
-    if (node.atomKind === 'cora_source' || node.atomKind === 'cora_entity' || node.atomKind === 'cora_claim') return null;
+    // Organizational overlay nodes resolve through /v1/grounding, not the atom store.
+    if (node.atomKind === 'grounding_source' || node.atomKind === 'grounding_entity' || node.atomKind === 'grounding_claim') return null;
 
     switch (node.atomKind) {
       case 'episode': {
@@ -1886,12 +2137,13 @@ export class SharedIntelligenceService {
         };
       }
       case 'memory': {
-        const row = this.db.select().from(schema.workspaceMemory)
-          .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, node.atomId)))
+        // §B4 — memory atoms live in the episode substrate.
+        const row = this.db.select().from(schema.memoryEpisodes)
+          .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, node.atomId)))
           .get();
         if (!row) return null;
         return {
-          content: row.content,
+          content: row.summary,
           source: sourceLabel(row.source, 'Scoped memory'),
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
@@ -1924,21 +2176,24 @@ export class SharedIntelligenceService {
         };
       }
       case 'kb_chunk': {
-        const row = this.db.select().from(schema.kbChunks)
+        const row = this.db.select({ chunk: schema.kbChunks, scopeId: schema.knowledgeBases.scopeId })
+          .from(schema.kbChunks)
+          .innerJoin(schema.knowledgeBases, eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id))
           .where(and(eq(schema.kbChunks.workspaceId, workspaceId), eq(schema.kbChunks.id, node.atomId)))
           .get();
         if (!row) return null;
-        const metadata = parseJsonRecord(row.metadata);
+        const metadata = parseJsonRecord(row.chunk.metadata);
         const document = this.db.select({ name: schema.kbDocuments.name, archivedAt: schema.kbDocuments.archivedAt }).from(schema.kbDocuments)
-          .where(and(eq(schema.kbDocuments.workspaceId, workspaceId), eq(schema.kbDocuments.id, row.documentId)))
+          .where(and(eq(schema.kbDocuments.workspaceId, workspaceId), eq(schema.kbDocuments.id, row.chunk.documentId)))
           .get();
         if (!document || document.archivedAt) return null;
         const metadataSource = typeof metadata.source === 'string' ? metadata.source : null;
         return {
-          content: row.content,
+          content: row.chunk.content,
           source: document?.name ?? metadataSource ?? 'Knowledge document',
-          createdAt: row.createdAt,
-          updatedAt: row.createdAt,
+          createdAt: row.chunk.createdAt,
+          updatedAt: row.chunk.createdAt,
+          workflowId: row.scopeId,
         };
       }
     }
@@ -2023,25 +2278,11 @@ export class SharedIntelligenceService {
       return episodeToGraphNode(updated, 2);
     }
 
+    // §B4 — memory atoms are episodes; reinforce via the substrate.
     if (kind === 'memory') {
-      const row = this.db.select().from(schema.workspaceMemory)
-        .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, id)))
-        .get();
-      if (!row) return null;
-      const now = new Date().toISOString();
-      const trust = clamp01(Number(row.trust) + 0.04);
-      const globalConfidence = clamp01(Number(row.globalConfidence ?? 0) + (1 - Number(row.globalConfidence ?? 0)) * 0.15);
-      this.db.update(schema.workspaceMemory)
-        .set({
-          trust: String(trust),
-          globalConfidence: String(globalConfidence),
-          adapterType: provenance.adapterType ?? row.adapterType ?? null,
-          reinforcedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(schema.workspaceMemory.id, id))
-        .run();
-      return memoryRowToGraphNode({ ...row, trust: String(trust), globalConfidence: String(globalConfidence), adapterType: provenance.adapterType ?? row.adapterType, reinforcedAt: now, updatedAt: now }, 2);
+      const updated = this.episodes.reinforce(workspaceId, id, { confidenceDelta: 0.06, trustDelta: 0.04 });
+      if (!updated) return null;
+      return episodeToGraphNode(updated, 2);
     }
 
     return this.loadAtomById(workspaceId, kind, id)?.node ?? null;
@@ -2077,6 +2318,12 @@ export class SharedIntelligenceService {
           ...(scope === 'scoped' && scopeId
             ? [includeWorkspace ? or(eq(schema.memoryEpisodes.scopeId, scopeId), isNull(schema.memoryEpisodes.scopeId))! : eq(schema.memoryEpisodes.scopeId, scopeId)]
             : []),
+          // §C7 — row-level access: shared atoms + the requester's own private atoms only.
+          ...(options.requesterScopeId !== undefined
+            ? [typeof options.requesterScopeId === 'string'
+                ? or(eq(schema.memoryEpisodes.shared, true), eq(schema.memoryEpisodes.scopeId, options.requesterScopeId))!
+                : eq(schema.memoryEpisodes.shared, true)]
+            : []),
         ))
         .orderBy(desc(schema.memoryEpisodes.updatedAt))
         .limit(perKind)
@@ -2087,22 +2334,8 @@ export class SharedIntelligenceService {
       }
     }
 
-    if (!kindFilter || kindFilter.has('memory')) {
-      const rows = this.db.select().from(schema.workspaceMemory)
-        .where(and(
-          eq(schema.workspaceMemory.workspaceId, workspaceId),
-	          ...(scope === 'scoped' && scopeId
-	            ? [includeWorkspace ? or(eq(schema.workspaceMemory.scopeId, scopeId), isNull(schema.workspaceMemory.scopeId), eq(schema.workspaceMemory.scopeId, ''))! : eq(schema.workspaceMemory.scopeId, scopeId)]
-	            : []),
-        ))
-        .orderBy(desc(schema.workspaceMemory.updatedAt))
-        .limit(perKind)
-        .all();
-      for (const row of rows) {
-        const node = memoryRowToGraphNode(row, 1);
-        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: 'memory', text: `${row.title}\n${row.content}`, node });
-      }
-    }
+    // §B4 — typed workspace memory now lives in memory_episodes (plane-tagged),
+    // already surfaced by the episode branch above. No separate 'memory' read.
 
     if (!kindFilter || kindFilter.has('pattern')) {
       const rows = this.db.select().from(schema.promotedPatterns)
@@ -2138,16 +2371,25 @@ export class SharedIntelligenceService {
       }
     }
 
-    if ((!kindFilter || kindFilter.has('kb_chunk')) && scope === 'workspace') {
-      const rows = this.db.select().from(schema.kbChunks)
-        .where(eq(schema.kbChunks.workspaceId, workspaceId))
+    if (!kindFilter || kindFilter.has('kb_chunk')) {
+      const rows = this.db.select({ chunk: schema.kbChunks, scopeId: schema.knowledgeBases.scopeId })
+        .from(schema.kbChunks)
+        .innerJoin(schema.knowledgeBases, eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id))
+        .where(and(
+          eq(schema.kbChunks.workspaceId, workspaceId),
+          ...(scope === 'scoped' && scopeId
+            ? [includeWorkspace
+              ? or(eq(schema.knowledgeBases.scopeId, scopeId), isNull(schema.knowledgeBases.scopeId))!
+              : eq(schema.knowledgeBases.scopeId, scopeId)]
+            : []),
+        ))
         .orderBy(desc(schema.kbChunks.createdAt))
         .limit(perKind)
         .all();
-      for (const row of rows) {
-        if (!this.isKbDocumentActive(workspaceId, row.documentId)) continue;
-        const node = kbChunkRowToGraphNode(row);
-        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: 'kb_chunk', text: row.content, node });
+      for (const { chunk, scopeId: knowledgeBaseScopeId } of rows) {
+        if (!this.isKbDocumentActive(workspaceId, chunk.documentId)) continue;
+        const node = kbChunkRowToGraphNode({ ...chunk, scopeId: knowledgeBaseScopeId });
+        if (node.confidence >= minConfidence) out.push({ id: chunk.id, kind: 'kb_chunk', text: chunk.content, node });
       }
     }
 
@@ -2165,12 +2407,13 @@ export class SharedIntelligenceService {
         return { id: row.id, kind, text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node };
       }
       case 'memory': {
-        const row = this.db.select().from(schema.workspaceMemory)
-          .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, id)))
+        // §B4 — memory atoms live in the episode substrate.
+        const row = this.db.select().from(schema.memoryEpisodes)
+          .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
           .get();
         if (!row) return null;
-        const node = memoryRowToGraphNode(row, 1);
-        return { id: row.id, kind, text: `${row.title}\n${row.content}`, node };
+        const node = episodeRowToGraphNode(row, 1);
+        return { id: row.id, kind, text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node };
       }
       case 'pattern': {
         const row = this.db.select().from(schema.promotedPatterns)
@@ -2189,13 +2432,15 @@ export class SharedIntelligenceService {
         return { id: row.id, kind, text: `${row.title}\n${row.content}`, node };
       }
       case 'kb_chunk': {
-        const row = this.db.select().from(schema.kbChunks)
+        const row = this.db.select({ chunk: schema.kbChunks, scopeId: schema.knowledgeBases.scopeId })
+          .from(schema.kbChunks)
+          .innerJoin(schema.knowledgeBases, eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id))
           .where(and(eq(schema.kbChunks.workspaceId, workspaceId), eq(schema.kbChunks.id, id)))
           .get();
         if (!row) return null;
-        if (!this.isKbDocumentActive(workspaceId, row.documentId)) return null;
-        const node = kbChunkRowToGraphNode(row);
-        return { id: row.id, kind, text: row.content, node };
+        if (!this.isKbDocumentActive(workspaceId, row.chunk.documentId)) return null;
+        const node = kbChunkRowToGraphNode({ ...row.chunk, scopeId: row.scopeId });
+        return { id: row.chunk.id, kind, text: row.chunk.content, node };
       }
     }
   }
@@ -2332,33 +2577,8 @@ function episodeRowToGraphNode(row: typeof schema.memoryEpisodes.$inferSelect, r
   };
 }
 
-function memoryRowToGraphNode(row: typeof schema.workspaceMemory.$inferSelect, reinforceCount: number): BrainGraphNode {
-  const trust = clamp01(Number(row.trust));
-  const globalConfidence = clamp01(Number(row.globalConfidence ?? 0));
-  return {
-    id: atomKey('memory', row.id),
-    atomId: row.id,
-    atomKind: 'memory',
-    label: row.title,
-    summary: row.content,
-    confidence: Math.max(globalConfidence, trust * 0.85),
-    trust,
-    reinforceCount,
-    adapterType: row.adapterType,
-    scopeId: row.scopeId,
-    isStale: isStale(row.updatedAt),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    metadata: {
-      kind: row.kind,
-      source: row.source,
-      tags: parseJsonArray<string>(row.tags),
-      provenance: parseJsonRecord(row.provenance),
-      globalConfidence,
-      workspaceGlobal: globalConfidence >= GLOBAL_CONFIDENCE_THRESHOLD,
-    },
-  };
-}
+// §B4 — memoryRowToGraphNode removed: workspace_memory collapsed into episodes,
+// which project via episodeRowToGraphNode.
 
 function patternRowToGraphNode(row: typeof schema.promotedPatterns.$inferSelect): BrainGraphNode {
   return {
@@ -2403,7 +2623,7 @@ function knowledgeChunkRowToGraphNode(row: typeof schema.knowledgeChunks.$inferS
   };
 }
 
-function kbChunkRowToGraphNode(row: typeof schema.kbChunks.$inferSelect): BrainGraphNode {
+function kbChunkRowToGraphNode(row: typeof schema.kbChunks.$inferSelect & { scopeId: string | null }): BrainGraphNode {
   const metadata = parseJsonRecord(row.metadata);
   const source = typeof metadata.source === 'string' ? metadata.source : 'Knowledge document';
   return {
@@ -2415,12 +2635,16 @@ function kbChunkRowToGraphNode(row: typeof schema.kbChunks.$inferSelect): BrainG
     confidence: 0.82,
     trust: 0.82,
     reinforceCount: 1,
+    scopeId: row.scopeId,
     createdAt: row.createdAt,
     updatedAt: row.createdAt,
     metadata: {
       ...metadata,
       documentId: row.documentId,
       knowledgeBaseId: row.knowledgeBaseId,
+      scopeId: row.scopeId,
+      scopeKind: row.scopeId ? 'workflow' : 'workspace',
+      workflowId: row.scopeId,
       chunkIndex: row.chunkIndex,
       tokenCount: row.tokenCount,
     },
@@ -2487,10 +2711,10 @@ function sourceLabel(source: unknown, fallback: string): string {
   }
 }
 
-// Accepts the widened link-kind union; cora_* kinds never resolve to atoms
-// here (the organizational overlay is served by /v1/cora/graph), so their
+// Accepts the widened link-kind union; grounding_* kinds never resolve to atoms
+// here (the organizational overlay is served by /v1/grounding/graph), so their
 // keys simply never match and the links filter out.
-function atomKey(kind: KnowledgeAtomKind | 'cora_source' | 'cora_entity' | 'cora_claim', id: string): string {
+function atomKey(kind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim', id: string): string {
   return `${kind}:${id}`;
 }
 
@@ -2611,44 +2835,87 @@ function parseEmbedding(raw: unknown): number[] | null {
   }
 }
 
-function similarity(a: string, b: string): number {
-  const aTokens = new Set(tokenize(a));
-  const bTokens = new Set(tokenize(b));
-  if (aTokens.size === 0 || bTokens.size === 0) return 0;
-  let overlap = 0;
-  for (const token of aTokens) if (bTokens.has(token)) overlap += 1;
-  const union = new Set([...aTokens, ...bTokens]).size;
-  const jaccard = overlap / union;
-  const containment = overlap / Math.min(aTokens.size, bTokens.size);
-  return jaccard * 0.65 + containment * 0.35;
-}
-
-function tokenize(input: string): string[] {
-  const out: string[] = [];
-  const cleaned = input.toLowerCase().replace(/[^a-z0-9_\s]+/g, ' ');
-  for (const raw of cleaned.split(/\s+/)) {
-    if (!raw || raw.length < 2 || STOP_WORDS.has(raw)) continue;
-    out.push(raw);
+/**
+ * §B2.2 — Maximal Marginal Relevance selection. Greedily picks `limit` items that
+ * are both relevant (high score) AND diverse (low similarity to already-picked),
+ * so a dispatch never wastes its budget on five paraphrases of one atom. Pure +
+ * model-free: uses the lexical `similarity` over atom text. Falls through to the
+ * plain top-K when there is nothing to diversify.
+ */
+function mmrSelect<T extends { score: number; text: string }>(candidates: T[], limit: number, lambda: number): T[] {
+  if (candidates.length <= limit) return candidates;
+  const pool = candidates.slice(0, Math.max(limit * 3, limit));
+  const maxScore = Math.max(...pool.map((c) => c.score), 1e-9);
+  const selected: T[] = [];
+  while (selected.length < limit && pool.length > 0) {
+    let bestIdx = 0;
+    let bestVal = -Infinity;
+    for (let i = 0; i < pool.length; i++) {
+      const rel = pool[i]!.score / maxScore;
+      let maxSim = 0;
+      for (const s of selected) {
+        const sim = similarity(pool[i]!.text, s.text);
+        if (sim > maxSim) maxSim = sim;
+      }
+      const mmr = lambda * rel - (1 - lambda) * maxSim;
+      if (mmr > bestVal) { bestVal = mmr; bestIdx = i; }
+    }
+    selected.push(pool.splice(bestIdx, 1)[0]!);
   }
-  return out;
+  return selected;
 }
 
-function uniqueByNormalized(items: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of items) {
-    const key = tokenize(item).slice(0, 18).join(' ');
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
+// §C5 — multi-scale temporal memory. One freshness curve can't serve "what did
+// we just say" and "the rule from 6 months ago", so the injector classifies each
+// atom into a SCALE and fills the budget across scales by surface.
+type MemoryScale = 'working' | 'episodic' | 'semantic';
+
+function scaleOf(atom: BrainSearchResult): MemoryScale {
+  const tags = atom.tags ?? [];
+  if (
+    atom.kind === 'memory'
+    || tags.includes('generalization') || tags.includes('upward_generalized')
+    || tags.includes('charter') || tags.includes('rule') || tags.includes('pacer:conceptual')
+  ) return 'semantic';
+  const ageDays = (Date.now() - Date.parse(atom.updatedAt)) / 86_400_000;
+  if (Number.isFinite(ageDays) && ageDays <= 3) return 'working';
+  return 'episodic';
+}
+
+/**
+ * Select up to `limit` atoms balanced across temporal scales. Candidates arrive
+ * sorted by score (best first). Each scale is filled to a surface-weighted target
+ * by score; any unused budget backfills from the global best, so a scale never
+ * starves the prompt.
+ */
+function selectAcrossScales(candidates: BrainSearchResult[], limit: number, surface: 'chat' | 'dispatch'): BrainSearchResult[] {
+  if (candidates.length <= limit) return candidates;
+  const buckets: Record<MemoryScale, BrainSearchResult[]> = { working: [], episodic: [], semantic: [] };
+  for (const c of candidates) buckets[scaleOf(c)].push(c);
+  const w = surface === 'chat'
+    ? { working: 0.4, episodic: 0.2, semantic: 0.4 }
+    : { working: 0.15, episodic: 0.45, semantic: 0.4 };
+  const target: Record<MemoryScale, number> = {
+    working: Math.round(limit * w.working),
+    episodic: Math.round(limit * w.episodic),
+    semantic: Math.round(limit * w.semantic),
+  };
+  const picked: BrainSearchResult[] = [];
+  const used = new Set<string>();
+  const countIn = (scale: MemoryScale) => picked.reduce((n, p) => n + (scaleOf(p) === scale ? 1 : 0), 0);
+  for (const scale of ['semantic', 'episodic', 'working'] as MemoryScale[]) {
+    for (const c of buckets[scale]) {
+      if (countIn(scale) >= target[scale]) break;
+      if (used.has(c.id)) continue;
+      picked.push(c); used.add(c.id);
+      if (picked.length >= limit) return picked;
+    }
   }
-  return out;
-}
-
-function compactValue(value: unknown): unknown {
-  if (value == null || typeof value !== 'object') return value ?? null;
-  if (Array.isArray(value)) return { type: 'array', count: value.length };
-  return { type: 'object', keys: Object.keys(value as Record<string, unknown>).slice(0, 8) };
+  for (const c of candidates) {
+    if (picked.length >= limit) break;
+    if (!used.has(c.id)) { picked.push(c); used.add(c.id); }
+  }
+  return picked;
 }
 
 function latestActivity(nodes: BrainGraphNode[], links: BrainGraphLink[]): string | null {
@@ -2668,15 +2935,6 @@ function isStale(iso: string): boolean {
   return Date.now() - at > 1000 * 60 * 60 * 24 * 90;
 }
 
-function synthesizePreTaskContext(texts: string[]): string {
-  const rules = texts
-    .map((text) => text.split('\n').map((line) => line.trim()).filter(Boolean).join(' - '))
-    .filter(Boolean)
-    .slice(0, 3);
-  if (rules.length === 0) return '- No stable prior signal matched this task.';
-  return rules.map((rule) => `- Carry forward: ${truncate(rule, 180)}`).join('\n');
-}
-
 function summarizeRows(rows: Array<typeof schema.memoryEpisodes.$inferSelect>) {
   const count = rows.length;
   const totalConfidence = rows.reduce((sum, row) => sum + clamp01(Number(row.confidence)), 0);
@@ -2686,11 +2944,6 @@ function summarizeRows(rows: Array<typeof schema.memoryEpisodes.$inferSelect>) {
     averageConfidence: count === 0 ? 0 : totalConfidence / count,
     capacityTokens: estimateTokens(text),
   };
-}
-
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  return Math.ceil(text.length / 4);
 }
 
 function disputeAtom(row: typeof schema.memoryEpisodes.$inferSelect) {
@@ -2713,36 +2966,3 @@ function mergeDisputeContent(a: string, b: string): string {
   return `Context-aware synthesis: ${a.trim()} In a different context, ${b.trim()}`;
 }
 
-function parseJsonArray<T>(raw: unknown): T[] {
-  if (Array.isArray(raw)) return raw as T[];
-  if (typeof raw !== 'string') return [];
-  try {
-    const value = JSON.parse(raw);
-    return Array.isArray(value) ? value as T[] : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseJsonRecord(raw: unknown): Record<string, unknown> {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
-  if (typeof raw !== 'string') return {};
-  try {
-    const value = JSON.parse(raw);
-    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  } catch {
-    return {};
-  }
-}
-
-function truncate(input: string, max: number): string {
-  if (input.length <= max) return input;
-  return `${input.slice(0, Math.max(0, max - 1))}...`;
-}
-
-function clamp01(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  if (value < 0) return 0;
-  if (value > 1) return 1;
-  return value;
-}

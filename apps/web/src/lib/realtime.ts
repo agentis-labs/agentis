@@ -405,6 +405,18 @@ function mapCanvasStreamEvent(event: string, data: unknown): RealtimeEnvelope[] 
     }
   }
 
+  // The workspace SSE stream mirrors these build events verbatim.  Keeping
+  // their original names means every existing useRealtime consumer receives
+  // the same progressive updates whether it is connected by Socket.IO or the
+  // fallback stream.
+  if (
+    event === REALTIME_EVENTS.WORKFLOW_BUILD_PHASE
+    || event === REALTIME_EVENTS.CANVAS_NODE_PLACED
+    || event === REALTIME_EVENTS.CANVAS_EDGE_CONNECTED
+  ) {
+    return [env(event, payload)];
+  }
+
   if (event === 'agent_state') {
     switch (stringField(payload, 'type')) {
       case 'TOOL_CALL':

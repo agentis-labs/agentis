@@ -1,28 +1,28 @@
 /**
- * KnowledgeAutoLinker — when a new knowledge atom is written (uploaded doc
+ * KnowledgeAutoLinker â€” when a new knowledge atom is written (uploaded doc
  * chunk, ingested kb chunk, promoted episode, etc.), this service mines the
  * collective brain for the most similar existing atoms and writes
  * `knowledge_links` rows so the graph is never "0 links" again.
  *
- * Spec: docs/UIUX-refactor/BRAIN-PAGE-REDESIGN.md §5 (Auto-Linking on
+ * Spec: docs/UIUX-refactor/BRAIN-PAGE-REDESIGN.md Â§5 (Auto-Linking on
  * Document Upload).
  *
  * Strategy (V1, lexical):
  *   1. Tokenise the candidate text (shared tokeniser with KnowledgeStore).
  *   2. Compute Jaccard similarity vs every active atom in the workspace
- *      (bounded by MAX_CANDIDATES — uses SharedIntelligenceService.loadAtoms).
+ *      (bounded by MAX_CANDIDATES â€” uses SharedIntelligenceService.loadAtoms).
  *   3. Take the top-N matches over MIN_SIMILARITY and write
  *      `relation: 'co_observed'` links via SharedIntelligenceService.createLink.
  *
  * Sibling-chunk pass: when many chunks land in a single upload, the linker
  * also draws `derived_from` edges from each chunk to chunk 0 of the same
- * document so a document never appears as a disconnected cloud of orphans.
+ * document so a document never appears as a disconnected cloud of chunks.
  */
 
 import type { KnowledgeAtomKind, KnowledgeLinkRelation } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { SharedIntelligenceService } from './sharedIntelligence.js';
-import { cosineSimilarity, embedText, HashingEmbeddingProvider, type EmbeddingProvider } from './embeddingProvider.js';
+import { cosineSimilarity, embedText, type EmbeddingProvider } from './embeddingProvider.js';
 
 export interface AutoLinkInput {
   workspaceId: string;
@@ -73,7 +73,7 @@ export class KnowledgeAutoLinker {
       });
       const sourceTokens = tokenize(`${input.sourceTitle} ${input.sourceContent}`);
       if (sourceTokens.size === 0) {
-        // Still draw a sibling edge if requested so the chunk is not orphaned.
+        // Still draw a sibling edge if requested so the chunk stays connected.
         if (input.siblingHeadId && input.siblingHeadKind && input.siblingHeadId !== input.sourceId) {
           const ok = this.SharedIntelligence.createLink({
             workspaceId: input.workspaceId,
@@ -97,7 +97,7 @@ export class KnowledgeAutoLinker {
         .filter((candidate) => !(candidate.kind === input.sourceKind && candidate.id === input.sourceId))
         .map((candidate) => ({
           candidate,
-          score: this.similarity(input.workspaceId, `${input.sourceTitle} ${input.sourceContent}`, sourceTokens, candidate.text, candidate.tokens),
+          score: this.similarity(sourceTokens, candidate.tokens),
         }))
         .filter((entry) => entry.score >= MIN_SIMILARITY)
         .sort((a, b) => b.score - a.score)
@@ -149,7 +149,7 @@ export class KnowledgeAutoLinker {
 
   async autoLinkSemantic(input: AutoLinkInput): Promise<number> {
     const provider = this.embeddingProvider?.(input.workspaceId);
-    if (!provider || provider instanceof HashingEmbeddingProvider) return 0;
+    if (!provider) return 0;
     try {
       const sourceVector = await embedText(provider, `${input.sourceTitle} ${input.sourceContent}`);
       const candidates = this.SharedIntelligence.listLinkCandidates(input.workspaceId, {
@@ -213,7 +213,7 @@ export class KnowledgeAutoLinker {
       .filter((candidate) => !(candidate.kind === args.sourceKind && candidate.id === args.sourceId))
       .map((candidate) => ({
         candidate,
-        score: this.similarity(args.workspaceId, `${args.sourceTitle} ${args.sourceContent}`, sourceTokens, candidate.text, candidate.tokens),
+        score: this.similarity(sourceTokens, candidate.tokens),
       }))
       .filter((entry) => entry.score >= MIN_SIMILARITY)
       .sort((a, b) => b.score - a.score)
@@ -227,21 +227,10 @@ export class KnowledgeAutoLinker {
       }));
   }
 
-  private similarity(
-    workspaceId: string,
-    source: string,
-    sourceTokens: Set<string>,
-    target: string,
-    targetTokens: Set<string>,
-  ): number {
-    const provider = this.embeddingProvider?.(workspaceId);
-    if (provider instanceof HashingEmbeddingProvider) {
-      const sourceVector = provider.embed(source);
-      const targetVector = provider.embed(target);
-      if (Array.isArray(sourceVector) && Array.isArray(targetVector) && sourceVector.length === targetVector.length) {
-        return Math.max(0, cosineSimilarity(sourceVector, targetVector));
-      }
-    }
+  // Synchronous suggestion heuristic (token Jaccard) for the inspector's
+  // "Suggested links" affordance. Real semantic linking happens on the async
+  // ingestion path above via embedText(); this stays sync + cheap for the UI.
+  private similarity(sourceTokens: Set<string>, targetTokens: Set<string>): number {
     return jaccard(sourceTokens, targetTokens);
   }
 }

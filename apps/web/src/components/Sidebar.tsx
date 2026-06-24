@@ -1,8 +1,8 @@
 /**
  * Sidebar — primary navigation rail.
  *
- * Home / Workflows / Agents / Brain / Abilities / Packages / Settings.
- * Live badges on Agents (live count) and Workflows (active runs).
+ * Home / Apps / Agents / Brain / Packages.
+ * Live badges on Agents (live count).
  * Auto-collapse when ChatPanel is docked.
  */
 
@@ -12,10 +12,9 @@ import clsx from 'clsx';
 import {
   Home as HomeIcon,
   Bot,
-  Workflow as WorkflowIcon,
   Brain as BrainIcon,
   Package as PackageIcon,
-  Network as NetworkIcon,
+  LayoutGrid as AppsIcon,
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react';
@@ -27,12 +26,12 @@ interface NavItem {
   to: string;
   label: string;
   icon: LucideIcon;
-  badge?: 'liveAgents' | 'activeRuns';
+  badge?: 'liveAgents';
 }
 
 const NAV: NavItem[] = [
   { to: '/home', label: 'Home', icon: HomeIcon },
-  { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, badge: 'activeRuns' },
+  { to: '/apps', label: 'Apps', icon: AppsIcon },
   { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
   { to: '/brain', label: 'Brain', icon: BrainIcon },
   { to: '/packages', label: 'Packages', icon: PackageIcon },

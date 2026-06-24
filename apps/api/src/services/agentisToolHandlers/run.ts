@@ -25,6 +25,8 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           type: 'object',
           properties: {
             workflowId: { type: 'string' },
+            taskId: { type: 'string' },
+            planId: { type: 'string' },
             inputs: { type: 'object' },
             input: { type: 'string' },
           },
@@ -43,6 +45,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         }
         const graph = wf.graph as WorkflowGraph;
         const runId = randomUUID();
+        const planId = args.planId ? String(args.planId) : args.taskId ? String(args.taskId) : null;
         const inputs = parseInputs(args.inputs ?? args.input);
         const initialState: WorkflowRunState = buildInitialRunState({
           runId,
@@ -71,6 +74,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           ambientId: ctx.ambientId ?? null,
           conversationId: ctx.conversationId ?? null,
           workflowId: wf.id,
+          ...(planId ? { planId } : {}),
           userId: ctx.userId,
           triggerId: null,
           inputs,
@@ -251,8 +255,6 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         mutating: true,
       },
       handler: async (args, ctx) => {
-        const id = randomUUID();
-        const now = new Date().toISOString();
         const title = String(args.title);
         const content = String(args.content);
         const kind = String(args.kind ?? 'fact');
@@ -280,25 +282,19 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           }
         }
 
-        deps.db
-          .insert(schema.workspaceMemory)
-          .values({
-            id,
-            workspaceId: ctx.workspaceId,
-            scopeId,
-            kind,
-            source: 'operator',
-            title,
-            content,
-            trust: '0.7',
-            importance: String(importanceVal),
-            tags: parsedTags,
-            provenance: {},
-            reinforcedAt: null,
-            createdAt: now,
-            updatedAt: now,
-          })
-          .run();
+        // §B4 — write typed memory through the unified MemoryStore facade.
+        if (!deps.memory) throw new Error('workspace memory service not available');
+        const id = deps.memory.write({
+          workspaceId: ctx.workspaceId,
+          scopeId: scopeId || null,
+          kind: kind as Parameters<NonNullable<typeof deps.memory>['write']>[0]['kind'],
+          source: 'operator',
+          title,
+          content,
+          trust: 0.7,
+          importance: importanceVal,
+          tags: parsedTags,
+        });
 
         return { id, title, kind, importance: importanceVal, tags: parsedTags, status: 'created' };
       },
@@ -320,31 +316,13 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       },
       handler: async (args, ctx) => {
         const id = String(args.id);
-        const scopeId = String(args.agentId ?? '');
-        const result = deps.db
-          .delete(schema.workspaceMemory)
-          .where(
-            and(
-              eq(schema.workspaceMemory.workspaceId, ctx.workspaceId),
-              eq(schema.workspaceMemory.scopeId, scopeId),
-              eq(schema.workspaceMemory.id, id),
-            ),
-          )
-          .run();
-
-        if (result.changes === 0) {
-          const fallbackResult = deps.db
-            .delete(schema.workspaceMemory)
-            .where(
-              and(
-                eq(schema.workspaceMemory.workspaceId, ctx.workspaceId),
-                eq(schema.workspaceMemory.id, id),
-              ),
-            )
-            .run();
-          if (fallbackResult.changes === 0) {
-            throw new Error(`Memory entry ${id} not found in workspace`);
-          }
+        const scopeId = args.agentId ? String(args.agentId) : null;
+        // §B4 — delete through the unified MemoryStore facade (scoped, then global).
+        if (!deps.memory) throw new Error('workspace memory service not available');
+        const deleted = (scopeId !== null && deps.memory.delete(ctx.workspaceId, scopeId, id))
+          || deps.memory.delete(ctx.workspaceId, null, id);
+        if (!deleted) {
+          throw new Error(`Memory entry ${id} not found in workspace`);
         }
         return { id, deleted: true };
       },

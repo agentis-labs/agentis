@@ -12,6 +12,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { eq } from 'drizzle-orm';
 import { REALTIME_EVENTS, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
+import { ConnectorRegistry, type ConnectorModule } from '@agentis/integrations';
 import { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import { buildInitialRunState } from '../../src/engine/initialRunState.js';
 import { LedgerService } from '../../src/services/ledger.js';
@@ -27,6 +28,19 @@ let ctx: TestContext;
 let engine: WorkflowEngine;
 let workflowStore: WorkflowStoreService;
 let approvals: ApprovalInboxService;
+
+const acmeConnector: ConnectorModule = {
+  service: 'acme_crm',
+  operations: ['create_lead'],
+  async execute(opts) {
+    return {
+      ok: true,
+      operation: opts.operation,
+      token: opts.credential?.token,
+      name: opts.params.name,
+    };
+  },
+};
 
 beforeEach(async () => {
   ctx = await createTestContext();
@@ -48,6 +62,8 @@ beforeEach(async () => {
     skills,
     adapters,
     workflowStore,
+    connectors: new ConnectorRegistry([acmeConnector]),
+    vault: ctx.vault,
   });
 });
 
@@ -152,6 +168,45 @@ describe('WorkflowEngine — transform node', () => {
     expect(state.nodeStates.X?.outputData).toEqual({ doubled: 42, name: 'ADA' });
   });
 
+  it('does not report success when every declared output branch was skipped', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'P',
+          type: 'transform',
+          title: 'Produce',
+          position: { x: 200, y: 0 },
+          config: { kind: 'transform', expression: '({ delivered: true })' },
+        },
+        {
+          id: 'R',
+          type: 'return_output',
+          title: 'Return result',
+          position: { x: 400, y: 0 },
+          config: { kind: 'return_output', renderAs: 'json' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'T', target: 'P' },
+        { id: 'e2', source: 'P', target: 'R', condition: 'false' },
+      ],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    const row = loadRun(runId);
+    const state = row.runState as {
+      completionFailure?: string;
+      nodeStates: Record<string, { status?: string }>;
+    };
+
+    expect(row.status).toBe('COMPLETED_WITH_ERRORS');
+    expect(state.nodeStates.R?.status).toBe('SKIPPED');
+    expect(state.completionFailure).toContain('no declared terminal output');
+  });
+
   it('runs deterministically and routes failure through the error edge', async () => {
     const graph: WorkflowGraph = {
       version: 1,
@@ -188,6 +243,53 @@ describe('WorkflowEngine — transform node', () => {
     const state = row.runState as { nodeStates: Record<string, { outputData?: Record<string, unknown>; error?: string }> };
     expect(state.nodeStates.C?.outputData).toMatchObject({ caught: true });
     expect(state.nodeStates.X?.error).toBeTruthy();
+  });
+});
+
+describe('WorkflowEngine - integration credentials', () => {
+  it('uses a workspace integration credential when the node has no explicit credentialId', async () => {
+    ctx.db.insert(schema.credentials).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Acme CRM',
+      credentialType: 'integration_acme_crm',
+      encryptedValue: ctx.vault.encrypt(JSON.stringify({ token: 'workspace-token' })),
+    }).run();
+
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'crm',
+          type: 'integration',
+          title: 'Create lead',
+          position: { x: 200, y: 0 },
+          config: {
+            kind: 'integration',
+            integrationId: 'acme_crm',
+            operationId: 'create_lead',
+            inputs: { name: 'Ada' },
+          },
+        },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'crm' }],
+    };
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    const row = loadRun(runId);
+    const state = row.runState as { nodeStates: Record<string, { outputData?: Record<string, unknown> }> };
+
+    expect(row.status).toBe('COMPLETED');
+    expect(state.nodeStates.crm?.outputData).toMatchObject({
+      ok: true,
+      operation: 'create_lead',
+      token: 'workspace-token',
+      name: 'Ada',
+    });
   });
 });
 

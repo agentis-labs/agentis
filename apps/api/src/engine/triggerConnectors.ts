@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto';
 import { AgentisError, CONSTANTS } from '@agentis/core';
 
 export type TriggerConnectorId =
@@ -8,7 +8,18 @@ export type TriggerConnectorId =
   | 'linear'
   | 'stripe'
   | 'typeform'
-  | 'gmail';
+  | 'gmail'
+  // WORKFLOW-UPDATE — n8n-inspired integration webhook verifiers
+  | 'shopify'
+  | 'hubspot'
+  | 'intercom'
+  | 'zendesk'
+  | 'twilio'
+  | 'discord'
+  | 'pagerduty'
+  | 'sendgrid';
+
+const EXTRA_CONNECTORS = ['shopify', 'hubspot', 'intercom', 'zendesk', 'twilio', 'discord', 'pagerduty', 'sendgrid'] as const;
 
 export interface ConnectorVerificationInput {
   connector: TriggerConnectorId;
@@ -93,6 +104,102 @@ export function verifyConnectorWebhook(input: ConnectorVerificationInput): Conne
         payload: parsed,
       };
     }
+    case 'shopify': {
+      // base64 HMAC-SHA256 over the raw body.
+      const expected = hmacBase64(input.secret, input.rawBody, 'sha256');
+      safeCompare(expected, requiredHeader(input.headers, 'x-shopify-hmac-sha256'));
+      return {
+        deliveryId: stringFrom(input.headers['x-shopify-webhook-id'] ?? parsed.id ?? Date.now()),
+        eventType: stringFrom(input.headers['x-shopify-topic'] ?? 'shopify.event'),
+        payload: parsed,
+      };
+    }
+    case 'hubspot': {
+      // hex HMAC-SHA256 over the raw body.
+      safeCompare(hmacHex(input.secret, input.rawBody), requiredHeader(input.headers, 'x-hubspot-signature'));
+      const events = arrayBody(parsed);
+      const first = events ? recordFrom(events[0]) : parsed;
+      return {
+        deliveryId: stringFrom(first.eventId ?? first.objectId ?? Date.now()),
+        eventType: stringFrom(first.subscriptionType ?? first.changeFlag ?? 'hubspot.event'),
+        payload: events ? { events } : parsed,
+      };
+    }
+    case 'intercom':
+      // `sha256=`-prefixed hex HMAC-SHA256 over the raw body (x-hub-signature).
+      verifyPrefixedHexHmac({
+        secret: input.secret,
+        rawBody: input.rawBody,
+        header: requiredHeader(input.headers, 'x-hub-signature'),
+        prefix: 'sha256=',
+      });
+      return {
+        deliveryId: stringFrom(parsed.id ?? Date.now()),
+        eventType: stringFrom(parsed.topic ?? parsed.type ?? 'intercom.notification'),
+        payload: parsed,
+      };
+    case 'zendesk': {
+      // base64 HMAC-SHA256 over `${timestamp}${body}`.
+      const timestamp = requiredHeader(input.headers, 'x-zendesk-webhook-signature-timestamp');
+      const expected = hmacBase64(input.secret, `${timestamp}${input.rawBody}`, 'sha256');
+      safeCompare(expected, requiredHeader(input.headers, 'x-zendesk-webhook-signature'));
+      return {
+        deliveryId: stringFrom(input.headers['x-zendesk-webhook-id'] ?? parsed.id ?? timestamp),
+        eventType: stringFrom(parsed.type ?? parsed.event ?? 'zendesk.event'),
+        payload: parsed,
+      };
+    }
+    case 'twilio': {
+      // base64 HMAC-SHA1 over the raw body. (Twilio's URL-based scheme needs the
+      // public request URL, which the trigger receiver does not carry; this
+      // verifies the body HMAC with the configured signing secret.)
+      const expected = hmacBase64(input.secret, input.rawBody, 'sha1');
+      safeCompare(expected, requiredHeader(input.headers, 'x-twilio-signature'));
+      return {
+        deliveryId: stringFrom(parsed.SmsSid ?? parsed.MessageSid ?? parsed.CallSid ?? Date.now()),
+        eventType: stringFrom(parsed.EventType ?? parsed.MessageStatus ?? 'twilio.event'),
+        payload: parsed,
+      };
+    }
+    case 'discord': {
+      // Ed25519 over `${timestamp}${body}`; `secret` is the application public key.
+      const timestamp = requiredHeader(input.headers, 'x-signature-timestamp');
+      const signature = requiredHeader(input.headers, 'x-signature-ed25519');
+      verifyEd25519(input.secret, `${timestamp}${input.rawBody}`, signature);
+      return {
+        deliveryId: stringFrom(parsed.id ?? `${timestamp}:${signature.slice(0, 12)}`),
+        eventType: stringFrom(typeof parsed.type === 'number' ? `discord.type.${parsed.type}` : parsed.type ?? 'discord.interaction'),
+        payload: parsed,
+      };
+    }
+    case 'pagerduty': {
+      // `v1=`-prefixed hex HMAC-SHA256 list over the raw body (x-pagerduty-signature).
+      const header = requiredHeader(input.headers, 'x-pagerduty-signature');
+      const expected = hmacHex(input.secret, input.rawBody);
+      const signatures = header.split(',').map((s) => s.trim().replace(/^v1=/, ''));
+      if (!signatures.some((sig) => compareHex(expected, sig))) {
+        throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', 'invalid PagerDuty signature');
+      }
+      const event = recordFrom(parsed.event);
+      return {
+        deliveryId: stringFrom(parsed.id ?? event.id ?? Date.now()),
+        eventType: stringFrom(event.event_type ?? parsed.event_type ?? 'pagerduty.event'),
+        payload: parsed,
+      };
+    }
+    case 'sendgrid': {
+      // ECDSA (P-256, SHA-256) over `${timestamp}${body}`; `secret` is the base64
+      // (or PEM) verification public key SendGrid provides.
+      const timestamp = requiredHeader(input.headers, 'x-twilio-email-event-webhook-timestamp');
+      const signature = requiredHeader(input.headers, 'x-twilio-email-event-webhook-signature');
+      verifyEcdsaP256(input.secret, `${timestamp}${input.rawBody}`, signature);
+      const events = arrayBody(parsed);
+      return {
+        deliveryId: stringFrom(timestamp),
+        eventType: 'sendgrid.events',
+        payload: events ? { events } : parsed,
+      };
+    }
     case 'generic':
       throw new AgentisError('TRIGGER_INVALID_CONFIG', 'generic connector must use Agentis HMAC verification');
   }
@@ -100,7 +207,7 @@ export function verifyConnectorWebhook(input: ConnectorVerificationInput): Conne
 
 export function connectorFromConfig(config: Record<string, unknown>): TriggerConnectorId {
   const raw = String(config.connector ?? config.provider ?? 'generic').toLowerCase();
-  if (['github', 'slack', 'linear', 'stripe', 'typeform', 'gmail'].includes(raw)) {
+  if (['github', 'slack', 'linear', 'stripe', 'typeform', 'gmail', ...EXTRA_CONNECTORS].includes(raw)) {
     return raw as TriggerConnectorId;
   }
   return 'generic';
@@ -123,6 +230,55 @@ function requiredHeader(headers: Record<string, string | undefined>, name: strin
 
 function hmacHex(secret: string, value: string): string {
   return createHmac('sha256', secret).update(value).digest('hex');
+}
+
+function hmacBase64(secret: string, value: string, algo: 'sha256' | 'sha1'): string {
+  return createHmac(algo, secret).update(value).digest('base64');
+}
+
+/** Verify an Ed25519 signature (hex) over `message`. `publicKey` is hex-encoded
+ *  raw 32-byte key (Discord) or a PEM block. */
+function verifyEd25519(publicKey: string, message: string, signatureHex: string): void {
+  let keyObject;
+  try {
+    keyObject = publicKey.includes('BEGIN')
+      ? createPublicKey(publicKey)
+      : createPublicKey({
+          // Wrap the raw 32-byte key in a DER SPKI envelope for Ed25519.
+          key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(publicKey, 'hex')]),
+          format: 'der',
+          type: 'spki',
+        });
+  } catch (err) {
+    throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', `invalid Ed25519 public key: ${(err as Error).message}`);
+  }
+  let ok = false;
+  try {
+    ok = cryptoVerify(null, Buffer.from(message), keyObject, Buffer.from(signatureHex, 'hex'));
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', 'invalid Ed25519 signature');
+}
+
+/** Verify an ECDSA (P-256 / SHA-256) signature (base64) over `message`.
+ *  `publicKey` is base64 DER SPKI (SendGrid) or a PEM block. */
+function verifyEcdsaP256(publicKey: string, message: string, signatureB64: string): void {
+  let keyObject;
+  try {
+    keyObject = publicKey.includes('BEGIN')
+      ? createPublicKey(publicKey)
+      : createPublicKey({ key: Buffer.from(publicKey, 'base64'), format: 'der', type: 'spki' });
+  } catch (err) {
+    throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', `invalid ECDSA public key: ${(err as Error).message}`);
+  }
+  let ok = false;
+  try {
+    ok = cryptoVerify('sha256', Buffer.from(message), keyObject, Buffer.from(signatureB64, 'base64'));
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new AgentisError('WEBHOOK_SIGNATURE_INVALID', 'invalid ECDSA signature');
 }
 
 function verifyPrefixedHexHmac(args: { secret: string; rawBody: string; header: string | undefined; prefix: string }): void {
@@ -193,6 +349,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function recordFrom(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
+}
+
+/** An array webhook body is wrapped by parseBody as `{ value: [...] }`. Recover it. */
+function arrayBody(parsed: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(parsed)) return parsed;
+  const value = (parsed as { value?: unknown }).value;
+  return Array.isArray(value) ? value : null;
 }
 
 function stringFrom(value: unknown): string {

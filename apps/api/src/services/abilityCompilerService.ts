@@ -44,7 +44,7 @@ import type { Logger } from '../logger.js';
 import type { AbilityService } from './abilityService.js';
 import { EvaluatorRuntime } from './evaluatorRuntime.js';
 import type { SharedIntelligenceService } from './sharedIntelligence.js';
-import { embedText, HashingEmbeddingProvider, type EmbeddingProvider } from './embeddingProvider.js';
+import { embedText, type EmbeddingProvider } from './embeddingProvider.js';
 import type { AbilityKnowledge, AbilityRecord } from '@agentis/core';
 
 export interface AbilityCompilerDeps {
@@ -177,28 +177,25 @@ export class AbilityCompilerService {
    * of (timeout × every-embed-call).
    */
   #wrapProvider(inner: EmbeddingProvider): EmbeddingProvider {
-    if (inner instanceof HashingEmbeddingProvider) return inner;
     let degraded = false;
-    let fallback: HashingEmbeddingProvider | null = null;
-    const ensureFallback = (): HashingEmbeddingProvider => {
-      if (!fallback) fallback = new HashingEmbeddingProvider();
-      return fallback;
-    };
+    const zero = (): number[] => new Array<number>(inner.dimension).fill(0);
     return {
-      get dimension() {
-        return degraded ? ensureFallback().dimension : inner.dimension;
-      },
-      embed: async (text: string) => {
-        if (degraded) return ensureFallback().embed(text);
+      dimension: inner.dimension,
+      modelId: inner.modelId,
+      embed: async (text: string): Promise<number[]> => {
+        if (degraded) return zero();
         try {
           return await withTimeout(Promise.resolve(inner.embed(text)), COMPILE_EMBED_TIMEOUT_MS);
         } catch (err) {
+          // Never let a flaky/slow embedder tank a compile: degrade to zero
+          // vectors for the rest of this compile (non-lexical; flagged for
+          // re-embed later), rather than falling back to keyword hashing.
           degraded = true;
-          this.deps.logger.warn('ability.compile.embed_fallback', {
+          this.deps.logger.warn('ability.compile.embed_degraded', {
             err: (err as Error).message,
-            note: 'switching to local hashing embeddings for the rest of this compile',
+            note: 'embedding provider unavailable; remaining atoms get zero vectors (re-embedded later)',
           });
-          return ensureFallback().embed(text);
+          return zero();
         }
       },
     };
@@ -425,15 +422,14 @@ export class AbilityCompilerService {
     try {
       return await embedText(provider, seed);
     } catch (err) {
-      // Final safety net — never let a flaky embedding provider tank the
-      // entire compile. Use a fresh hashing provider so retrieval still
-      // works, just with lexical embeddings.
+      // Final safety net — never let a flaky embedding provider tank the entire
+      // compile. Store a zero vector (flagged for re-embed later) rather than a
+      // lexical hash; the ability still publishes.
       this.deps.logger.warn('ability.compile.domain_embedding_fallback', {
         abilityId: ability.id,
         err: (err as Error).message,
       });
-      const fallback = new HashingEmbeddingProvider();
-      return fallback.embed(seed);
+      return new Array<number>(provider.dimension).fill(0);
     }
   }
 

@@ -15,6 +15,9 @@ import { registerEnvironmentTools } from './environment.js';
 import { registerAgentTools } from './agent.js';
 import { registerEphemeralTools } from './ephemeral.js';
 import { registerCapabilityTools } from './capability.js';
+import { registerTaskSpineTools } from './taskSpine.js';
+import { registerChannelTools } from './channel.js';
+import { registerAppDataTools } from './appData.js';
 
 export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registerInspectTools(registry, deps);
@@ -24,6 +27,9 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerEnvironmentTools(registry, deps);
   registerEphemeralTools(registry, deps);
   registerCapabilityTools(registry, deps);
+  registerTaskSpineTools(registry, deps);
+  registerChannelTools(registry, deps);
+  registerAppDataTools(registry, deps);
 }
 
 export type { ToolHandlerDeps } from './deps.js';

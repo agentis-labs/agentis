@@ -21,6 +21,7 @@ import { Skeleton } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { DetailPanel } from '../components/shared/DetailPanel';
+import { openRunModal } from '../lib/runModal';
 
 type EventType = 'all' | 'runs' | 'activity' | 'audit';
 
@@ -32,6 +33,8 @@ interface HistoryEvent {
   timestamp: string;
   status?: string;
   runId?: string;
+  workflowId?: string;
+  failedNodeId?: string;
   agentId?: string;
   agentName?: string;
   workflowName?: string;
@@ -80,7 +83,7 @@ export function HistoryPage() {
     } catch {
       // Fallback: synthesize from /v1/runs
       try {
-        const runs = await api<{ runs: Array<{ id: string; status: string; workflowName?: string; finishedAt?: string; startedAt?: string; failedNode?: string }> }>(
+        const runs = await api<{ runs: Array<{ id: string; status: string; workflowId?: string; workflowName?: string; finishedAt?: string; startedAt?: string; failedNode?: string; failedNodeId?: string }> }>(
           '/v1/runs?limit=100',
         );
         setEvents((runs.runs ?? []).map((r) => ({
@@ -90,7 +93,9 @@ export function HistoryPage() {
           timestamp: r.finishedAt ?? r.startedAt ?? new Date().toISOString(),
           status: r.status,
           runId: r.id,
+          workflowId: r.workflowId,
           workflowName: r.workflowName,
+          failedNodeId: r.failedNodeId,
           failedNode: r.failedNode,
         })));
       } catch { setEvents([]); }
@@ -104,6 +109,11 @@ export function HistoryPage() {
     return () => unsubscribe?.();
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [tab]);
+
+  useEffect(() => {
+    const runId = searchParams.get('runId');
+    if (runId) openRunModal({ runId, source: 'history-query' });
+  }, [searchParams]);
 
   useRealtime([
     REALTIME_EVENTS.RUN_COMPLETED,
@@ -135,6 +145,16 @@ export function HistoryPage() {
   async function handleRetry(runId: string) {
     try { await api(`/v1/runs/${runId}/retry`, { method: 'POST' }); toast.success('Retry started'); void refresh(); }
     catch (e) { toast.error('Retry failed', apiErrorMessage(e)); }
+  }
+
+  function inspectRun(event: HistoryEvent) {
+    if (!event.runId) return;
+    openRunModal({
+      runId: event.runId,
+      workflowId: event.workflowId ?? (typeof event.context?.workflowId === 'string' ? event.context.workflowId : undefined),
+      focusNodeId: event.failedNodeId,
+      source: 'history',
+    });
   }
 
   return (
@@ -208,7 +228,7 @@ export function HistoryPage() {
                       <Button variant="secondary" size="sm" iconLeft={<RotateCcw size={11} />} onClick={(ev) => { ev.stopPropagation(); void handleRetry(e.runId!); }}>Retry</Button>
                     )}
                     {(e.type === REALTIME_EVENTS.RUN_COMPLETED || e.type === REALTIME_EVENTS.RUN_FAILED) && e.runId && (
-                      <Button variant="ghost" size="sm" iconRight={<ArrowRight size={11} />} onClick={(ev) => { ev.stopPropagation(); nav(`/runs/${e.runId}`); }}>View</Button>
+                      <Button variant="ghost" size="sm" iconRight={<ArrowRight size={11} />} onClick={(ev) => { ev.stopPropagation(); inspectRun(e); }}>Inspect</Button>
                     )}
                   </button>
                 ))}
@@ -235,7 +255,7 @@ export function HistoryPage() {
             )}
             {selected.runId && (
               <KV k="Run" v={
-                <button onClick={() => nav(`/runs/${selected.runId}`)} className="text-accent hover:underline">
+                <button onClick={() => inspectRun(selected)} className="text-accent hover:underline">
                   run_{selected.runId.slice(-8)}
                 </button>
               } />
@@ -253,7 +273,7 @@ export function HistoryPage() {
             )}
             <div className="flex gap-1.5">
               {selected.runId && (
-                <Button variant="primary" size="sm" iconLeft={<Eye size={11} />} onClick={() => nav(`/runs/${selected.runId}`)}>View run</Button>
+                <Button variant="primary" size="sm" iconLeft={<Eye size={11} />} onClick={() => inspectRun(selected)}>Inspect run</Button>
               )}
               {selected.type === REALTIME_EVENTS.RUN_FAILED && selected.runId && (
                 <Button variant="secondary" size="sm" iconLeft={<RotateCcw size={11} />} onClick={() => void handleRetry(selected.runId!)}>Retry</Button>

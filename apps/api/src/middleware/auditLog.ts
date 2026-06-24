@@ -68,7 +68,6 @@ const RESOURCES: ResourceMatcher[] = [
   { pattern: /^\/v1\/workspaces(?:\/|$)/, entityType: 'workspace' },
   { pattern: /^\/v1\/ambients(?:\/|$)/, entityType: 'ambient' },
   { pattern: /^\/v1\/tasks(?:\/|$)/, entityType: 'task' },
-  { pattern: /^\/v1\/teams(?:\/|$)/, entityType: 'team' },
   { pattern: /^\/v1\/budgets(?:\/|$)/, entityType: 'budget' },
   { pattern: /^\/v1\/ephemeral(?:\/|$)/, entityType: 'ephemeral_run' },
   { pattern: /^\/v1\/mcp(?:\/|$)/, entityType: 'mcp' },

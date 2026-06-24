@@ -6,8 +6,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { RadioTower, Settings as SettingsIcon, LogOut } from 'lucide-react';
+import { Settings as SettingsIcon, LogOut } from 'lucide-react';
 import clsx from 'clsx';
 import { ThemeToggle } from './ThemeToggle';
 
@@ -15,8 +16,6 @@ interface AvatarMenuProps {
   name: string;
   email?: string;
   imageUrl?: string;
-  miniMonitorOpen?: boolean;
-  onToggleMiniMonitor?: () => void;
   onLogout: () => void;
 }
 
@@ -30,28 +29,49 @@ function initials(name: string): string {
   return ((first[0] ?? '') + (last[0] ?? '')).toUpperCase();
 }
 
-export function AvatarMenu({ name, email, imageUrl, miniMonitorOpen = false, onToggleMiniMonitor, onLogout }: AvatarMenuProps) {
+export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps) {
   const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 52, left: 12 });
   const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
 
   useEffect(() => {
     if (!open) return;
+    const updatePosition = () => {
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = 256;
+      setPosition({
+        top: rect.bottom + 8,
+        left: Math.max(12, Math.min(window.innerWidth - width - 12, rect.right - width)),
+      });
+    };
+    updatePosition();
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
     return () => {
       document.removeEventListener('mousedown', onDoc);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
     };
   }, [open]);
 
   return (
     <div className="relative" ref={ref}>
       <button
+        ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label="Open profile menu"
@@ -67,9 +87,11 @@ export function AvatarMenu({ name, email, imageUrl, miniMonitorOpen = false, onT
         )}
       </button>
 
-      {open && (
+      {open && createPortal(
         <div
-          className="animate-fade-in absolute right-0 top-full z-40 mt-2 w-64 rounded-card border border-line bg-surface shadow-dropdown"
+          ref={menuRef}
+          className="animate-fade-in fixed z-[85] w-64 rounded-card border border-line bg-surface shadow-dropdown"
+          style={{ top: position.top, left: position.left }}
           role="menu"
           aria-label="Profile menu"
         >
@@ -102,19 +124,7 @@ export function AvatarMenu({ name, email, imageUrl, miniMonitorOpen = false, onT
             <button
               type="button"
               role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onToggleMiniMonitor?.();
-              }}
-              className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
-            >
-              <RadioTower size={14} />
-              {miniMonitorOpen ? 'Hide mini monitor' : 'Show mini monitor'}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => { setOpen(false); nav('/settings'); }}
+              onClick={() => { setOpen(false); nav('/settings?tab=workspace'); }}
               className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
             >
               <SettingsIcon size={14} />
@@ -130,7 +140,8 @@ export function AvatarMenu({ name, email, imageUrl, miniMonitorOpen = false, onT
               Sign out
             </button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

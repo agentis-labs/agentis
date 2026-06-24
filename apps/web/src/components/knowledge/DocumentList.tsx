@@ -4,20 +4,27 @@ import { EmptyState } from '../shared/EmptyState';
 import { DocumentRow } from './DocumentRow';
 import type { KnowledgeDocumentRow } from './types';
 
+type KnowledgeDocumentView = KnowledgeDocumentRow & {
+  knowledgeBaseScopeKind?: 'workspace' | 'workflow';
+  ownerWorkflow?: { id: string; title: string } | null;
+};
+
 export function DocumentList({
   documents,
   onDelete,
+  onInspect,
   emptyBody = 'Upload files or paste text to give agents shared workspace context.',
 }: {
-  documents: KnowledgeDocumentRow[];
-  onDelete?: (document: KnowledgeDocumentRow) => void;
+  documents: KnowledgeDocumentView[];
+  onDelete?: (document: KnowledgeDocumentView) => void;
+  onInspect?: (document: KnowledgeDocumentView) => void;
   emptyBody?: string;
 }) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return documents;
-    return documents.filter((document) => `${document.name} ${document.knowledgeBaseName ?? ''} ${document.mimeType}`.toLowerCase().includes(q));
+    return documents.filter((document) => `${document.name} ${document.knowledgeBaseName ?? ''} ${document.ownerWorkflow?.title ?? ''} ${document.mimeType}`.toLowerCase().includes(q));
   }, [documents, query]);
 
   if (documents.length === 0) {
@@ -37,7 +44,7 @@ export function DocumentList({
       {filtered.length === 0 ? (
         <div className="px-4 py-8 text-center text-[13px] text-text-muted">No documents match that search.</div>
       ) : (
-        filtered.map((document) => <DocumentRow key={document.id} document={document} onDelete={onDelete} />)
+        filtered.map((document) => <DocumentRow key={document.id} document={document} onDelete={onDelete} onInspect={onInspect} />)
       )}
     </div>
   );

@@ -67,11 +67,13 @@ describe('InstinctEngine', () => {
     expect(proposal!.suggestion).toMatch(/truncate/i);
     expect(events).toHaveLength(1);
 
-    const memory = ctx.db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.workspaceId, ctx.workspace.id)).all();
+    // §B4 — workspace memory now lives in memory_episodes (plane-tagged); system → system_write.
+    const memory = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
     expect(memory).toHaveLength(1);
-    expect(memory[0]!.kind).toBe('lesson');
-    expect(memory[0]!.source).toBe('system');
-    expect(memory[0]!.content).toMatch(/summarizer.*repeatedly fails/i);
+    expect((memory[0]!.metadata as Record<string, unknown>).memoryKind).toBe('lesson');
+    expect(memory[0]!.source).toBe('system_write');
+    expect(memory[0]!.summary).toMatch(/summarizer.*repeatedly fails/i);
   });
 
   it('does not propose below the threshold', async () => {

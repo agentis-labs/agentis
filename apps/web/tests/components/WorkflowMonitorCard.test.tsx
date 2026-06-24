@@ -1,10 +1,11 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { REALTIME_EVENTS } from '@agentis/core';
 
 const realtime = vi.hoisted(() => ({
   handler: null as null | ((env: { event: string; payload: unknown; emittedAt: string }) => void),
 }));
+const apiMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../src/lib/realtime', () => ({
   rtSubscribe: () => () => undefined,
@@ -14,11 +15,34 @@ vi.mock('../../src/lib/realtime', () => ({
 }));
 
 vi.mock('../../src/lib/api', () => ({
-  api: vi.fn(async () => ({ activity: [] })),
+  api: (...args: unknown[]) => apiMock(...args),
 }));
 
 vi.mock('../../src/lib/workspaceData', () => ({
-  useWorkspaceData: () => ({ workspaceId: 'workspace-1', approvals: [] }),
+  useWorkspaceData: () => ({
+    workspaceId: 'workspace-1',
+    approvals: [],
+    activeRuns: [],
+    failedRuns: [
+      {
+        id: 'run-self-heal',
+        workflowId: 'workflow-self-heal',
+        workflowName: 'Daily digest',
+        failedNode: 'Draft',
+        selfHealIncident: {
+          nodeId: 'node-draft',
+          nodeTitle: 'Draft',
+          status: 'BLOCKED',
+          mode: 'guarded',
+          attempt: 1,
+          maxAttempts: 2,
+          reason: 'No workspace model available to ground a repair.',
+          startedAt: '2026-06-09T12:00:00.000Z',
+          updatedAt: '2026-06-09T12:00:01.000Z',
+        },
+      },
+    ],
+  }),
   refreshWorkspaceSnapshot: vi.fn(async () => undefined),
 }));
 
@@ -31,6 +55,31 @@ function emit(event: string, payload: Record<string, unknown>) {
 describe('WorkflowMonitorCard', () => {
   beforeEach(() => {
     realtime.handler = null;
+    apiMock.mockReset();
+    apiMock.mockImplementation(async (path: string) => {
+      if (path.includes('/preflight')) {
+        return {
+          status: 'healthy',
+          durationMs: 12,
+          nodes: { trigger: { status: 'passed' }, deliver: { status: 'passed' } },
+          issues: [],
+        };
+      }
+      if (path.includes('/analytics')) {
+        return {
+          runs: 4,
+          successRate: 0.75,
+          avgDurationMs: 2_300,
+          avgCostCents: 25,
+          totalCostCents: 100,
+          totalTokens: 840,
+          avgTokensPerRun: 210,
+          byStatus: { COMPLETED: 3, FAILED: 1 },
+          nodeFailures: [{ nodeId: 'node-1', title: 'Send email', failures: 1, sampleError: 'mail unavailable' }],
+        };
+      }
+      return { activity: [] };
+    });
   });
 
   it('deduplicates node activity and latches a non-animated completed state', async () => {
@@ -40,8 +89,11 @@ describe('WorkflowMonitorCard', () => {
         workflowTitle="Daily digest"
         activeRunId="run-1"
         nodeTitles={new Map([['node-1', 'Send email']])}
+        revision="rev-1"
         onFocusNode={vi.fn()}
         onOpenRun={vi.fn()}
+        onRunStarted={vi.fn()}
+        onOpenHistory={vi.fn()}
       />,
     );
     await act(async () => undefined);
@@ -78,8 +130,11 @@ describe('WorkflowMonitorCard', () => {
         workflowTitle="Daily digest"
         activeRunId="build-1"
         nodeTitles={new Map()}
+        revision="rev-1"
         onFocusNode={vi.fn()}
         onOpenRun={vi.fn()}
+        onRunStarted={vi.fn()}
+        onOpenHistory={vi.fn()}
       />,
     );
     await act(async () => undefined);
@@ -108,5 +163,77 @@ describe('WorkflowMonitorCard', () => {
     expect(screen.queryByRole('button', { name: 'Open run drawer' })).not.toBeInTheDocument();
     expect(screen.getByTestId('workflow-realtime-monitor').querySelector('.animate-pulse')).toBeNull();
     expect(screen.queryByText('Agent update')).not.toBeInTheDocument();
+  });
+
+  it('renders blocked self-heal incidents in the activity surface', async () => {
+    render(
+      <WorkflowMonitorCard
+        workflowId="workflow-self-heal"
+        workflowTitle="Daily digest"
+        activeRunId="run-self-heal"
+        nodeTitles={new Map()}
+        revision="rev-1"
+        onFocusNode={vi.fn()}
+        onOpenRun={vi.fn()}
+        onRunStarted={vi.fn()}
+        onOpenHistory={vi.fn()}
+      />,
+    );
+    await act(async () => undefined);
+
+    expect(screen.getByTestId('self-heal-console')).toBeInTheDocument();
+    expect(screen.getByText(/Couldn't safely repair/)).toBeInTheDocument();
+    expect(screen.getByText(/No workspace model available to ground a repair/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Report to team/ })).toBeInTheDocument();
+  });
+
+  it('keeps the completed run visible instead of falling back to an older failure', async () => {
+    const props = {
+      workflowId: 'workflow-1',
+      workflowTitle: 'Daily digest',
+      nodeTitles: new Map<string, string>(),
+      revision: 'rev-1',
+      onFocusNode: vi.fn(),
+      onOpenRun: vi.fn(),
+      onRunStarted: vi.fn(),
+      onOpenHistory: vi.fn(),
+    };
+    const { rerender } = render(<WorkflowMonitorCard {...props} activeRunId="run-success" activeRunStatus="running" />);
+
+    emit(REALTIME_EVENTS.RUN_COMPLETED, { workflowId: 'workflow-1', runId: 'run-success' });
+    rerender(<WorkflowMonitorCard {...props} activeRunId={null} activeRunStatus={null} />);
+    await act(async () => undefined);
+
+    expect(screen.getByText('Run completed')).toBeInTheDocument();
+    expect(screen.queryByText('Latest run failed')).not.toBeInTheDocument();
+  });
+
+  it('loads refreshable health and analytics data from the workflow endpoints', async () => {
+    render(
+      <WorkflowMonitorCard
+        workflowId="workflow-1"
+        workflowTitle="Daily digest"
+        activeRunId="run-1"
+        activeRunStatus="running"
+        nodeTitles={new Map([['node-1', 'Send email']])}
+        revision="rev-1"
+        onFocusNode={vi.fn()}
+        onOpenRun={vi.fn()}
+        onRunStarted={vi.fn()}
+        onOpenHistory={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'health' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('Healthy')).toBeInTheDocument();
+    expect(screen.getAllByText('2')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'analytics' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('Run analytics')).toBeInTheDocument();
+    expect(screen.getByText('75%')).toBeInTheDocument();
+    expect(screen.getByText('2.3s')).toBeInTheDocument();
+    expect(apiMock).toHaveBeenCalledWith('/v1/workflows/workflow-1/analytics');
   });
 });

@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { appIdentitySchema } from './app.js';
+import { upsertSurfaceSchema } from './view.js';
+import { collectionSchemaSchema } from './datastore.js';
 
 export const packageKindSchema = z.enum(['agent', 'workflow', 'extension', 'agentis', 'integration']);
 export type PackageKind = z.infer<typeof packageKindSchema>;
@@ -173,6 +176,21 @@ export const agentisPackageContentsSchema = z.object({
     )
     .default([]),
   entryWorkflowSlug: z.string().optional(),
+  // ── Agentic App facets (AGENTIC-APPS-10X §7.2) — the `.agentisapp` payload. ──
+  // An `agentis` bundle becomes an App package by carrying its identity, surfaces,
+  // and datastore SCHEMAS. Collections ship structure always; `seed` rows are
+  // optional and NOT auto-applied on install (empty-with-schema default, §7.2).
+  appManifest: appIdentitySchema.partial().optional(),
+  surfaces: z.array(upsertSurfaceSchema).default([]),
+  collections: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        schema: collectionSchemaSchema,
+        seed: z.array(z.record(z.unknown())).default([]),
+      }),
+    )
+    .default([]),
   category: z.string().optional(),
   replaces: z.string().optional(),
   costSavedPerMonth: z.string().optional(),

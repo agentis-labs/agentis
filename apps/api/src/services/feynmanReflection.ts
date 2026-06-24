@@ -72,6 +72,7 @@ export const REPEAT_FAILURE_THRESHOLD = 3;
 
 export class FeynmanReflectionService {
   #completer: StructuredCompleter | null = null;
+  #modelAssistedRuntimeEnabled: (workspaceId: string) => boolean = () => true;
 
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -82,6 +83,10 @@ export class FeynmanReflectionService {
   /** Wire (or clear) the grading model. Mirrors SharedIntelligence's pattern. */
   setCompleter(completer: StructuredCompleter | null): void {
     this.#completer = completer;
+  }
+
+  setModelAssistedRuntimeEnabled(resolver: (workspaceId: string) => boolean): void {
+    this.#modelAssistedRuntimeEnabled = resolver;
   }
 
   /**
@@ -151,7 +156,7 @@ export class FeynmanReflectionService {
     // No model → fall back to a grounded procedural lesson ONLY when the
     // deterministic analyzer recognized the failure (high confidence, no model
     // risk). Otherwise no-op: an ungrounded guess is worse than nothing.
-    if (!this.#completer) {
+    if (!this.#completer || !this.#modelAssistedRuntimeEnabled(payload.workspaceId)) {
       if (diagnosis?.recognized && diagnosis.fixes.length > 0) {
         const lesson = `When "${payload.nodeTitle ?? payload.nodeId}" fails with this class of error (${oneLine(diagnosis.error ?? payload.error)}): ${diagnosis.fixes.join(' ')}`;
         const atomId = await this.#commit(payload, lesson, 'procedural', payload.scopeId ? 'agent' : 'workspace');
@@ -221,7 +226,13 @@ export class FeynmanReflectionService {
 
     let parsed: Record<string, unknown> | null = null;
     try {
-      parsed = await this.#completer!.completeStructured<Record<string, unknown>>({ system, user, maxTokens: 600, maxAttempts: 2 });
+      parsed = await this.#completer!.completeStructured<Record<string, unknown>>({
+        system,
+        user,
+        workspaceId: payload.workspaceId,
+        maxTokens: 600,
+        maxAttempts: 2,
+      });
     } catch {
       return null;
     }

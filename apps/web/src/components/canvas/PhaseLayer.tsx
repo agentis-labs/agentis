@@ -1,137 +1,207 @@
 import { useMemo } from 'react';
-import { ViewportPortal } from '@xyflow/react';
+import { useStore, ViewportPortal } from '@xyflow/react';
+import clsx from 'clsx';
 
 /**
- * PhaseLayer — colored region backgrounds that group canvas nodes into
- * logical phases. Rendered through React Flow's `ViewportPortal` so the
- * regions live in flow coordinates and pan/zoom with the nodes.
+ * PhaseLayer groups related workflow nodes into soft canvas lanes.
  *
- * A "phase" is a named bag of node ids with a color. The layer computes a
- * bounding rect around the contained nodes (with padding), draws a tinted
- * region + label behind the nodes. Large workflows (50+ nodes) become legible
- * because operators can read the graph as "first this phase, then that one"
- * instead of as indecipherable spaghetti.
- *
- * The shape (`WorkflowPhase`) mirrors what the Brain' layout section will
- * use — keep this dumb and dependency-free.
+ * The tinted lane background stays behind the graph, while the readable phase
+ * header is rendered as a separate zoom-aware overlay above the nodes.
  */
-
 export interface PhaseNode {
   id: string;
   position: { x: number; y: number };
-  /** Optional measured size; defaults to the standard 200x100 node footprint. */
   width?: number;
   height?: number;
+  data?: {
+    pendingConfig?: boolean;
+    liveStatus?: 'running' | 'completed' | 'failed' | 'retry' | 'waiting';
+    kind?: string;
+    requiredCapabilities?: string[];
+    runtimeLabel?: string;
+    toolPreview?: string;
+    liveExtra?: {
+      runtimeActivity?: unknown;
+      progress?: { completed?: number; total?: number };
+    };
+    agentMatches?: Array<{ satisfied: boolean }>;
+  };
 }
 
 export interface PhaseSpec {
   id: string;
   name: string;
+  description?: string;
   color: string;
   nodeIds: string[];
-  collapsed?: boolean;
 }
 
 interface PhaseLayerProps {
   phases: PhaseSpec[];
   nodes: PhaseNode[];
-  /** Padding around the bounding rect, in canvas units. */
-  padding?: number;
-  /** Triggered when the user clicks the phase label — wire to collapse/expand UI. */
-  onPhaseClick?: (phaseId: string) => void;
+  focusedPhaseId?: string | null;
 }
 
-interface ComputedPhaseRect {
-  spec: PhaseSpec;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+export type PhaseRunStatus = 'idle' | 'failed' | 'running' | 'completed';
+
+export function derivePhaseStatus(members: PhaseNode[]): { status: PhaseRunStatus; pending: number } {
+  const pending = members.filter((node) => node.data?.pendingConfig).length;
+  const statuses = members.map((node) => node.data?.liveStatus).filter(Boolean);
+  const status: PhaseRunStatus = statuses.includes('failed')
+    ? 'failed'
+    : statuses.includes('running') || statuses.includes('retry') || statuses.includes('waiting')
+      ? 'running'
+      : members.length > 0 && statuses.length === members.length && statuses.every((item) => item === 'completed')
+        ? 'completed'
+        : 'idle';
+  return { status, pending };
 }
 
-const DEFAULT_NODE_WIDTH = 200;
-const DEFAULT_NODE_HEIGHT = 100;
+export function stripPhasePrefix(name: string): string {
+  return name.replace(/^Phase\s+\d+\s*[^A-Za-z0-9]*\s*/i, '').trim() || name;
+}
 
-export function PhaseLayer({ phases, nodes, padding = 24, onPhaseClick }: PhaseLayerProps) {
-  const rects = useMemo<ComputedPhaseRect[]>(() => {
-    const byId = new Map(nodes.map((n) => [n.id, n]));
-    const out: ComputedPhaseRect[] = [];
-    for (const phase of phases) {
-      const contained = phase.nodeIds.map((nid) => byId.get(nid)).filter((n): n is PhaseNode => Boolean(n));
-      if (contained.length === 0) continue;
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const node of contained) {
-        const w = node.width ?? DEFAULT_NODE_WIDTH;
-        const h = node.height ?? DEFAULT_NODE_HEIGHT;
-        if (node.position.x < minX) minX = node.position.x;
-        if (node.position.y < minY) minY = node.position.y;
-        if (node.position.x + w > maxX) maxX = node.position.x + w;
-        if (node.position.y + h > maxY) maxY = node.position.y + h;
-      }
-      out.push({
-        spec: phase,
-        x: minX - padding,
-        y: minY - padding,
-        width: (maxX - minX) + padding * 2,
-        height: (maxY - minY) + padding * 2,
-      });
-    }
-    return out;
-  }, [phases, nodes, padding]);
+const NODE_WIDTH = 252;
+const BASE_NODE_HEIGHT = 72;
+const AGENT_NODE_HEIGHT = 110;
+const HEADER_HEIGHT = 104;
+const PAD_X = 20;
+const PAD_TOP = 20;
+const PAD_BOTTOM = 40;
 
-  if (rects.length === 0) return null;
+export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
+  const zoom = useStore((state) => state.transform[2]);
+  const counterScale = zoom < 1 ? 1 / Math.max(zoom, 0.24) : 1;
 
-  // ViewportPortal renders children into the flow's transformed coordinate
-  // space — so absolute positions in flow units pan/zoom with the nodes.
-  // Each region is its own absolutely-positioned div behind the nodes.
+  const lanes = useMemo(() => {
+    if (phases.length === 0) return [];
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    return phases.flatMap((phase) => {
+      const members = phase.nodeIds.map((id) => nodeById.get(id)).filter(Boolean) as PhaseNode[];
+      if (members.length === 0) return [];
+      const minX = Math.min(...members.map((node) => node.position.x)) - PAD_X;
+      const maxX = Math.max(...members.map((node) => node.position.x + estimatedNodeWidth(node))) + PAD_X;
+      const minY = Math.min(...members.map((node) => node.position.y)) - HEADER_HEIGHT - PAD_TOP;
+      const maxY = Math.max(...members.map((node) => node.position.y + estimatedNodeHeight(node))) + PAD_BOTTOM;
+      const { pending, status } = derivePhaseStatus(members);
+      return [{
+        phase,
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+        pending,
+        status,
+      }];
+    });
+  }, [nodes, phases]);
+
+  if (lanes.length === 0) return null;
+
   return (
     <ViewportPortal>
-      {rects.map((rect) => (
-        <div
-          key={rect.spec.id}
-          style={{
-            position: 'absolute',
-            transform: `translate(${rect.x}px, ${rect.y}px)`,
-            width: rect.width,
-            height: rect.height,
-            background: rect.spec.color,
-            opacity: 0.08,
-            border: `1px dashed ${rect.spec.color}`,
-            borderRadius: 12,
-            pointerEvents: 'none',
-            zIndex: 0,
-          }}
-        />
-      ))}
-      {rects.map((rect) => (
-        <div
-          key={`${rect.spec.id}-label`}
-          onClick={() => onPhaseClick?.(rect.spec.id)}
-          style={{
-            position: 'absolute',
-            transform: `translate(${rect.x + 12}px, ${rect.y + 8}px)`,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '2px 8px',
-            borderRadius: 999,
-            background: rect.spec.color,
-            color: 'var(--color-canvas, #0c0d10)',
-            fontSize: 11,
-            fontWeight: 600,
-            cursor: onPhaseClick ? 'pointer' : 'default',
-            userSelect: 'none',
-            pointerEvents: onPhaseClick ? 'auto' : 'none',
-            zIndex: 1,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {rect.spec.name}
-        </div>
-      ))}
+      {lanes.map(({ phase, x, y, width, height }) => {
+        const dimmed = Boolean(focusedPhaseId && focusedPhaseId !== phase.id);
+        const active = focusedPhaseId === phase.id;
+        return (
+          <div
+            key={phase.id}
+            data-phase-id={phase.id}
+            data-testid="phase-band"
+            className={clsx('absolute rounded-2xl border transition-opacity duration-200', dimmed && 'opacity-20')}
+            style={{
+              transform: `translate(${x}px, ${y}px)`,
+              width,
+              height,
+              borderColor: active ? `${phase.color}59` : `${phase.color}24`,
+              background: `linear-gradient(180deg, ${phase.color}12 0%, ${phase.color}08 100%)`,
+              pointerEvents: 'none',
+              zIndex: -1,
+            }}
+          />
+        );
+      })}
+      {lanes.map(({ phase, x, y, width, pending, status }, index) => {
+        const dimmed = Boolean(focusedPhaseId && focusedPhaseId !== phase.id);
+        const active = focusedPhaseId === phase.id;
+        const laneScreenWidth = width * zoom;
+        const compact = laneScreenWidth < 180;
+        const headerWidth = Math.max(72, Math.min(compact ? 164 : 260, Math.round(laneScreenWidth - 6)));
+        const headerY = y + Math.max(4, Math.min(10, 8 / counterScale));
+        return (
+          <div
+            key={`${phase.id}-header`}
+            data-phase-id={phase.id}
+            data-testid="phase-header"
+            className={clsx('pointer-events-none absolute', dimmed && 'opacity-20')}
+            style={{
+              transform: `translate(${x + 14}px, ${headerY}px)`,
+              zIndex: 6,
+            }}
+          >
+            <div
+              className="flex items-center gap-1.5 px-1 py-0.5"
+              style={{
+                transform: counterScale !== 1 ? `scale(${counterScale})` : undefined,
+                transformOrigin: 'top left',
+                width: headerWidth,
+                textShadow: active ? '0 1px 4px rgba(0,0,0,0.9)' : '0 1px 3px rgba(0,0,0,0.76)',
+              }}
+            >
+              <span className="shrink-0 font-semibold tabular-nums" style={{ color: phase.color, fontSize: compact ? 12 : 13 }}>
+                {index + 1}
+              </span>
+              <span
+                className="min-w-0 flex-1 truncate font-semibold text-text-primary"
+                style={{ fontSize: compact ? 12 : 13 }}
+                title={stripPhasePrefix(phase.name)}
+              >
+                {stripPhasePrefix(phase.name)}
+              </span>
+              {pending > 0 ? (
+                <span
+                  className="shrink-0 font-medium text-warn"
+                  style={{ fontSize: compact ? 9 : 10 }}
+                  title={`${pending} node${pending === 1 ? '' : 's'} still need setup`}
+                >
+                  {pending}
+                </span>
+              ) : status === 'running' ? (
+                <span
+                  className="shrink-0 font-medium text-accent"
+                  style={{ fontSize: compact ? 9 : 10 }}
+                  title="Phase running"
+                >
+                  Live
+                </span>
+              ) : status === 'failed' ? (
+                <span
+                  className="shrink-0 font-medium text-danger"
+                  style={{ fontSize: compact ? 9 : 10 }}
+                  title="Phase blocked"
+                >
+                  Error
+                </span>
+              ) : null}
+            </div>
+          </div>
+        );
+      })}
     </ViewportPortal>
   );
+}
+
+function estimatedNodeWidth(node: PhaseNode): number {
+  return typeof node.width === 'number' && node.width > 0 ? node.width : NODE_WIDTH;
+}
+
+function estimatedNodeHeight(node: PhaseNode): number {
+  if (typeof node.height === 'number' && node.height > 0) return node.height;
+  const isAgentNode = node.data?.kind === 'agent_task' || node.data?.kind === 'agent_session';
+  let height = isAgentNode ? AGENT_NODE_HEIGHT : BASE_NODE_HEIGHT;
+  if (node.data?.pendingConfig) height += 28;
+  if (Array.isArray(node.data?.agentMatches) && node.data.agentMatches.some((match) => !match.satisfied)) height += 52;
+  if (node.data?.liveExtra?.progress && typeof node.data.liveExtra.progress.total === 'number') height += 24;
+  if (node.data?.toolPreview) height += 30;
+  return height;
 }

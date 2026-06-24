@@ -10,8 +10,8 @@ import type { EventBus } from '../event-bus.js';
 import { getUser, requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 
-const ROOM_KINDS = ['workspace', 'team', 'custom', 'thread'] as const;
-const VISIBILITIES = ['workspace', 'team', 'private'] as const;
+const ROOM_KINDS = ['workspace', 'custom', 'thread'] as const;
+const VISIBILITIES = ['workspace', 'private'] as const;
 const AUTHOR_TYPES = ['operator', 'agent', 'system'] as const;
 const CONTENT_TYPES = [
   'text', 'artifact_card', 'run_card', 'approval_card', 'canvas_embed',
@@ -22,7 +22,6 @@ const createRoomSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().max(2000).nullable().optional(),
   kind: z.enum(ROOM_KINDS).default('custom'),
-  teamId: z.string().uuid().nullable().optional(),
   visibility: z.enum(VISIBILITIES).default('workspace'),
   agentIds: z.array(z.string().uuid()).max(50).default([]),
 });
@@ -54,13 +53,11 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
 
   app.get('/', (c) => {
     const ws = getWorkspace(c);
-    const teamId = c.req.query('teamId');
     const kind = c.req.query('kind');
     const rows = deps.db.select().from(schema.rooms)
       .where(eq(schema.rooms.workspaceId, ws.workspaceId))
       .orderBy(desc(schema.rooms.lastMessageAt))
       .all()
-      .filter((r) => !teamId || r.teamId === teamId)
       .filter((r) => !kind || r.kind === kind);
     const rooms = rows.map((r) => ({ ...r, agentIds: agentsForRoom(deps.db, r.id) }));
     return c.json({ rooms });
@@ -74,11 +71,9 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
       id: randomUUID(),
       workspaceId: ws.workspaceId,
       userId: ws.user.id,
-      teamId: body.teamId ?? null,
       kind: body.kind,
       name: body.name,
       description: body.description ?? null,
-      isTeamDefault: false,
       visibility: body.visibility,
       pinnedAt: null,
       lastMessageAt: null,
@@ -174,26 +169,9 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
   app.delete('/:id', (c) => {
     const ws = getWorkspace(c);
     const existing = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
-    if (existing.isTeamDefault) {
-      throw new AgentisError('VALIDATION_FAILED', 'Cannot delete a team default room');
-    }
     deps.db.delete(schema.rooms).where(eq(schema.rooms.id, existing.id)).run();
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ROOM_DELETED, { id: existing.id });
     return c.json({ ok: true, id: existing.id });
-  });
-
-  app.get('/for-team/:teamId', (c) => {
-    const ws = getWorkspace(c);
-    const teamId = c.req.param('teamId');
-    const room = deps.db.select().from(schema.rooms)
-      .where(and(
-        eq(schema.rooms.workspaceId, ws.workspaceId),
-        eq(schema.rooms.teamId, teamId),
-        eq(schema.rooms.isTeamDefault, true),
-      ))
-      .get();
-    if (!room) throw new AgentisError('RESOURCE_NOT_FOUND', 'No default room for team');
-    return c.json({ room: { ...room, agentIds: agentsForRoom(deps.db, room.id) } });
   });
 
   app.get('/:id/messages', (c) => {

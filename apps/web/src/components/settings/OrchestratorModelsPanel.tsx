@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Sparkles } from 'lucide-react';
+import { CheckCircle2, Loader2, Sparkles } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
@@ -29,6 +29,12 @@ interface RoleRow {
 interface AutonomySummary {
   enabled: boolean;
   model: string | null;
+  source?: 'configured_model' | 'agent_harness' | 'none';
+  agentName?: string;
+  adapterType?: string;
+}
+interface ModelAssistedRuntimeSummary {
+  enabled: boolean;
 }
 
 const ROLE_LABELS: Record<string, { title: string; blurb: string }> = {
@@ -44,12 +50,15 @@ export function OrchestratorModelsPanel() {
   const toast = useToast();
   const [roles, setRoles] = useState<RoleRow[] | null>(null);
   const [autonomy, setAutonomy] = useState<AutonomySummary | null>(null);
+  const [modelAssistedRuntime, setModelAssistedRuntime] = useState<ModelAssistedRuntimeSummary | null>(null);
+  const [toggleBusy, setToggleBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const data = await api<{ roles: RoleRow[]; autonomy?: AutonomySummary }>('/v1/orchestrator/models');
+      const data = await api<{ roles: RoleRow[]; autonomy?: AutonomySummary; modelAssistedRuntime?: ModelAssistedRuntimeSummary }>('/v1/orchestrator/models');
       const nextRoles = data.roles ?? [];
       setRoles(nextRoles);
+      setModelAssistedRuntime(data.modelAssistedRuntime ?? { enabled: true });
       // Prefer the server's autonomy signal (mirrors the engine's canRun). Fall
       // back to deriving it from the role models for older responses/mocks.
       setAutonomy(
@@ -61,8 +70,27 @@ export function OrchestratorModelsPanel() {
     } catch {
       setRoles([]);
       setAutonomy(null);
+      setModelAssistedRuntime(null);
     }
   }, []);
+
+  async function toggleModelAssistedRuntime() {
+    if (!modelAssistedRuntime) return;
+    const enabled = !modelAssistedRuntime.enabled;
+    setToggleBusy(true);
+    try {
+      await api('/v1/orchestrator/models/model-assisted-runtime', {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled }),
+      });
+      toast.success(enabled ? 'Model-assisted runtime enabled' : 'Model-assisted runtime disabled');
+      await refresh();
+    } catch (err) {
+      toast.error('Could not update runtime setting', String(err));
+    } finally {
+      setToggleBusy(false);
+    }
+  }
 
   useEffect(() => {
     void refresh();
@@ -81,6 +109,24 @@ export function OrchestratorModelsPanel() {
         (e.g. a sharper model just for <span className="text-text-primary">synthesis</span>) — a power-user plus,
         not a required step.
       </p>
+      <div className="mb-3 flex items-center justify-between gap-3 rounded-card border border-line bg-surface px-4 py-3">
+        <div>
+          <div className="text-[14px] font-medium text-text-primary">Model-assisted evaluator and brain features</div>
+          <p className="mt-0.5 text-[12px] text-text-muted">
+            Allows evaluation, synthesis, agent sessions, formation judge, Feynman repair, memory reflection, and Brain Ask to reuse the orchestrator model when no role-specific model is selected.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={modelAssistedRuntime?.enabled ?? true}
+          disabled={!modelAssistedRuntime || toggleBusy}
+          onClick={() => void toggleModelAssistedRuntime()}
+          className={`relative h-6 w-11 shrink-0 rounded-full transition ${modelAssistedRuntime?.enabled ?? true ? 'bg-accent' : 'border border-line bg-surface-2'} disabled:opacity-60`}
+        >
+          <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${modelAssistedRuntime?.enabled ?? true ? 'left-[22px]' : 'left-0.5'}`} />
+        </button>
+      </div>
       {autonomy && !autonomy.enabled && (
         <div role="alert" className="mb-3 flex items-start gap-2.5 rounded-card border border-warn bg-warn-soft px-4 py-3">
           <Sparkles size={15} className="mt-0.5 shrink-0 text-warn" />
@@ -90,6 +136,15 @@ export function OrchestratorModelsPanel() {
             Connect an agent runtime, or set a <span className="text-text-primary">Conversation</span> or{' '}
             <span className="text-text-primary">Evaluation</span> model below, to switch agents into full tool-using mode.
           </div>
+        </div>
+      )}
+      {autonomy?.enabled && autonomy.source === 'agent_harness' && (
+        <div className="mb-3 flex items-start gap-2.5 border-l-2 border-success/70 bg-success/5 px-3 py-2.5">
+          <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-success" />
+          <p className="text-[12px] leading-5 text-text-secondary">
+            <span className="font-medium text-text-primary">Default runtime: {autonomy.agentName ?? 'orchestrator harness'}.</span>{' '}
+            Conversation, planning, synthesis, evaluation, and repair inherit this connected {autonomy.adapterType ?? 'agent'} runtime until you add an override.
+          </p>
         </div>
       )}
       {roles === null ? (

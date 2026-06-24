@@ -462,7 +462,7 @@ export class PeerProfileService {
     }).from(schema.workspaces)
       .where(eq(schema.workspaces.id, workspaceId))
       .get();
-    const provider = selectEmbeddingProvider(row?.type ?? 'hashing', parseRecord(row?.config));
+    const provider = selectEmbeddingProvider(row?.type ?? 'local', parseRecord(row?.config));
     this.#embeddingProviders.set(workspaceId, provider);
     return provider;
   }

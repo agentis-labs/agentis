@@ -179,10 +179,6 @@ function loadViewportResource(deps: ToolHandlerDeps, workspaceId: string, kind: 
     const row = deps.db.select().from(schema.agents).where(eq(schema.agents.id, id)).get();
     return row?.workspaceId === workspaceId ? { kind, agent: row } : { kind, id, found: false };
   }
-  if (kind === 'team') {
-    const row = deps.db.select().from(schema.teams).where(eq(schema.teams.id, id)).get();
-    return row?.workspaceId === workspaceId ? { kind, team: row } : { kind, id, found: false };
-  }
   return { kind, id, found: false };
 }
 

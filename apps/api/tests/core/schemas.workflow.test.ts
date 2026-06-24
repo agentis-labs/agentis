@@ -257,6 +257,31 @@ describe('workflowGraphSchema', () => {
     expect(() => schemas.workflowGraphSchema.parse(ok)).not.toThrow();
   });
 
+  it('preserves agent_task useSession opt-out through graph parsing', () => {
+    const parsed = schemas.workflowGraphSchema.parse({
+      ...validGraph,
+      nodes: [
+        ...validGraph.nodes,
+        {
+          id: 'n3',
+          type: 'agent_task' as const,
+          title: 'Ask',
+          position: { x: 200, y: 0 },
+          config: {
+            kind: 'agent_task' as const,
+            prompt: 'Run once.',
+            capabilityTags: [],
+            inputKeys: [],
+            outputKeys: [],
+            useSession: false,
+          },
+        },
+      ],
+    });
+
+    expect((parsed.nodes[2]!.config as { useSession?: boolean }).useSession).toBe(false);
+  });
+
   it('edges with optional condition + handles parse', () => {
     const ok = {
       ...validGraph,

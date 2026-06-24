@@ -53,6 +53,46 @@ describe('<OrchestratorModelsPanel />', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('shows the connected orchestrator harness as the default runtime', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      roles: ROLES.map((role) => ({ ...role, envModel: null, effectiveModel: null })),
+      autonomy: {
+        enabled: true,
+        model: 'gpt-5.3-codex',
+        source: 'agent_harness',
+        agentName: 'The Brain',
+        adapterType: 'codex',
+      },
+    })));
+    render(<OrchestratorModelsPanel />);
+    expect(await screen.findByText(/Default runtime: The Brain/i)).toBeInTheDocument();
+    expect(screen.getByText(/planning, synthesis, evaluation, and repair inherit/i)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('toggles model-assisted evaluator and brain features', async () => {
+    const patches: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'PATCH') {
+        patches.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ modelAssistedRuntime: { enabled: false } });
+      }
+      return jsonResponse({
+        roles: ROLES,
+        autonomy: { enabled: true, model: 'gpt-4o-mini' },
+        modelAssistedRuntime: { enabled: true },
+      });
+    }));
+
+    render(<OrchestratorModelsPanel />);
+    const toggle = await screen.findByRole('switch');
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    await userEvent.click(toggle);
+
+    await waitFor(() => expect(patches).toEqual([{ enabled: false }]));
+  });
+
   it('overrides the conversation model via PUT', async () => {
     const puts: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

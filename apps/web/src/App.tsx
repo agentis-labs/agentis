@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Search, Check, Plus, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
@@ -12,8 +12,10 @@ import { RealtimeStatusIndicator } from './components/shared/RealtimeStatusIndic
 import { ChatPanelHeaderButton } from './components/chat/ChatPanelHeaderButton';
 import { NotificationPanel } from './components/shared/NotificationPanel';
 import { AvatarMenu } from './components/shared/AvatarMenu';
+import { RunModalProvider } from './components/runs/RunModalProvider';
 import { ConfirmProvider } from './components/shared/ConfirmDialog';
 import { ToastProvider } from './components/shared/Toast';
+import { openRunModal } from './lib/runModal';
 import { tokens, workspace as wsStore, ambient as ambientStore, api, logout } from './lib/api';
 import {
   LOCAL_BYPASS_LAUNCH_TOKEN,
@@ -26,14 +28,14 @@ import {
   setStoredLaunchToken,
 } from './lib/launchAuth';
 import { useAgentisStore } from './store/agentisStore';
-import { useLocation } from 'react-router-dom';
 // Initialize theme on app boot
 import './components/shared/ThemeToggle';
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
-const WorkflowsPage = lazy(() => import('./pages/WorkflowsPage').then((m) => ({ default: m.WorkflowsPage })));
+const AppsPage = lazy(() => import('./pages/AppsPage').then((m) => ({ default: m.AppsPage })));
+const AppEditorPage = lazy(() => import('./pages/AppEditorPage').then((m) => ({ default: m.AppEditorPage })));
 const WorkflowCanvasPage = lazy(() => import('./pages/WorkflowCanvasPage').then((m) => ({ default: m.WorkflowCanvasPage })));
-const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((m) => ({ default: m.RunDetailPage })));
+const PublicAppSurfacePage = lazy(() => import('./pages/PublicAppSurfacePage').then((m) => ({ default: m.PublicAppSurfacePage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })));
 const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })));
 
@@ -72,6 +74,7 @@ async function tryLaunchTokenAuth(token: string, options: { removeUrlToken?: boo
 }
 
 export function App() {
+  const location = useLocation();
   const [authed, setAuthed] = useState<boolean>(false);
   const [initializing, setInitializing] = useState<boolean>(true);
   const [initializingLabel, setInitializingLabel] = useState<string>('Loading...');
@@ -166,6 +169,17 @@ export function App() {
     })();
   }, [authed]);
 
+  if (location.pathname.startsWith('/public/apps/')) {
+    return (
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/public/apps/:token" element={<PublicAppSurfacePage />} />
+          <Route path="*" element={<Navigate to="/public/apps/invalid" replace />} />
+        </Routes>
+      </Suspense>
+    );
+  }
+
   if (initializing) {
     return (
       <div className="flex h-screen items-center justify-center bg-canvas text-[13px] text-text-muted">
@@ -193,7 +207,8 @@ export function App() {
   return (
     <ToastProvider>
       <ConfirmProvider>
-        <Shell
+        <RunModalProvider>
+          <Shell
           workspaceName={ws?.name ?? '…'}
           workspaceImage={ws?.imageUrl ?? null}
           workspaceId={ws?.id ?? null}
@@ -213,9 +228,13 @@ export function App() {
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agents/:id" element={<AgentDetailPage />} />
 
-              <Route path="/workflows" element={<WorkflowsPage />} />
-              <Route path="/workflows/build" element={<Navigate to="/workflows" replace />} />
-              <Route path="/workflows/:id" element={<WorkflowCanvasPage />} />
+              <Route path="/apps" element={<AppsPage />} />
+              <Route path="/apps/workflows/:id" element={<WorkflowCanvasPage />} />
+              <Route path="/apps/:id" element={<AppEditorPage />} />
+              <Route path="/apps/:id/build" element={<Navigate to="../" replace />} />
+              <Route path="/workflows" element={<Navigate to="/apps" replace />} />
+              <Route path="/workflows/build" element={<Navigate to="/apps" replace />} />
+              <Route path="/workflows/:id" element={<WorkflowLegacyRedirect />} />
               <Route path="/brain/*" element={<BrainPage />} />
               <Route path="/knowledge" element={<BrainPage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
@@ -223,8 +242,9 @@ export function App() {
               <Route path="/abilities" element={<Navigate to="/agents" replace />} />
               <Route path="/abilities/:id" element={<AbilityDetailPage />} />
               <Route path="/packages" element={<PackagesPage />} />
+              <Route path="/issues" element={<Navigate to="/home" replace />} />
               <Route path="/history" element={<HistoryPage />} />
-              <Route path="/runs/:id" element={<RunDetailPage />} />
+              <Route path="/runs/:id" element={<RunRouteBridge />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/chat/agent/:agentId" element={<ChatPage />} />
               <Route path="/workspaces" element={<WorkspacesPage />} />
@@ -238,14 +258,15 @@ export function App() {
               <Route path="/spaces" element={<Navigate to="/home" replace />} />
               <Route path="/spaces/:id" element={<Navigate to="/home" replace />} />
               <Route path="/gateways" element={<Navigate to="/settings?tab=connections" replace />} />
-              <Route path="/conversations" element={<Navigate to="/chat" replace />} />
-              <Route path="/conversations/:agentId" element={<Navigate to="/chat" replace />} />
+              <Route path="/conversations" element={<ChatPage />} />
+              <Route path="/conversations/:agentId" element={<ChatPage />} />
               <Route path="/settings/channels" element={<Navigate to="/settings?tab=connections" replace />} />
               <Route path="*" element={<Navigate to="/home" replace />} />
             </Routes>
           </Suspense>
           <CommandPalette />
-        </Shell>
+          </Shell>
+        </RunModalProvider>
       </ConfirmProvider>
     </ToastProvider>
   );
@@ -257,6 +278,22 @@ function RouteFallback() {
       Loading…
     </div>
   );
+}
+
+function RunRouteBridge() {
+  const { id } = useParams<{ id: string }>();
+
+  useEffect(() => {
+    if (id) openRunModal({ runId: id, source: 'legacy-route' });
+  }, [id]);
+
+  return <Navigate to="/history?tab=runs" replace />;
+}
+
+function WorkflowLegacyRedirect() {
+  const { id } = useParams<{ id: string }>();
+  const location = useLocation();
+  return <Navigate to={`/apps/workflows/${id ?? ''}${location.search}`} replace />;
 }
 
 function Shell({
@@ -276,14 +313,13 @@ function Shell({
 }) {
   const nav = useNavigate();
   const location = useLocation();
-  const onChatPage = location.pathname.startsWith('/chat');
   const embedded = new URLSearchParams(location.search).get('embed') === '1';
 
   useEffect(() => {
     function onOpenCanvas(event: Event) {
       const detail = (event as CustomEvent<{ workflowId?: string }>).detail;
       if (!detail?.workflowId) return;
-      nav(`/workflows/${detail.workflowId}`);
+      nav(`/apps/workflows/${detail.workflowId}`);
     }
     window.addEventListener('agentis:open-canvas', onOpenCanvas);
     return () => window.removeEventListener('agentis:open-canvas', onOpenCanvas);
@@ -325,7 +361,7 @@ function Shell({
           </button>
           <RealtimeStatusIndicator />
           <NotificationPanel />
-          {!onChatPage && <ChatPanelHeaderButton />}
+          <ChatPanelHeaderButton />
           <AvatarMenu
             name={operator?.name ?? 'Operator'}
             email={operator?.email}
@@ -340,7 +376,7 @@ function Shell({
       <div data-agentis-shell-layout className="flex min-h-0 flex-1">
         <Sidebar />
         <main data-agentis-shell-main className="min-h-0 flex-1 overflow-auto">{children}</main>
-        {!onChatPage && <ChatPanelMount />}
+        <ChatPanelMount />
       </div>
       <div data-agentis-live-strip>
         <LiveStrip />

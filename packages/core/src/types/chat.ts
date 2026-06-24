@@ -1,3 +1,5 @@
+import type { ChatPlan, PlanLifecycleEvent } from './plan.js';
+
 /**
  * Chat-agent loop types — CHAT-AGENT-LOOP.md §2.
  *
@@ -90,6 +92,7 @@ export type ChatDelta =
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | ({ type: 'confirmation_required' } & ChatConfirmationRequest)
   | { type: 'tool_result'; id: string; name: string; result: unknown; error?: string }
+  | { type: 'plan'; event: PlanLifecycleEvent; plan: ChatPlan }
   // `length` = the model hit its output-token ceiling (typically a reasoning
   // model that spent the budget thinking and never emitted a final answer). It
   // is surfaced distinctly so the turn loop can recover (retry with more room)
@@ -130,6 +133,7 @@ export interface ChatTurnContext {
   userId: string;
   conversationId: string;
   clientTurnId?: string;
+  executionMode?: 'chat' | 'plan';
   /** Optional operation/run correlation id for direct tool turns. */
   runId?: string;
   ambientId?: string | null;
@@ -153,7 +157,7 @@ export interface ViewportContext {
   ambientId?: string | null;
   /** Active resource id on the current surface (e.g. workflowId, agentId, runId). */
   resourceId?: string;
-  resourceKind?: 'workflow' | 'run' | 'agent' | 'team' | 'artifact' | 'extension' | 'package' | 'ledger' | 'room' | 'unknown';
+  resourceKind?: 'workflow' | 'run' | 'agent' | 'artifact' | 'extension' | 'package' | 'ledger' | 'room' | 'app' | 'unknown';
   selection?: {
     ids?: string[];
     label?: string;
@@ -165,15 +169,16 @@ export interface ViewportContext {
 
 export type AgentisSurface =
   | 'home'
+  | 'apps'
+  | 'app_detail'
   | 'workflows'
   | 'workflow_detail'
   | 'agents'
   | 'agent_detail'
-  | 'teams'
-  | 'team_detail'
   | 'canvas'
   | 'runs'
   | 'run_detail'
+  | 'run_modal'
   | 'artifacts'
   | 'artifact_detail'
   | 'packages'
@@ -202,7 +207,7 @@ export interface AgentisToolCallResult {
   durationMs?: number;
 }
 
-export type AgentisToolFamily = 'build' | 'run' | 'inspect' | 'data' | 'environment';
+export type AgentisToolFamily = 'build' | 'run' | 'inspect' | 'data' | 'environment' | 'app';
 
 export interface AgentisToolDefinition {
   id: string;
@@ -234,6 +239,7 @@ export interface AgentisToolContext {
   agentId?: string;
   runId?: string;
   conversationId?: string;
+  executionMode?: 'chat' | 'plan';
   viewport?: ViewportContext | null;
   caller: 'chat' | 'workflow' | 'mcp' | 'system';
   /**

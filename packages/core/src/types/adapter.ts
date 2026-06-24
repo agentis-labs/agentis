@@ -187,6 +187,13 @@ export interface AgentAdapter {
   listRuntimeSessions?(): Promise<RuntimeSessionInfo[]>;
   closeRuntimeSession?(sessionKey: string): Promise<void>;
   dispatchTask(task: NormalizedTask): Promise<void>;
+  /**
+   * The adapter's statically-configured working directory, if it spawns local
+   * processes. The engine reads this as the BASE from which it derives an
+   * isolated per-task `workdir` for parallel subtasks. Adapters that don't run
+   * local processes (gateway/remote) omit it.
+   */
+  getWorkdir?(): string | undefined;
   chat?(history: ChatMessage[], tools: ToolDefinition[], options?: ChatInvocationOptions): AsyncIterable<ChatDelta>;
   cancelTask(taskId: string): Promise<void>;
   createPersistentListener?(trigger: TriggerConfig): Promise<TriggerListenerHandle>;
@@ -318,9 +325,8 @@ export interface HermesAgentAdapterConfig {
   cwd?: string;
   model?: string;
   /**
-   * `cli` uses Hermes' stable headless chat contract. `acp` enables the
-   * experimental persistent ACP transport for Hermes builds where it is known
-   * to complete model turns reliably.
+   * `acp` is the default persistent streaming transport. Set `cli` only for
+   * compatibility with Hermes builds that cannot run ACP.
    */
   chatTransport?: 'cli' | 'acp';
   maxTurns?: number;
@@ -388,6 +394,14 @@ export interface NormalizedTask {
    * controller; omitted = no external cancellation (timeout still applies).
    */
   signal?: AbortSignal;
+  /**
+   * Isolated working directory for THIS task, allocated by the engine for
+   * parallel work (swarm/worker/delegate subtasks) so concurrent agents never
+   * share one checkout and clobber each other's files. When set, the adapter
+   * spawns its child process here instead of its statically-configured `cwd`.
+   * Omitted = use the adapter's configured `cwd` (the single-agent default).
+   */
+  workdir?: string;
   /**
    * Awareness manifest of the Agentis platform tools available in this
    * workspace, injected by AdapterManager.dispatchTask so an agent running a

@@ -386,3 +386,125 @@ pointed at.
   vs. persistent workspace agents the user accumulates? Likely a per-workflow
   toggle, defaulting to ephemeral for one-shots and persistent for recurring.
 - **Auto-layout engine:** dagre (light) vs. elk (richer, heavier). Start dagre.
+
+---
+
+## Implementation log — 2026-06-15 · Readability & phase redesign (minimalism + clarity)
+
+User report: an attempt to make node labels readable degenerated the canvas into a
+ribbon of detached "phase cards" floating across the top, and node text was still
+illegible. Root causes confirmed in code:
+
+- `PhaseLayer.tsx` packed every phase header into one top-left `Panel` row via a
+  `nextAvailableX` accumulator → labels detached from their bands into a meaningless ribbon.
+- One fit-to-everything zoom (`fitViewOptions.minZoom: 0.2`) + no level-of-detail →
+  a wide 13-node/7-phase graph framed at ~0.2, rendering 13px node text at ~3px.
+
+Shipped:
+
+1. **Semantic zoom (level-of-detail)** — `AgentisNode` (`WorkflowCanvasPage.tsx`) reads
+   live scale via `useStore((s) => s.transform[2])` and renders three tiers:
+   `far` (<0.5) a counter-scaled recognition chip (glyph + name kept legible on screen),
+   `mid` (<0.92) the trimmed card, `near` the full detail (capabilities/tool preview).
+   This is the actual readability fix — the card no longer shrinks to mush.
+2. **Phases dock to their band** — rewrote `PhaseLayer` header placement: each label
+   anchors to its own band's top-left (clamped into the viewport), no horizontal packing,
+   and hides when the band is too narrow on screen to read (the rail names it instead).
+3. **Phase rail** — new `PhaseRail.tsx` + `CanvasLeftRail.tsx`: one left panel, two modes
+   (Phases | Nodes) via `SegmentedControl`; opens structure-first when phases exist.
+   Numbered phases with rolled-up status + counts; click frames that band at a readable
+   zoom (`focusPhase`) and dims the rest. `NodePalette` gained a `bare` mode to embed.
+   Shared `derivePhaseStatus` helper exported from `PhaseLayer` (no duplicated health logic).
+4. **Readable default framing** — `fitViewOptions.minZoom` 0.2 → 0.55 so the editor lands
+   legible; engine `minZoom={0.12}` retained so manual zoom-out still works (now backed by
+   the far-LOD chips). `clearPhaseFocus` refits the whole graph.
+
+Verification: `apps/web` `tsc --noEmit` clean; canvas suite green (PhaseLayer + WorkflowCanvas,
+8 tests) including a new far-zoom label-suppression test. No live browser pass — the canvas
+sits behind auth + seeded multi-phase data.
+
+Deferred: a dedicated zoomed-out "Overview" mode; edge-routing legibility at low zoom.
+
+### Round 2 — 2026-06-15 · Kill the bands, rebuild the node card
+
+User feedback on round 1: the on-canvas phase bands+pills covered the graph and
+looked terrible at every zoom ("take this to garbage"). Decision: remove the
+on-canvas phase layer entirely and rebuild the node card from scratch.
+
+- **Removed `<PhaseLayer>` from the canvas** (`WorkflowCanvasPage.tsx`). Phases are
+  now navigated solely from the left rail; focusing one dims the rest of the graph
+  (`node.data.phaseDimmed`). The band/pill overlay is gone. `PhaseLayer.tsx` is kept
+  only for its exported `derivePhaseStatus` helper + types used by the rail.
+- **New `AgentisNode` card** — clean, minimal, modern:
+  - Color now lives in a tinted **icon tile** (`${accent}1f` bg, accent glyph), not a
+    garish left rail strip.
+  - Title (13px medium) + one subtitle line (kind, or extension operation in mono).
+  - **Calm states**: thin colored border + soft glow; the only animated element is a
+    small header status pip (`StatusPip`: spinner/check/alert/pause/retry). No more
+    full-border `animate-pulse` twitching on idle/pending nodes.
+  - Pending-config is a quiet amber footer strip ("Needs setup" → full message at
+    near zoom), not a thick pulsing ring.
+  - Quieter handles (brighten on hover; error handle fades in on hover).
+  - Detail (tool preview, capability/agent-match chips) only renders at near zoom
+    (`>1.05`); the default mid card stays clean.
+- LOD thresholds retuned: `far <0.45`, `near >1.05`, `mid` between (the hero card).
+
+Verification: `tsc --noEmit` clean; canvas suite green (8 tests).
+
+### Round 3 — 2026-06-15 · Reshape to the user's 6 points
+
+1. **Initial zoom == fit view** — `fitViewOptions` floor removed (`{ padding: 0.16, maxZoom: 1 }`); `clearPhaseFocus` matches. Opening a workflow now frames the whole graph exactly like the fit-view control.
+2. **Faded phase bands are back (no pills)** — `PhaseLayer` rewritten as purely decorative, pointer-events-none, zIndex-behind-nodes faded dark-tinted regions with a quiet inline label (number + name + setup count). The floating pill ribbon that covered the graph is gone for good. Bands read the workflow shape at fit-view; navigation stays in the rail.
+3. **Monochrome node icons** — `AgentisNode` icon is now a neutral `bg-surface` + `text-text-secondary` glyph matching the node palette; the colored icon tile was removed. Phase color lives only in the band behind the card.
+4. **"Phase N ·" prefix stripped** — shared `stripPhasePrefix()` (exported from `PhaseLayer`) applied to node titles, band labels, and rail rows.
+5. **Selection toolbar is clickable** — added `nopan nodrag` to `CanvasSelectionToolbar`; previously a pointerdown was captured by the pane first and cleared the selection before the button fired.
+6. **Minimal rail** — `PhaseRail` de-childified: dropped the saturated numbered circles for a muted number + a tiny color tick + name + small status glyph; active row gets a thin inset color accent. Monochrome, quiet.
+
+Verification: `tsc --noEmit` clean; canvas suite green (9 tests, incl. new decorative-band + prefix-strip tests).
+
+  - Follow-up: `stripPhasePrefix` also applied in `PhaseInspector` (heading + Nodes list). `focusPhase` now defers the fit and uses `maxZoom: 1.6` so clicking a phase genuinely zooms IN to it rather than holding the whole-graph fit.
+
+### Round 4 — 2026-06-15 · Readability at fit-view (layout + counter-scaling)
+
+Problem: even at fit-view nodes were ~1px tall because `computePhaseAwareLayout`
+laid all phases left-to-right → a ~38:1-wide strip → fit zoom ~0.1.
+
+- **Compact vertical-phase layout** — `computePhaseAwareLayout` now stacks phase
+  lanes top-to-bottom (within a lane: dependency columns L→R, siblings stacked).
+  Bounding box goes from one long strip to near-square, so fit-view lands far
+  higher. Node dims retuned to the new card (252×76, tighter gaps). `PhaseLane`
+  gained `y`/`height`.
+- **Auto-heal on open** — `WorkflowCanvasPage` detects a legacy wide-strip graph
+  (aspect > 2.4) once per workflow id and re-flows it to the compact layout +
+  persists; idempotent afterwards. Existing workflows fix themselves on open.
+- **Per-phase bands** — `PhaseLayer` now derives each band's vertical extent from
+  its own members (lanes stack), instead of one shared global height.
+- **Counter-scaled labels** — node titles and band labels scale toward a constant
+  on-screen size below ~0.7 zoom (capped ~24px); node title wraps to 2 lines and
+  drops its subtitle when zoomed out. Titles stay legible at fit-view.
+
+Verification: core 20/20, API layout/phase 7/7, web canvas 10/10; `tsc` clean in
+core + web. Test updated: vertical lanes mean the unassigned lane sits *below* the
+work lane (`M.y > B.y`) rather than to its right.
+
+### Round 5 — 2026-06-15 · Back to left-to-right flow
+
+User preferred the original left-to-right reading direction over the Round 4
+vertical stack. Reverted `computePhaseAwareLayout` to LEFT-TO-RIGHT lanes (phase 1,
+then phase 2 to its right). Kept everything else from Round 4 (retuned node dims,
+per-phase bands, counter-scaled labels, click-to-zoom). Auto-heal flipped: it now
+re-flows any non-canonical (tall/near-square) saved graph back to the wide
+left-to-right layout once, then stays put. Core/API/web tests green; the lane test
+asserts `M.x > B.x` again.
+
+Tradeoff noted: a wide left-to-right graph frames small at full fit-view. Reading
+is via click-to-zoom on a phase (works well) — if readable-at-fit is also wanted,
+the lever is stacking nodes vertically *within* each phase to narrow the strip.
+
+### Round 5.1 — 2026-06-15 · Remove auto-relayout (it broke autosave)
+
+The Round 4/5 "normalize layout on open" effect mutated the graph and fired a save
+at mount, racing hydration → `Auto-save failed: VALIDATION_FAILED`. Removed it
+entirely. The left-to-right layout still applies via the **Tidy** button and new
+builds; opening a workflow no longer triggers any save. Existing graphs saved in
+the old orientation are re-flowed by clicking Tidy once (a normal, validated save).

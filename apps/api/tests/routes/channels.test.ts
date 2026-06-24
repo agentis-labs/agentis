@@ -6,16 +6,17 @@
  * /v1/webhooks/channel/:id (mounted via buildWebhookRoutes).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
 import { ConversationStore } from '../../src/services/conversationStore.js';
-import { ChannelBridge } from '../../src/services/channelBridge.js';
+import { ChannelBridge, type PersistentChannelTransport } from '../../src/services/channelBridge.js';
 import { buildChannelRoutes } from '../../src/routes/channels.js';
 import { buildWebhookRoutes } from '../../src/routes/webhooks.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
+import { SlackChannelAdapter } from '../../src/adapters/channels/slack.js';
 
 class StubAdapter implements ChannelAdapter {
   readonly kind = 'telegram' as const;
@@ -70,6 +71,17 @@ function app() {
   ]);
 }
 
+function fakePersistentTransport(): PersistentChannelTransport {
+  return {
+    handles: (conn) => conn.kind === 'whatsapp',
+    requiresNoToken: (kind) => kind === 'whatsapp',
+    status: () => ({ status: 'idle' }),
+    send: async () => {
+      throw new Error('should not send during QR-local create');
+    },
+  };
+}
+
 beforeEach(async () => {
   ctx = await createTestContext();
   adapter = new StubAdapter();
@@ -80,7 +92,7 @@ beforeEach(async () => {
     conversations,
     bus: ctx.bus,
     logger: ctx.logger,
-    adapters: { telegram: adapter },
+    adapters: { telegram: adapter, slack: new SlackChannelAdapter() },
   });
 });
 
@@ -105,6 +117,54 @@ describe('POST /v1/channels', () => {
     expect(body.webhookSecret).toMatch(/^[0-9a-f]{48}$/);
     expect(body.webhookUrl).toMatch(/^\/v1\/webhooks\/channel\//);
     expect(JSON.stringify(body)).not.toContain('super-secret-bot-token');
+  });
+
+  it('defaults Telegram to long polling when AGENTIS_PUBLIC_URL is not set', async () => {
+    const previous = process.env.AGENTIS_PUBLIC_URL;
+    delete process.env.AGENTIS_PUBLIC_URL;
+    try {
+      const agentId = seedAgent();
+      const res = await app().request('/v1/channels', {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({
+          kind: 'telegram',
+          name: 'Tg poll',
+          agentId,
+          token: 'super-secret-bot-token',
+          runInitialTest: false,
+        }),
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { connection: { transport: string | null } };
+      expect(body.connection.transport).toBe('polling');
+    } finally {
+      if (previous) process.env.AGENTIS_PUBLIC_URL = previous;
+      else delete process.env.AGENTIS_PUBLIC_URL;
+    }
+  });
+
+  it('does not auto-test WhatsApp QR-local connections before login', async () => {
+    bridge.setPersistentTransport(fakePersistentTransport());
+    const agentId = seedAgent();
+    const res = await app().request('/v1/channels', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        kind: 'whatsapp',
+        mode: 'qr_local',
+        name: 'WA local',
+        agentId,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      loginUrl?: string;
+      health: { status: string; checks: Array<{ code: string }> };
+    };
+    expect(body.loginUrl).toMatch(/^\/v1\/channels\/.+\/login$/);
+    expect(body.health.status).toBe('needs_action');
+    expect(body.health.checks.every((check) => check.code === 'not_checked')).toBe(true);
   });
 
   it('rejects without auth (401)', async () => {
@@ -178,7 +238,7 @@ describe('POST /v1/channels/:id/test', () => {
     expect(adapter.sent).toEqual([{ chatId: '999', body: 'ping' }]);
   });
 
-  it('returns 422 when no chatId is available', async () => {
+  it('returns structured diagnostics when no chatId is available', async () => {
     const agentId = seedAgent();
     const { connection } = bridge.create({
       workspaceId: ctx.workspace.id,
@@ -194,7 +254,59 @@ describe('POST /v1/channels/:id/test', () => {
       headers: ctx.authHeaders,
       body: '{}',
     });
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; health: { status: string; checks: Array<{ code: string }> } };
+    expect(body.ok).toBe(false);
+    expect(body.health.status).toBe('needs_action');
+    expect(body.health.checks.some((check) => check.code === 'missing_default_target')).toBe(true);
+  });
+});
+
+describe('GET /v1/channels/:id/health', () => {
+  it('returns current health without sending a message', async () => {
+    const agentId = seedAgent();
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      agentId,
+      kind: 'telegram',
+      name: 'tg',
+      token: 'tok',
+    });
+    const res = await app().request(`/v1/channels/${connection.id}/health`, {
+      headers: ctx.authHeaders,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { connection: { id: string }; health: { status: string; checks: unknown[] } };
+    expect(body.connection.id).toBe(connection.id);
+    expect(body.health.status).toBe('verifying');
+    expect(adapter.sent).toEqual([]);
+  });
+});
+
+describe('PATCH /v1/channels/:id/targets', () => {
+  it('saves a default target and aliases without exposing secrets', async () => {
+    const agentId = seedAgent();
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      agentId,
+      kind: 'telegram',
+      name: 'tg',
+      token: 'tok',
+    });
+    const res = await app().request(`/v1/channels/${connection.id}/targets`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ defaultChatId: '777', targetAliases: { work: '888' } }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { connection: { defaultChatId: string; targetAliases: Record<string, string> } };
+    expect(body.connection.defaultChatId).toBe('777');
+    expect(body.connection.targetAliases.work).toBe('888');
+    expect(JSON.stringify(body)).not.toContain('tok');
   });
 });
 
@@ -320,5 +432,55 @@ describe('POST /v1/webhooks/channel/:connectionId — unauth ingress', () => {
     expect(second.status).toBe(200);
     const body = (await second.json()) as Record<string, unknown>;
     expect(body.idempotent).toBe(true);
+  });
+
+  it('answers Slack URL verification challenge after signature validation', async () => {
+    const agentId = seedAgent();
+    const signingSecret = 'slack-signing-secret';
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      agentId,
+      kind: 'slack',
+      name: 'slack',
+      token: 'xoxb-token',
+      signingSecret,
+    });
+    const rawBody = JSON.stringify({ type: 'url_verification', challenge: 'challenge-123' });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = `v0=${createHmac('sha256', signingSecret).update(`v0:${timestamp}:${rawBody}`).digest('hex')}`;
+    const res = await app().request(`/v1/webhooks/channel/${connection.id}`, {
+      method: 'POST',
+      headers: {
+        'x-slack-request-timestamp': timestamp,
+        'x-slack-signature': signature,
+      },
+      body: rawBody,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ challenge: 'challenge-123' });
+  });
+});
+
+describe('GET /v1/webhooks/channel/:connectionId', () => {
+  it('answers WhatsApp Cloud webhook verification', async () => {
+    const agentId = seedAgent();
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      agentId,
+      kind: 'whatsapp',
+      name: 'wa cloud',
+      mode: 'cloud',
+      token: 'meta-access-token',
+      phoneNumberId: '123456789',
+      appSecret: 'meta-app-secret',
+      verifyToken: 'verify-me',
+    });
+    const res = await app().request(`/v1/webhooks/channel/${connection.id}?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=abc123`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('abc123');
   });
 });

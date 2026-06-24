@@ -58,11 +58,117 @@ export function createSourceDriver(source: ListenerSource, deps: SourceDeps): So
       return new WorkflowEventSource(source, deps);
     case 'file_watch':
       return new FileWatchSource(source, deps);
+    case 'rss':
+      return new RssSource(source, deps);
+    case 'email_imap':
+      return new UnavailableSource('email_imap', 'IMAP email sources require an IMAP client add-on not installed on this host.');
     case 'message_queue':
       return new UnavailableSource('message_queue', `Message-queue sources (${source.protocol}) require a broker client add-on not installed on this host.`);
     case 'db_notify':
       return new UnavailableSource('db_notify', 'Postgres LISTEN/NOTIFY sources require a pg client add-on not installed on this host.');
   }
+}
+
+// ── rss (RSS/Atom feed poller) ────────────────────────────────────────────────
+
+class RssSource implements SourceDriver {
+  readonly kind = 'rss' as const;
+  #timer: ReturnType<typeof setTimeout> | null = null;
+  #closed = false;
+  #connected = false;
+  #seen = new Set<string>();
+  #primed = false;
+  #intervalMs: number;
+
+  constructor(private readonly source: Extract<ListenerSource, { kind: 'rss' }>, private readonly deps: SourceDeps) {
+    this.#intervalMs = Math.max(MIN_POLL_MS, source.intervalMs ?? 300_000);
+  }
+
+  async start(onEvent: (payload: Record<string, unknown>) => void): Promise<void> {
+    const poll = async () => {
+      if (this.#closed) return;
+      try {
+        await this.#pollOnce(onEvent);
+        this.#connected = true;
+        this.deps.onConnectionChange?.(true);
+      } catch (err) {
+        this.#connected = false;
+        const error = asError(err);
+        this.deps.onConnectionChange?.(false);
+        this.deps.onError?.(error);
+        this.deps.logger.warn('listener.rss.error', { triggerId: this.deps.triggerId, err: error.message });
+      } finally {
+        if (!this.#closed) {
+          this.#timer = setTimeout(() => void poll().catch(() => {}), this.#intervalMs);
+          this.#timer.unref?.();
+        }
+      }
+    };
+    void poll();
+  }
+
+  async #pollOnce(onEvent: (payload: Record<string, unknown>) => void): Promise<void> {
+    const safe = await assertSafeUrl(this.source.feedUrl, { allowPrivate: this.deps.allowPrivateNetwork, allowedDomains: [] });
+    const res = await fetch(safe.toString(), { headers: { Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml', ...(this.source.headers ?? {}) } });
+    const text = await res.text();
+    const items = parseFeedItems(text);
+    // First poll primes the seen-set without emitting, so activation does not
+    // flood the workflow with the whole backlog (n8n RSS-trigger behavior).
+    for (const item of items) {
+      const id = String(item.id ?? item.link ?? item.guid ?? item.title ?? JSON.stringify(item));
+      if (this.#seen.has(id)) continue;
+      this.#seen.add(id);
+      if (this.#primed) onEvent(item);
+    }
+    this.#primed = true;
+    // Bound memory: keep the seen-set from growing forever on a busy feed.
+    if (this.#seen.size > 5_000) this.#seen = new Set([...this.#seen].slice(-2_000));
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+    if (this.#timer) clearTimeout(this.#timer);
+    this.#timer = null;
+    this.#connected = false;
+  }
+
+  isConnected(): boolean {
+    return this.#connected && !this.#closed;
+  }
+}
+
+/** Extract item/entry records from an RSS 2.0 or Atom feed (dependency-free). */
+export function parseFeedItems(xml: string): Array<Record<string, unknown>> {
+  const items: Array<Record<string, unknown>> = [];
+  const blockRe = /<(item|entry)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(xml))) {
+    const body = m[2] ?? '';
+    const field = (name: string): string | undefined => {
+      const tag = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, 'i').exec(body);
+      if (tag) return cleanXmlText(tag[1] ?? '');
+      // Atom link is an attribute: <link href="..."/>
+      const attr = new RegExp(`<${name}\\b[^>]*href=["']([^"']+)["']`, 'i').exec(body);
+      return attr ? attr[1] : undefined;
+    };
+    items.push({
+      title: field('title'),
+      link: field('link'),
+      guid: field('guid') ?? field('id'),
+      id: field('guid') ?? field('id') ?? field('link'),
+      pubDate: field('pubDate') ?? field('published') ?? field('updated'),
+      description: field('description') ?? field('summary') ?? field('content'),
+    });
+  }
+  return items;
+}
+
+function cleanXmlText(s: string): string {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .trim();
 }
 
 // ── http_poll ────────────────────────────────────────────────────────────────
@@ -409,11 +515,19 @@ class WorkflowEventSource implements SourceDriver {
 
   async start(onEvent: (payload: Record<string, unknown>) => void): Promise<void> {
     const wanted = new Set(this.source.onStatus.map((s) => RUN_STATUS_EVENTS[s]).filter(Boolean));
+    // `'*'` matches any workflow in the workspace — the error_trigger "any" scope.
+    const anyWorkflow = this.source.workflowId === '*';
     this.#unsub = this.deps.bus.subscribe(({ envelope }) => {
       if (!wanted.has(envelope.event)) return;
       const payload = asRecord(envelope.payload);
+      // The bus is process-global; a wildcard ('*') error_trigger must only see
+      // failures from its OWN workspace.
+      if (anyWorkflow && typeof payload.workspaceId === 'string' && payload.workspaceId !== this.deps.workspaceId) return;
       const workflowId = typeof payload.workflowId === 'string' ? payload.workflowId : this.#lookupWorkflow(payload.runId);
-      if (workflowId !== this.source.workflowId) return;
+      if (!anyWorkflow && workflowId !== this.source.workflowId) return;
+      // Loop guard: an error-handler workflow must never fire on its OWN failure
+      // (otherwise a wildcard error_trigger would re-trigger itself forever).
+      if (workflowId && workflowId === this.deps.workflowId) return;
       onEvent({ event: envelope.event, ...payload });
     });
   }

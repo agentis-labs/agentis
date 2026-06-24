@@ -29,15 +29,26 @@ export interface StructuredCompleter {
   readonly label?: string;
   /** The last failure reason, when a call returned null. */
   readonly lastError?: string | null;
-  completeStructured<T extends Record<string, unknown>>(args: {
-    system: string;
-    user: string;
-    maxTokens?: number;
-    maxAttempts?: number;
-    timeoutMs?: number;
-    /** Abort an in-flight (and any further) completion when the turn is canceled. */
-    signal?: AbortSignal;
-  }): Promise<T | null>;
+  completeStructured<T extends Record<string, unknown>>(args: StructuredCompletionArgs): Promise<T | null>;
+}
+
+export interface StructuredCompletionArgs {
+  system: string;
+  user: string;
+  maxTokens?: number;
+  maxAttempts?: number;
+  timeoutMs?: number;
+  /** Binds a dynamic completer to the workspace's configured/default runtime. */
+  workspaceId?: string;
+  /** Abort an in-flight (and any further) completion when the turn is canceled. */
+  signal?: AbortSignal;
+  /** Public liveness only; callers must not surface private chain-of-thought. */
+  onProgress?: (progress: StructuredCompletionProgress) => void;
+}
+
+export interface StructuredCompletionProgress {
+  phase: 'started' | 'thinking' | 'text' | 'stalled';
+  text?: string;
 }
 
 /**
@@ -56,6 +67,7 @@ export async function completeStructuredViaAdapter<T extends Record<string, unkn
     preferredModel?: string;
     maxTokens?: number;
     timeoutMs?: number;
+    onProgress?: (progress: StructuredCompletionProgress) => void;
   },
 ): Promise<{ value: T | null; error: string | null }> {
   if (!adapter.chat) return { value: null, error: 'the agent runtime does not support chat completions' };
@@ -69,6 +81,24 @@ export async function completeStructuredViaAdapter<T extends Record<string, unkn
     let errored = false;
     let adapterError: string | null = null;
     try {
+      const stall = new AbortController();
+      const abortFromParent = () => stall.abort();
+      args.signal?.addEventListener('abort', abortFromParent, { once: true });
+      let stallTimer: ReturnType<typeof setTimeout> | null = null;
+      const requestedTimeoutMs = args.timeoutMs ?? DEFAULT_STRUCTURED_COMPLETION_TIMEOUT_MS;
+      // A CLI harness may spend tens of seconds starting its process and model
+      // before it emits its first delta. Do not convert that into a synthetic
+      // evaluator verdict; the outer request timeout remains the hard bound.
+      const stallTimeoutMs = Math.max(30_000, Math.min(requestedTimeoutMs, 120_000));
+      const armStall = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          args.onProgress?.({ phase: 'stalled' });
+          stall.abort();
+        }, stallTimeoutMs);
+      };
+      args.onProgress?.({ phase: 'started' });
+      armStall();
       const messages: ChatMessage[] = [
         { role: 'system', content: args.system },
         { role: 'user', content: user },
@@ -76,19 +106,27 @@ export async function completeStructuredViaAdapter<T extends Record<string, unkn
       const options = {
         latencyClass: 'structured' as const,
         toolMode: 'caller_loop' as const,
-        timeoutMs: args.timeoutMs ?? DEFAULT_STRUCTURED_COMPLETION_TIMEOUT_MS,
-        ...(args.signal ? { signal: args.signal } : {}),
+        timeoutMs: requestedTimeoutMs,
+        signal: stall.signal,
         ...(args.preferredModel ? { preferredModel: args.preferredModel } : {}),
         ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       };
       for await (const delta of adapter.chat(messages, [], options)) {
-        if (delta.type === 'text') text += delta.delta;
+        armStall();
+        if (delta.type === 'text') {
+          text += delta.delta;
+          args.onProgress?.({ phase: 'text', text: delta.delta.slice(0, 240) });
+        } else if (delta.type === 'thinking') {
+          args.onProgress?.({ phase: 'thinking' });
+        }
         else if (delta.type === 'tool_result' && delta.error) adapterError = delta.error;
         else if (delta.type === 'done') {
           errored = delta.finishReason === 'error';
           break;
         }
       }
+      if (stallTimer) clearTimeout(stallTimer);
+      args.signal?.removeEventListener('abort', abortFromParent);
     } catch (err) {
       lastError = (err as Error).message;
       if (args.signal?.aborted) return { value: null, error: 'canceled' };
@@ -136,25 +174,41 @@ export class AdapterStructuredCompleter implements StructuredCompleter {
     this.#defaultTimeoutMs = structuredTimeoutForAdapter(adapter);
   }
 
-  async completeStructured<T extends Record<string, unknown>>(args: {
-    system: string;
-    user: string;
-    maxTokens?: number;
-    maxAttempts?: number;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-  }): Promise<T | null> {
+  async completeStructured<T extends Record<string, unknown>>(args: StructuredCompletionArgs): Promise<T | null> {
     const result = await completeStructuredViaAdapter<T>(this.adapter, {
       system: args.system,
       user: args.user,
       ...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
       ...(args.signal ? { signal: args.signal } : {}),
+      ...(args.onProgress ? { onProgress: args.onProgress } : {}),
       ...(this.preferredModel ? { preferredModel: this.preferredModel } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       timeoutMs: args.timeoutMs ?? this.#defaultTimeoutMs,
     });
     this.lastError = result.error;
     return result.value;
+  }
+}
+
+/**
+ * Ordered, bounded runtime fallback. Used by self-healing so a configured
+ * healer may hand off once to the orchestrator without broad agent fishing.
+ */
+export class FallbackStructuredCompleter implements StructuredCompleter {
+  readonly label: string;
+  lastError: string | null = null;
+  constructor(private readonly sources: StructuredCompleter[]) {
+    this.label = sources.map((source) => source.label ?? 'runtime').join(' → ');
+  }
+
+  async completeStructured<T extends Record<string, unknown>>(args: StructuredCompletionArgs): Promise<T | null> {
+    for (const source of this.sources) {
+      const value = await source.completeStructured<T>(args);
+      if (value) return value;
+      this.lastError = source.lastError ?? 'runtime returned no structured result';
+      if (args.signal?.aborted) return null;
+    }
+    return null;
   }
 }
 
@@ -178,4 +232,4 @@ function isTransientRuntimeError(error: string): boolean {
 }
 
 const DEFAULT_STRUCTURED_COMPLETION_TIMEOUT_MS = 30_000;
-const HARNESS_STRUCTURED_COMPLETION_TIMEOUT_MS = 60_000;
+const HARNESS_STRUCTURED_COMPLETION_TIMEOUT_MS = 120_000;

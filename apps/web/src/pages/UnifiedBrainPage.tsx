@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { BookOpen, Network, Plug, Settings, Sparkles } from 'lucide-react';
+import { Settings } from 'lucide-react';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api } from '../lib/api';
 import { useRealtime } from '../lib/realtime';
@@ -10,9 +10,9 @@ import { InsightsTab } from '../components/brain/InsightsTab';
 import { KnowledgeTab } from '../components/knowledge/KnowledgeTab';
 import { PersonalBrainPanel } from '../components/brain/PersonalBrainPanel';
 import { AgentBrainPanel } from '../components/brain/AgentBrainPanel';
-import { SourcesTab } from '../components/brain/SourcesTab';
+import { BrainSectionNav } from '../components/brain/BrainSectionNav';
 
-type BrainTab = 'map' | 'knowledge' | 'sources' | 'insights';
+type BrainTab = 'map' | 'knowledge' | 'insights';
 type BrainScope = 'workspace' | 'agent' | 'personal';
 
 interface IntelligenceStatus {
@@ -32,9 +32,6 @@ function destination(pathname: string, search: string): { tab: BrainTab; canonic
   }
   if (raw === 'health' || raw === 'config' || raw === 'disputes' || raw === 'memory' || raw === 'episodes' || raw === 'insights') {
     return { tab: 'insights', canonical: '/brain?tab=insights' };
-  }
-  if (raw === 'sources' || raw === 'learning') {
-    return { tab: 'sources', canonical: '/brain?tab=sources' };
   }
   return { tab: 'map', canonical: '/brain' };
 }
@@ -112,45 +109,8 @@ export function UnifiedBrainPage() {
       </header>
       {scope === 'workspace' && (
         <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-6">
-          <span className="text-[12px] font-semibold text-text-muted">Workspace space explorer</span>
-          <div className="flex items-center gap-1.5 text-[12px]">
-            <button
-              type="button"
-              onClick={() => changeTab('map')}
-              className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${
-                tab === 'map' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'
-              }`}
-            >
-              <Network size={12} /> Map
-            </button>
-            <button
-              type="button"
-              onClick={() => changeTab('knowledge')}
-              className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${
-                tab === 'knowledge' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'
-              }`}
-            >
-              <BookOpen size={12} /> Knowledge
-            </button>
-            <button
-              type="button"
-              onClick={() => changeTab('sources')}
-              className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${
-                tab === 'sources' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'
-              }`}
-            >
-              <Plug size={12} /> Sources
-            </button>
-            <button
-              type="button"
-              onClick={() => changeTab('insights')}
-              className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${
-                tab === 'insights' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'
-              }`}
-            >
-              <Sparkles size={12} /> Insights
-            </button>
-          </div>
+          <span className="text-[12px] font-semibold text-text-muted">Workspace intelligence explorer</span>
+          <BrainSectionNav value={tab} onChange={changeTab} />
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-hidden">
@@ -158,7 +118,6 @@ export function UnifiedBrainPage() {
         {scope === 'agent' && <AgentBrainPanel />}
         {scope === 'workspace' && tab === 'map' && <BrainView onManage={() => changeTab('knowledge')} onOpenConfig={() => setConfigDrawerOpen(true)} />}
         {scope === 'workspace' && tab === 'knowledge' && <KnowledgeTab />}
-        {scope === 'workspace' && tab === 'sources' && <SourcesTab />}
         {scope === 'workspace' && tab === 'insights' && <InsightsTab onOpenConfig={() => setConfigDrawerOpen(true)} />}
       </div>
       <ConfigDrawer

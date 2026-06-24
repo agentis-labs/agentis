@@ -10,7 +10,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { REALTIME_EVENTS, type ChatToolCall, type SessionAdapter, type SessionStepResult, type WorkflowGraph } from '@agentis/core';
+import { REALTIME_EVENTS, type ChatMessage, type ChatToolCall, type SessionAdapter, type SessionStepResult, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import { buildInitialRunState } from '../../src/engine/initialRunState.js';
@@ -82,11 +82,12 @@ describe('isPathPermitted', () => {
 
 type ScriptStep = { text?: string; toolCalls?: ChatToolCall[] };
 
-function scriptedAdapter(steps: ScriptStep[]): SessionAdapter {
+function scriptedAdapter(steps: ScriptStep[], seenMessages?: ChatMessage[][]): SessionAdapter {
   let i = 0;
   return {
     id: 'stub-session',
-    async executeStep(): Promise<SessionStepResult> {
+    async executeStep(input): Promise<SessionStepResult> {
+      seenMessages?.push(input.messages);
       const step = steps[Math.min(i, steps.length - 1)] ?? {};
       i += 1;
       const toolCalls = step.toolCalls ?? [];
@@ -168,15 +169,18 @@ describe('WorkflowEngine — delegation scope enforcement', () => {
     // Parent (unrestricted): writes a scratchpad key, then delegates with a
     // tool allowlist that excludes scratchpad_write. The delegate tries to write
     // anyway (denied) and completes. Parent completes.
+    const seenMessages: ChatMessage[][] = [];
     const engine = buildEngine(scriptedAdapter([
       { toolCalls: [
         call('scratchpad_write', { key: 'parent', value: 'ok' }),
-        call('delegate_task', { role: 'researcher', task: 'look something up', allowed_tools: ['knowledge_search'] }),
+        // create_if_missing: built-in specialists were retired, so the delegate
+        // role is authored on-demand (open vocabulary) rather than pre-resolved.
+        call('delegate_task', { role: 'researcher', task: 'look something up', allowed_tools: ['knowledge_search'], create_if_missing: true }),
       ] },
       { toolCalls: [call('scratchpad_write', { key: 'child', value: 'leak' })] }, // delegate — DENIED
       { toolCalls: [call('complete_task', { output: { result: 'child done' } })] },
       { toolCalls: [call('complete_task', { output: { result: 'parent done' } })] },
-    ]));
+    ], seenMessages));
 
     const runId = await runGraph(engine);
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
@@ -185,5 +189,14 @@ describe('WorkflowEngine — delegation scope enforcement', () => {
     // The unrestricted parent's write landed; the scoped delegate's did not.
     expect(scratchpad.read(runId, 'parent')).toBe('ok');
     expect(scratchpad.read(runId, 'child') ?? null).toBeNull();
+
+    const delegatedSystem = String(
+      seenMessages
+        .find((messages) => String(messages[0]?.content ?? '').includes('role: researcher'))?.[0]?.content ?? '',
+    );
+    expect(delegatedSystem.match(/<agentis_identity/g)).toHaveLength(1);
+    expect(delegatedSystem).toContain('role: researcher');
+    expect(delegatedSystem).toContain('instructions:\nlook something up');
+    expect(delegatedSystem).not.toContain('You are the Agentis platform orchestrator');
   });
 });

@@ -35,6 +35,14 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
           type: 'string',
           description: 'The ID of the workflow to run.',
         },
+        taskId: {
+          type: 'string',
+          description: 'Optional durable task/plan id to bind this run to.',
+        },
+        planId: {
+          type: 'string',
+          description: 'Optional durable task/plan id to bind this run to.',
+        },
         input: {
           type: 'string',
           description: 'JSON-encoded input data to pass to the workflow trigger node.',
@@ -113,6 +121,86 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.task.accept',
+    description:
+      'Accept a complex operator objective into the durable task spine. Use when a requested task will span multiple steps, tools, runs, sessions, or decisions, even if it is not a workflow.',
+    parameters: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string', description: 'The task objective.' },
+        title: { type: 'string', description: 'Short operator-facing task title.' },
+        acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: 'Criteria that must be verified before completion.' },
+        assumptions: { type: 'array', items: { type: 'string' }, description: 'Known assumptions for the work.' },
+      },
+      required: ['objective'],
+    },
+  },
+  {
+    name: 'agentis.task.inspect',
+    description: 'Inspect the durable task spine row, including status, run/session bindings, decisions, deviations, and verification.',
+    parameters: {
+      type: 'object',
+      properties: { taskId: { type: 'string', description: 'The durable task/plan id.' } },
+      required: ['taskId'],
+    },
+  },
+  {
+    name: 'agentis.routing.preview',
+    description:
+      'Preview Agentis runtime/model routing for a task. Use before spawning or dispatching when deciding between specialist/extension/ability creation and model escalation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Task text or mission brief.' },
+        purpose: { type: 'string', description: 'Purpose such as conversation, workflow_synthesis, evaluation, agent_task, or specialist.' },
+        requiredAffordances: { type: 'array', items: { type: 'string' }, description: 'Hard requirements such as browser, web, integration, code, listener, or extension.' },
+        agentId: { type: 'string', description: 'Optional agent whose explicit model pin should be respected.' },
+        runtime: { type: 'string', description: 'Optional adapter/runtime type.' },
+        model: { type: 'string', description: 'Optional explicit model pin to preview.' },
+      },
+      required: ['task'],
+    },
+  },
+  {
+    name: 'agentis.task.bind_run',
+    description: 'Bind an existing workflow run to a durable task spine when the run is part of a larger accepted task.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The durable task/plan id.' },
+        runId: { type: 'string', description: 'The workflow run id.' },
+      },
+      required: ['taskId', 'runId'],
+    },
+  },
+  {
+    name: 'agentis.task.record_decision',
+    description: 'Record a durable task decision after making a meaningful scope, approach, or verification choice.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The durable task/plan id.' },
+        summary: { type: 'string', description: 'Concise decision statement.' },
+        rationale: { type: 'string', description: 'Grounded rationale for the decision.' },
+      },
+      required: ['taskId', 'summary'],
+    },
+  },
+  {
+    name: 'agentis.task.flag_deviation',
+    description: 'Record a durable deviation when reality does not fit the accepted task contract.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The durable task/plan id.' },
+        kind: { type: 'string', enum: ['reject_input', 'rescope', 'blocked'] },
+        reason: { type: 'string', description: 'Grounded explanation of the deviation.' },
+        proposed: { type: 'string', description: 'Optional proposed revised path.' },
+      },
+      required: ['taskId', 'kind', 'reason'],
+    },
+  },
+  {
     name: 'agentis.workflow.patch',
     description:
       'Patch a workflow graph. Use workflowId + graph for an at-rest workflow, or runId + patch for a live run graph patch after diagnosing a concrete issue.',
@@ -143,18 +231,61 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.channel.list',
+    description:
+      'List native Agentis messaging channels for Telegram, WhatsApp, Slack, and Discord with health checks and saved default targets. Use this before sending a channel message or when diagnosing channel connectivity.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          description: 'Optional channel kind filter.',
+          enum: ['telegram', 'whatsapp', 'slack', 'discord'],
+        },
+        status: {
+          type: 'string',
+          description: 'Optional status filter such as active, needs_action, error, degraded, verifying, or paused.',
+        },
+      },
+    },
+  },
+  {
+    name: 'agentis.channel.send',
+    description:
+      'Send a message through a connected native Agentis channel. Use this for requests like "send this to me on WhatsApp" or "send it to Slack" after checking channels. If the user says "me" or "myself", omit to or pass "default" to use the saved default target.',
+    parameters: {
+      type: 'object',
+      properties: {
+        connectionId: {
+          type: 'string',
+          description: 'Specific channel connection id. Use when more than one active channel could match.',
+        },
+        kind: {
+          type: 'string',
+          description: 'Channel kind to use when connectionId is omitted.',
+          enum: ['telegram', 'whatsapp', 'slack', 'discord'],
+        },
+        to: {
+          type: 'string',
+          description: 'Destination address. Use "default" or omit to use the saved default target.',
+        },
+        body: {
+          type: 'string',
+          description: 'Message body to send.',
+        },
+      },
+      required: ['body'],
+    },
+  },
+  {
     name: 'agentis.agents.list',
     description:
       'List all agents registered in the workspace. Use this when the user asks which agents ' +
       'are available, wants agent names or IDs, or needs to route a task to the right agent. ' +
-      'Returns agent id, name, status, team, and adapter type.',
+      'Returns agent id, name, status, role, and adapter type.',
     parameters: {
       type: 'object',
       properties: {
-        teamId: {
-          type: 'string',
-          description: 'Filter agents by team ID. Omit to list all agents.',
-        },
         status: {
           type: 'string',
           description: 'Filter by agent status. One of: idle, busy, offline, paused.',
@@ -281,10 +412,6 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         agentId: {
           type: 'string',
           description: 'Restrict to memories written by a specific agent.',
-        },
-        teamId: {
-          type: 'string',
-          description: 'Restrict to memories scoped to a specific team.',
         },
         limit: {
           type: 'string',
@@ -611,14 +738,37 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.build_workflow',
     description:
-      'Generate or update a workflow graph from a natural-language description. Use this when ' +
-      'the user asks to create, design, build, add, or modify a workflow. Call this tool immediately for clear build requests; do not show JSON for the operator to paste. The tool saves the workflow, emits live canvas build events, and returns workflowId/runId. Example input: {"title":"Hello World","description":"Create a manual workflow that returns { text: \\"Workflow is working\\" }."}.',
+      'Validate, enrich, save, and stream an agent-authored workflow graph or patch. ' +
+      'For a new workflow, inspect the request and relevant Agentis state, design a complete WorkflowGraph, and pass it as graphDraft. ' +
+      'For an edit, inspect the current workflow and pass workflowId plus patchDraft. A configured fast synthesis runtime may accept description-only calls, but runtime-native agents should author the draft themselves. ' +
+      'The tool returns workflowId/runId and emits live canvas build events.',
     examples: [
       {
-        description: 'Build the minimal Hello World workflow directly.',
+        description: 'Build the minimal Hello World workflow from an agent-authored graph draft.',
         input: {
           title: 'Hello World',
           description: 'Create a manual workflow that returns the fixed object { text: "Workflow is working" }.',
+          graphDraft: {
+            version: 1,
+            nodes: [
+              {
+                id: 'trigger',
+                type: 'trigger',
+                title: 'Manual Trigger',
+                position: { x: 0, y: 0 },
+                config: { kind: 'trigger', triggerType: 'manual' },
+              },
+              {
+                id: 'output',
+                type: 'return_output',
+                title: 'Return Output',
+                position: { x: 280, y: 0 },
+                config: { kind: 'return_output', renderAs: 'text' },
+              },
+            ],
+            edges: [{ id: 'trigger-output', source: 'trigger', target: 'output' }],
+            viewport: { x: 0, y: 0, zoom: 1 },
+          },
         },
         expectedOutput: { workflowId: '...', runId: 'build_...', nodeCount: 2, edgeCount: 1 },
       },
@@ -645,6 +795,14 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         workflowId: {
           type: 'string',
           description: 'Existing workflow ID to update. Omit to create a new one.',
+        },
+        graphDraft: {
+          type: 'object',
+          description: 'Complete agent-authored WorkflowGraph for a new workflow or intentional full replacement.',
+        },
+        patchDraft: {
+          type: 'object',
+          description: 'Agent-authored edit patch: addNodes, updateNodes, removeNodeIds, addEdges, and removeEdgeIds.',
         },
       },
       required: ['description'],
@@ -707,111 +865,83 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
       required: ['name', 'source', 'operations'],
     },
   },
+  // ── Agentic Apps (AGENTIC-APPS-10X §4/§5) — chat-driven full-stack build. ──
+  // Names match registry ids in agentisToolHandlers/appData.ts. data_*/ui_*
+  // resolve the App from `appId` or the open App surface.
   {
     name: 'agentis.app.create',
     description:
-      'Create a deployed Agentis app from a natural-language goal. Use this after the operator confirms an app plan. ' +
-      'If workflowId is omitted, the tool creates a sensible entry workflow and app canvas automatically.',
+      'Create a new Agentic App — a full-stack product (UI + logic + memory + data) the agent operates for a human. ' +
+      'Returns the appId to thread through the data and ui tools below.',
     parameters: {
       type: 'object',
       properties: {
-        goal: {
-          type: 'string',
-          description: 'What the app should do for the operator.',
-        },
-        name: {
-          type: 'string',
-          description: 'Human-facing app name.',
-        },
-        description: {
-          type: 'string',
-          description: 'One-line app description.',
-        },
-        workflowId: {
-          type: 'string',
-          description: 'Optional existing workflow ID to use as the app entry workflow.',
-        },
+        name: { type: 'string', description: 'Human-facing app name.' },
+        description: { type: 'string', description: 'One-line app description.' },
       },
-      required: ['goal'],
+      required: ['name'],
     },
   },
   {
-    name: 'agentis.app.compose',
+    name: 'agentis.data.define_collection',
     description:
-      'Complete or update an existing draft Agentis app. Use this during the app builder flow after the operator describes what the app should do. ' +
-      'Updates the app identity, surfaces, entry workflow, worker agents, and app canvas instead of creating a duplicate app.',
+      'Define (or update) a typed Datastore collection on an App. fields: [{ key, type: "string"|"number"|"boolean"|"date"|"json", required?, indexed? }].',
     parameters: {
       type: 'object',
       properties: {
-        appId: {
-          type: 'string',
-          description: 'Existing draft app id to complete.',
-        },
-        slug: {
-          type: 'string',
-          description: 'Existing draft app slug if appId is unavailable.',
-        },
-        goal: {
-          type: 'string',
-          description: 'What the app should do for the operator.',
-        },
-        name: {
-          type: 'string',
-          description: 'Updated human-facing app name.',
-        },
-        description: {
-          type: 'string',
-          description: 'One-line app description.',
-        },
-        workflowId: {
-          type: 'string',
-          description: 'Optional existing workflow ID to use as the app entry workflow.',
-        },
-        workflowTitle: {
-          type: 'string',
-          description: 'Title for a generated entry workflow when workflowId is omitted.',
-        },
-        surfaces: {
-          type: 'array',
-          description: 'Declared app surfaces such as thread, dashboard, api, webhook_receiver, stream, artifact, page, or embed.',
-          items: { type: 'object' },
-        },
-        agents: {
-          type: 'array',
-          description: 'Optional worker agents to create for this app. Each item may include name, description, role, adapterType, capabilityTags, and instructions.',
-          items: { type: 'object' },
-        },
-        appGraph: {
-          type: 'object',
-          description: 'Optional complete App Canvas graph. If omitted, Agentis creates a compact entry workflow to output graph.',
-        },
+        appId: { type: 'string', description: 'Target App id (omit to use the open App).' },
+        name: { type: 'string' },
+        schema: { type: 'object', description: '{ fields: [...] }' },
       },
+      required: ['name', 'schema'],
     },
   },
   {
-    name: 'agentis.team.design',
+    name: 'agentis.data.insert',
+    description: 'Insert a record into an App collection (validated against its schema).',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, record: { type: 'object' } }, required: ['collection', 'record'] },
+  },
+  {
+    name: 'agentis.data.update',
+    description: 'Patch an App collection record by id.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, id: { type: 'string' }, patch: { type: 'object' } }, required: ['collection', 'id', 'patch'] },
+  },
+  {
+    name: 'agentis.data.upsert',
+    description: 'Insert, or update the first record matching `match`.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, match: { type: 'object' }, record: { type: 'object' } }, required: ['collection', 'match', 'record'] },
+  },
+  {
+    name: 'agentis.data.delete',
+    description: 'Delete an App collection record by id.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, id: { type: 'string' } }, required: ['collection', 'id'] },
+  },
+  {
+    name: 'agentis.data.query',
+    description: 'Query App collection records. Filter ops: eq/ne/gt/gte/lt/lte/contains/in, or a bare value for equality.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, filter: { type: 'object' }, sort: { type: 'array' }, limit: { type: 'number' }, cursor: { type: 'string' } }, required: ['collection'] },
+  },
+  {
+    name: 'agentis.data.promote_memory',
+    description: 'Promote a Datastore record into the workspace Brain as a durable memory (one-way; data stays source of truth).',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, id: { type: 'string' }, title: { type: 'string' } }, required: ['collection', 'id'] },
+  },
+  {
+    name: 'agentis.ui.render',
     description:
-      'Propose an agent team structure for a given objective. Use this when the user asks ' +
-      'to design a team, wants to know which agents to create for a task, or asks for a ' +
-      'team blueprint. Returns a proposed list of agents with roles, skills, and coordination rules.',
-    parameters: {
-      type: 'object',
-      properties: {
-        brief: {
-          type: 'string',
-          description: 'Description of the objective this team should accomplish.',
-        },
-        teamName: {
-          type: 'string',
-          description: 'Name for the proposed team.',
-        },
-        teamId: {
-          type: 'string',
-          description: 'Existing team ID to redesign. Omit for a new team.',
-        },
-      },
-      required: ['brief'],
-    },
+      'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge/CustomView). ' +
+      'Table/List bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Button/Form reference an action declared with agentis.ui.action_schema.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, view: { type: 'object' } }, required: ['surface', 'view'] },
+  },
+  {
+    name: 'agentis.ui.patch',
+    description: 'Mutate part of an existing surface view. ops: [{ op: "set"|"insert"|"remove", path, value?|node? }].',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, ops: { type: 'array' } }, required: ['surface', 'ops'] },
+  },
+  {
+    name: 'agentis.ui.action_schema',
+    description: 'Declare a surface\'s actions. Each resolves to a workflow run, an agent tool, or a datastore op ("collection.insert"|"update"|"upsert"|"delete"). { name, kind, target, inputSchema? }.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, actions: { type: 'array' } }, required: ['surface', 'actions'] },
   },
   {
     name: 'agentis.plan',
@@ -891,7 +1021,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         resourceKind: {
           type: 'string',
           description: 'Optional resource kind. Examples: workflow, run, agent.',
-          enum: ['workflow', 'run', 'agent', 'team', 'app', 'artifact', 'unknown'],
+          enum: ['workflow', 'run', 'agent', 'app', 'artifact', 'unknown'],
         },
       },
     },

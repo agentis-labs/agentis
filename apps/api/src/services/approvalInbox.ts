@@ -26,10 +26,11 @@ export interface ApprovalCreateArgs {
   taskId: string | null;
   targetId?: string | null;
   gatewayId: string | null;
-  source: 'checkpoint' | 'phase_gate' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
+  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
   title: string;
   summary: string;
   confidence: number | null;
+  payload?: Record<string, unknown> | null;
 }
 
 /**
@@ -74,6 +75,7 @@ export class ApprovalInboxService {
         title: args.title,
         summary: args.summary,
         confidence: args.confidence,
+        payload: args.payload ?? {},
         status: 'pending',
         createdAt,
       })
@@ -132,11 +134,7 @@ export class ApprovalInboxService {
       status: next,
       resolvedAt,
     });
-    if (
-      row.runId &&
-      (row.source === 'checkpoint' || row.source === 'phase_gate') &&
-      this.#onCheckpointResolved
-    ) {
+    if (row.runId && isRunResumingApproval(row.source) && this.#onCheckpointResolved) {
       await this.#onCheckpointResolved({
         runId: row.runId,
         approvalId: row.id,
@@ -147,4 +145,8 @@ export class ApprovalInboxService {
     }
     return { ...row, status: next, resolvedAt, resolutionReason: args.reason ?? null };
   }
+}
+
+function isRunResumingApproval(source: string): boolean {
+  return source === 'checkpoint' || source === 'phase_gate' || source === 'self_heal';
 }

@@ -102,7 +102,7 @@ function describeEvent(env: RealtimeEnvelope): LiveRow | null {
 function kindLabel(kind: CanvasNode['kind']): string {
   if (kind === 'orchestrator') return 'Orchestrator';
   if (kind === 'manager') return 'Manager';
-  if (kind === 'worker') return 'Worker';
+  if (kind === 'worker') return 'Specialist';
   if (kind === 'workflow') return 'Workflow';
   if (kind === 'knowledge') return 'Brain';
   if (kind === 'approval') return 'Approval';

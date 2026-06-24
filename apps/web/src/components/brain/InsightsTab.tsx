@@ -25,22 +25,24 @@ interface HealthSnapshot {
   intelligence: { degraded: boolean };
 }
 
-export function InsightsTab({ onOpenConfig }: { onOpenConfig: () => void }) {
+export function InsightsTab({ onOpenConfig, scopeId }: { onOpenConfig?: () => void; scopeId?: string }) {
   const [snapshot, setSnapshot] = useState<HealthSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const toast = useToast();
+  const isScoped = Boolean(scopeId);
+  const healthPath = scopeId ? `/v1/brain/health?scopeId=${encodeURIComponent(scopeId)}` : '/v1/brain/health';
 
   const load = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true);
     try {
-      setSnapshot(await api<HealthSnapshot>('/v1/brain/health'));
+      setSnapshot(await api<HealthSnapshot>(healthPath));
     } catch (error) {
       toast.error('Failed to load Brain insights', apiErrorMessage(error));
     } finally {
       if (showLoader) setLoading(false);
     }
-  }, [toast]);
+  }, [healthPath, toast]);
 
   useEffect(() => { void load(true); }, [load]);
   useEffect(() => rtSubscribe('workspace', {}), []);
@@ -87,11 +89,11 @@ export function InsightsTab({ onOpenConfig }: { onOpenConfig: () => void }) {
   return (
     <main className="h-full overflow-y-auto px-6 py-5">
       <div className="mx-auto max-w-7xl space-y-5">
-        {snapshot.intelligence.degraded && (
+        {snapshot.intelligence.degraded && !isScoped && (
           <section className="flex flex-wrap items-center gap-3 rounded-card border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-100">
             <AlertTriangle size={16} className="text-amber-300" />
             <span>Brain is running in keyword mode. Semantic search is disabled.</span>
-            <Button variant="secondary" size="sm" onClick={onOpenConfig} className="ml-auto border-amber-400/30 text-amber-100">Set up embedding</Button>
+            {onOpenConfig && <Button variant="secondary" size="sm" onClick={onOpenConfig} className="ml-auto border-amber-400/30 text-amber-100">Set up embedding</Button>}
           </section>
         )}
 
@@ -109,21 +111,31 @@ export function InsightsTab({ onOpenConfig }: { onOpenConfig: () => void }) {
           <Metric icon={<AlertTriangle size={15} />} label="Disputes" value={String(snapshot.metrics.disputedAtomCount)} detail={`${snapshot.metrics.staleAtomCount} stale atoms`} />
         </section>
 
-        {snapshot.metrics.disputedAtomCount > 0 && (
+        {!isScoped && snapshot.metrics.disputedAtomCount > 0 && (
           <section className="rounded-card border border-amber-400/20 bg-amber-500/[0.035] p-4">
             <DisputeResolutionPanel embedded hideWhenEmpty />
           </section>
         )}
 
-        <InsightSection eyebrow="Memory" title="Shared recall" description="Facts, rules, preferences, patterns, and lessons available to every agent.">
-          <WorkspaceMemoryTab />
+        <InsightSection
+          eyebrow="Memory"
+          title={isScoped ? 'Workflow recall' : 'Shared recall'}
+          description={isScoped
+            ? 'Facts, rules, preferences, patterns, and lessons available to this workflow.'
+            : 'Facts, rules, preferences, patterns, and lessons available to every agent.'}
+        >
+          <WorkspaceMemoryTab scopeId={scopeId} />
         </InsightSection>
 
-        <InsightSection eyebrow="Episodes" title="Promoted learning" description="Lessons distilled automatically from workflow outcomes.">
-          <EpisodesTab />
+        <InsightSection
+          eyebrow="Episodes"
+          title="Promoted learning"
+          description={isScoped ? 'Lessons distilled from this workflow’s outcomes.' : 'Lessons distilled automatically from workflow outcomes.'}
+        >
+          <EpisodesTab scopeId={scopeId} />
         </InsightSection>
 
-        <section className="flex flex-wrap items-center gap-3 rounded-card border border-line bg-surface p-4">
+        {!isScoped && <section className="flex flex-wrap items-center gap-3 rounded-card border border-line bg-surface p-4">
           <div className="mr-auto">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Maintenance</div>
             <p className="mt-1 text-[12px] text-text-secondary">
@@ -138,7 +150,7 @@ export function InsightsTab({ onOpenConfig }: { onOpenConfig: () => void }) {
           </span>
           <Button size="sm" variant="secondary" loading={running} iconLeft={<Sparkles size={13} />} onClick={() => void dreamPass()}>Dream Pass</Button>
           <Button size="sm" variant="ghost" iconLeft={<RefreshCw size={13} />} onClick={() => void load(true)}>Refresh</Button>
-        </section>
+        </section>}
       </div>
     </main>
   );

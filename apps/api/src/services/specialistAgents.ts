@@ -17,6 +17,7 @@ import {
   SPECIALIST_AGENTS,
   specialistForRole,
   genericSpecialist,
+  isSpecialistRole,
   normalizeRole,
   type AgentRole,
   type SpecialistDefinition,
@@ -51,12 +52,19 @@ export class SpecialistAgentService {
     return genericSpecialist(normalized);
   }
 
-  /** Resolve a role to a concrete agentId, seeding the specialist if absent. */
-  ensureRole(workspaceId: string, userId: string, role: AgentRole): string {
+  /**
+   * Resolve a role to a concrete agentId, seeding the specialist if absent.
+   * `runtime` lets a caller seed the specialist with a REAL runtime (adapterType +
+   * config) instead of the default offline `http` placeholder — so a role that
+   * needs e.g. a native browser can be created already pointing at a capable
+   * harness (the operator/hydrator connects it). Ignored for an already-seeded
+   * specialist (operator runtime choices are preserved).
+   */
+  ensureRole(workspaceId: string, userId: string, role: AgentRole, runtime?: SpecialistRuntimeSeed): string {
     const normalized = normalizeRole(role);
     const existing = this.#findByRole(workspaceId, normalized);
     if (existing) return existing;
-    return this.#create(workspaceId, userId, this.defForRole(workspaceId, normalized));
+    return this.#create(workspaceId, userId, this.defForRole(workspaceId, normalized), runtime);
   }
 
   /** Resolve a role to an existing agentId without creating one. */
@@ -109,7 +117,10 @@ export class SpecialistAgentService {
       else await this.library.writeCustom(workspaceId, libDef);
     }
     const existing = this.#findByRole(workspaceId, role);
-    const agentId = this.#upsert(workspaceId, userId, def, existing);
+    const runtime: SpecialistRuntimeSeed | undefined = input.adapterType
+      ? { adapterType: input.adapterType, config: input.runtimeConfig }
+      : undefined;
+    const agentId = this.#upsert(workspaceId, userId, def, existing, runtime);
     return { agentId, role, created: existing === null, def };
   }
 
@@ -129,13 +140,12 @@ export class SpecialistAgentService {
    * with a role that isn't the orchestrator or manager hierarchy tier.
    */
   list(workspaceId: string): Array<{ id: string; role: string | null; name: string; status: string }> {
-    const hierarchyTiers = new Set<string>(['orchestrator', 'manager']);
     return this.db
       .select({ id: schema.agents.id, role: schema.agents.role, name: schema.agents.name, status: schema.agents.status })
       .from(schema.agents)
       .where(eq(schema.agents.workspaceId, workspaceId))
       .all()
-      .filter((a) => a.role != null && !hierarchyTiers.has(normalizeRole(a.role)));
+      .filter((a) => isSpecialistRole(a.role));
   }
 
   #findByRole(workspaceId: string, role: string): string | null {
@@ -148,8 +158,8 @@ export class SpecialistAgentService {
   }
 
   /** Create the agent row for a role, or update an existing one's definition-derived fields. */
-  #upsert(workspaceId: string, userId: string, spec: SpecialistDefinition, existingId: string | null): string {
-    if (!existingId) return this.#create(workspaceId, userId, spec);
+  #upsert(workspaceId: string, userId: string, spec: SpecialistDefinition, existingId: string | null, runtime?: SpecialistRuntimeSeed): string {
+    if (!existingId) return this.#create(workspaceId, userId, spec, runtime);
     const existing = this.db
       .select({ config: schema.agents.config })
       .from(schema.agents)
@@ -161,7 +171,7 @@ export class SpecialistAgentService {
       description: spec.description,
       capabilityTags: spec.capabilityTags,
       // Preserve operator-set adapter/runtime keys; refresh the specialist hints.
-      config: { ...prevConfig, specialist: true, defaultModel: spec.defaultModel, tools: spec.tools },
+      config: { ...prevConfig, specialist: true, specialistSource: spec.source ?? 'generated', defaultModel: spec.defaultModel, tools: spec.tools },
       colorHex: spec.colorHex,
       instructions: spec.systemPrompt,
       avatarGlyph: spec.avatarGlyph,
@@ -170,9 +180,14 @@ export class SpecialistAgentService {
     return existingId;
   }
 
-  #create(workspaceId: string, userId: string, spec: SpecialistDefinition): string {
+  #create(workspaceId: string, userId: string, spec: SpecialistDefinition, runtime?: SpecialistRuntimeSeed): string {
     const id = randomUUID();
     const now = new Date().toISOString();
+    // Default: an offline `http` placeholder that executes once a runtime is
+    // connected. A `runtime` seed instead binds a real harness (e.g. a native-
+    // browser-capable Codex/OpenClaw) up front, with the runtime keys merged into
+    // the specialist hints so the adapter and the specialist metadata coexist.
+    const adapterType = runtime?.adapterType ?? 'http';
     this.db.insert(schema.agents).values({
       id,
       workspaceId,
@@ -181,9 +196,15 @@ export class SpecialistAgentService {
       packageId: null,
       name: spec.name,
       description: spec.description,
-      adapterType: 'http',
+      adapterType,
       capabilityTags: spec.capabilityTags,
-      config: { specialist: true, defaultModel: spec.defaultModel, tools: spec.tools },
+      config: {
+        ...(runtime?.config ?? {}),
+        specialist: true,
+        specialistSource: spec.source ?? 'generated',
+        defaultModel: spec.defaultModel,
+        tools: spec.tools,
+      },
       status: 'offline',
       colorHex: spec.colorHex,
       instructions: spec.systemPrompt,
@@ -194,6 +215,12 @@ export class SpecialistAgentService {
     }).run();
     return id;
   }
+}
+
+/** Seed a specialist with a real runtime (adapterType + adapter config) at creation. */
+export interface SpecialistRuntimeSeed {
+  adapterType: string;
+  config?: Record<string, unknown>;
 }
 
 /** Human/AI input for authoring a specialist. Only a role *or* name is required. */
@@ -210,6 +237,12 @@ export interface SpecialistAuthorInput {
   avatarGlyph?: string;
   /** `generated` marks AI-authored specialists for review; defaults to `custom`. */
   source?: 'custom' | 'generated';
+  /** Optional — bind the specialist to a real runtime (e.g. `codex` with native
+   *  browser) instead of the default offline `http` placeholder. Only honored
+   *  when the specialist is first created. */
+  adapterType?: string;
+  /** Adapter config paired with {@link adapterType} (e.g. `{ browser: true }`). */
+  runtimeConfig?: Record<string, unknown>;
 }
 
 /** Normalize a free-form role/name into a stable snake_case role slug. */

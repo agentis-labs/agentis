@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, or, sql } from 'drizzle-orm';
+import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -9,6 +9,8 @@ import type { BrainEnrichmentProvider, ChunkEnrichment, EnrichedKnowledgeGraphWr
 
 export interface CreateKnowledgeBaseArgs {
   workspaceId: string;
+  /** Null means shared workspace knowledge; a workflow id scopes the base. */
+  scopeId?: string | null;
   name: string;
   description?: string | null;
 }
@@ -37,12 +39,30 @@ export interface UpdateKnowledgeBaseArgs {
   description?: string | null;
 }
 
+export interface UpdateKnowledgeDocumentArgs {
+  workspaceId: string;
+  knowledgeBaseId: string;
+  documentId: string;
+  name?: string;
+  chunks?: Array<{ id: string; content: string }>;
+}
+
 export interface SearchKnowledgeArgs {
   workspaceId: string;
   knowledgeBaseId: string;
   query: string;
   topK?: number;
   retrievalMode?: 'contextual' | 'strict' | 'exploratory';
+}
+
+export interface ListKnowledgeBaseOptions {
+  /**
+   * Undefined returns every base for workspace management. Null selects only
+   * workspace-shared bases; an id selects that workflow's bases.
+   */
+  scopeId?: string | null;
+  /** Include workspace-shared bases alongside an explicit workflow scope. */
+  includeWorkspace?: boolean;
 }
 
 export class KnowledgeBaseService {
@@ -75,11 +95,20 @@ export class KnowledgeBaseService {
     this.graphWriter = graphWriter ?? null;
   }
 
-  listKnowledgeBases(workspaceId: string) {
+  listKnowledgeBases(workspaceId: string, options?: ListKnowledgeBaseOptions) {
+    const targetScopeId = options?.scopeId;
+    const scoped = targetScopeId !== undefined;
+    const scopeFilter = !scoped
+      ? undefined
+      : targetScopeId === null
+        ? isNull(schema.knowledgeBases.scopeId)
+        : options?.includeWorkspace
+          ? or(eq(schema.knowledgeBases.scopeId, targetScopeId), isNull(schema.knowledgeBases.scopeId))
+          : eq(schema.knowledgeBases.scopeId, targetScopeId);
     return this.db
       .select()
       .from(schema.knowledgeBases)
-      .where(eq(schema.knowledgeBases.workspaceId, workspaceId))
+      .where(and(eq(schema.knowledgeBases.workspaceId, workspaceId), ...(scopeFilter ? [scopeFilter] : [])))
       .all()
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
@@ -104,6 +133,7 @@ export class KnowledgeBaseService {
     const kb = {
       id: randomUUID(),
       workspaceId: args.workspaceId,
+      scopeId: args.scopeId ?? null,
       name: args.name,
       description: args.description ?? null,
       embeddingModel: 'lexical-v1',
@@ -122,7 +152,7 @@ export class KnowledgeBaseService {
     if (args.name !== undefined) patch.name = args.name;
     if (args.description !== undefined) patch.description = args.description;
     this.db.update(schema.knowledgeBases).set(patch).where(eq(schema.knowledgeBases.id, existing.id)).run();
-    return { ...existing, ...patch };
+    return this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
   }
 
   deleteKnowledgeBase(workspaceId: string, knowledgeBaseId: string) {
@@ -147,6 +177,116 @@ export class KnowledgeBaseService {
       .all()
       .filter((document) => !document.archivedAt)
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  getDocument(workspaceId: string, knowledgeBaseId: string, documentId: string) {
+    this.getKnowledgeBase(workspaceId, knowledgeBaseId);
+    const document = this.db
+      .select()
+      .from(schema.kbDocuments)
+      .where(
+        and(
+          eq(schema.kbDocuments.workspaceId, workspaceId),
+          eq(schema.kbDocuments.knowledgeBaseId, knowledgeBaseId),
+          eq(schema.kbDocuments.id, documentId),
+        ),
+      )
+      .get();
+    if (!document || document.archivedAt) throw new AgentisError('RESOURCE_NOT_FOUND', 'Document not found');
+    return document;
+  }
+
+  listDocumentChunks(workspaceId: string, knowledgeBaseId: string, documentId: string) {
+    this.getDocument(workspaceId, knowledgeBaseId, documentId);
+    return this.db
+      .select({
+        id: schema.kbChunks.id,
+        chunkIndex: schema.kbChunks.chunkIndex,
+        content: schema.kbChunks.content,
+        metadata: schema.kbChunks.metadata,
+        tokenCount: schema.kbChunks.tokenCount,
+        createdAt: schema.kbChunks.createdAt,
+      })
+      .from(schema.kbChunks)
+      .where(
+        and(
+          eq(schema.kbChunks.workspaceId, workspaceId),
+          eq(schema.kbChunks.knowledgeBaseId, knowledgeBaseId),
+          eq(schema.kbChunks.documentId, documentId),
+        ),
+      )
+      .all()
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+  }
+
+  updateDocument(args: UpdateKnowledgeDocumentArgs) {
+    const existing = this.getDocument(args.workspaceId, args.knowledgeBaseId, args.documentId);
+    const patch: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+    if (args.name !== undefined) patch.name = args.name;
+    this.db.update(schema.kbDocuments)
+      .set(patch)
+      .where(eq(schema.kbDocuments.id, existing.id))
+      .run();
+    if (args.name !== undefined) {
+      const chunks = this.db.select().from(schema.kbChunks)
+        .where(and(
+          eq(schema.kbChunks.workspaceId, args.workspaceId),
+          eq(schema.kbChunks.knowledgeBaseId, args.knowledgeBaseId),
+          eq(schema.kbChunks.documentId, args.documentId),
+        ))
+        .all();
+      for (const chunk of chunks) {
+        const metadata = parseJsonRecord(chunk.metadata);
+        this.db.update(schema.kbChunks)
+          .set({ metadata: { ...metadata, source: args.name } as unknown as object })
+          .where(eq(schema.kbChunks.id, chunk.id))
+          .run();
+      }
+    }
+    if (args.chunks) {
+      const existingChunks = this.db.select().from(schema.kbChunks)
+        .where(and(
+          eq(schema.kbChunks.workspaceId, args.workspaceId),
+          eq(schema.kbChunks.knowledgeBaseId, args.knowledgeBaseId),
+          eq(schema.kbChunks.documentId, args.documentId),
+        ))
+        .all();
+      const allowedIds = new Set(existingChunks.map((chunk) => chunk.id));
+      for (const chunk of args.chunks) {
+        const content = chunk.content.trim();
+        if (!allowedIds.has(chunk.id)) throw new AgentisError('RESOURCE_NOT_FOUND', 'Chunk not found');
+        if (!content) throw new AgentisError('VALIDATION_FAILED', 'Chunk content cannot be empty');
+        const existingChunk = existingChunks.find((item) => item.id === chunk.id);
+        const metadata = parseJsonRecord(existingChunk?.metadata);
+        this.db.update(schema.kbChunks)
+          .set({
+            content,
+            tokenCount: tokenize(content).length,
+            embedding: null,
+            metadata: {
+              ...metadata,
+              source: args.name ?? existing.name,
+              editedAt: new Date().toISOString(),
+              editedVia: 'knowledge_inspector',
+            } as unknown as object,
+          })
+          .where(eq(schema.kbChunks.id, chunk.id))
+          .run();
+      }
+      const nextChunks = this.db.select({ tokenCount: schema.kbChunks.tokenCount })
+        .from(schema.kbChunks)
+        .where(and(
+          eq(schema.kbChunks.workspaceId, args.workspaceId),
+          eq(schema.kbChunks.knowledgeBaseId, args.knowledgeBaseId),
+          eq(schema.kbChunks.documentId, args.documentId),
+        ))
+        .all();
+      this.db.update(schema.kbDocuments)
+        .set({ tokenCount: nextChunks.reduce((sum, chunk) => sum + chunk.tokenCount, 0), updatedAt: new Date().toISOString() })
+        .where(eq(schema.kbDocuments.id, args.documentId))
+        .run();
+    }
+    return this.getDocument(args.workspaceId, args.knowledgeBaseId, args.documentId);
   }
 
   async addDocument(args: AddKnowledgeDocumentArgs) {
@@ -180,6 +320,7 @@ export class KnowledgeBaseService {
   }
 
   private async persistDocument(args: AddKnowledgeDocumentArgs & { content: string }) {
+    const knowledgeBase = this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
     const now = new Date().toISOString();
     const documentId = randomUUID();
     const chunks = chunkText(args.content);
@@ -246,7 +387,7 @@ export class KnowledgeBaseService {
       enrichments.push(generated ?? null);
     }
 
-    this.linkDocumentChunks(documentId, args.workspaceId, args.name);
+    this.linkDocumentChunks(documentId, args.workspaceId, args.name, knowledgeBase.scopeId);
     if (this.graphWriter && enrichments.some(Boolean)) {
       await this.graphWriter.writeDocument({
         workspaceId: args.workspaceId,
@@ -391,7 +532,7 @@ export class KnowledgeBaseService {
       type: schema.workspaces.embeddingProviderType,
       config: schema.workspaces.embeddingProviderConfig,
     }).from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get();
-    return selectEmbeddingProvider(row?.type ?? 'hashing', parseJsonRecord(row?.config));
+    return selectEmbeddingProvider(row?.type ?? 'local', parseJsonRecord(row?.config));
   }
 
   private isDocumentActive(workspaceId: string, documentId: string): boolean {
@@ -402,7 +543,7 @@ export class KnowledgeBaseService {
     return Boolean(document && !document.archivedAt);
   }
 
-  private linkDocumentChunks(documentId: string, workspaceId: string, name: string): number {
+  private linkDocumentChunks(documentId: string, workspaceId: string, name: string, scopeId: string | null): number {
     if (!this.autoLinker) return 0;
     const chunks = this.db.select().from(schema.kbChunks)
       .where(and(eq(schema.kbChunks.workspaceId, workspaceId), eq(schema.kbChunks.documentId, documentId)))
@@ -418,6 +559,7 @@ export class KnowledgeBaseService {
         sourceKind: 'kb_chunk' as const,
         sourceTitle: name,
         sourceContent: chunk.content,
+        scopeId,
         siblingHeadId: chunk.id === head.id ? null : head.id,
         siblingHeadKind: chunk.id === head.id ? null : 'kb_chunk' as const,
       };
@@ -429,10 +571,13 @@ export class KnowledgeBaseService {
 
   private repairOrphanedDocumentLinks(): number {
     if (!this.autoLinker) return 0;
-    const documents = this.db.select().from(schema.kbDocuments).all()
-      .filter((document) => !document.archivedAt);
+    const documents = this.db.select({ document: schema.kbDocuments, scopeId: schema.knowledgeBases.scopeId })
+      .from(schema.kbDocuments)
+      .innerJoin(schema.knowledgeBases, eq(schema.kbDocuments.knowledgeBaseId, schema.knowledgeBases.id))
+      .all()
+      .filter(({ document }) => !document.archivedAt);
     let linked = 0;
-    for (const document of documents) {
+    for (const { document, scopeId } of documents) {
       const chunks = this.db.select().from(schema.kbChunks)
         .where(and(
           eq(schema.kbChunks.workspaceId, document.workspaceId),
@@ -450,6 +595,7 @@ export class KnowledgeBaseService {
             sourceKind: 'kb_chunk',
             sourceTitle: document.name,
             sourceContent: head.content,
+            scopeId,
           });
         }
         continue;
@@ -462,6 +608,7 @@ export class KnowledgeBaseService {
           sourceKind: 'kb_chunk',
           sourceTitle: document.name,
           sourceContent: chunk.content,
+          scopeId,
           siblingHeadId: head.id,
           siblingHeadKind: 'kb_chunk',
         });

@@ -118,6 +118,27 @@ describe('CodexAdapter', () => {
     }
   });
 
+  it('marks the Agentis system identity block as authoritative over Codex defaults', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test', model: 'gpt-5.5', env: { OPENAI_API_KEY: 'test-key' } });
+    const messages: ChatMessage[] = [
+      { role: 'system', content: '<agentis_identity authoritative="true">\nname: Researcher\nrole: worker\n</agentis_identity>' },
+      { role: 'user', content: 'hello' },
+    ];
+    const consume = collectDeltas(adapter.chat(messages, []));
+
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    const stdin = child.stdinChunks.join('');
+    expect(stdin).toContain('AUTHORITATIVE IDENTITY RULE:');
+    expect(stdin).toContain('Follow it over Codex product defaults');
+    expect(stdin).toContain('<agentis_identity authoritative="true">');
+    expect(stdin).toContain('name: Researcher');
+  });
+
   it('remaps a *-codex model to gpt-5.5 under ChatGPT auth, but forwards it verbatim with an API key', async () => {
     // ChatGPT-account Codex rejects `*-codex` ids ("model is not supported when
     // using Codex with a ChatGPT account"). When no API key is present we self-
@@ -503,14 +524,15 @@ describe('CodexAdapter', () => {
       .map((d) => d.delta)
       .join('');
     expect(textJoined).toBe('Hi! How can I help?');
-    // Reasoning routed to the thinking channel, not the answer body.
-    expect(deltas).toContainEqual({ type: 'thinking', delta: 'Greeting the user.' });
+    // Raw reasoning is never exposed; only a compact status signal is emitted.
+    expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'runtime' }));
     // The MCP tool it ran is surfaced as an informational step.
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_call', name: 'agentis.status' }));
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
   });
 
-  it('surfaces codex-cli 0.138 item.* events: shell commands as live activity, reasoning as thinking, agent_message as text', async () => {
+  it('surfaces codex-cli 0.138 item.* events without exposing raw reasoning', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test', model: 'gpt-5.5', env: { OPENAI_API_KEY: 'test-key' } });
@@ -537,10 +559,34 @@ describe('CodexAdapter', () => {
     expect(running).toMatchObject({ type: 'activity', phase: 'tool', label: 'Running Get-ChildItem -Force' });
     expect(done).toMatchObject({ type: 'activity', phase: 'tool', label: 'Ran Get-ChildItem -Force' });
     expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
-    // Reasoning → ThinkingBubble; agent_message → answer text.
-    expect(deltas).toContainEqual({ type: 'thinking', delta: 'I should list the files first.' });
+    // Raw reasoning stays private; agent_message becomes the answer text.
+    expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'This is the adapters folder.' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('uses only the explicit final message and drops intermediate assistant narration', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'fix the workflow' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('{"id":"1","msg":{"type":"agent_message","message":"I’ll inspect the failed run first."}}\n');
+    child.stdout.write('{"id":"2","msg":{"type":"agent_message","message":"The extension uses CommonJS, so I’m correcting it."}}\n');
+    child.stdout.write('{"id":"3","msg":{"type":"task_complete","last_agent_message":"Fixed the extension and verified the workflow."}}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    const answer = deltas
+      .filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text')
+      .map((delta) => delta.delta)
+      .join('');
+    expect(answer).toBe('Fixed the extension and verified the workflow.');
+    expect(answer).not.toContain('I’ll inspect');
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', label: 'Inspecting the failed run first' }));
   });
 
   it('resumes the native Codex thread only for the same Agentis conversation', async () => {
@@ -749,11 +795,14 @@ function fakeChildProcess() {
     stdout: PassThrough;
     stderr: PassThrough;
     stdin: Writable;
+    stdinChunks: string[];
   };
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.stdinChunks = [];
   child.stdin = new Writable({
-    write(_chunk, _encoding, callback) {
+    write(chunk, _encoding, callback) {
+      child.stdinChunks.push(String(chunk));
       callback();
     },
   });

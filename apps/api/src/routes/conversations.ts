@@ -37,6 +37,7 @@ import type { ConversationStore } from '../services/conversationStore.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
 import { ChatSessionExecutor } from '../services/chatSessionExecutor.js';
+import { publishAgentWorkStep, publishChatDeltaProgress } from '../services/agentWorkProgress.js';
 import type { ViewportStore } from '../services/viewportStore.js';
 import type { Logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -72,6 +73,17 @@ const confirmSchema = z.object({
   clientTurnId: z.string().min(1).max(120).optional(),
 });
 const editSchema = z.object({ text: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH) });
+const rewriteSchema = sendSchema.omit({ body: true }).extend({
+  text: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
+});
+const PLAN_MODE_SYSTEM_ADDENDUM = [
+  'PLAN MODE',
+  'The operator explicitly asked you to plan. You are the selected agent for this conversation; answer in your own role and expertise.',
+  'Do not mutate workspace state in this turn. You may inspect existing state with read-only tools, but do not build, save, run, delete, patch, or otherwise change resources.',
+  'Produce an intelligent, concrete plan for the requested outcome. Avoid generic placeholders. Use domain-specific phases, dependencies, risks, open questions, and verification criteria.',
+  'When useful, wrap the final plan in <proposed_plan>...</proposed_plan>. Keep it readable markdown; the UI will render it as a lightweight canvas.',
+  'If the user asks for workflow design, describe the actual workflow architecture: trigger, data sources, specialist/agent steps, integrations, guardrails, outputs, and verification.',
+].join('\n');
 
 type ConversationRouteDeps = {
   db: AgentisSqliteDb;
@@ -101,6 +113,7 @@ type ConversationRouteDeps = {
 };
 
 type AgentRow = typeof schema.agents.$inferSelect;
+type ConversationRow = typeof schema.conversations.$inferSelect;
 type ConversationMessageRow = typeof schema.conversationMessages.$inferSelect;
 
 interface PersistedToolCallData {
@@ -115,7 +128,6 @@ interface PersistedToolCallData {
 
 interface StreamedChatMetadata {
   turn: ChatTurnTrace;
-  thinking: string;
   activity: Array<Extract<ChatDelta, { type: 'activity' }>>;
   toolCalls: PersistedToolCallData[];
   toolStartedAt: Map<string, number>;
@@ -216,8 +228,19 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       .where(eq(schema.agents.workspaceId, ws.workspaceId))
       .all();
     const byId = new Map(agentRows.map((a) => [a.id, a]));
+    const channelRows = deps.db
+      .select({
+        id: schema.channelConnections.id,
+        kind: schema.channelConnections.kind,
+        name: schema.channelConnections.name,
+      })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.workspaceId, ws.workspaceId))
+      .all();
+    const channelsById = new Map(channelRows.map((channel) => [channel.id, channel]));
     const enriched = rows.map((r) => {
       const a = byId.get(r.agentId);
+      const channel = r.channelConnectionId ? channelsById.get(r.channelConnectionId) : null;
       const last = deps.conversations.messages(r.id, 1).at(-1);
       return {
         id: r.id,
@@ -231,6 +254,10 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
         lastMessageAt: r.lastMessageAt,
         lastMessagePreview: last ? last.body.slice(0, 80) : null,
         mirroredSessionId: r.mirroredSessionId,
+        channelConnectionId: r.channelConnectionId,
+        channelChatId: r.channelChatId,
+        channelKind: channel?.kind ?? null,
+        channelName: channel?.name ?? null,
         createdAt: r.createdAt,
       };
     });
@@ -345,6 +372,44 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     const conversationId = c.req.param('conversationId');
     deps.conversations.deleteConversation(ws.workspaceId, conversationId);
     return c.json({ ok: true });
+  });
+
+  app.post('/:agentId/:messageId/rewrite', async (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const messageId = c.req.param('messageId');
+    const body = rewriteSchema.parse(await c.req.json());
+    const clientTurnId = body.clientTurnId ?? randomUUID();
+    const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+    if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    const result = deps.conversations.rewriteFromMessage({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+      messageId,
+      body: body.text,
+      metadata: { clientTurnId },
+    });
+    if (c.req.header('accept')?.includes('text/event-stream')) {
+      return streamConversationTurnReply(c, deps, ws, {
+        agentId,
+        conversation,
+        clientTurnId,
+        currentMessageId: result.message.id,
+        userMessage: body.text,
+        useViewportContext: body.useViewportContext,
+        viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
+      });
+    }
+    return c.json(result);
   });
 
   app.patch('/:agentId/:messageId', async (c) => {
@@ -463,58 +528,13 @@ function publishChatDelta(
   clientTurnId: string,
   delta: ChatDelta,
 ): void {
-  const room = REALTIME_ROOMS.workspace(ws.workspaceId);
-  if (delta.type === 'activity') {
-    deps.bus.publish(room, REALTIME_EVENTS.AGENT_WORK_STEP, {
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      agentId,
-      conversationId,
-      clientTurnId,
-      workflowId: delta.workflowId,
-      runId: delta.runId,
-      nodeId: delta.nodeId,
-      phase: delta.status === 'error' ? 'fail' : delta.status === 'success' ? 'complete' : delta.phase,
-      description: [delta.label, delta.detail].filter(Boolean).join(' - '),
-      at: delta.startedAt ?? new Date().toISOString(),
-    });
-    return;
-  }
-  if (delta.type === 'tool_call') {
-    deps.bus.publish(room, REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL, {
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      agentId,
-      conversationId,
-      clientTurnId,
-      tool: delta.name,
-      args: delta.args,
-      at: new Date().toISOString(),
-    });
-    deps.bus.publish(room, REALTIME_EVENTS.AGENT_WORK_STEP, {
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      agentId,
-      conversationId,
-      clientTurnId,
-      phase: 'tool',
-      description: `Calling ${delta.name}`,
-      at: new Date().toISOString(),
-    });
-    return;
-  }
-  if (delta.type === 'tool_result') {
-    deps.bus.publish(room, REALTIME_EVENTS.AGENT_WORK_STEP, {
-      workspaceId: ws.workspaceId,
-      ambientId: ws.ambientId,
-      agentId,
-      conversationId,
-      clientTurnId,
-      phase: delta.error ? 'fail' : 'complete',
-      description: delta.error ? `${delta.name} failed: ${delta.error}` : `${delta.name} completed`,
-      at: new Date().toISOString(),
-    });
-  }
+  publishChatDeltaProgress(deps.bus, {
+    workspaceId: ws.workspaceId,
+    ambientId: ws.ambientId,
+    agentId,
+    conversationId,
+    clientTurnId,
+  }, delta);
 }
 
 async function* withChatHeartbeats(
@@ -525,6 +545,7 @@ async function* withChatHeartbeats(
   const startedAt = Date.now();
   let nextHeartbeatAt = 15_000;
   let next = iterator.next();
+  let lastActivity: Extract<ChatDelta, { type: 'activity' }> | undefined;
 
   while (true) {
     const waitMs = Math.max(0, startedAt + nextHeartbeatAt - Date.now());
@@ -539,9 +560,9 @@ async function* withChatHeartbeats(
         agentId: args.agentId,
         workflowId: args.workflowId,
         phase: 'waiting',
-        label: 'Waiting for runtime',
+        label: lastActivity?.label ?? 'Waiting for runtime',
         detail: `Still working after ${Math.round(raced.threshold / 1000)}s.`,
-        suffix: `waiting-${raced.threshold}`,
+        suffix: 'waiting',
       });
       nextHeartbeatAt = raced.threshold < 60_000
         ? 60_000
@@ -552,6 +573,7 @@ async function* withChatHeartbeats(
     }
 
     if (raced.result.done) return;
+    if (raced.result.value.type === 'activity') lastActivity = raced.result.value;
     yield raced.result.value;
     while (Date.now() - startedAt >= nextHeartbeatAt) {
       nextHeartbeatAt = nextHeartbeatAt < 60_000
@@ -594,6 +616,231 @@ function serializeScopeAgent(agent: AgentRow) {
   };
 }
 
+function conversationHistoryForTurn(
+  deps: ConversationRouteDeps,
+  conversationId: string,
+  currentMessageId: string | null,
+) {
+  return deps.conversations
+    .messages(conversationId, 20)
+    .filter((row) => row.id !== currentMessageId)
+    .map((row) => ({
+      role: row.authorType === 'operator' ? 'user' as const : 'assistant' as const,
+      content: row.body,
+    }));
+}
+
+function streamConversationTurnReply(
+  c: Context,
+  deps: ConversationRouteDeps,
+  ws: ReturnType<typeof getWorkspace>,
+  args: {
+    agentId: string;
+    conversation: ConversationRow;
+    clientTurnId: string;
+    currentMessageId: string | null;
+    userMessage: string;
+    useViewportContext: boolean;
+    viewportOverride?: ViewportContext | null;
+  },
+) {
+  const reg = deps.adapters.get(args.agentId);
+  return streamSSE(c, async (stream) => {
+    const turnStartedAtMs = Date.now();
+    const turnStartedAt = new Date(turnStartedAtMs).toISOString();
+    let finalText = '';
+    let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
+    let adapterError: string | null = null;
+    const streamedMetadata = createStreamedChatMetadata(args.clientTurnId, turnStartedAt);
+    const activeViewport = args.useViewportContext
+      ? args.viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
+      : args.viewportOverride ?? null;
+    const viewportWorkflowId = workflowIdFromViewport(activeViewport);
+    const requestedPlan = /^\/plan(?:\s|$)/i.test(args.userMessage);
+    const requestedChat = /^\/(?:act|chat)(?:\s|$)/i.test(args.userMessage);
+    const runtimeUserMessage = requestedPlan
+      ? args.userMessage.replace(/^\/plan\b/i, '').trim() || 'Plan the requested work.'
+      : args.userMessage;
+
+    await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, createChatActivity({
+      clientTurnId: args.clientTurnId,
+      agentId: args.agentId,
+      workflowId: viewportWorkflowId,
+      phase: 'received',
+      label: 'Request received',
+      detail: 'The agent accepted the chat turn.',
+      suffix: 'received',
+      startedAt: turnStartedAt,
+    }), streamedMetadata);
+
+    if (requestedChat) {
+      deps.db.update(schema.conversations)
+        .set({ executionMode: 'chat', updatedAt: new Date().toISOString() })
+        .where(eq(schema.conversations.id, args.conversation.id))
+        .run();
+      finalText = 'Plan mode closed. Chat can use workspace tools normally again.';
+      await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
+        type: 'text',
+        delta: finalText,
+      }, streamedMetadata);
+    } else if (reg?.adapter?.chat) {
+      const history = conversationHistoryForTurn(deps, args.conversation.id, args.currentMessageId);
+      const turnContext: ChatTurnContext = {
+        workspaceId: ws.workspaceId,
+        ambientId: ws.ambientId,
+        agentId: args.agentId,
+        userId: ws.user.id,
+        conversationId: args.conversation.id,
+        clientTurnId: args.clientTurnId,
+        executionMode: requestedPlan ? 'plan' : 'chat',
+        maxTurns: 8,
+        viewport: activeViewport,
+        signal: c.req.raw.signal,
+      };
+      for await (const delta of withChatHeartbeats(
+        ChatSessionExecutor.turn(reg.adapter, history, runtimeUserMessage, turnContext, {
+          ...(requestedPlan ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM } : {}),
+        }),
+        { clientTurnId: args.clientTurnId, agentId: args.agentId, workflowId: viewportWorkflowId },
+      )) {
+        if (isAdapterErrorDelta(delta)) {
+          if (delta.error.startsWith('canceled:')) {
+            finishReason = 'max_turns';
+            finalText = 'Stopped by operator.';
+            break;
+          }
+          adapterError = delta.error;
+          continue;
+        }
+        if (delta.type === 'done') {
+          finishReason = delta.finishReason;
+          break;
+        }
+        await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, delta, streamedMetadata);
+        if (delta.type === 'text') finalText += delta.delta;
+      }
+    } else {
+      const limitation = reg?.adapter?.capabilities?.().limitations?.[0];
+      finalText = limitation
+        ?? 'This agent is not connected to an interactive chat harness yet. Configure a V1 harness, then try again.';
+      finishReason = 'error';
+      adapterError = finalText;
+      await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
+        type: 'activity',
+        id: `activity-${args.clientTurnId}-no-chat`,
+        phase: 'error',
+        status: 'error',
+        label: 'Interactive chat unavailable',
+        detail: finalText,
+        clientTurnId: args.clientTurnId,
+        agentId: args.agentId,
+      }, streamedMetadata);
+      await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, { type: 'text', delta: finalText }, streamedMetadata);
+    }
+
+    if (!finalText.trim() && !streamedMetadata.confirmation) {
+      if (finishReason === 'error') {
+        finalText = relevantTurnError(streamedMetadata, adapterError);
+      } else {
+        finishReason = 'error';
+        finalText = 'The runtime completed without returning an answer. The turn was stopped so you can retry without wondering whether it is still running.';
+      }
+    }
+
+    const turnCompletedAt = new Date().toISOString();
+    const durationMs = Math.max(0, Date.now() - turnStartedAtMs);
+    finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
+    const failed = streamedMetadata.turn.status === 'failed';
+    const stopped = streamedMetadata.turn.status === 'stopped';
+    await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, createChatActivity({
+      clientTurnId: args.clientTurnId,
+      agentId: args.agentId,
+      workflowId: streamedMetadata.workflowId ?? viewportWorkflowId,
+      phase: failed ? 'error' : 'complete',
+      status: failed ? 'error' : 'success',
+      label: failed ? 'Response failed' : stopped ? 'Stopped before completion' : 'Response ready',
+      detail: failed ? finalText : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
+      suffix: 'terminal',
+      startedAt: turnCompletedAt,
+      completedAt: turnCompletedAt,
+      durationMs,
+    }), streamedMetadata);
+
+    if (failed) {
+      await stream.writeSSE({
+        event: 'error',
+        data: JSON.stringify({
+          code: 'ADAPTER_CHAT_FAILED',
+          message: finalText,
+        }),
+      });
+    }
+
+    const hasContentToSave = finalText.trim() || streamedMetadata.confirmation || failed;
+    if (hasContentToSave) {
+      const bodyToSave = finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required';
+      const persisted = deps.conversations.appendMirrored({
+        workspaceId: ws.workspaceId,
+        conversationId: args.conversation.id,
+        sessionMessageId: `chat_${randomUUID()}`,
+        authorType: 'agent',
+        body: bodyToSave,
+        deliveryStatus: failed ? 'failed' : 'delivered',
+        metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata, args.clientTurnId),
+      });
+      await stream.writeSSE({
+        event: 'message',
+        data: JSON.stringify({
+          id: persisted.id,
+          role: 'agent',
+          body: persisted.body,
+          createdAt: persisted.createdAt,
+          metadata: persisted.metadata,
+          deliveryStatus: persisted.deliveryStatus,
+        }),
+      });
+    }
+
+    const capture = await deps.memoryCapture?.captureTurn({
+      workspaceId: ws.workspaceId,
+      conversationId: args.conversation.id,
+      userId: ws.user.id,
+      agentId: args.agentId,
+      userDisplayName: ws.user.displayName,
+      userMessage: args.userMessage,
+      assistantMessage: finalText.trim() || null,
+      finishReason,
+    });
+    if (
+      capture &&
+      (capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
+    ) {
+      publishAgentWorkStep(deps.bus, {
+        workspaceId: ws.workspaceId,
+        ambientId: ws.ambientId,
+        agentId: args.agentId,
+        conversationId: args.conversation.id,
+        clientTurnId: args.clientTurnId,
+        phase: 'complete',
+        description: 'Learning from this conversation (updating memory in the background)',
+        at: new Date().toISOString(),
+      });
+    }
+
+    await writeChatDelta(
+      stream,
+      deps,
+      ws,
+      args.agentId,
+      args.conversation.id,
+      args.clientTurnId,
+      { type: 'done', finishReason },
+      streamedMetadata,
+    );
+    await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
+  });
+}
+
 async function sendConversationMessage(
   c: Context,
   deps: ConversationRouteDeps,
@@ -618,201 +865,18 @@ async function sendConversationMessage(
     body: body.body,
     metadata: { clientTurnId },
   });
-  const reg = deps.adapters.get(agentId);
-
-  const acceptsSSE = c.req.header('accept')?.includes('text/event-stream');
-  if (acceptsSSE) {
-    return streamSSE(c, async (stream) => {
-      const turnStartedAtMs = Date.now();
-      const turnStartedAt = new Date(turnStartedAtMs).toISOString();
-      let finalText = '';
-      let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
-      let adapterError: string | null = null;
-      const streamedMetadata = createStreamedChatMetadata(clientTurnId, turnStartedAt);
-      const viewportOverride = body.viewportOverride as ViewportContext | null | undefined;
-      const activeViewport = body.useViewportContext
-        ? viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
-        : viewportOverride ?? null;
-      const viewportWorkflowId = workflowIdFromViewport(activeViewport);
-      await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
-        clientTurnId,
-        agentId,
-        workflowId: viewportWorkflowId,
-        phase: 'received',
-        label: 'Request received',
-        detail: 'The agent accepted the chat turn.',
-        suffix: 'received',
-        startedAt: turnStartedAt,
-      }), streamedMetadata);
-      if (reg?.adapter?.chat) {
-        const history = deps.conversations
-          .messages(conversation.id, 20)
-          .slice(0, -1)
-          .map((row) => ({
-            role: row.authorType === 'operator' ? 'user' as const : 'assistant' as const,
-            content: row.body,
-          }));
-        const turnContext: ChatTurnContext = {
-          workspaceId: ws.workspaceId,
-          ambientId: ws.ambientId,
-          agentId,
-          userId: ws.user.id,
-          conversationId: conversation.id,
-          clientTurnId,
-          maxTurns: 8,
-          viewport: activeViewport,
-          // Cancel the whole turn (chat loop + model-backed tools like workflow
-          // synthesis) when the operator disconnects the SSE stream, so we stop
-          // spending model credits on a turn nobody is listening to.
-          signal: c.req.raw.signal,
-        };
-        for await (const delta of withChatHeartbeats(
-          ChatSessionExecutor.turn(reg.adapter, history, body.body, turnContext),
-          { clientTurnId, agentId, workflowId: viewportWorkflowId },
-        )) {
-          if (isAdapterErrorDelta(delta)) {
-            if (delta.error.startsWith('canceled:')) {
-              finishReason = 'max_turns';
-              finalText = 'Stopped by operator.';
-              break;
-            }
-            adapterError = delta.error;
-            continue;
-          }
-          if (delta.type === 'done') {
-            finishReason = delta.finishReason;
-            break;
-          }
-          await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, delta, streamedMetadata);
-          if (delta.type === 'text') finalText += delta.delta;
-        }
-      } else {
-        // Every V1 harness adapter (OpenClaw, Hermes, Codex, Cursor, Claude Code,
-        // HTTP) now implements `chat()`, so this is reached only by an adapter that
-        // genuinely cannot chat. Surface the adapter's own reason, not boilerplate.
-        const limitation = reg?.adapter?.capabilities?.().limitations?.[0];
-        finalText = limitation
-          ?? 'This agent is not connected to an interactive chat harness yet. Configure a V1 harness, then try again.';
-        finishReason = 'error';
-        adapterError = finalText;
-        await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, {
-          type: 'activity',
-          id: `activity-${clientTurnId}-no-chat`,
-          phase: 'error',
-          status: 'error',
-          label: 'Interactive chat unavailable',
-          detail: finalText,
-          clientTurnId,
-          agentId,
-        }, streamedMetadata);
-        await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, { type: 'text', delta: finalText }, streamedMetadata);
-      }
-
-      if (!finalText.trim() && !streamedMetadata.confirmation) {
-        if (finishReason === 'error') {
-          finalText = relevantTurnError(streamedMetadata, adapterError);
-        } else {
-          finishReason = 'error';
-          finalText = 'The runtime completed without returning an answer. The turn was stopped so you can retry without wondering whether it is still running.';
-        }
-      }
-
-      const turnCompletedAt = new Date().toISOString();
-      const durationMs = Math.max(0, Date.now() - turnStartedAtMs);
-      finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
-      const failed = streamedMetadata.turn.status === 'failed';
-      const stopped = streamedMetadata.turn.status === 'stopped';
-      await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
-        clientTurnId,
-        agentId,
-        workflowId: streamedMetadata.workflowId ?? viewportWorkflowId,
-        phase: failed ? 'error' : 'complete',
-        status: failed ? 'error' : 'success',
-        label: failed ? 'Response failed' : stopped ? 'Stopped before completion' : 'Response ready',
-        detail: failed ? finalText : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
-        suffix: 'terminal',
-        startedAt: turnCompletedAt,
-        completedAt: turnCompletedAt,
-        durationMs,
-      }), streamedMetadata);
-
-      if (failed) {
-        await stream.writeSSE({
-          event: 'error',
-          data: JSON.stringify({
-            code: 'ADAPTER_CHAT_FAILED',
-            message: finalText,
-          }),
-        });
-      }
-
-      const hasContentToSave = finalText.trim() || streamedMetadata.confirmation || failed;
-      if (hasContentToSave) {
-        const bodyToSave = finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required';
-
-        const persisted = deps.conversations.appendMirrored({
-          workspaceId: ws.workspaceId,
-          conversationId: conversation.id,
-          sessionMessageId: `chat_${randomUUID()}`,
-          authorType: 'agent',
-          body: bodyToSave,
-          deliveryStatus: failed ? 'failed' : 'delivered',
-          metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata, clientTurnId),
-        });
-        await stream.writeSSE({
-          event: 'message',
-          data: JSON.stringify({
-            id: persisted.id,
-            role: 'agent',
-            body: persisted.body,
-            createdAt: persisted.createdAt,
-            metadata: persisted.metadata,
-            deliveryStatus: persisted.deliveryStatus,
-          }),
-        });
-      }
-      const capture = await deps.memoryCapture?.captureTurn({
-        workspaceId: ws.workspaceId,
-        conversationId: conversation.id,
-        userId: ws.user.id,
-        agentId,
-        userDisplayName: ws.user.displayName,
-        userMessage: body.body,
-        assistantMessage: finalText.trim() || null,
-        finishReason,
-      });
-      // Surface the post-turn "learning" so the small background spend (peer-profile
-      // embeddings + cognitive promotion LLM passes) is never a mystery charge after
-      // the turn looks done. Only emitted when real background work was actually
-      // enqueued — routine turns stay silent.
-      if (
-        capture &&
-        (capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
-      ) {
-        deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
-          workspaceId: ws.workspaceId,
-          ambientId: ws.ambientId,
-          agentId,
-          conversationId: conversation.id,
-          clientTurnId,
-          phase: 'complete',
-          description: 'Learning from this conversation (updating memory in the background)',
-          at: new Date().toISOString(),
-        });
-      }
-      await writeChatDelta(
-        stream,
-        deps,
-        ws,
-        agentId,
-        conversation.id,
-        clientTurnId,
-        { type: 'done', finishReason },
-        streamedMetadata,
-      );
-      await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
+  if (c.req.header('accept')?.includes('text/event-stream')) {
+    return streamConversationTurnReply(c, deps, ws, {
+      agentId,
+      conversation,
+      clientTurnId,
+      currentMessageId: message.id,
+      userMessage: body.body,
+      useViewportContext: body.useViewportContext,
+      viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
     });
   }
+  const reg = deps.adapters.get(agentId);
 
   if (reg?.adapter instanceof OpenClawAdapter) {
     await relayOpenClaw(deps, reg.adapter, conversation.mirroredSessionId ?? undefined, body.body, agentId);
@@ -1034,7 +1098,6 @@ function createStreamedChatMetadata(
       startedAt,
       status: 'running',
     },
-    thinking: '',
     activity: [],
     toolCalls: [],
     toolStartedAt: new Map(),
@@ -1082,10 +1145,7 @@ function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta)
     if (delta.runId) state.runId = delta.runId;
     return;
   }
-  if (delta.type === 'thinking') {
-    state.thinking += delta.delta;
-    return;
-  }
+  if (delta.type === 'thinking') return;
   if (delta.type === 'tool_call') {
     state.toolStartedAt.set(delta.id, Date.now());
     state.toolCalls = [
@@ -1147,7 +1207,6 @@ function buildPersistedChatMetadata(
     source,
     ...(clientTurnId ? { clientTurnId } : {}),
     turn: state.turn,
-    ...(state.thinking.trim() ? { thinking: state.thinking } : {}),
     ...(state.activity.length > 0 ? { activity: state.activity } : {}),
     ...(state.toolCalls.length > 0 ? { toolCalls: state.toolCalls } : {}),
     ...(state.workflowId ? { workflowId: state.workflowId } : {}),

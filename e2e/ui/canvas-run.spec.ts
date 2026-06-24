@@ -1,39 +1,65 @@
 /**
- * Canvas — run a saved workflow and verify the ledger panel populates.
+ * Canvas - run a saved workflow and verify inspection stays modal-first.
  */
 import { test, expect } from '../fixtures';
-import { uiAuth } from './_helpers';
+import { trivialGraph } from '../api/_helpers';
+import { uiAuth, waitForShell } from './_helpers';
 
-test('Run button on the canvas starts a run and navigates to /runs/:id', async ({ page, request }) => {
-  await uiAuth(page, request);
-  await page.locator('a[title="Workflows"]').click();
-  await page.getByRole('button', { name: /\+ New workflow/i }).click();
-  await expect(page.getByText('Echo')).toBeVisible();
+test.setTimeout(60_000);
+
+async function seedWorkflow(request: import('@playwright/test').APIRequestContext, headers: Record<string, string>) {
+  const res = await request.post('/v1/workflows', {
+    headers,
+    data: {
+      title: 'ModalProbe',
+      summary: '',
+      graph: trivialGraph(),
+      settings: {},
+    },
+  });
+  const body = await res.json();
+  return body.workflow.id as string;
+}
+
+test('Run button on the canvas starts a run and opens the run modal without leaving the canvas', async ({ page, request }) => {
+  const auth = await uiAuth(page, request);
+  const workflowId = await seedWorkflow(request, auth.h);
+  await waitForShell(page);
+  await page.goto(`/workflows/${workflowId}`);
   await page.getByRole('button', { name: /^Run$/i }).click();
-  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]{36}/, { timeout: 10_000 });
+  await page.getByRole('dialog').getByRole('button', { name: /^Run$/i }).click();
+  await expect(page).toHaveURL(new RegExp(`/workflows/${workflowId}(\\?tab=studio)?$`), { timeout: 10_000 });
+  await expect(page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i })).toBeVisible({ timeout: 15_000 });
 });
 
-test('run detail page renders the ledger header (events panel)', async ({ page, request }) => {
-  await uiAuth(page, request);
-  await page.locator('a[title="Workflows"]').click();
-  await page.getByRole('button', { name: /\+ New workflow/i }).click();
+test('run modal renders the ledger tab from the canvas flow', async ({ page, request }) => {
+  const auth = await uiAuth(page, request);
+  const workflowId = await seedWorkflow(request, auth.h);
+  await waitForShell(page);
+  await page.goto(`/workflows/${workflowId}`);
   await page.getByRole('button', { name: /^Run$/i }).click();
-  await expect(page.getByText(/Ledger/i)).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/events$/)).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: /^Run$/i }).click();
+  const modal = page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i });
+  await expect(modal.getByRole('button', { name: /^ledger$/i })).toBeVisible({ timeout: 15_000 });
+  await modal.getByRole('button', { name: /^ledger$/i }).click();
+  await expect(modal.getByText('#1')).toBeVisible({ timeout: 15_000 });
 });
 
-test('run detail shows a Nodes panel header', async ({ page, request }) => {
-  // Triggering Run via the UI races the auto-bind effect for the placeholder
-  // skillId — assert only the panel header (run state populates async).
-  await uiAuth(page, request);
-  await page.locator('a[title="Workflows"]').click();
-  await page.getByRole('button', { name: /\+ New workflow/i }).click();
+test('run modal shows a Nodes panel header', async ({ page, request }) => {
+  const auth = await uiAuth(page, request);
+  const workflowId = await seedWorkflow(request, auth.h);
+  await waitForShell(page);
+  await page.goto(`/workflows/${workflowId}`);
   await page.getByRole('button', { name: /^Run$/i }).click();
-  await expect(page.getByText(/Nodes/i).first()).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('dialog').getByRole('button', { name: /^Run$/i }).click();
+  const modal = page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i });
+  await expect(modal.getByRole('button', { name: /^nodes$/i })).toBeVisible({ timeout: 15_000 });
 });
 
-test('Runs sidebar entry navigates to the run history list', async ({ page, request }) => {
+test('History remains the dedicated route for workflow runs', async ({ page, request }) => {
   await uiAuth(page, request);
-  await page.locator('a[title="Runs"]').click();
-  await expect(page).toHaveURL(/\/runs$/);
+  await waitForShell(page);
+  await page.goto('/history?tab=runs');
+  await expect(page).toHaveURL(/\/history\?tab=runs$/);
+  await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible();
 });

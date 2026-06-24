@@ -17,6 +17,21 @@ const codexDetection: HarnessDetectionResult = {
   },
 };
 
+const currentClaudePath = 'C:\\Users\\antar\\AppData\\Roaming\\Claude\\claude-code\\2.1.189\\claude.exe';
+const staleClaudePath = 'C:\\Users\\antar\\AppData\\Roaming\\Claude\\claude-code\\2.1.177\\claude.exe';
+
+const claudeDetection: HarnessDetectionResult = {
+  adapterType: 'claude_code',
+  harness: 'Claude Code',
+  status: 'found',
+  binaryPath: currentClaudePath,
+  config: {
+    command: currentClaudePath,
+    binaryPath: currentClaudePath,
+    detectedBinaryPath: currentClaudePath,
+  },
+};
+
 describe('runtime config repair', () => {
   it('repairs stale versioned WindowsApps CLI paths to stable commands', async () => {
     const result = await repairCliHarnessConfig('codex', { binaryPath: staleBinaryPath }, [codexDetection]);
@@ -34,5 +49,23 @@ describe('runtime config repair', () => {
 
     expect(result.changed).toBe(false);
     expect(result.config.command).toBe('C:\\tools\\codex-wrapper.cmd');
+  });
+
+  it('repairs stale Claude Code managed package paths to the detected current runtime', async () => {
+    const result = await repairCliHarnessConfig('claude_code', { binaryPath: staleClaudePath }, [claudeDetection]);
+
+    expect(result.changed).toBe(true);
+    expect(result.config).toMatchObject({
+      command: currentClaudePath,
+      binaryPath: currentClaudePath,
+      detectedBinaryPath: currentClaudePath,
+    });
+  });
+
+  it('preserves custom Claude Code wrappers', async () => {
+    const result = await repairCliHarnessConfig('claude_code', { command: 'C:\\tools\\claude-wrapper.cmd' }, [claudeDetection]);
+
+    expect(result.changed).toBe(false);
+    expect(result.config.command).toBe('C:\\tools\\claude-wrapper.cmd');
   });
 });

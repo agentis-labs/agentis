@@ -11,7 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 
 interface Hit {
-  type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'extension' | 'conversation';
+  type: 'app' | 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'extension' | 'conversation';
   id: string;
   title: string;
   subtitle?: string;
@@ -103,7 +103,7 @@ export function CommandPalette() {
               if (hit) go(hit);
             }
           }}
-          placeholder="Search workflows, agents, gateways, runs, approvals…"
+          placeholder="Search apps, agents, workflows, runs, approvals…"
           className="w-full border-b border-line bg-transparent px-4 py-3 text-sm outline-none"
         />
         <div className="max-h-80 overflow-auto">

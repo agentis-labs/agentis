@@ -49,6 +49,7 @@ describe('<AgentChannelsTab />', () => {
     await waitFor(() => expect(screen.getByText('WhatsApp')).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole('button', { name: /Connect WhatsApp/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Show QR/i }));
 
     // QR image appears + linked-devices instruction.
     await waitFor(() => expect(screen.getByAltText(/WhatsApp login QR/i)).toBeInTheDocument());
@@ -65,7 +66,58 @@ describe('<AgentChannelsTab />', () => {
     await waitFor(() => expect(screen.getByText('Telegram')).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole('button', { name: /Connect Telegram/i }));
-    expect(screen.getByText(/long-polling/i)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/Paste the bot token/i)).toBeInTheDocument();
+    expect(screen.getByText(/long polling/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Paste token/i)).toBeInTheDocument();
+  });
+
+  it('saves a default recipient on an existing channel', async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : undefined });
+      if (url === '/v1/channels' && method === 'GET') {
+        return jsonResponse({
+          connections: [{
+            id: 'wa1',
+            agentId: 'a1',
+            kind: 'whatsapp',
+            name: 'Orchy WhatsApp',
+            status: 'active',
+            mode: 'qr_local',
+            defaultChatId: null,
+            targetAliases: {},
+            health: { status: 'active', checks: [] },
+          }],
+        });
+      }
+      if (url === '/v1/channels/wa1/targets' && method === 'PATCH') {
+        return jsonResponse({
+          connection: {
+            id: 'wa1',
+            agentId: 'a1',
+            kind: 'whatsapp',
+            name: 'Orchy WhatsApp',
+            status: 'active',
+            mode: 'qr_local',
+            defaultChatId: '12345678901@s.whatsapp.net',
+            targetAliases: { me: '12345678901@s.whatsapp.net' },
+            health: { status: 'active', checks: [] },
+          },
+          health: { status: 'active', checks: [] },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<AgentChannelsTab agentId="a1" agentName="Orchestrator" />);
+    await waitFor(() => expect(screen.getByText(/Orchy WhatsApp/)).toBeInTheDocument());
+
+    await userEvent.type(screen.getByPlaceholderText(/\+12345678901/i), '+1 234 567-8901');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    await waitFor(() => expect(calls.some((call) => call.url === '/v1/channels/wa1/targets' && call.method === 'PATCH')).toBe(true));
+    const targetCall = calls.find((call) => call.url === '/v1/channels/wa1/targets');
+    expect(targetCall?.body).toContain('+1 234 567-8901');
   });
 });

@@ -125,7 +125,7 @@ export class RunCompactionService {
 
     // 2) Delete ledger events whose run finished long ago. We key off the
     //    event's createdAt (cheaper) and let foreign-key cascade handle any
-    //    orphans from already-deleted runs.
+    //    events from already-deleted runs.
     const deletedLedger = this.#db
       .delete(schema.ledgerEvents)
       .where(

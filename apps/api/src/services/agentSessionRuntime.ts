@@ -23,7 +23,7 @@ import {
   CONSTANTS,
   REALTIME_EVENTS,
   REALTIME_ROOMS,
-  roleTools,
+  effectiveSpecialistTools,
   TOOL_DESCRIPTIONS,
   isAgentRole,
   type AgentRole,
@@ -42,16 +42,42 @@ import {
   type AgentSession,
   type MemoryBlock,
 } from './agentSession.js';
+import type { PlanService, TaskCompletionJudge } from './planService.js';
 
 // ──────────────────────────────────────────────────────────────
 // Outcomes
 // ──────────────────────────────────────────────────────────────
 
 export type SessionYield =
-  | { kind: 'delegate'; toolCallId: string; role: AgentRole; task: string; allowedTools?: string[]; allowedPaths?: string[]; maxTokens?: number }
+  | {
+      kind: 'delegate';
+      toolCallId: string;
+      role: AgentRole;
+      task: string;
+      allowedTools?: string[];
+      allowedPaths?: string[];
+      maxTokens?: number;
+      createIfMissing?: boolean;
+      temporary?: boolean;
+      name?: string;
+      instructions?: string;
+      leaseMinutes?: number;
+    }
   | { kind: 'await_event'; toolCallId: string; event: string }
   | { kind: 'sleep_until'; toolCallId: string; untilIso: string }
-  | { kind: 'request_approval'; toolCallId: string; title: string; summary: string };
+  | { kind: 'request_approval'; toolCallId: string; title: string; summary: string }
+  // W3 — spawn a TEAM of specialists in parallel, await all, synthesize.
+  | { kind: 'delegate_team'; toolCallId: string; members: DelegateMember[] }
+  // W4 — run a saved workflow as a tool (subroutine) and WAIT for its result.
+  | { kind: 'run_workflow'; toolCallId: string; workflowId: string; inputs?: Record<string, unknown> }
+  // W4 — author a NEW saved workflow (validated + persisted), then run it later.
+  | { kind: 'build_workflow'; toolCallId: string; title: string; graph: Record<string, unknown> };
+
+/** One member of a parallel team spawn (delegate fields without kind/toolCallId). */
+export type DelegateMember = Omit<Extract<SessionYield, { kind: 'delegate' }>, 'kind' | 'toolCallId'>;
+
+/** Max specialists one agent may spawn in a single team without approval (W6/D3). */
+export const MAX_TEAM_FANOUT = 8;
 
 export type SessionOutcome =
   | { kind: 'completed'; output: Record<string, unknown> }
@@ -87,10 +113,12 @@ export interface DelegationRequest {
 
 export interface SessionRunContext {
   workspaceId: string;
+  userId?: string;
   runId: string;
   nodeId: string;
   agentId: string;
   workflowId: string;
+  planId?: string | null;
   role?: AgentRole;
   /** Workspace / Brain / memory context injected as a system addendum each step. */
   runContextBlock?: string;
@@ -116,12 +144,14 @@ export interface AgentSessionRuntimeDeps {
    * Per-workspace adapter resolver — preferred over {@link adapter}. Returns the
    * cognitive-step adapter for a workspace (Settings → env → first agent runtime),
    * or undefined when no model is configured anywhere for that workspace.
-   */
+  */
   resolveAdapter?: (workspaceId: string) => SessionAdapter | undefined;
   scratchpad: ScratchpadService;
+  plans?: PlanService;
   bus: EventBus;
   logger: Logger;
   agentTools?: AgentToolRuntime;
+  verifyCompletion?: TaskCompletionJudge;
   /** Cheap-model summarizer for compaction; falls back to truncation when absent. */
   summarize?: SummarizeFn;
 }
@@ -135,14 +165,19 @@ const TOOL = {
   broadcast: 'broadcast',
   readChannel: 'read_channel',
   runInspect: 'run_inspect',
+  flagDeviation: 'flag_deviation',
+  recordDecision: 'record_decision',
   delegateTask: 'delegate_task',
+  spawnTeam: 'spawn_team',
+  runWorkflow: 'run_workflow',
+  buildWorkflow: 'build_workflow',
   awaitEvent: 'await_event',
   sleepUntil: 'sleep_until',
   requestApproval: 'request_approval',
   completeTask: 'complete_task',
 } as const;
 
-const YIELD_TOOLS = new Set<string>([TOOL.delegateTask, TOOL.awaitEvent, TOOL.sleepUntil, TOOL.requestApproval]);
+const YIELD_TOOLS = new Set<string>([TOOL.delegateTask, TOOL.spawnTeam, TOOL.runWorkflow, TOOL.buildWorkflow, TOOL.awaitEvent, TOOL.sleepUntil, TOOL.requestApproval]);
 
 /**
  * Tools a delegation grant never restricts: terminal, session-local, and
@@ -291,8 +326,10 @@ export class AgentSessionRuntime {
       // No tools requested → the model's free text is its final answer.
       if (result.toolCalls.length === 0) {
         const output = { result: result.text };
-        this.deps.sessions.complete(sessionId, output);
-        return { kind: 'completed', output };
+        const completion = await this.#completeWithVerification(sessionId, runCtx, output);
+        if (completion.ok) return { kind: 'completed', output };
+        this.deps.sessions.fail(sessionId, completion.error);
+        return { kind: 'failed', error: completion.error };
       }
 
       const dispatch = await this.#runToolCalls(sessionId, stepNumber, runCtx, result.toolCalls);
@@ -373,13 +410,14 @@ export class AgentSessionRuntime {
       // Terminal.
       if (call.name === TOOL.completeTask) {
         const output = normalizeOutput(args.output ?? args);
+        const completion = await this.#completeWithVerification(sessionId, runCtx, output);
         this.deps.sessions.appendMessages(
           sessionId,
-          [{ role: 'tool', toolCallId: call.id, content: 'task completed' }],
+          [{ role: 'tool', toolCallId: call.id, content: completion.ok ? 'task completed' : completion.error }],
           stepNumber,
         );
-        this.deps.sessions.complete(sessionId, output);
-        return { kind: 'done', outcome: { kind: 'completed', output } };
+        if (completion.ok) return { kind: 'done', outcome: { kind: 'completed', output } };
+        continue;
       }
 
       // Yield points — record intent, suspend, hand the engine the wake spec.
@@ -417,20 +455,33 @@ export class AgentSessionRuntime {
   #buildYield(call: ChatToolCall, args: Record<string, unknown>): SessionYield | null {
     switch (call.name) {
       case TOOL.delegateTask: {
-        const role = String(args.role ?? '');
-        const task = String(args.task ?? '');
-        if (!isAgentRole(role) || !task) return null;
-        const strList = (v: unknown): string[] | undefined =>
-          Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : undefined;
-        const allowedTools = strList(args.allowed_tools);
-        const allowedPaths = strList(args.allowed_paths);
-        const maxTokens = typeof args.max_tokens === 'number' && args.max_tokens > 0 ? args.max_tokens : undefined;
-        return {
-          kind: 'delegate', toolCallId: call.id, role, task,
-          ...(allowedTools && allowedTools.length > 0 ? { allowedTools } : {}),
-          ...(allowedPaths && allowedPaths.length > 0 ? { allowedPaths } : {}),
-          ...(maxTokens !== undefined ? { maxTokens } : {}),
-        };
+        const member = parseDelegateMember(args);
+        return member ? { kind: 'delegate', toolCallId: call.id, ...member } : null;
+      }
+      case TOOL.spawnTeam: {
+        const rawTasks = Array.isArray(args.tasks) ? args.tasks : [];
+        const members: DelegateMember[] = [];
+        for (const raw of rawTasks) {
+          const m = parseDelegateMember(asRecord(raw));
+          if (m) members.push(m);
+        }
+        if (members.length === 0) return null;
+        // W6/D3 — bound fan-out; surplus members are dropped (the agent can spawn
+        // a second wave). Future: approval gate beyond the cap.
+        return { kind: 'delegate_team', toolCallId: call.id, members: members.slice(0, MAX_TEAM_FANOUT) };
+      }
+      case TOOL.runWorkflow: {
+        const workflowId = String(args.workflow_id ?? args.workflowId ?? '');
+        if (!workflowId) return null;
+        const inputs = args.inputs && typeof args.inputs === 'object' && !Array.isArray(args.inputs)
+          ? (args.inputs as Record<string, unknown>) : undefined;
+        return { kind: 'run_workflow', toolCallId: call.id, workflowId, ...(inputs ? { inputs } : {}) };
+      }
+      case TOOL.buildWorkflow: {
+        const title = String(args.title ?? '').trim();
+        const graph = args.graph;
+        if (!title || !graph || typeof graph !== 'object' || Array.isArray(graph)) return null;
+        return { kind: 'build_workflow', toolCallId: call.id, title, graph: graph as Record<string, unknown> };
       }
       case TOOL.awaitEvent: {
         const event = String(args.event ?? '');
@@ -495,15 +546,114 @@ export class AgentSessionRuntime {
             : null,
         };
       }
+      case TOOL.flagDeviation: {
+        // W5.1 — a first-class, visible verdict: the agent says the planned work
+        // doesn't fit reality (bad input / wrong scope / blocked) BEFORE failing.
+        // Recorded + broadcast so the operator sees it; the agent then completes
+        // with a grounded partial, escalates, or re-scopes within budget.
+        const kind = ['reject_input', 'rescope', 'blocked'].includes(String(args.kind)) ? String(args.kind) : 'rescope';
+        const reason = String(args.reason ?? '').slice(0, 1000);
+        const proposed = typeof args.proposed === 'string' && args.proposed.trim() ? args.proposed.trim().slice(0, 1000) : undefined;
+        const planId = await this.#resolvePlanId(sessionId, runCtx);
+        if (planId && this.deps.plans) {
+          this.deps.plans.recordDeviation(runCtx.workspaceId, runCtx.userId ?? runCtx.agentId, planId, {
+            kind: kind as 'reject_input' | 'rescope' | 'blocked',
+            reason,
+            ...(proposed ? { proposed } : {}),
+            actorId: runCtx.agentId,
+            runId: runCtx.runId,
+            sessionId,
+            nodeId: runCtx.nodeId,
+          });
+        }
+        this.deps.scratchpad.write(runCtx.runId, `deviation:${runCtx.nodeId ?? runCtx.agentId}`, { kind, reason, proposed, at: new Date().toISOString() });
+        this.deps.scratchpad.broadcast(runCtx.runId, 'deviations', runCtx.agentId, `[${kind}] ${reason}`);
+        this.deps.bus.publish(REALTIME_ROOMS.run(runCtx.runId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+          runId: runCtx.runId, nodeId: runCtx.nodeId, agentId: runCtx.agentId,
+          text: `Deviation flagged (${kind}): ${clip(reason, 200)}`, toolCalls: ['flag_deviation'],
+        });
+        return {
+          ok: true,
+          acknowledged: true,
+          guidance: 'Deviation recorded and visible to the operator. If the input is unusable, complete with a grounded partial plus this note, request_approval to escalate, or re-scope your plan and proceed within budget. Never fabricate to satisfy a contract.',
+        };
+      }
+      case TOOL.recordDecision: {
+        const summary = String(args.summary ?? '').slice(0, 1000);
+        const rationale = typeof args.rationale === 'string' && args.rationale.trim()
+          ? args.rationale.trim().slice(0, 1000)
+          : undefined;
+        const planId = await this.#resolvePlanId(sessionId, runCtx);
+        if (planId && this.deps.plans) {
+          this.deps.plans.recordDecision(runCtx.workspaceId, runCtx.userId ?? runCtx.agentId, planId, {
+            summary,
+            ...(rationale ? { rationale } : {}),
+            actorId: runCtx.agentId,
+            runId: runCtx.runId,
+            sessionId,
+            nodeId: runCtx.nodeId,
+          });
+        } else {
+          this.deps.scratchpad.write(runCtx.runId, `decision:${runCtx.nodeId ?? runCtx.agentId}:${Date.now()}`, {
+            summary,
+            rationale,
+            at: new Date().toISOString(),
+          });
+        }
+        return { ok: true, recorded: true };
+      }
       default:
         return this.#execRoleTool(name, args, runCtx);
     }
   }
 
+  async #completeWithVerification(
+    sessionId: string,
+    runCtx: SessionRunContext,
+    output: Record<string, unknown>,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const planId = await this.#resolvePlanId(sessionId, runCtx);
+    if (!planId || !this.deps.plans) {
+      this.deps.sessions.complete(sessionId, output);
+      return { ok: true };
+    }
+    const result = await this.deps.plans.verifyCompletion(runCtx.workspaceId, runCtx.userId ?? runCtx.agentId, planId, {
+      output,
+      judge: this.deps.verifyCompletion,
+      evidence: [{ label: 'Agent completion output', runId: runCtx.runId, sessionId, nodeId: runCtx.nodeId }],
+    });
+    if (result.passed) {
+      this.deps.sessions.complete(sessionId, output);
+      return { ok: true };
+    }
+    const failed = result.verification.criteria
+      .filter((criterion) => !criterion.passed)
+      .map((criterion) => `- ${criterion.criterion}: ${criterion.reason}`)
+      .join('\n');
+    return {
+      ok: false,
+      error: `completion verification failed; revise the work or flag a grounded deviation before trying again.\n${failed}`,
+    };
+  }
+
+  async #resolvePlanId(sessionId: string, runCtx: SessionRunContext): Promise<string | null> {
+    if (runCtx.planId) return runCtx.planId;
+    if (!this.deps.plans) return null;
+    const bySession = this.deps.plans.findBySession(runCtx.workspaceId, sessionId);
+    if (bySession) return bySession.id;
+    const byRun = this.deps.plans.findByRun(runCtx.workspaceId, runCtx.runId);
+    return byRun?.id ?? null;
+  }
+
   async #execRoleTool(name: string, args: Record<string, unknown>, runCtx: SessionRunContext): Promise<unknown> {
     if (!this.deps.agentTools || !runCtx.role) return { ok: false, error: `unknown tool '${name}'` };
-    const granted = roleTools(runCtx.role);
-    if (!granted.includes(name as AgentTool)) return { ok: false, error: `tool '${name}' not granted to role '${runCtx.role}'` };
+    // §specialist-removal — built-in role manifests are gone; a specialist gets
+    // the universal floor. A scoped delegate is ALSO restricted by its grant, so
+    // role tools (not just orchestration tools) honor the delegation allowlist.
+    const roleManifest = effectiveSpecialistTools({ role: runCtx.role });
+    if (!roleManifest.includes(name as AgentTool) || !isToolPermitted(name, runCtx.grant)) {
+      return { ok: false, error: `tool '${name}' not granted to role '${runCtx.role}'` };
+    }
     const toolArgs = args.args && typeof args.args === 'object' && !Array.isArray(args.args)
       ? args.args as Record<string, unknown>
       : args;
@@ -551,7 +701,9 @@ export class AgentSessionRuntime {
   #toolCatalog(role?: AgentRole): ToolDefinition[] {
     const tools: ToolDefinition[] = [...CONTROL_TOOLS];
     if (role) {
-      for (const t of roleTools(role)) {
+      // §specialist-removal — offer the role's effective toolbox (the universal
+      // floor when it has no explicit manifest), not the retired built-in map.
+      for (const t of effectiveSpecialistTools({ role })) {
         tools.push({
           name: t,
           description: TOOL_DESCRIPTIONS[t],
@@ -630,13 +782,62 @@ const CONTROL_TOOLS: ToolDefinition[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: TOOL.flagDeviation,
+    description:
+      'Flag that the planned work does not fit reality — BEFORE failing. Use when the input you received is unusable, ' +
+      'the scope is wrong, or you are blocked. Records a visible verdict for the operator; you then complete with a ' +
+      'grounded partial + this note, request_approval to escalate, or re-scope and proceed within budget. Never fabricate.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['reject_input', 'rescope', 'blocked'], description: 'reject_input = upstream gave unusable data; rescope = the objective needs adjusting; blocked = cannot proceed.' },
+        reason: { type: 'string', description: 'Grounded explanation citing the actual input/error. No speculation.' },
+        proposed: { type: 'string', description: 'Optional: what you propose to do instead (the better path).' },
+      },
+      required: ['kind', 'reason'],
+    },
+  },
+  {
+    name: TOOL.recordDecision,
+    description:
+      'Record an important decision made while executing the task spine. Use for durable choices that affect scope, approach, verification, or operator-visible tradeoffs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        summary: { type: 'string', description: 'Concise decision statement.' },
+        rationale: { type: 'string', description: 'Why this decision was made, grounded in observed evidence.' },
+      },
+      required: ['summary'],
+    },
+  },
+  {
     name: TOOL.delegateTask,
     description: 'Hand a subtask to a specialist and WAIT for its result. Use for work outside your expertise.',
     parameters: {
       type: 'object',
       properties: {
-        role: { type: 'string', description: 'Specialist role (planner, researcher, coder, reviewer, analyst, writer, monitor, architect, debugger, deployer).' },
+        role: { type: 'string', description: 'Specialist role slug, for example frontend_architect, tax_analyst, or launch_operator.' },
         task: { type: 'string', description: 'A self-contained description of the subtask.' },
+        create_if_missing: {
+          type: 'boolean',
+          description: 'Create a durable specialist for this role when none exists. Default false.',
+        },
+        temporary: {
+          type: 'boolean',
+          description: 'Create or reuse a temporary ephemeral specialist instance for this delegation. Implies create_if_missing.',
+        },
+        name: {
+          type: 'string',
+          description: 'Optional display name when creating the specialist.',
+        },
+        instructions: {
+          type: 'string',
+          description: 'Optional system instructions when creating the specialist. Defaults to the task brief.',
+        },
+        lease_minutes: {
+          type: 'number',
+          description: 'Optional lease for temporary specialists, capped at 24 hours. Default 60.',
+        },
         allowed_tools: {
           type: 'array',
           items: { type: 'string' },
@@ -653,6 +854,65 @@ const CONTROL_TOOLS: ToolDefinition[] = [
         },
       },
       required: ['role', 'task'],
+    },
+  },
+  {
+    name: TOOL.spawnTeam,
+    description:
+      `Spawn a TEAM of specialists to work in PARALLEL and WAIT for all results. Use when a goal splits into ` +
+      `independent subtasks you can run at once (e.g. research three markets, draft + review + fact-check). Each ` +
+      `member runs concurrently; you get an array of results to synthesize. Up to ${MAX_TEAM_FANOUT} members per call.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array',
+          description: 'The team members to spawn in parallel. Each is a delegation: { role, task, create_if_missing?, temporary?, allowed_tools?, max_tokens?, … }.',
+          items: {
+            type: 'object',
+            properties: {
+              role: { type: 'string', description: 'Specialist role slug.' },
+              task: { type: 'string', description: 'A self-contained description of this member\'s subtask.' },
+              create_if_missing: { type: 'boolean', description: 'Create a durable specialist for this role when none exists.' },
+              temporary: { type: 'boolean', description: 'Create/reuse a temporary ephemeral specialist for this delegation.' },
+              allowed_tools: { type: 'array', items: { type: 'string' }, description: 'Optional least-privilege tool scope (narrows only).' },
+              max_tokens: { type: 'number', description: 'Optional per-member token budget (narrows only).' },
+            },
+            required: ['role', 'task'],
+          },
+        },
+      },
+      required: ['tasks'],
+    },
+  },
+  {
+    name: TOOL.runWorkflow,
+    description:
+      'Run a saved workflow as a TOOL (subroutine) and WAIT for its result. Use when a repeatable, multi-step ' +
+      'process is already captured as a workflow — reach for it instead of redoing the steps yourself. Returns the ' +
+      'workflow\'s final output, which you then use to continue.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflow_id: { type: 'string', description: 'The id of the saved workflow to run.' },
+        inputs: { type: 'object', description: 'Optional input object passed to the workflow trigger.' },
+      },
+      required: ['workflow_id'],
+    },
+  },
+  {
+    name: TOOL.buildWorkflow,
+    description:
+      'Author a NEW saved workflow and persist it (validated). Use when you discover a repeatable process worth ' +
+      'capturing as a reusable tool — build it once, then run it with run_workflow now and in future runs. Returns the ' +
+      'new workflowId.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'A short, descriptive name for the workflow.' },
+        graph: { type: 'object', description: 'An Agentis WorkflowGraph JSON (version, nodes, edges, viewport).' },
+      },
+      required: ['title', 'graph'],
     },
   },
   {
@@ -676,7 +936,7 @@ const CONTROL_TOOLS: ToolDefinition[] = [
   },
   {
     name: TOOL.completeTask,
-    description: 'Finish the task and return your final output. Call this exactly once when done.',
+    description: 'Finish the task and return your final output. If the task declares output keys, output must be an object with those exact top-level keys. Call this exactly once when done.',
     parameters: {
       type: 'object',
       properties: { output: { description: 'Your final result — an object or a string.' } },
@@ -689,11 +949,42 @@ const CONTROL_TOOLS: ToolDefinition[] = [
 // helpers
 // ──────────────────────────────────────────────────────────────
 
+/** Parse one delegate/team-member spec from tool args (shared by delegate + spawn_team). */
+function parseDelegateMember(args: Record<string, unknown>): DelegateMember | null {
+  const role = String(args.role ?? '');
+  const task = String(args.task ?? '');
+  if (!isAgentRole(role) || !task) return null;
+  const strList = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : undefined;
+  const allowedTools = strList(args.allowed_tools);
+  const allowedPaths = strList(args.allowed_paths);
+  const maxTokens = typeof args.max_tokens === 'number' && args.max_tokens > 0 ? args.max_tokens : undefined;
+  const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : undefined;
+  const instructions = typeof args.instructions === 'string' && args.instructions.trim() ? args.instructions.trim() : undefined;
+  const leaseMinutes = typeof args.lease_minutes === 'number' && args.lease_minutes > 0
+    ? Math.min(Math.floor(args.lease_minutes), 24 * 60)
+    : undefined;
+  return {
+    role, task,
+    ...(allowedTools && allowedTools.length > 0 ? { allowedTools } : {}),
+    ...(allowedPaths && allowedPaths.length > 0 ? { allowedPaths } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(args.create_if_missing === true ? { createIfMissing: true } : {}),
+    ...(args.temporary === true ? { temporary: true } : {}),
+    ...(name ? { name } : {}),
+    ...(instructions ? { instructions } : {}),
+    ...(leaseMinutes !== undefined ? { leaseMinutes } : {}),
+  };
+}
+
 function suspendReasonFor(y: SessionYield): 'delegate' | 'await_event' | 'sleep_until' | 'checkpoint' {
   switch (y.kind) {
     case 'delegate':
+    case 'delegate_team':
       return 'delegate';
     case 'await_event':
+    case 'run_workflow':
+    case 'build_workflow':
       return 'await_event';
     case 'sleep_until':
       return 'sleep_until';
@@ -710,9 +1001,14 @@ function suspendReasonFor(y: SessionYield): 'delegate' | 'await_event' | 'sleep_
 function wakeConditionFor(y: SessionYield): string {
   switch (y.kind) {
     case 'delegate':
+    case 'delegate_team':
       return `delegate:${y.toolCallId}`;
     case 'await_event':
       return `event:${y.event}`;
+    case 'run_workflow':
+      return `workflow:${y.toolCallId}`;
+    case 'build_workflow':
+      return `build:${y.toolCallId}`;
     case 'sleep_until':
       return `time:${y.untilIso}`;
     case 'request_approval':

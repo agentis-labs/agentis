@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Clock, ChevronLeft, Maximize2, Plus, ChevronDown, Check, Globe } from 'lucide-react';
+import { X, Clock, ChevronLeft, Maximize2, Minimize2, Plus, ChevronDown, Check, Globe, Hash } from 'lucide-react';
 import clsx from 'clsx';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useChatPanelStore } from './ChatPanelStore';
@@ -31,8 +31,10 @@ function pathToContext(path: string): string {
   if (path === '/' || path === '/home') return 'Home';
   if (path.startsWith('/agents/')) return 'Agent Details';
   if (path === '/agents') return 'Agents';
-  if (path.startsWith('/workflows/')) return 'Workflow Canvas';
-  if (path === '/workflows') return 'Workflows';
+  if (path.startsWith('/apps/workflows/')) return 'App Logic';
+  if (path.startsWith('/workflows/')) return 'App Logic';
+  if (path === '/workflows') return 'Apps';
+  if (path.startsWith('/apps/')) return 'App';
   if (path === '/apps') return 'Apps';
   if (path === '/packages') return 'Packages';
   if (path === '/settings') return 'Settings';
@@ -51,6 +53,7 @@ export function ChatPanel() {
     launchContext,
     setLaunchContext,
     openRequestId,
+    setReturnPath,
     resetForWorkspace,
   } = useChatPanelStore();
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -60,6 +63,7 @@ export function ChatPanel() {
   const nav = useNavigate();
   const { pathname } = useLocation();
   const pageCtx = pathToContext(pathname);
+  const isFullscreen = state === 'fullscreen';
   const resizePointerIdRef = useRef<number | null>(null);
   const { loading, orchestrator, scopes, workspaceName, missingOrchestrator } = usePrimaryChatScopes();
 
@@ -111,8 +115,6 @@ export function ChatPanel() {
     };
   }, [selectThread]);
 
-  if (state === 'hidden') return null;
-
   function handleResizeStart(event: React.PointerEvent<HTMLDivElement>) {
     resizePointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -153,23 +155,40 @@ export function ChatPanel() {
 
   return (
     <>
+      {isFullscreen && (
+        <div className="fixed inset-0 z-40 bg-canvas/70 backdrop-blur-[2px]" aria-hidden />
+      )}
       <aside
-        className={clsx('animate-slide-in-right relative z-30 flex shrink-0 flex-col border-l border-line bg-surface')}
-        style={{ width: `${dockedWidth}px` }}
-        role="complementary"
+        className={clsx(
+          'flex min-w-0 flex-col overflow-hidden bg-surface transition-[width,opacity,transform] duration-150',
+          isFullscreen
+            ? 'fixed inset-2 z-50 rounded-2xl border border-line shadow-modal md:inset-4'
+            : 'relative z-30 shrink-0',
+          state === 'hidden'
+            ? 'pointer-events-none overflow-hidden border-l-0 opacity-0'
+            : isFullscreen
+              ? 'opacity-100'
+              : 'animate-slide-in-right border-l border-line opacity-100',
+        )}
+        style={isFullscreen ? undefined : { width: state === 'hidden' ? 0 : `${dockedWidth}px`, maxWidth: '100vw' }}
+        role={isFullscreen ? 'dialog' : 'complementary'}
         aria-label="Chat panel"
+        aria-modal={isFullscreen ? true : undefined}
+        aria-hidden={state === 'hidden'}
       >
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize chat panel"
-          className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize bg-transparent before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-line hover:before:bg-accent"
-          onPointerDown={handleResizeStart}
-          onPointerMove={handleResizeMove}
-          onPointerUp={handleResizeEnd}
-          onPointerCancel={handleResizeEnd}
-        />
-        <header className="flex h-12 items-center gap-2 border-b border-line px-3">
+        {state === 'docked' && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize chat panel"
+            className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize bg-transparent before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-line hover:before:bg-accent"
+            onPointerDown={handleResizeStart}
+            onPointerMove={handleResizeMove}
+            onPointerUp={handleResizeEnd}
+            onPointerCancel={handleResizeEnd}
+          />
+        )}
+        <header className="flex h-12 min-w-0 shrink-0 items-center gap-2 border-b border-line px-3">
           {historyOpen || showingSecondaryThread || currentThread?.kind === 'room' ? (
             <>
               <button
@@ -183,7 +202,7 @@ export function ChatPanel() {
               >
                 <ChevronLeft size={16} />
               </button>
-              <span className="truncate text-subheading text-text-primary">
+              <span className="min-w-0 truncate text-subheading text-text-primary">
                 {historyOpen ? 'Conversation history' : currentThread?.name ?? 'Chat'}
               </span>
               <div className="ml-auto flex items-center gap-1">
@@ -200,6 +219,18 @@ export function ChatPanel() {
                 )}
                 <button
                   type="button"
+                  onClick={() => {
+                    if (!isFullscreen) setReturnPath(`${pathname}${window.location.search}${window.location.hash}`);
+                    setState(isFullscreen ? 'docked' : 'fullscreen');
+                  }}
+                  aria-label={isFullscreen ? 'Return chat to dock' : 'Expand chat'}
+                  title={isFullscreen ? 'Return chat to dock' : 'Expand chat'}
+                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary active:scale-[0.97]"
+                >
+                  {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </button>
+                <button
+                  type="button"
                   onClick={() => setState('hidden')}
                   aria-label="Close chat panel"
                   className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
@@ -210,16 +241,16 @@ export function ChatPanel() {
             </>
           ) : (
             <>
-              <div className="relative" ref={agentMenuRef}>
+              <div className="relative min-w-0" ref={agentMenuRef}>
                 <button
                   type="button"
                   onClick={() => setAgentMenuOpen((o) => !o)}
                   aria-label="Switch agent"
-                  className="-ml-1 flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-surface-2"
+                  className="-ml-1 flex max-w-[20rem] min-w-0 items-center gap-1 rounded-md px-1 py-0.5 hover:bg-surface-2"
                 >
-                  <div className="flex flex-col items-start">
-                    <span className="text-subheading text-text-primary">{currentThread?.name ?? 'Chat'}</span>
-                    <span className="text-[10px] text-text-muted">
+                  <div className="flex min-w-0 flex-col items-start">
+                    <span className="max-w-full truncate text-subheading text-text-primary">{currentThread?.name ?? 'Chat'}</span>
+                    <span className="max-w-full truncate text-[10px] text-text-muted">
                       {currentScope
                         ? formatChatScopeDescriptor(currentScope, workspaceName)
                         : pageCtx || 'Chat'}
@@ -294,6 +325,15 @@ export function ChatPanel() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setRoomCreateOpen(true)}
+                  aria-label="Create room"
+                  title="Create room"
+                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                >
+                  <Hash size={14} />
+                </button>
+                <button
+                  type="button"
                   onClick={() => setHistoryOpen(true)}
                   aria-label="Session history"
                   title="Session history"
@@ -304,15 +344,14 @@ export function ChatPanel() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (currentThread?.kind === 'agent') nav(`/chat/agent/${currentThread.id}`);
-                    else nav('/chat');
-                    setState('hidden');
+                    if (!isFullscreen) setReturnPath(`${pathname}${window.location.search}${window.location.hash}`);
+                    setState(isFullscreen ? 'docked' : 'fullscreen');
                   }}
-                  aria-label="Open full page chat"
-                  title="Open full page chat"
-                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                  aria-label={isFullscreen ? 'Return chat to dock' : 'Expand chat'}
+                  title={isFullscreen ? 'Return chat to dock' : 'Expand chat'}
+                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary active:scale-[0.97]"
                 >
-                  <Maximize2 size={14} />
+                  {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
                 </button>
                 <button
                   type="button"
@@ -327,7 +366,7 @@ export function ChatPanel() {
           )}
         </header>
 
-        <div className="min-h-0 flex-1 flex flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {historyOpen ? (
             <SessionHistoryPanel
               activeConversationId={currentThread?.kind === 'agent' && 'conversationId' in currentThread ? currentThread.conversationId : null}

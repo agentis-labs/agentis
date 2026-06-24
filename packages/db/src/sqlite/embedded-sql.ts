@@ -426,6 +426,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   title             TEXT NOT NULL,
   summary           TEXT NOT NULL,
   confidence        INTEGER,
+  payload           TEXT NOT NULL DEFAULT '{}',
   status            TEXT NOT NULL DEFAULT 'pending',
   resolution_reason TEXT,
   resolved_at       TEXT,
@@ -440,7 +441,10 @@ CREATE TABLE IF NOT EXISTS conversations (
   user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   agent_id              TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   mirrored_session_id   TEXT,
+  channel_connection_id TEXT REFERENCES channel_connections(id) ON DELETE SET NULL,
+  channel_chat_id       TEXT,
   title                 TEXT,
+  execution_mode        TEXT NOT NULL DEFAULT 'chat',
   archived_at           TEXT,
   unread_count          INTEGER NOT NULL DEFAULT 0,
   last_message_at       TEXT,
@@ -483,15 +487,45 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id, created_at);
 
+CREATE TABLE IF NOT EXISTS plans (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id   TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id        TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+  run_ids           TEXT NOT NULL DEFAULT '[]',
+  session_id        TEXT,
+  title             TEXT NOT NULL,
+  objective         TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'draft',
+  active_version    INTEGER NOT NULL DEFAULT 1,
+  approved_version  INTEGER,
+  decisions         TEXT NOT NULL DEFAULT '[]',
+  deviations        TEXT NOT NULL DEFAULT '[]',
+  verification      TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS plans_conversation ON plans(workspace_id, conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS plans_session ON plans(workspace_id, session_id);
+
+CREATE TABLE IF NOT EXISTS plan_versions (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  plan_id       TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  version       INTEGER NOT NULL,
+  content       TEXT NOT NULL,
+  created_by    TEXT,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(plan_id, version)
+);
+
 CREATE TABLE IF NOT EXISTS rooms (
   id                TEXT PRIMARY KEY,
   workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  team_id           TEXT REFERENCES teams(id) ON DELETE CASCADE,
   kind              TEXT NOT NULL DEFAULT 'custom',
   name              TEXT NOT NULL,
   description       TEXT,
-  is_team_default   INTEGER NOT NULL DEFAULT 0,
   visibility        TEXT NOT NULL DEFAULT 'workspace',
   pinned_at         TEXT,
   last_message_at   TEXT,
@@ -626,6 +660,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_library_packages_slug ON library_packages(
 CREATE TABLE IF NOT EXISTS knowledge_bases (
   id                  TEXT PRIMARY KEY,
   workspace_id        TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  scope_id            TEXT REFERENCES workflows(id) ON DELETE CASCADE,
   name                TEXT NOT NULL,
   description         TEXT,
   embedding_model     TEXT NOT NULL DEFAULT 'lexical-v1',
@@ -635,6 +670,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_bases_ws ON knowledge_bases(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_bases_scope ON knowledge_bases(workspace_id, scope_id);
 
 CREATE TABLE IF NOT EXISTS kb_documents (
   id                TEXT PRIMARY KEY,
@@ -701,36 +737,4 @@ CREATE TABLE IF NOT EXISTS personal_brain_grants (
 );
 -- ── Fleet / Organization layer (v12) ──────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS teams (
-  id           TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  ambient_id   TEXT NOT NULL REFERENCES ambients(id) ON DELETE CASCADE,
-  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  name         TEXT NOT NULL,
-  slug         TEXT NOT NULL,
-  description  TEXT,
-  icon_glyph   TEXT,
-  color_hex    TEXT,
-  profile_json TEXT NOT NULL DEFAULT '{}',
-  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_teams_workspace ON teams(workspace_id);
-
-CREATE TABLE IF NOT EXISTS team_context (
-  id                    TEXT PRIMARY KEY,
-  team_id               TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-  workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  operating_principles  TEXT NOT NULL DEFAULT '',
-  constraints           TEXT NOT NULL DEFAULT '',
-  handoffs              TEXT NOT NULL DEFAULT '',
-  success_metrics       TEXT NOT NULL DEFAULT '',
-  escalation_rules      TEXT NOT NULL DEFAULT '',
-  shared_prompt         TEXT NOT NULL DEFAULT '',
-  updated_by_user_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_team_context_team ON team_context(team_id);
 `;

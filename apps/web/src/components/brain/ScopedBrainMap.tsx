@@ -69,7 +69,6 @@ export function ScopedBrainMap({
     () => nodes.find((node) => node.id === selectedId) ?? null,
     [nodes, selectedId],
   );
-
   if (loading) return <div className="h-full p-5"><Skeleton height={500} /></div>;
   if (!brain || (graph?.meta.atomCount ?? 0) === 0) {
     return (
@@ -99,7 +98,11 @@ export function ScopedBrainMap({
           brain={brain}
           node={selectedNode}
           candidateNodes={nodes}
-          detailPath={detailEndpoint ? `${detailEndpoint}/${encodeURIComponent(selectedNode.id)}` : null}
+          detailPath={detailEndpoint
+            ? (detailEndpoint.includes(':id')
+              ? detailEndpoint.replace(':id', encodeURIComponent(selectedNode.id))
+              : `${detailEndpoint}/${encodeURIComponent(selectedNode.id)}`)
+            : null}
           allowMutations={false}
           onClose={() => setSelectedId(null)}
           onGraphChanged={() => {}}

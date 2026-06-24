@@ -209,16 +209,20 @@ describe('WorkflowEngine — agent_task agentic-by-default', () => {
   });
 
   it('runs the tool loop for a PLAIN agent_task (no useRoleTools) — agentic is the default', async () => {
-    // Same coder task, but WITHOUT useRoleTools. Gap-fix A: the loop is now the
-    // default path, so the agent still acts (writes the file) instead of a
-    // single fire-and-forget completion.
+    // WITHOUT useRoleTools and with built-in role manifests retired, the agent
+    // still ACTS via the universal floor (run_code) instead of a single
+    // fire-and-forget completion — agentic execution is the default.
+    engine = buildEngine(scriptedFetch([
+      { thought: 'compute the result', action: 'tool', tool: 'run_code', args: { expression: '40 + 2' } },
+      { thought: 'done', action: 'final', output: 'Computed the result: 42.' },
+    ]));
     const graph: WorkflowGraph = {
       version: 1, viewport: { x: 0, y: 0, zoom: 1 },
       nodes: [
         { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
-        { id: 'A', type: 'agent_task', title: 'Coder', position: { x: 200, y: 0 }, config: {
-          kind: 'agent_task', agentRole: 'coder', capabilityTags: [],
-          prompt: 'Write the result file.', inputKeys: [], outputKeys: [],
+        { id: 'A', type: 'agent_task', title: 'Analyst', position: { x: 200, y: 0 }, config: {
+          kind: 'agent_task', agentRole: 'analyst', capabilityTags: [],
+          prompt: 'Compute the result.', inputKeys: [], outputKeys: [],
         } },
       ],
       edges: [{ id: 'e1', source: 'T', target: 'A' }],
@@ -229,7 +233,7 @@ describe('WorkflowEngine — agent_task agentic-by-default', () => {
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     expect(run.status).toBe('COMPLETED');
     const state = run.runState as { nodeStates: Record<string, { outputData?: { output?: string; toolCalls?: number } }> };
-    expect(state.nodeStates.A?.outputData?.output).toMatch(/Wrote out\/result\.txt/);
+    expect(state.nodeStates.A?.outputData?.output).toMatch(/42/);
     expect(state.nodeStates.A?.outputData?.toolCalls).toBe(1);
   });
 
@@ -334,5 +338,65 @@ describe('WorkflowEngine — agent_task agentic-by-default', () => {
     expect(state.nodeStates.A?.blockedReason).toMatch(/credits|billing/i);
     expect(state.failedNodeIds).toEqual([]);
     expect(events).toContain(REALTIME_EVENTS.NODE_WAITING_FOR_INPUT);
+  });
+
+  it('accepts a final output object and satisfies declared agent output keys', async () => {
+    engine = buildEngine(scriptedFetch([
+      {
+        thought: 'done',
+        action: 'final',
+        output: {
+          subject: 'Digest',
+          htmlBody: '<p>Ready.</p>',
+          topStories: [],
+          sentStoryKeys: [],
+          sentCount: 0,
+        },
+      },
+    ]));
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Analyst', position: { x: 200, y: 0 }, config: {
+          kind: 'agent_task', agentRole: 'analyst', capabilityTags: [],
+          prompt: 'Return a digest object.', inputKeys: [], outputKeys: ['subject', 'htmlBody', 'topStories', 'sentStoryKeys', 'sentCount'],
+        } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'A' }],
+    } as WorkflowGraph;
+
+    const events: string[] = [];
+    const runId = await runGraph(graph, events);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+    const state = run.runState as {
+      nodeStates: Record<string, {
+        outputData?: {
+          output?: unknown;
+          subject?: string;
+          htmlBody?: string;
+          topStories?: unknown[];
+          sentStoryKeys?: string[];
+          sentCount?: number;
+        };
+        contractDeviation?: unknown;
+      }>;
+    };
+    expect(state.nodeStates.A?.contractDeviation).toBeUndefined();
+    expect(state.nodeStates.A?.outputData).toMatchObject({
+      output: {
+        subject: 'Digest',
+        htmlBody: '<p>Ready.</p>',
+        topStories: [],
+        sentStoryKeys: [],
+        sentCount: 0,
+      },
+      subject: 'Digest',
+      htmlBody: '<p>Ready.</p>',
+      topStories: [],
+      sentStoryKeys: [],
+      sentCount: 0,
+    });
   });
 });

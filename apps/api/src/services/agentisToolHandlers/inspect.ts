@@ -476,21 +476,15 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
         const agentId = typeof args.agentId === 'string' ? args.agentId : null;
         const limit = clampLimit(args.limit, 20, 100);
 
-        let selectQuery = deps.db
-          .select()
-          .from(schema.workspaceMemory)
-          .where(
-            and(
-              eq(schema.workspaceMemory.workspaceId, ctx.workspaceId),
-              ...(kind ? [eq(schema.workspaceMemory.kind, kind)] : []),
-              ...(agentId ? [eq(schema.workspaceMemory.scopeId, agentId)] : []),
-            )
-          )
-          .orderBy(desc(schema.workspaceMemory.updatedAt))
-          .limit(limit)
-          .$dynamic();
-
-        const rows = selectQuery.all();
+        // §B4 — read typed memory through the unified MemoryStore facade.
+        const rows = deps.memory
+          ? deps.memory.list({
+              workspaceId: ctx.workspaceId,
+              scopeId: agentId,
+              ...(kind ? { kind: kind as Parameters<NonNullable<typeof deps.memory>['list']>[0]['kind'] } : {}),
+              limit,
+            })
+          : [];
         let memories = rows.map((r) => ({
           id: r.id,
           workspaceId: r.workspaceId,
@@ -499,9 +493,9 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
           source: r.source,
           title: r.title,
           content: r.content,
-          trust: Number(r.trust),
-          importance: Number(r.importance),
-          tags: Array.isArray(r.tags) ? r.tags : [],
+          trust: r.trust,
+          importance: r.importance,
+          tags: r.tags,
           createdAt: r.createdAt,
           updatedAt: r.updatedAt,
         }));

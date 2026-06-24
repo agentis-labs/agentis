@@ -348,3 +348,9 @@ requires a backend stub but is gated on that, not on the frontend work.
 - [LocalRuntime](https://www.assistant-ui.com/docs/runtimes/custom/local-runtime)
 - [Adapters (attach, speech)](https://www.assistant-ui.com/docs/runtimes/concepts/adapters)
 - [@tanstack/react-virtual](https://tanstack.com/virtual/latest)
+# Superseded Reasoning UI
+
+The reasoning/transcript presentation in this proposal is superseded by
+`AGENT_CHAT_RUNTIME_IMPLEMENTATION.md`. Agentis no longer renders or persists raw
+model reasoning. Active work is represented by one compact factual status line,
+with completed activity and tool details collapsed by default.

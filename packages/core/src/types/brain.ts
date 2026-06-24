@@ -136,8 +136,8 @@ export type BrainGraphScope = 'workspace' | 'scoped';
 export interface BrainGraphNode {
   id: string;
   atomId: string;
-  /** `cora_*` kinds are the Workspace Brain's organizational overlay (sources, entities, claims). */
-  atomKind: KnowledgeAtomKind | 'core' | 'warning' | 'gap' | 'cora_source' | 'cora_entity' | 'cora_claim';
+  /** `grounding_*` kinds are the Workspace Brain's organizational overlay (sources, entities, claims). */
+  atomKind: KnowledgeAtomKind | 'core' | 'warning' | 'gap' | 'grounding_source' | 'grounding_entity' | 'grounding_claim';
   label: string;
   summary?: string;
   confidence: number;
@@ -169,9 +169,9 @@ export interface BrainGraphLink {
   source: string;
   target: string;
   sourceAtomId: string;
-  sourceKind: KnowledgeAtomKind | 'cora_source' | 'cora_entity' | 'cora_claim';
+  sourceKind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim';
   targetAtomId: string;
-  targetKind: KnowledgeAtomKind | 'cora_source' | 'cora_entity' | 'cora_claim';
+  targetKind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim';
   relation: KnowledgeLinkRelation;
   confidence: number;
   reinforceCount: number;

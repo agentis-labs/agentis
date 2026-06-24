@@ -24,20 +24,31 @@ import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 
 const createSchema = z
   .object({
-    // WhatsApp is QR-authenticated (no token); the others are token/webhook-based.
+    // WhatsApp QR is tokenless; WhatsApp Cloud and the others are token/API based.
     kind: z.enum(['telegram', 'discord', 'slack', 'whatsapp']),
     name: z.string().min(1).max(120),
     agentId: z.string().min(1),
     token: z.string().min(8).max(4096).optional(),
     defaultChatId: z.string().min(1).max(120).optional(),
+    defaultRecipient: z.string().min(1).max(120).optional(),
+    mode: z.enum(['qr_local', 'cloud']).optional(),
+    signingSecret: z.string().min(8).max(4096).optional(),
+    phoneNumberId: z.string().min(1).max(120).optional(),
+    appSecret: z.string().min(8).max(4096).optional(),
+    verifyToken: z.string().min(4).max(512).optional(),
+    runInitialTest: z.boolean().optional(),
     // Persistent transports: Telegram 'polling' (long-poll), Discord 'gateway'
     // (live message events) — both avoid a public webhook.
     transport: z.enum(['polling', 'webhook', 'gateway']).optional(),
     ambientId: z.string().nullish(),
   })
-  .refine((v) => v.kind === 'whatsapp' || Boolean(v.token), {
+  .refine((v) => (v.kind === 'whatsapp' && v.mode !== 'cloud') || Boolean(v.token), {
     message: 'token is required for this channel kind',
     path: ['token'],
+  })
+  .refine((v) => v.kind !== 'whatsapp' || v.mode !== 'cloud' || Boolean(v.phoneNumberId && v.appSecret && v.verifyToken), {
+    message: 'WhatsApp Cloud requires phoneNumberId, appSecret, and verifyToken',
+    path: ['mode'],
   });
 
 const linkSchema = z.object({
@@ -50,6 +61,11 @@ const linkSchema = z.object({
 const testSchema = z.object({
   chatId: z.string().min(1).max(120).optional(),
   body: z.string().min(1).max(2048).optional(),
+});
+
+const targetSchema = z.object({
+  defaultChatId: z.string().min(1).max(120).nullable().optional(),
+  targetAliases: z.record(z.string().min(1).max(80), z.string().min(1).max(120).nullable()).optional(),
 });
 
 export function buildChannelRoutes(deps: {
@@ -103,14 +119,31 @@ export function buildChannelRoutes(deps: {
     };
     if (body.token) input.token = body.token;
     if (body.defaultChatId) input.defaultChatId = body.defaultChatId;
+    if (body.defaultRecipient) input.defaultRecipient = body.defaultRecipient;
     if (body.transport) input.transport = body.transport;
+    if (body.mode) input.mode = body.mode;
+    if (body.signingSecret) input.signingSecret = body.signingSecret;
+    if (body.phoneNumberId) input.phoneNumberId = body.phoneNumberId;
+    if (body.appSecret) input.appSecret = body.appSecret;
+    if (body.verifyToken) input.verifyToken = body.verifyToken;
     const { connection, webhookSecret } = deps.bridge.create(input);
+    const shouldRunInitialTest = body.runInitialTest ?? !(body.kind === 'whatsapp' && body.mode !== 'cloud');
+    const health = shouldRunInitialTest
+      ? await deps.bridge.test({
+          workspaceId: ws.workspaceId,
+          id: connection.id,
+          ...(body.defaultChatId || body.defaultRecipient ? { chatId: body.defaultChatId ?? body.defaultRecipient } : {}),
+          body: `Agentis test message for ${connection.name}`,
+        })
+      : deps.bridge.health(ws.workspaceId, connection.id);
+    const refreshed = deps.bridge.get(ws.workspaceId, connection.id);
     return c.json(
       {
-        connection,
+        connection: refreshed,
+        health,
         webhookSecret,
         // WhatsApp links via QR (POST /:id/login); the others ingest via webhook.
-        ...(connection.kind === 'whatsapp'
+        ...(refreshed.kind === 'whatsapp' && refreshed.mode !== 'cloud'
           ? { loginUrl: `/v1/channels/${connection.id}/login` }
           : { webhookUrl: `/v1/webhooks/channel/${connection.id}` }),
       },
@@ -165,8 +198,22 @@ export function buildChannelRoutes(deps: {
     };
     if (parsed.chatId) args.chatId = parsed.chatId;
     if (parsed.body) args.body = parsed.body;
-    await deps.bridge.test(args);
-    return c.json({ ok: true });
+    const health = await deps.bridge.test(args);
+    return c.json({ ok: health.status === 'active', health });
+  });
+
+  app.patch('/:id/targets', async (c) => {
+    const ws = getWorkspace(c);
+    const body = targetSchema.parse(await c.req.json());
+    const connection = deps.bridge.updateTargets(ws.workspaceId, c.req.param('id'), body);
+    return c.json({ connection, health: connection.health });
+  });
+
+  app.get('/:id/health', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const connection = deps.bridge.get(ws.workspaceId, id);
+    return c.json({ connection, health: deps.bridge.health(ws.workspaceId, id) });
   });
 
   app.get('/:id/webhook-info', (c) => {

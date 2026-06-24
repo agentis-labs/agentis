@@ -512,7 +512,7 @@ Identity / Instructions / Memory / Runtime / Channels / History.
 - **Channel bridge only registers Telegram + Discord adapters** — Slack and
   WhatsApp from the §3.5 mock are not yet backable, so only the two supported
   providers are rendered (in the panel and the Channels tab).
-- **`AgentHierarchyDetailPanel.tsx`** is now orphaned (the canvas uses the new
+- **`AgentHierarchyDetailPanel.tsx`** is now unused (the canvas uses the new
   quick-detail panel). Left in place rather than deleted to keep the change
   scoped; safe to remove in cleanup.
 

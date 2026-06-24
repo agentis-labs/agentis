@@ -2,7 +2,7 @@
  * /v1/workflows — list/get/create/update + run trigger.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
@@ -33,6 +33,7 @@ import { hashWorkflowGraph } from '../services/graphHash.js';
 import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
 import { buildTemplateContext, resolveTemplateDeep } from '../engine/templateResolver.js';
 import { WorkflowTriggerDeploymentService } from '../services/workflowTriggerDeployment.js';
+import { preflightWorkflow } from '../services/workflowPreflight.js';
 
 export function buildWorkflowRoutes(deps: {
   db: AgentisSqliteDb;
@@ -44,6 +45,10 @@ export function buildWorkflowRoutes(deps: {
   packager?: PackagerService;
 }) {
   const app = new Hono();
+
+  // Legacy Studio public-surface route removed — public sharing now lives on the
+  // Agentic App surface (AGENTIC-APPS-10X §4: GET /v1/apps/public/surfaces/:token).
+
   app.use('*', requireAuth(deps), requireWorkspace(deps));
   const deletedWorkflowsCache = new Map<string, any>();
   const triggerDeployments = deps.triggerRuntime
@@ -121,6 +126,7 @@ export function buildWorkflowRoutes(deps: {
         ambientId: ws.ambientId ?? body.ambientId ?? null,
         userId: ws.user.id,
         spaceId: body.spaceId ?? null,
+        ownerAgentId: body.ownerAgentId ?? null,
         title: body.title,
         description: body.description?.trim() || null,
         graph: normalizedGraph,
@@ -197,6 +203,30 @@ export function buildWorkflowRoutes(deps: {
     return c.json(analyzeWorkflowReadiness(deps.db, ws.workspaceId, wf.graph as WorkflowGraph));
   });
 
+  app.get('/:id/health', (c) => {
+    const ws = getWorkspace(c);
+    const wf = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    return c.json(preflightWorkflow({
+      db: deps.db,
+      workspaceId: ws.workspaceId,
+      workflowId: wf.id,
+      graph: wf.graph as WorkflowGraph,
+    }));
+  });
+
+  app.post('/:id/preflight', async (c) => {
+    const ws = getWorkspace(c);
+    const wf = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    const body = (await c.req.json().catch(() => ({}))) as { inputs?: Record<string, unknown> };
+    return c.json(preflightWorkflow({
+      db: deps.db,
+      workspaceId: ws.workspaceId,
+      workflowId: wf.id,
+      graph: wf.graph as WorkflowGraph,
+      inputs: body.inputs,
+    }));
+  });
+
   app.get('/:id/deployment', (c) => {
     const ws = getWorkspace(c);
     if (!triggerDeployments) {
@@ -205,12 +235,12 @@ export function buildWorkflowRoutes(deps: {
     return c.json({ deployment: triggerDeployments.get(ws.workspaceId, c.req.param('id')) });
   });
 
-  app.post('/:id/publish', async (c) => {
+  app.post('/:id/activate', async (c) => {
     const ws = getWorkspace(c);
     if (!triggerDeployments) {
       throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Workflow trigger deployment is unavailable.');
     }
-    const deployment = await triggerDeployments.publish({
+    const deployment = await triggerDeployments.activate({
       workspaceId: ws.workspaceId,
       workflowId: c.req.param('id'),
       ambientId: ws.ambientId ?? null,
@@ -254,6 +284,7 @@ export function buildWorkflowRoutes(deps: {
             ? wf.description
             : body.description?.trim() || null,
         spaceId: body.spaceId === undefined ? wf.spaceId : body.spaceId ?? null,
+        ownerAgentId: body.ownerAgentId === undefined ? wf.ownerAgentId : body.ownerAgentId ?? null,
         graph: nextGraph,
         contentHash: hashWorkflowGraph(nextGraph),
         settings: body.settings ?? (wf.settings as Record<string, unknown>),
@@ -285,6 +316,24 @@ export function buildWorkflowRoutes(deps: {
       throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'Cannot run an empty workflow');
     }
     validateWorkflowGraph(graph, { currentWorkflowId: wf.id });
+    const health = preflightWorkflow({
+      db: deps.db,
+      workspaceId: ws.workspaceId,
+      workflowId: wf.id,
+      graph,
+      inputs: body.inputs,
+      // Gate the REAL run against the EXACT input the engine will use — a missing
+      // required input is blocked here with the field name instead of dead-ending
+      // mid-run with a raw expression error.
+      mode: 'run-gate',
+    });
+    if (health.status === 'blocked') {
+      const first = health.issues.find((issue) => issue.severity === 'error');
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        `Workflow preflight failed${first ? `: ${first.nodeTitle ? `${first.nodeTitle}: ${first.message}` : first.message}${first.remediation ? ` — ${first.remediation}` : ''}` : ''}`,
+      );
+    }
     // Heal the stored row when the normalization actually changed something, so
     // the persisted graph matches what the engine will run (and so the next read
     // is a no-op). Skipping this left the database permanently out of sync.
@@ -424,6 +473,28 @@ export function buildWorkflowRoutes(deps: {
       rows.map((r) => r.triggerId),
     );
     return c.json({ runs: rows.map((r) => mapRunSummary(r, triggerMap)) });
+  });
+
+  // One compact projection for canvas node labels. This intentionally avoids
+  // the old N-per-node history fan-out.
+  app.get('/:id/node-activity', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    const rows = deps.db.select().from(schema.workflowRuns)
+      .where(and(eq(schema.workflowRuns.workspaceId, ws.workspaceId), eq(schema.workflowRuns.workflowId, id)))
+      .orderBy(desc(schema.workflowRuns.createdAt)).limit(40).all();
+    const nodes: Record<string, { status: string; startedAt?: string; completedAt?: string; durationMs?: number }> = {};
+    for (const run of rows) {
+      const state = run.runState as WorkflowRunState | null;
+      for (const node of Object.values(state?.nodeStates ?? {})) {
+        if (!node || nodes[node.nodeId]) continue;
+        const startedAt = node.startedAt;
+        const completedAt = node.completedAt;
+        const durationMs = startedAt && completedAt ? Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)) : undefined;
+        nodes[node.nodeId] = { status: node.status, ...(startedAt ? { startedAt } : {}), ...(completedAt ? { completedAt } : {}), ...(durationMs !== undefined ? { durationMs } : {}) };
+      }
+    }
+    return c.json({ nodes });
   });
 
   /** Output history, newest first, with immutable delivery artifacts per run. */

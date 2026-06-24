@@ -16,7 +16,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { sqliteTable, text, integer, real, primaryKey, uniqueIndex, type AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, primaryKey, uniqueIndex, index, type AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 
 const isoNow = () => sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
 
@@ -57,7 +57,7 @@ export const workspaces = sqliteTable('workspaces', {
   /** Layer 5 §5.3 — workspace/day cost ceiling (cents). null = uncapped. */
   dailyBudgetCents: integer('daily_budget_cents'),
   /** Brain — embedding provider for knowledge/memory vectorization + settings. */
-  embeddingProviderType: text('embedding_provider_type').notNull().default('hashing'),
+  embeddingProviderType: text('embedding_provider_type').notNull().default('local'),
   embeddingProviderConfig: text('embedding_provider_config', { mode: 'json' }).notNull().default(sql`'{}'`),
   brainSettings: text('brain_settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   ...baseTimestamps(),
@@ -141,7 +141,7 @@ export const apiKeys = sqliteTable('api_keys', {
 // Spaces
 // ────────────────────────────────────────────────────────────
 
-export const spaces = sqliteTable('spaces', {
+export const domains = sqliteTable('domains', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -154,10 +154,14 @@ export const spaces = sqliteTable('spaces', {
   description: text('description'),
   colorHex: text('color_hex'),
   iconEmoji: text('icon_emoji'),
-  /** The designated orchestrator/manager for this space. */
+  /** The designated orchestrator/manager for this domain. For a subdomain (parentDomainId set) this is the responsible specialist. */
   managerId: text('manager_id').references((): AnySQLiteColumn => agents.id, { onDelete: 'set null' }),
+  /** When set, this domain is a Subdomain nested under the referenced parent Domain. */
+  parentDomainId: text('parent_domain_id').references((): AnySQLiteColumn => domains.id, { onDelete: 'set null' }),
   ...baseTimestamps(),
 });
+
+export const spaces = domains;
 
 // ────────────────────────────────────────────────────────────
 // Agents
@@ -193,9 +197,9 @@ export const agents = sqliteTable('agents', {
   /** orchestrator | manager | worker, with legacy free-text roles tolerated. */
   role: text('role'),
   reportsTo: text('reports_to'),
-  spaceId: text('space_id').references((): AnySQLiteColumn => spaces.id, { onDelete: 'set null' }),
-  /** Human-readable domain or team label (e.g. "marketing", "engineering"). Powers canvas cluster halos. */
-  spaceTag: text('space_tag'),
+  spaceId: text('domain_id').references((): AnySQLiteColumn => domains.id, { onDelete: 'set null' }),
+  /** Human-readable domain label (e.g. "marketing", "engineering"). Powers canvas cluster halos. */
+  spaceTag: text('domain_tag'),
   isPaused: integer('is_paused', { mode: 'boolean' }).notNull().default(false),
   monthlyBudgetCents: integer('monthly_budget_cents'),
   currentMonthSpendCents: integer('current_month_spend_cents').notNull().default(0),
@@ -302,7 +306,11 @@ export const workflows = sqliteTable('workflows', {
   userId: text('user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
-  spaceId: text('space_id').references(() => spaces.id, { onDelete: 'set null' }),
+  spaceId: text('domain_id').references(() => domains.id, { onDelete: 'set null' }),
+  /** Specialist agent that owns this workflow (direct per-workflow responsibility). */
+  ownerAgentId: text('owner_agent_id').references((): AnySQLiteColumn => agents.id, { onDelete: 'set null' }),
+  /** Agentic App that owns this workflow. Null = bare workflow (App-of-one). AGENTIC-APPS-10X §3. */
+  appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'set null' }),
   registryEntryId: text('registry_entry_id'),
   registryVersion: text('registry_version'),
   title: text('title').notNull(),
@@ -440,6 +448,26 @@ export const workflowRunSnapshots = sqliteTable('workflow_run_snapshots', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
+/** Durable before/after snapshots for self-healing rollback. */
+export const workflowRepairCheckpoints = sqliteTable('workflow_repair_checkpoints', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  runId: text('run_id').notNull().references(() => workflowRuns.id, { onDelete: 'cascade' }),
+  workflowId: text('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
+  incidentId: text('incident_id').notNull(),
+  planId: text('plan_id').notNull(),
+  revisionBefore: integer('revision_before').notNull(),
+  revisionAfter: integer('revision_after').notNull(),
+  graphBefore: text('graph_before', { mode: 'json' }).notNull(),
+  graphAfter: text('graph_after', { mode: 'json' }).notNull(),
+  patch: text('patch', { mode: 'json' }).notNull(),
+  rolledBackAt: text('rolled_back_at'),
+  ...baseTimestamps(),
+}, (table) => ({
+  runRecency: index('idx_workflow_repair_checkpoints_run').on(table.runId, table.createdAt),
+  planUnique: uniqueIndex('idx_workflow_repair_checkpoints_plan').on(table.runId, table.planId),
+}));
+
 export const workflowRunQueue = sqliteTable('workflow_run_queue', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
@@ -559,13 +587,11 @@ export const rooms = sqliteTable('rooms', {
   userId: text('user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
-  teamId: text('team_id').references(() => teams.id, { onDelete: 'cascade' }),
-  /** workspace | team | custom | thread */
+  /** workspace | custom | thread */
   kind: text('kind').notNull().default('custom'),
   name: text('name').notNull(),
   description: text('description'),
-  isTeamDefault: integer('is_team_default', { mode: 'boolean' }).notNull().default(false),
-  /** workspace | team | private */
+  /** workspace | private */
   visibility: text('visibility').notNull().default('workspace'),
   pinnedAt: text('pinned_at'),
   lastMessageAt: text('last_message_at'),
@@ -676,6 +702,62 @@ export const activityEvents = sqliteTable('activity_events', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
+/**
+ * Realtime observability spine.
+ *
+ * Unlike `activity_events` (human audit/activity history) and `ledger_events`
+ * (run-local engine log), this table is the durable, replayable event stream
+ * that powers live command-center surfaces across workspace/run/agent/workflow
+ * scopes.
+ */
+export const observabilityEvents = sqliteTable(
+  'observability_events',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    sequenceNumber: integer('sequence_number').notNull(),
+    scopeType: text('scope_type').notNull().default('workspace'),
+    scopeId: text('scope_id'),
+    kind: text('kind').notNull(),
+    status: text('status').notNull().default('info'),
+    title: text('title').notNull(),
+    summary: text('summary').notNull().default(''),
+    detail: text('detail'),
+    actorType: text('actor_type'),
+    actorId: text('actor_id'),
+    targetType: text('target_type'),
+    targetId: text('target_id'),
+    runId: text('run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+    workflowId: text('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
+    agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    nodeId: text('node_id'),
+    approvalId: text('approval_id'),
+    correlationId: text('correlation_id'),
+    parentEventId: text('parent_event_id'),
+    progress: text('progress', { mode: 'json' }).$type<{ completed?: number; total?: number; label?: string } | null>(),
+    evidence: text('evidence', { mode: 'json' }).notNull().default(sql`'[]'`).$type<Array<Record<string, unknown>>>(),
+    rawPayloadRedacted: text('raw_payload_redacted', { mode: 'json' }).notNull().default(sql`'{}'`).$type<Record<string, unknown>>(),
+    sourceEvent: text('source_event').notNull(),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    workspaceSequence: uniqueIndex('observability_events_workspace_sequence')
+      .on(table.workspaceId, table.sequenceNumber),
+    workspaceCreated: index('observability_events_workspace_created')
+      .on(table.workspaceId, table.createdAt),
+    scopeSequence: index('observability_events_scope_sequence')
+      .on(table.scopeType, table.scopeId, table.sequenceNumber),
+    runSequence: index('observability_events_run_sequence')
+      .on(table.runId, table.sequenceNumber),
+    agentSequence: index('observability_events_agent_sequence')
+      .on(table.agentId, table.sequenceNumber),
+    workflowSequence: index('observability_events_workflow_sequence')
+      .on(table.workflowId, table.sequenceNumber),
+  }),
+);
+
 export const budgetEvents = sqliteTable('budget_events', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
@@ -712,6 +794,8 @@ export const approvalRequests = sqliteTable('approval_requests', {
   title: text('title').notNull(),
   summary: text('summary').notNull(),
   confidence: integer('confidence'),
+  /** Source-specific structured data. Self-heal approvals persist the patch here. */
+  payload: text('payload', { mode: 'json' }).notNull().default(sql`'{}'`),
   /** pending | approved | rejected | expired | cancelled */
   status: text('status').notNull().default('pending'),
   resolutionReason: text('resolution_reason'),
@@ -733,7 +817,14 @@ export const conversations = sqliteTable('conversations', {
     .references(() => agents.id, { onDelete: 'cascade' }),
   /** OpenClaw Gateway session id when mirrored; null for Agentis-originated threads. */
   mirroredSessionId: text('mirrored_session_id'),
+  /** Channel-scoped thread owner, when this conversation is isolated to an external chat. */
+  channelConnectionId: text('channel_connection_id')
+    .references((): AnySQLiteColumn => channelConnections.id, { onDelete: 'set null' }),
+  /** Provider chat/thread id used with channelConnectionId to isolate external conversations. */
+  channelChatId: text('channel_chat_id'),
   title: text('title'),
+  /** chat | plan */
+  executionMode: text('execution_mode').notNull().default('chat'),
   archivedAt: text('archived_at'),
   unreadCount: integer('unread_count').notNull().default(0),
   lastMessageAt: text('last_message_at'),
@@ -792,6 +883,47 @@ export const conversationMessages = sqliteTable('conversation_messages', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
+export const plans = sqliteTable('plans', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  conversationId: text('conversation_id')
+    .references(() => conversations.id, { onDelete: 'cascade' }),
+  messageId: text('message_id').references(() => conversationMessages.id, { onDelete: 'set null' }),
+  runIds: text('run_ids', { mode: 'json' }).notNull().default(sql`'[]'`),
+  sessionId: text('session_id'),
+  title: text('title').notNull(),
+  objective: text('objective').notNull(),
+  status: text('status').notNull().default('draft'),
+  activeVersion: integer('active_version').notNull().default(1),
+  approvedVersion: integer('approved_version'),
+  decisions: text('decisions', { mode: 'json' }).notNull().default(sql`'[]'`),
+  deviations: text('deviations', { mode: 'json' }).notNull().default(sql`'[]'`),
+  verification: text('verification', { mode: 'json' }),
+  ...baseTimestamps(),
+});
+
+export const planVersions = sqliteTable(
+  'plan_versions',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    planId: text('plan_id')
+      .notNull()
+      .references(() => plans.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    content: text('content', { mode: 'json' }).notNull(),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    planVersion: uniqueIndex('plan_versions_plan_version').on(table.planId, table.version),
+  }),
+);
+
 export const issues = sqliteTable('issues', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
@@ -819,7 +951,9 @@ export const workspaceCounters = sqliteTable('workspace_counters', {
   counterName: text('counter_name').notNull(),
   counterValue: integer('counter_value').notNull().default(0),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-});
+}, (table) => ({
+  pk: primaryKey({ columns: [table.workspaceId, table.counterName] }),
+}));
 
 // ────────────────────────────────────────────────────────────
 // extension registry
@@ -1042,6 +1176,8 @@ export const knowledgeBases = sqliteTable('knowledge_bases', {
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Null = workspace knowledge; set = knowledge owned by one workflow Brain. */
+  scopeId: text('scope_id').references(() => workflows.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   description: text('description'),
   embeddingModel: text('embedding_model').notNull().default('lexical-v1'),
@@ -1106,51 +1242,6 @@ export const kbChunks = sqliteTable('kb_chunks', {
 // ────────────────────────────────────────────────────────────
 
 /** Workspace teams — each team owns a dedicated Ambient. */
-export const teams = sqliteTable('teams', {
-  id: text('id').primaryKey(),
-  workspaceId: text('workspace_id')
-    .notNull()
-    .references(() => workspaces.id, { onDelete: 'cascade' }),
-  ambientId: text('ambient_id')
-    .notNull()
-    .references(() => ambients.id, { onDelete: 'cascade' }),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  name: text('name').notNull(),
-  slug: text('slug').notNull(),
-  description: text('description'),
-  iconGlyph: text('icon_glyph'),
-  colorHex: text('color_hex'),
-  /** JSON blob stored in profile_json column. */
-  profile: text('profile_json', { mode: 'json' }).notNull().default(sql`'{}'`),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-});
-
-/** Per-team operating context (operating principles, constraints, etc.). */
-export const teamContext = sqliteTable('team_context', {
-  id: text('id').primaryKey(),
-  teamId: text('team_id')
-    .notNull()
-    .references(() => teams.id, { onDelete: 'cascade' }),
-  workspaceId: text('workspace_id')
-    .notNull()
-    .references(() => workspaces.id, { onDelete: 'cascade' }),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  operatingPrinciples: text('operating_principles').notNull().default(''),
-  constraints: text('constraints').notNull().default(''),
-  handoffs: text('handoffs').notNull().default(''),
-  successMetrics: text('success_metrics').notNull().default(''),
-  escalationRules: text('escalation_rules').notNull().default(''),
-  sharedPrompt: text('shared_prompt').notNull().default(''),
-  updatedByUserId: text('updated_by_user_id').references(() => users.id, { onDelete: 'set null' }),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-});
-
 // ────────────────────────────────────────────────────────────
 // Brain — knowledge graph + memory subsystem (workspace-scoped)
 // scope_id columns are nullable; workspace-scoped rows leave them null.
@@ -1178,7 +1269,14 @@ export const knowledgeChunks = sqliteTable('knowledge_chunks', {
   trust: text('trust').notNull().default('1'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-});
+}, (table) => ({
+  // The recall hot path filters by (workspace_id, scope_id) and orders by
+  // updated_at DESC (see KnowledgeStore candidate scan). Without this index that
+  // query is a full table scan + transient sort on every recall, which grows
+  // linearly with corpus size. Mirrored by migration v78.
+  scopeRecency: index('idx_knowledge_chunks_scope_recency')
+    .on(table.workspaceId, table.scopeId, table.updatedAt),
+}));
 
 export const datasetImports = sqliteTable('dataset_imports', {
   id: text('id').primaryKey(),
@@ -1271,6 +1369,17 @@ export const memoryEpisodes = sqliteTable('memory_episodes', {
   outcomeStatus: text('outcome_status'),
   /** Vector retrieval — JSON array of floats (B4: real embeddings). */
   embedding: text('embedding', { mode: 'json' }),
+  /** Brain 10x §B1.2 — embedding provenance: which model + dimension produced the vector. */
+  embeddingModel: text('embedding_model'),
+  embeddingDims: integer('embedding_dims'),
+  /** True when the stored vector no longer matches the workspace provider; sweep re-embeds. */
+  needsReembed: integer('needs_reembed', { mode: 'boolean' }).notNull().default(false),
+  /** Brain 10x §B4 — operator-authored atom that injects on every dispatch (constitutional tier). */
+  governing: integer('governing', { mode: 'boolean' }).notNull().default(false),
+  /** Brain 10x §B7.3 — scope-affinity links (agent/workflow ids this atom applies to). */
+  appliesTo: text('applies_to', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** Brain 10x §C7 — team visibility: true = shared with the team, false = private to scope/owner. */
+  shared: integer('shared', { mode: 'boolean' }).notNull().default(true),
   metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
   /** When the episode was last reinforced (re-promoted or re-confirmed). */
   reinforcedAt: text('reinforced_at'),
@@ -1335,6 +1444,10 @@ export const userNotes = sqliteTable('user_notes', {
   content: text('content').notNull(),
   noteType: text('note_type').notNull().default('note'),
   embedding: text('embedding', { mode: 'json' }),
+  /** Brain 10x §B1.2 — embedding provenance. */
+  embeddingModel: text('embedding_model'),
+  embeddingDims: integer('embedding_dims'),
+  needsReembed: integer('needs_reembed', { mode: 'boolean' }).notNull().default(false),
   tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
   source: text('source').notNull().default('user_typed'),
   agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
@@ -1429,6 +1542,10 @@ export const sessionMoments = sqliteTable('session_moments', {
   content: text('content').notNull(),
   confidence: real('confidence').notNull().default(0.6),
   embedding: text('embedding', { mode: 'json' }),
+  /** Brain 10x §B1.2 — embedding provenance. */
+  embeddingModel: text('embedding_model'),
+  embeddingDims: integer('embedding_dims'),
+  needsReembed: integer('needs_reembed', { mode: 'boolean' }).notNull().default(false),
   promotedAt: text('promoted_at'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   expiresAt: text('expires_at').notNull(),
@@ -1469,31 +1586,23 @@ export const brainForgetRequests = sqliteTable('brain_forget_requests', {
 
 
 // Brain - scoped memory atom stores (workspace-scoped; scope_id nullable).
+//
+// Brain 10x §B4 — the standalone `workspace_memory` table was COLLAPSED into the
+// canonical `memory_episodes` substrate (migration v69). Typed workspace memory
+// now lives there with a `plane:workspace_memory` tag; the `MemoryStore` facade
+// preserves the kind/source contract. There is one physical memory store.
 
-export const workspaceMemory = sqliteTable('workspace_memory', {
+// Brain 10x §C2 — sleep-time precomputed working set (Tier-0 retrieval cache).
+export const brainWorkingSet = sqliteTable('brain_working_set', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   scopeId: text('scope_id'),
-  /** fact | preference | pattern | rule | lesson. */
-  kind: text('kind').notNull(),
-  /** seed | promotion | operator | agent | system. */
-  source: text('source').notNull(),
-  title: text('title').notNull(),
-  content: text('content').notNull(),
-  trust: text('trust').notNull().default('1'),
-  /** 0..1 stored as text. */
-  importance: text('importance').notNull().default('0.5'),
-  tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
-  provenance: text('provenance', { mode: 'json' }).notNull().default(sql`'{}'`),
-  /** Adapter provenance for collective-brain contributions. */
-  adapterType: text('adapter_type'),
-  /** 0..1 confidence for workspace-global recall and graph ranking. */
-  globalConfidence: text('global_confidence').notNull().default('0'),
-  reinforcedAt: text('reinforced_at'),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  /** JSON array of { id, title, content, kind, score }. */
+  atoms: text('atoms', { mode: 'json' }).notNull().default(sql`'[]'`),
+  atomCount: integer('atom_count').notNull().default(0),
+  builtAt: text('built_at').notNull().default(isoNow() as unknown as string),
 });
 
 export const evaluatorExamples = sqliteTable('evaluator_examples', {
@@ -2105,15 +2214,15 @@ export const agentSessionMessages = sqliteTable('agent_session_messages', {
 });
 
 // ────────────────────────────────────────────────────────────
-// CORA — continuous organizational reasoning engine (Workspace
+// Grounding — continuous organizational reasoning engine (Workspace
 // Brain "Sources" experience). Migration v63. Engineering-named
-// tables; the user never sees "CORA" in the UI.
+// tables; the user never sees "Grounding" in the UI.
 // Conventions: learning briefs fold into source connections,
 // entity aliases fold into entities, access policies are per-row
 // JSON — leaner physical layout than the RFC's logical list.
 // ────────────────────────────────────────────────────────────
 
-export const coraOwnerProfiles = sqliteTable('cora_owner_profiles', {
+export const groundingOwnerProfiles = sqliteTable('grounding_owner_profiles', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2130,7 +2239,7 @@ export const coraOwnerProfiles = sqliteTable('cora_owner_profiles', {
   ...baseTimestamps(),
 });
 
-export const coraSourceConnections = sqliteTable('cora_source_connections', {
+export const groundingSourceConnections = sqliteTable('grounding_source_connections', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2157,14 +2266,14 @@ export const coraSourceConnections = sqliteTable('cora_source_connections', {
   ...baseTimestamps(),
 });
 
-export const coraSyncRuns = sqliteTable('cora_sync_runs', {
+export const groundingSyncRuns = sqliteTable('grounding_sync_runs', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   connectionId: text('connection_id')
     .notNull()
-    .references(() => coraSourceConnections.id, { onDelete: 'cascade' }),
+    .references(() => groundingSourceConnections.id, { onDelete: 'cascade' }),
   /** backfill | incremental | reconcile | sample. */
   mode: text('mode').notNull().default('incremental'),
   /** queued | running | completed | failed | paused. */
@@ -2178,14 +2287,14 @@ export const coraSyncRuns = sqliteTable('cora_sync_runs', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
-export const coraSourceObjects = sqliteTable('cora_source_objects', {
+export const groundingSourceObjects = sqliteTable('grounding_source_objects', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   connectionId: text('connection_id')
     .notNull()
-    .references(() => coraSourceConnections.id, { onDelete: 'cascade' }),
+    .references(() => groundingSourceConnections.id, { onDelete: 'cascade' }),
   sourceType: text('source_type').notNull(),
   externalId: text('external_id').notNull(),
   objectType: text('object_type').notNull(),
@@ -2196,16 +2305,16 @@ export const coraSourceObjects = sqliteTable('cora_source_objects', {
   lifecycleAt: text('lifecycle_at'),
   currentVersionId: text('current_version_id'),
   ...baseTimestamps(),
-}, (table) => ({ identity: uniqueIndex('cora_source_objects_identity_uq').on(table.workspaceId, table.connectionId, table.externalId) }));
+}, (table) => ({ identity: uniqueIndex('grounding_source_objects_identity_uq').on(table.workspaceId, table.connectionId, table.externalId) }));
 
-export const coraEvidenceVersions = sqliteTable('cora_evidence_versions', {
+export const groundingEvidenceVersions = sqliteTable('grounding_evidence_versions', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   sourceObjectId: text('source_object_id')
     .notNull()
-    .references(() => coraSourceObjects.id, { onDelete: 'cascade' }),
+    .references(() => groundingSourceObjects.id, { onDelete: 'cascade' }),
   predecessorVersionId: text('predecessor_version_id'),
   sourceVersionId: text('source_version_id'),
   contentHash: text('content_hash').notNull(),
@@ -2221,16 +2330,16 @@ export const coraEvidenceVersions = sqliteTable('cora_evidence_versions', {
   validUntil: text('valid_until'),
   observedAt: text('observed_at').notNull(),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-}, (table) => ({ idempotent: uniqueIndex('cora_evidence_versions_idempotent_uq').on(table.sourceObjectId, table.contentHash) }));
+}, (table) => ({ idempotent: uniqueIndex('grounding_evidence_versions_idempotent_uq').on(table.sourceObjectId, table.contentHash) }));
 
-export const coraSourcePrincipals = sqliteTable('cora_source_principals', {
+export const groundingSourcePrincipals = sqliteTable('grounding_source_principals', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   connectionId: text('connection_id')
     .notNull()
-    .references(() => coraSourceConnections.id, { onDelete: 'cascade' }),
+    .references(() => groundingSourceConnections.id, { onDelete: 'cascade' }),
   externalPrincipalId: text('external_principal_id').notNull(),
   /** person | group | service | channel | domain | public. */
   kind: text('kind').notNull().default('person'),
@@ -2239,9 +2348,9 @@ export const coraSourcePrincipals = sqliteTable('cora_source_principals', {
   attributesJson: text('attributes_json', { mode: 'json' }).notNull().default(sql`'{}'`),
   status: text('status').notNull().default('active'),
   ...baseTimestamps(),
-}, (table) => ({ identity: uniqueIndex('cora_source_principals_identity_uq').on(table.workspaceId, table.connectionId, table.externalPrincipalId) }));
+}, (table) => ({ identity: uniqueIndex('grounding_source_principals_identity_uq').on(table.workspaceId, table.connectionId, table.externalPrincipalId) }));
 
-export const coraEntities = sqliteTable('cora_entities', {
+export const groundingEntities = sqliteTable('grounding_entities', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2256,17 +2365,17 @@ export const coraEntities = sqliteTable('cora_entities', {
   ...baseTimestamps(),
 });
 
-export const coraIdentityLinks = sqliteTable('cora_identity_links', {
+export const groundingIdentityLinks = sqliteTable('grounding_identity_links', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   entityId: text('entity_id')
     .notNull()
-    .references(() => coraEntities.id, { onDelete: 'cascade' }),
+    .references(() => groundingEntities.id, { onDelete: 'cascade' }),
   principalId: text('principal_id')
     .notNull()
-    .references(() => coraSourcePrincipals.id, { onDelete: 'cascade' }),
+    .references(() => groundingSourcePrincipals.id, { onDelete: 'cascade' }),
   /** email_exact | oauth_subject | owner_asserted | probabilistic (RFC §9.2 split). */
   method: text('method').notNull(),
   confidence: real('confidence').notNull().default(0),
@@ -2280,7 +2389,7 @@ export const coraIdentityLinks = sqliteTable('cora_identity_links', {
   ...baseTimestamps(),
 });
 
-export const coraClaims = sqliteTable('cora_claims', {
+export const groundingClaims = sqliteTable('grounding_claims', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2306,17 +2415,17 @@ export const coraClaims = sqliteTable('cora_claims', {
   ...baseTimestamps(),
 });
 
-export const coraClaimEvidence = sqliteTable('cora_claim_evidence', {
+export const groundingClaimEvidence = sqliteTable('grounding_claim_evidence', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   claimId: text('claim_id')
     .notNull()
-    .references(() => coraClaims.id, { onDelete: 'cascade' }),
+    .references(() => groundingClaims.id, { onDelete: 'cascade' }),
   evidenceVersionId: text('evidence_version_id')
     .notNull()
-    .references(() => coraEvidenceVersions.id, { onDelete: 'cascade' }),
+    .references(() => groundingEvidenceVersions.id, { onDelete: 'cascade' }),
   /** supports | contradicts | contextualizes | supersedes. */
   role: text('role').notNull().default('supports'),
   directness: real('directness').notNull().default(1),
@@ -2326,7 +2435,7 @@ export const coraClaimEvidence = sqliteTable('cora_claim_evidence', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
-export const coraClaimConflicts = sqliteTable('cora_claim_conflicts', {
+export const groundingClaimConflicts = sqliteTable('grounding_claim_conflicts', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2343,7 +2452,7 @@ export const coraClaimConflicts = sqliteTable('cora_claim_conflicts', {
   ...baseTimestamps(),
 });
 
-export const coraModelArtifacts = sqliteTable('cora_model_artifacts', {
+export const groundingModelArtifacts = sqliteTable('grounding_model_artifacts', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2360,7 +2469,7 @@ export const coraModelArtifacts = sqliteTable('cora_model_artifacts', {
   ...baseTimestamps(),
 });
 
-export const coraModelSnapshots = sqliteTable('cora_model_snapshots', {
+export const groundingModelSnapshots = sqliteTable('grounding_model_snapshots', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2377,7 +2486,7 @@ export const coraModelSnapshots = sqliteTable('cora_model_snapshots', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
-export const coraLearningPlans = sqliteTable('cora_learning_plans', {
+export const groundingLearningPlans = sqliteTable('grounding_learning_plans', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2390,9 +2499,9 @@ export const coraLearningPlans = sqliteTable('cora_learning_plans', {
   dailyBudgetJson: text('daily_budget_json', { mode: 'json' }).notNull().default(sql`'{}'`),
   status: text('status').notNull().default('active'),
   ...baseTimestamps(),
-}, (table) => ({ unique: uniqueIndex('cora_learning_plans_ws_uq').on(table.workspaceId) }));
+}, (table) => ({ unique: uniqueIndex('grounding_learning_plans_ws_uq').on(table.workspaceId) }));
 
-export const coraAgentGrants = sqliteTable('cora_agent_grants', {
+export const groundingAgentGrants = sqliteTable('grounding_agent_grants', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2410,9 +2519,9 @@ export const coraAgentGrants = sqliteTable('cora_agent_grants', {
   tokenBudgetPerRun: integer('token_budget_per_run'),
   expiresAt: text('expires_at'),
   ...baseTimestamps(),
-}, (table) => ({ unique: uniqueIndex('cora_agent_grants_agent_uq').on(table.workspaceId, table.agentId) }));
+}, (table) => ({ unique: uniqueIndex('grounding_agent_grants_agent_uq').on(table.workspaceId, table.agentId) }));
 
-export const coraBehaviorInfluences = sqliteTable('cora_behavior_influences', {
+export const groundingBehaviorInfluences = sqliteTable('grounding_behavior_influences', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2437,7 +2546,7 @@ export const coraBehaviorInfluences = sqliteTable('cora_behavior_influences', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
-export const coraMigrationCandidates = sqliteTable('cora_migration_candidates', {
+export const groundingMigrationCandidates = sqliteTable('grounding_migration_candidates', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2461,7 +2570,7 @@ export const coraMigrationCandidates = sqliteTable('cora_migration_candidates', 
   ...baseTimestamps(),
 });
 
-export const coraInvestigations = sqliteTable('cora_investigations', {
+export const groundingInvestigations = sqliteTable('grounding_investigations', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2485,7 +2594,7 @@ export const coraInvestigations = sqliteTable('cora_investigations', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
-export const coraAccessRequests = sqliteTable('cora_access_requests', {
+export const groundingAccessRequests = sqliteTable('grounding_access_requests', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2506,7 +2615,7 @@ export const coraAccessRequests = sqliteTable('cora_access_requests', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
-export const coraAuditEvents = sqliteTable('cora_audit_events', {
+export const groundingAuditEvents = sqliteTable('grounding_audit_events', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
     .notNull()
@@ -2520,3 +2629,208 @@ export const coraAuditEvents = sqliteTable('cora_audit_events', {
   payloadJson: text('payload_json', { mode: 'json' }).notNull().default(sql`'{}'`),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
+
+// ────────────────────────────────────────────────────────────
+// Agentic Apps (AGENTIC-APPS-10X-MASTERPLAN §3) — the first-class deployable
+// unit. An App owns workflows (workflows.appId). Surfaces (§4) and datastore
+// (§5) land in later migrations and reference apps.id. Migration v82.
+// ────────────────────────────────────────────────────────────
+
+export const apps = sqliteTable(
+  'apps',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    slug: text('slug').notNull(),
+    name: text('name').notNull(),
+    description: text('description').notNull().default(''),
+    version: text('version').notNull().default('0.1.0'),
+    /** draft | published | archived. */
+    status: text('status').notNull().default('draft'),
+    entrySurfaceId: text('entry_surface_id'),
+    icon: text('icon'),
+    /** Domain (or Subdomain) this App is organized under. Its workflows inherit. */
+    spaceId: text('domain_id').references((): AnySQLiteColumn => domains.id, { onDelete: 'set null' }),
+    /** Specialist agent that owns this App (App-level responsibility; workflows inherit). */
+    ownerAgentId: text('owner_agent_id').references((): AnySQLiteColumn => agents.id, { onDelete: 'set null' }),
+    manifestJson: text('manifest_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    policyJson: text('policy_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    sourceJson: text('source_json', { mode: 'json' }),
+    installedChecksum: text('installed_checksum'),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    workspaceSlug: uniqueIndex('idx_apps_workspace_slug').on(table.workspaceId, table.slug),
+  }),
+);
+
+export const appMembers = sqliteTable(
+  'app_members',
+  {
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    agentId: text('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    /** operator | worker. */
+    role: text('role').notNull().default('worker'),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.appId, table.agentId] }),
+    byAgent: index('idx_app_members_agent').on(table.agentId),
+  }),
+);
+
+// App Datastore (§5) — typed collections + schema-validated records. Migration v83.
+export const appCollections = sqliteTable(
+  'app_collections',
+  {
+    id: text('id').primaryKey(),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    schemaJson: text('schema_json', { mode: 'json' }).notNull(),
+    policyJson: text('policy_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    appName: uniqueIndex('idx_app_collections_app_name').on(table.appId, table.name),
+  }),
+);
+
+export const appRecords = sqliteTable(
+  'app_records',
+  {
+    id: text('id').primaryKey(),
+    collectionId: text('collection_id')
+      .notNull()
+      .references(() => appCollections.id, { onDelete: 'cascade' }),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    dataJson: text('data_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    version: integer('version').notNull().default(1),
+    createdBy: text('created_by'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byCollection: index('idx_app_records_collection').on(table.collectionId, table.updatedAt),
+  }),
+);
+
+// AG-UI surfaces (§4) — agent-authored ViewNode tree + declared actions. Migration v84.
+export const appSurfaces = sqliteTable(
+  'app_surfaces',
+  {
+    id: text('id').primaryKey(),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** page | dashboard | thread | embed | public. */
+    kind: text('kind').notNull().default('page'),
+    viewJson: text('view_json', { mode: 'json' }),
+    actionsJson: text('actions_json', { mode: 'json' }).notNull().default(sql`'[]'`),
+    shareable: integer('shareable', { mode: 'boolean' }).notNull().default(false),
+    revision: integer('revision').notNull().default(0),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    appName: uniqueIndex('idx_app_surfaces_app_name').on(table.appId, table.name),
+  }),
+);
+
+export const appRecordIndex = sqliteTable(
+  'app_record_index',
+  {
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    collectionId: text('collection_id')
+      .notNull()
+      .references(() => appCollections.id, { onDelete: 'cascade' }),
+    recordId: text('record_id')
+      .notNull()
+      .references(() => appRecords.id, { onDelete: 'cascade' }),
+    fieldKey: text('field_key').notNull(),
+    valueText: text('value_text'),
+    valueNumber: real('value_number'),
+    valueBoolean: integer('value_boolean', { mode: 'boolean' }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.collectionId, table.recordId, table.fieldKey] }),
+    lookupText: index('idx_app_record_index_text').on(table.collectionId, table.fieldKey, table.valueText),
+    lookupNumber: index('idx_app_record_index_number').on(table.collectionId, table.fieldKey, table.valueNumber),
+    lookupBoolean: index('idx_app_record_index_boolean').on(table.collectionId, table.fieldKey, table.valueBoolean),
+  }),
+);
+
+// App lifecycle snapshots (§9) — manifest + live collection rows captured before
+// an upgrade so rollback can restore both definition and data.
+export const appLifecycleSnapshots = sqliteTable(
+  'app_lifecycle_snapshots',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    version: text('version').notNull(),
+    manifestJson: text('manifest_json', { mode: 'json' }).notNull(),
+    installedChecksum: text('installed_checksum'),
+    collectionsJson: text('collections_json', { mode: 'json' }).notNull().default(sql`'[]'`),
+    reason: text('reason').notNull().default('upgrade'),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    byApp: index('idx_app_lifecycle_snapshots_app').on(table.workspaceId, table.appId, table.createdAt),
+  }),
+);
+
+export const appEnvironments = sqliteTable(
+  'app_environments',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    kind: text('kind').notNull().default('dev'),
+    manifestJson: text('manifest_json', { mode: 'json' }).notNull(),
+    sourceEnvironmentId: text('source_environment_id'),
+    promotedAt: text('promoted_at'),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    appName: uniqueIndex('idx_app_environments_app_name').on(table.workspaceId, table.appId, table.name),
+    byApp: index('idx_app_environments_app').on(table.workspaceId, table.appId, table.kind),
+  }),
+);

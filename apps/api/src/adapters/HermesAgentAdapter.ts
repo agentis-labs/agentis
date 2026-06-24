@@ -31,13 +31,20 @@ import {
   runCliChatTurn,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { runtimeProgressActivity } from './runtimeProgress.js';
+
+const DEFAULT_HERMES_STARTUP_TIMEOUT_MS = 120_000;
+const MAX_HERMES_STARTUP_TIMEOUT_MS = 300_000;
+const DEFAULT_HERMES_FIRST_EVENT_TIMEOUT_MS = 90_000;
+const MIN_HERMES_FIRST_EVENT_TIMEOUT_MS = 15_000;
+const MAX_HERMES_FIRST_EVENT_TIMEOUT_MS = 120_000;
 
 export interface HermesAgentAdapterOptions {
   agentId: string;
   binaryPath?: string;
   cwd?: string;
   model?: string;
-  chatTransport?: 'cli' | 'acp';
+  chatTransport?: 'cli' | 'acp' | 'auto';
   maxTurns?: number;
   extraArgs?: string[];
   env?: Record<string, string>;
@@ -66,7 +73,13 @@ export class HermesAgentAdapter implements AgentAdapter {
   readonly #inFlight = new Map<string, AbortController>();
   #client: AcpClient | undefined;
   #clientReady: Promise<AcpClient> | undefined;
-  #processGeneration = 0;
+  #processGeneration = Date.now();
+  #prewarmReady: Promise<void> | undefined;
+  #prewarmedSession: {
+    sessionId: string;
+    processGeneration: number;
+    models?: AcpModelInfo[];
+  } | undefined;
   #activeSessionId: string | undefined;
   #turnTail: Promise<void> = Promise.resolve();
   #version: string | null = null;
@@ -82,7 +95,23 @@ export class HermesAgentAdapter implements AgentAdapter {
 
   constructor(private readonly opts: HermesAgentAdapterOptions) {}
 
-  async connect(): Promise<void> {}
+  getWorkdir(): string | undefined { return this.opts.cwd; }
+
+  async connect(): Promise<void> {
+    if (!shouldPrewarmHermesOnConnect(this.opts.env) || this.#chatTransport() === 'cli' || this.#prewarmReady || this.#prewarmedSession) return;
+    const startupTimeoutMs = boundedTimeout(
+      process.env.AGENTIS_HERMES_STARTUP_TIMEOUT_MS,
+      DEFAULT_HERMES_STARTUP_TIMEOUT_MS,
+      MAX_HERMES_STARTUP_TIMEOUT_MS,
+      DEFAULT_HERMES_STARTUP_TIMEOUT_MS,
+    );
+    this.#prewarmReady = this.#prewarm(startupTimeoutMs).catch((err) => {
+      this.#prewarmReady = undefined;
+      this.opts.logger.warn('hermes_agent.acp.prewarm_failed', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
 
   async disconnect(): Promise<void> {
     for (const controller of this.#inFlight.values()) controller.abort();
@@ -90,6 +119,8 @@ export class HermesAgentAdapter implements AgentAdapter {
     this.#client?.dispose();
     this.#client = undefined;
     this.#clientReady = undefined;
+    this.#prewarmReady = undefined;
+    this.#prewarmedSession = undefined;
     this.#activeSessionId = undefined;
   }
 
@@ -106,7 +137,7 @@ export class HermesAgentAdapter implements AgentAdapter {
   }
 
   capabilities(): AdapterCapabilities {
-    const acp = this.#chatTransport() === 'acp';
+    const acp = this.#chatTransport() !== 'cli';
     return {
       interactiveChat: true,
       toolCalling: true,
@@ -215,9 +246,12 @@ export class HermesAgentAdapter implements AgentAdapter {
     let timeout: NodeJS.Timeout | undefined;
     try {
       const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
-      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
+      // Isolated per-task directory when the engine allocated one (parallel swarm
+      // subtask); otherwise the adapter's single-agent configured cwd.
+      const spawnCwd = task.workdir ?? this.opts.cwd;
+      const target = resolveSpawnTarget(binary, args, spawnCwd ?? process.cwd(), env);
       childProcess = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
+        cwd: spawnCwd,
         env,
         windowsHide: true,
         signal: controller.signal,
@@ -381,10 +415,12 @@ export class HermesAgentAdapter implements AgentAdapter {
     _tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
-    if (this.#chatTransport() === 'cli') {
+    const transport = this.#chatTransport();
+    if (transport === 'cli') {
       yield* this.#chatCli(messages, options);
       return;
     }
+    const allowCliFallback = transport === 'auto';
 
     const releaseTurn = await this.#acquireTurn();
     const queue = createChatQueue();
@@ -396,21 +432,30 @@ export class HermesAgentAdapter implements AgentAdapter {
     const hardCeilingMs = chatHardCeilingMs(requestedRoundMs, 'AGENTIS_HERMES_CHAT_HARD_CEILING_MS');
     const firstEventTimeoutMs = boundedTimeout(
       process.env.AGENTIS_HERMES_FIRST_EVENT_TIMEOUT_MS,
-      hardCeilingMs,
-      hardCeilingMs,
+      DEFAULT_HERMES_FIRST_EVENT_TIMEOUT_MS,
+      Math.min(hardCeilingMs, MAX_HERMES_FIRST_EVENT_TIMEOUT_MS),
+      MIN_HERMES_FIRST_EVENT_TIMEOUT_MS,
     );
     const startupTimeoutMs = boundedTimeout(
       process.env.AGENTIS_HERMES_STARTUP_TIMEOUT_MS,
-      30_000,
-      120_000,
+      DEFAULT_HERMES_STARTUP_TIMEOUT_MS,
+      MAX_HERMES_STARTUP_TIMEOUT_MS,
+      DEFAULT_HERMES_STARTUP_TIMEOUT_MS,
     );
     let settled = false;
+    let fallbackStarted = false;
     let client: AcpClient | undefined;
     let sessionId = '';
     let firstEventSeen = false;
     let firstEventTimer: NodeJS.Timeout | undefined;
     let hardTimer: NodeJS.Timeout | undefined;
     let abortHandler: (() => void) | undefined;
+    const turnState: HermesAcpTurnState = {
+      sessionKey,
+      agentId: this.opts.agentId,
+      thoughtText: '',
+      toolLabels: new Map(),
+    };
 
     const finish = (deltas: ChatDelta[]) => {
       if (settled) return;
@@ -420,7 +465,49 @@ export class HermesAgentAdapter implements AgentAdapter {
       for (const delta of deltas) queue.push(delta);
       queue.close();
     };
+    const fallbackToCli = async (code: string, message: string) => {
+      if (settled || fallbackStarted) return;
+      fallbackStarted = true;
+      settled = true;
+      if (firstEventTimer) clearTimeout(firstEventTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+      if (client) {
+        void client.cancel(sessionId);
+        this.#invalidateClient(client);
+      }
+      if (this.opts.sessionStore && this.opts.workspaceId) {
+        this.opts.sessionStore.markStatus(this.opts.workspaceId, this.opts.agentId, sessionKey, 'stale');
+      }
+      queue.push({
+        type: 'activity',
+        id: `hermes-fallback-${sessionKey}`,
+        label: 'Switching Hermes transport',
+        detail: `${code}: ${message}`,
+        phase: 'runtime',
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        agentId: this.opts.agentId,
+      });
+      try {
+        for await (const delta of this.#chatCli(messages, options)) queue.push(delta);
+      } catch (err) {
+        queue.push({
+          type: 'tool_result',
+          id: 'adapter',
+          name: 'adapter.chat',
+          result: null,
+          error: `hermes_cli_fallback_failed: ${(err as Error).message}`,
+        });
+        queue.push({ type: 'done', finishReason: 'error' });
+      } finally {
+        queue.close();
+      }
+    };
     const failTurn = (code: string, message: string) => {
+      if (allowCliFallback && !firstEventSeen && isHermesAcpStartupOrSessionFailure(code)) {
+        void fallbackToCli(code, message);
+        return;
+      }
       if (client) {
         void client.cancel(sessionId);
         this.#invalidateClient(client);
@@ -436,8 +523,46 @@ export class HermesAgentAdapter implements AgentAdapter {
 
     void (async () => {
       try {
+        queue.push({
+          type: 'activity',
+          id: `hermes-runtime-${sessionKey}`,
+          label: 'Starting Hermes runtime',
+          detail: 'Connecting to the persistent ACP runtime.',
+          phase: 'runtime',
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
         client = await this.#ensureClient(startupTimeoutMs);
+        queue.push({
+          type: 'activity',
+          id: `hermes-runtime-${sessionKey}`,
+          label: 'Hermes runtime ready',
+          phase: 'runtime',
+          status: 'success',
+          completedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
+        queue.push({
+          type: 'activity',
+          id: `hermes-session-${sessionKey}`,
+          label: 'Opening Hermes session',
+          detail: 'Preparing the conversation and runtime tools.',
+          phase: 'runtime',
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
         const session = await this.#openSession(client, sessionKey, startupTimeoutMs);
+        queue.push({
+          type: 'activity',
+          id: `hermes-session-${sessionKey}`,
+          label: 'Hermes session ready',
+          phase: 'runtime',
+          status: 'success',
+          completedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
         sessionId = session.sessionId;
         this.#activeSessionId = sessionId;
         if (session.models?.length) this.#models = session.models;
@@ -445,6 +570,15 @@ export class HermesAgentAdapter implements AgentAdapter {
         const requestedModel = options?.preferredModel ?? this.opts.model;
         const resolvedModelId = resolveAcpModelId(requestedModel, session.models ?? this.#models);
         if (resolvedModelId && session.selectedModel !== resolvedModelId) {
+          queue.push({
+            type: 'activity',
+            id: `hermes-model-${sessionKey}`,
+            label: `Selecting ${requestedModel ?? resolvedModelId}`,
+            phase: 'runtime',
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentId: this.opts.agentId,
+          });
           await withDeadline(
             client.setModel(sessionId, resolvedModelId),
             startupTimeoutMs,
@@ -452,6 +586,15 @@ export class HermesAgentAdapter implements AgentAdapter {
           );
           session.selectedModel = resolvedModelId;
           this.#persistSession(sessionKey, sessionId, resolvedModelId, 'active');
+          queue.push({
+            type: 'activity',
+            id: `hermes-model-${sessionKey}`,
+            label: `Using ${requestedModel ?? resolvedModelId}`,
+            phase: 'runtime',
+            status: 'success',
+            completedAt: new Date().toISOString(),
+            agentId: this.opts.agentId,
+          });
         } else if (requestedModel && !resolvedModelId) {
           this.opts.logger.warn('hermes_agent.acp.model_not_offered', { requested: requestedModel });
         }
@@ -493,7 +636,7 @@ export class HermesAgentAdapter implements AgentAdapter {
               firstEventSeen = true;
               if (firstEventTimer) clearTimeout(firstEventTimer);
             }
-            const delta = acpUpdateToDelta(update);
+            const delta = acpUpdateToDelta(update, turnState);
             if (delta && !settled) queue.push(delta);
           },
         );
@@ -589,11 +732,14 @@ export class HermesAgentAdapter implements AgentAdapter {
     }
   }
 
-  #chatTransport(): 'cli' | 'acp' {
+  #chatTransport(): 'cli' | 'acp' | 'auto' {
     const configured = this.opts.chatTransport
       ?? this.opts.env?.AGENTIS_HERMES_CHAT_TRANSPORT
       ?? process.env.AGENTIS_HERMES_CHAT_TRANSPORT;
-    return configured?.trim().toLowerCase() === 'acp' ? 'acp' : 'cli';
+    const normalized = configured?.trim().toLowerCase();
+    if (normalized === 'cli') return 'cli';
+    if (normalized === 'acp') return 'acp';
+    return 'auto';
   }
 
   async #acquireTurn(): Promise<() => void> {
@@ -618,8 +764,9 @@ export class HermesAgentAdapter implements AgentAdapter {
         env: this.opts.env,
         logger: this.opts.logger,
         logTag: 'hermes_agent.acp',
+        stderrLogLevel: 'none',
         onPermission: (request) => {
-          this.opts.logger.warn('hermes_agent.permission_denied', {
+          this.opts.logger.debug?.('hermes_agent.permission_requested', {
             tool: request.toolCall?.title ?? request.toolCall?.kind ?? 'unknown',
           });
           return null;
@@ -628,6 +775,8 @@ export class HermesAgentAdapter implements AgentAdapter {
           if (this.#client === client) {
             this.#client = undefined;
             this.#clientReady = undefined;
+            this.#prewarmReady = undefined;
+            this.#prewarmedSession = undefined;
             this.#activeSessionId = undefined;
           }
         },
@@ -648,6 +797,25 @@ export class HermesAgentAdapter implements AgentAdapter {
     return this.#clientReady;
   }
 
+  async #prewarm(startupTimeoutMs: number): Promise<void> {
+    const client = await this.#ensureClient(startupTimeoutMs);
+    if (this.#prewarmedSession?.processGeneration === this.#processGeneration) return;
+    const created = await withDeadline(
+      client.sessionNew({
+        cwd: this.opts.cwd ?? process.cwd(),
+        mcpServers: toAcpHttpMcpServers(this.opts.mcpServers ?? []),
+      }),
+      startupTimeoutMs,
+      'session_prewarm_timeout',
+    );
+    if (created.models?.length) this.#models = created.models;
+    this.#prewarmedSession = {
+      sessionId: created.sessionId,
+      processGeneration: this.#processGeneration,
+      models: created.models,
+    };
+  }
+
   async #openSession(
     client: AcpClient,
     sessionKey: string,
@@ -659,6 +827,7 @@ export class HermesAgentAdapter implements AgentAdapter {
   }> {
     const sessionCwd = this.opts.cwd ?? process.cwd();
     const mcpServers = toAcpHttpMcpServers(this.opts.mcpServers ?? []);
+    if (this.#prewarmReady) await this.#prewarmReady;
     const memorySession = this.#sessions.get(sessionKey);
     if (memorySession?.processGeneration === this.#processGeneration) {
       return {
@@ -671,7 +840,8 @@ export class HermesAgentAdapter implements AgentAdapter {
     const stored = this.opts.sessionStore && this.opts.workspaceId
       ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)
       : null;
-    const persistedId = memorySession?.sessionId ?? stored?.runtimeSessionId;
+    const persistedId = memorySession?.sessionId
+      ?? (stored?.processGeneration === this.#processGeneration ? stored.runtimeSessionId : undefined);
     if (persistedId) {
       try {
         const loaded = await withDeadline(
@@ -705,6 +875,25 @@ export class HermesAgentAdapter implements AgentAdapter {
           err: (err as Error).message,
         });
       }
+    }
+
+    const prewarmed = this.#prewarmedSession;
+    if (prewarmed?.processGeneration === this.#processGeneration) {
+      this.#prewarmedSession = undefined;
+      const now = new Date().toISOString();
+      this.#sessions.set(sessionKey, {
+        sessionId: prewarmed.sessionId,
+        processGeneration: this.#processGeneration,
+        selectedModel: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      this.#persistSession(sessionKey, prewarmed.sessionId, null, 'active');
+      return {
+        sessionId: prewarmed.sessionId,
+        models: prewarmed.models ?? this.#models,
+        selectedModel: null,
+      };
     }
 
     const created = await withDeadline(
@@ -757,6 +946,8 @@ export class HermesAgentAdapter implements AgentAdapter {
     if (this.#client === client) {
       this.#client = undefined;
       this.#clientReady = undefined;
+      this.#prewarmReady = undefined;
+      this.#prewarmedSession = undefined;
       this.#activeSessionId = undefined;
     }
     client.dispose();
@@ -802,33 +993,67 @@ export class HermesAgentAdapter implements AgentAdapter {
  * The agent's OWN tool calls (it ran them over MCP) surface as live activity —
  * never as executable `tool_call` deltas, so Agentis doesn't re-run them.
  */
-function acpUpdateToDelta(update: AcpSessionUpdate): ChatDelta | null {
+interface HermesAcpTurnState {
+  sessionKey: string;
+  agentId: string;
+  thoughtText: string;
+  toolLabels: Map<string, string>;
+}
+
+function acpUpdateToDelta(update: AcpSessionUpdate, state: HermesAcpTurnState): ChatDelta | null {
   switch (update.sessionUpdate) {
     case 'agent_thought_chunk': {
       const text = textOf(update.content);
-      return text ? { type: 'thinking', delta: text } : null;
+      if (!text) return null;
+      state.thoughtText += text;
+      return runtimeProgressActivity({
+        id: `hermes-thought-${state.sessionKey}`,
+        runtimeName: 'Hermes',
+        text: state.thoughtText,
+        reasoning: true,
+        agentId: state.agentId,
+      });
     }
     case 'agent_message_chunk': {
       const text = textOf(update.content);
+      state.thoughtText = '';
       return text ? { type: 'text', delta: text } : null;
     }
     case 'tool_call': {
       const u = update as { toolCallId?: string; title?: string; kind?: string };
       const label = u.title?.trim() || prettyToolName(u.kind) || 'a tool';
-      return {
-        type: 'activity',
-        id: `hermes-${u.toolCallId ?? randomUUID()}`,
-        phase: 'tool',
-        status: 'running',
-        label: `Using ${label}`,
-        startedAt: new Date().toISOString(),
-      };
+      const toolCallId = u.toolCallId ?? randomUUID();
+      state.toolLabels.set(toolCallId, label);
+      return hermesToolActivity(toolCallId, label, String(update.status ?? 'running'));
+    }
+    case 'tool_call_update': {
+      const u = update as { toolCallId?: string; title?: string; status?: string };
+      const toolCallId = u.toolCallId ?? randomUUID();
+      const label = u.title?.trim() || state.toolLabels.get(toolCallId) || 'a tool';
+      state.toolLabels.set(toolCallId, label);
+      return hermesToolActivity(toolCallId, label, u.status ?? 'running');
     }
     default:
-      // tool_call_update / usage_update / available_commands_update / plan — not
-      // surfaced as chat deltas (status churn, token meters, slash-command lists).
+      // usage_update / available_commands_update / plan are not operator-facing
+      // execution events.
       return null;
   }
+}
+
+function hermesToolActivity(toolCallId: string, label: string, rawStatus: string): Extract<ChatDelta, { type: 'activity' }> {
+  const status = rawStatus.toLowerCase();
+  const failed = /fail|error|cancel/.test(status);
+  const completed = failed || /complete|success|done|finished/.test(status);
+  return {
+    type: 'activity',
+    id: `hermes-${toolCallId}`,
+    phase: 'tool',
+    status: failed ? 'error' : completed ? 'success' : 'running',
+    label: failed ? `Failed ${label}` : completed ? `Used ${label}` : `Using ${label}`,
+    ...(completed
+      ? { completedAt: new Date().toISOString() }
+      : { startedAt: new Date().toISOString() }),
+  };
 }
 
 /**
@@ -855,10 +1080,23 @@ function normalizeHermesCliModel(model: string | null | undefined): string | und
   return value;
 }
 
-function boundedTimeout(raw: string | undefined, fallback: number, maximum: number): number {
+function shouldPrewarmHermesOnConnect(env: Record<string, string> | undefined): boolean {
+  const value = env?.AGENTIS_HERMES_PREWARM_ON_CONNECT ?? process.env.AGENTIS_HERMES_PREWARM_ON_CONNECT;
+  return value === '1' || value?.toLowerCase() === 'true';
+}
+
+function isHermesAcpStartupOrSessionFailure(code: string): boolean {
+  return code === 'handshake_timeout'
+    || code === 'session_prewarm_timeout'
+    || code === 'session_load_timeout'
+    || code === 'session_open_timeout'
+    || code === 'model_selection_timeout';
+}
+
+function boundedTimeout(raw: string | undefined, fallback: number, maximum: number, minimum = 1_000): number {
   const parsed = Number(raw);
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-  return Math.max(1_000, Math.min(Math.floor(value), maximum));
+  return Math.max(minimum, Math.min(Math.floor(value), maximum));
 }
 
 async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {

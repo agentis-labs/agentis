@@ -558,14 +558,14 @@ WHERE compile_status = 'compiling';
     version: 48,
     name: 'agent_space_tag',
     sql: `
-ALTER TABLE agents ADD COLUMN space_tag TEXT;
+ALTER TABLE agents ADD COLUMN domain_tag TEXT;
 `,
   },
   {
     version: 49,
     name: 'spaces_entity',
     sql: `
-CREATE TABLE IF NOT EXISTS spaces (
+CREATE TABLE IF NOT EXISTS domains (
   id           TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -579,8 +579,8 @@ CREATE TABLE IF NOT EXISTS spaces (
   updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
-ALTER TABLE agents ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;
-ALTER TABLE workflows ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;
+ALTER TABLE agents ADD COLUMN domain_id TEXT REFERENCES domains(id) ON DELETE SET NULL;
+ALTER TABLE workflows ADD COLUMN domain_id TEXT REFERENCES domains(id) ON DELETE SET NULL;
 `,
   },
   {
@@ -1464,6 +1464,625 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_sessions_owner
   ON runtime_sessions(workspace_id, agent_id, session_key, execution_mode);
 CREATE INDEX IF NOT EXISTS runtime_sessions_agent
   ON runtime_sessions(workspace_id, agent_id, last_used_at);
+`,
+  },
+  {
+    version: 66,
+    name: 'embedding_identity',
+    // Brain 10x §B1.2 — every embedding-bearing row records WHICH model produced
+    // its vector and at WHAT dimension, so retrieval can compare (model,dims)
+    // instead of length alone. `needs_reembed` flags rows whose stored vector no
+    // longer matches the workspace's configured provider, so the maintenance
+    // sweep can re-embed them instead of silently degrading to lexical.
+    sql: `
+ALTER TABLE memory_episodes ADD COLUMN embedding_model TEXT;
+ALTER TABLE memory_episodes ADD COLUMN embedding_dims INTEGER;
+ALTER TABLE memory_episodes ADD COLUMN needs_reembed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace_memory ADD COLUMN embedding TEXT;
+ALTER TABLE workspace_memory ADD COLUMN embedding_model TEXT;
+ALTER TABLE workspace_memory ADD COLUMN embedding_dims INTEGER;
+ALTER TABLE workspace_memory ADD COLUMN needs_reembed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE user_notes ADD COLUMN embedding_model TEXT;
+ALTER TABLE user_notes ADD COLUMN embedding_dims INTEGER;
+ALTER TABLE user_notes ADD COLUMN needs_reembed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE session_moments ADD COLUMN embedding_model TEXT;
+ALTER TABLE session_moments ADD COLUMN embedding_dims INTEGER;
+ALTER TABLE session_moments ADD COLUMN needs_reembed INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS memory_episodes_needs_reembed
+  ON memory_episodes(workspace_id, needs_reembed);
+`,
+  },
+  {
+    version: 67,
+    name: 'unified_substrate_governing',
+    // Brain 10x §B4 (dual-read stage, NON-DESTRUCTIVE) — memory_episodes becomes
+    // the canonical substrate. `governing` marks operator-authored atoms that
+    // must inject on every dispatch (the constitutional tier), replacing the
+    // separate workspace_memory-only scan. `applies_to` carries scope-affinity
+    // links (agent/workflow ids) for the narrow-write scope model (§B7.3). Both
+    // additive + reversible; the workspace_memory → episodes backfill and the
+    // eventual table drop are deferred destructive stages gated on a DB backup.
+    sql: `
+ALTER TABLE memory_episodes ADD COLUMN governing INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_episodes ADD COLUMN applies_to TEXT NOT NULL DEFAULT '[]';
+CREATE INDEX IF NOT EXISTS memory_episodes_governing
+  ON memory_episodes(workspace_id, governing);
+`,
+  },
+  {
+    version: 68,
+    name: 'remove_builtin_specialists',
+    sql: `
+DELETE FROM specialist_templates
+  WHERE category = 'platform'
+     OR slug IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_ability_loadouts
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_minds
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_profiles
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_eval_profiles
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_instances
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_routing_decisions
+  WHERE selected_role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM specialist_runs
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer');
+DELETE FROM agents
+  WHERE role IN ('planner','researcher','coder','reviewer','analyst','writer','monitor','architect','debugger','deployer')
+    AND json_extract(config, '$.specialist') = 1
+    AND COALESCE(json_extract(config, '$.specialistSource'), 'platform') = 'platform';
+`,
+  },
+  {
+    version: 69,
+    name: 'collapse_workspace_memory_into_episodes',
+    // Brain 10x §B4 (DESTRUCTIVE — operator-sanctioned, post-backup) — fold the
+    // typed workspace_memory plane into the canonical memory_episodes substrate.
+    // Rows copy id-preserving with a `plane:workspace_memory` tag + a metadata
+    // discriminator (memoryKind/memorySource/provenance) so the typed MemoryStore
+    // facade reconstructs the kind/source contract. kind→type and source→episode
+    // source are mapped; operator rules become `governing`. embedding is reset
+    // (needs_reembed=1) so the spine re-embeds with the workspace provider.
+    // Idempotent copy (NOT EXISTS), then drop the table.
+    sql: `
+INSERT INTO memory_episodes (
+  id, workspace_id, scope_id, workflow_id, run_id, agent_id, type, title, summary, details, source,
+  confidence, importance, trust, tags, entities, outcome_status, embedding, embedding_model, embedding_dims, needs_reembed,
+  governing, applies_to, metadata, reinforced_at, archived_at, superseded_by, status, managed, pinned_at, last_accessed_at,
+  is_disputed, dispute_reason, dispute_resolved_at, dispute_snoozed_until, context_condition, compressed_from, compression_tier,
+  created_at, updated_at
+)
+SELECT
+  wm.id, wm.workspace_id, wm.scope_id, NULL, NULL, NULL,
+  CASE wm.kind WHEN 'rule' THEN 'decision' WHEN 'preference' THEN 'decision' WHEN 'fact' THEN 'observation' WHEN 'pattern' THEN 'success_pattern' ELSE 'distilled_lesson' END,
+  wm.title, wm.content, NULL,
+  CASE wm.source WHEN 'operator' THEN 'operator_write' WHEN 'seed' THEN 'seed' WHEN 'promotion' THEN 'run_promotion' WHEN 'agent' THEN 'agent_write' ELSE 'system_write' END,
+  wm.trust, wm.importance, wm.trust,
+  json_insert(CASE WHEN json_valid(wm.tags) THEN wm.tags ELSE '[]' END, '$[#]', 'plane:workspace_memory'),
+  '[]',
+  NULL, NULL, NULL, NULL, 1,
+  CASE WHEN wm.source = 'operator' AND (wm.kind = 'rule' OR CAST(wm.importance AS REAL) >= 0.8) THEN 1 ELSE 0 END,
+  '[]',
+  json_object('plane', 'workspace_memory', 'memoryKind', wm.kind, 'memorySource', wm.source, 'provenance', CASE WHEN json_valid(wm.provenance) THEN json(wm.provenance) ELSE json('{}') END),
+  wm.reinforced_at, NULL, NULL, 'active',
+  CASE WHEN wm.source IN ('operator', 'seed', 'system') THEN 0 ELSE 1 END,
+  NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+  wm.created_at, wm.updated_at
+FROM workspace_memory wm
+WHERE NOT EXISTS (SELECT 1 FROM memory_episodes me WHERE me.id = wm.id);
+DROP TABLE workspace_memory;
+`,
+  },
+  {
+    version: 70,
+    name: 'chat_plan_canvas',
+    sql: `
+ALTER TABLE conversations ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'chat';
+
+CREATE TABLE IF NOT EXISTS plans (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+  run_ids TEXT NOT NULL DEFAULT '[]',
+  session_id TEXT,
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  active_version INTEGER NOT NULL DEFAULT 1,
+  approved_version INTEGER,
+  decisions TEXT NOT NULL DEFAULT '[]',
+  deviations TEXT NOT NULL DEFAULT '[]',
+  verification TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS plans_conversation ON plans(workspace_id, conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS plans_session ON plans(workspace_id, session_id);
+
+CREATE TABLE IF NOT EXISTS plan_versions (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  created_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(plan_id, version)
+);
+`,
+  },
+  {
+    version: 71,
+    name: 'rename_cora_to_grounding',
+    // Brain 10x §B8 — "CORA" retired as a name. Internal understanding folded into
+    // the Brain (facts, not claims); the claim/evidence/source machinery + its
+    // tables are reserved for the future EXTERNAL-sources system, now named
+    // "Grounding". Rename the 20 tables `cora_*` → `grounding_*`. SQLite's
+    // ALTER TABLE … RENAME TO updates FK references in dependent tables
+    // automatically (legacy_alter_table off by default), so this is safe.
+    sql: `
+ALTER TABLE cora_access_requests RENAME TO grounding_access_requests;
+ALTER TABLE cora_agent_grants RENAME TO grounding_agent_grants;
+ALTER TABLE cora_audit_events RENAME TO grounding_audit_events;
+ALTER TABLE cora_behavior_influences RENAME TO grounding_behavior_influences;
+ALTER TABLE cora_claim_conflicts RENAME TO grounding_claim_conflicts;
+ALTER TABLE cora_claim_evidence RENAME TO grounding_claim_evidence;
+ALTER TABLE cora_claims RENAME TO grounding_claims;
+ALTER TABLE cora_entities RENAME TO grounding_entities;
+ALTER TABLE cora_evidence_versions RENAME TO grounding_evidence_versions;
+ALTER TABLE cora_identity_links RENAME TO grounding_identity_links;
+ALTER TABLE cora_investigations RENAME TO grounding_investigations;
+ALTER TABLE cora_learning_plans RENAME TO grounding_learning_plans;
+ALTER TABLE cora_migration_candidates RENAME TO grounding_migration_candidates;
+ALTER TABLE cora_model_artifacts RENAME TO grounding_model_artifacts;
+ALTER TABLE cora_model_snapshots RENAME TO grounding_model_snapshots;
+ALTER TABLE cora_owner_profiles RENAME TO grounding_owner_profiles;
+ALTER TABLE cora_source_connections RENAME TO grounding_source_connections;
+ALTER TABLE cora_source_objects RENAME TO grounding_source_objects;
+ALTER TABLE cora_source_principals RENAME TO grounding_source_principals;
+ALTER TABLE cora_sync_runs RENAME TO grounding_sync_runs;
+`,
+  },
+  {
+    version: 72,
+    name: 'brain_working_set_and_shared_axis',
+    // Brain 10x §C2 — sleep-time precomputed working set (Tier-0 cache): one row
+    // per (workspace, scope) holding the precomputed top durable atoms so the
+    // injector can serve a scope's core knowledge at zero retrieval cost.
+    // §C7 — `shared` axis on every atom: 1 = visible to the whole team, 0 =
+    // private to its scope/owner. Powers the privacy-scoped team brain.
+    sql: `
+CREATE TABLE IF NOT EXISTS brain_working_set (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  scope_id TEXT,
+  atoms TEXT NOT NULL DEFAULT '[]',
+  atom_count INTEGER NOT NULL DEFAULT 0,
+  built_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS brain_working_set_scope
+  ON brain_working_set(workspace_id, scope_id);
+ALTER TABLE memory_episodes ADD COLUMN shared INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS memory_episodes_shared
+  ON memory_episodes(workspace_id, shared);
+`,
+  },
+  {
+    version: 73,
+    name: 'observability_events',
+    sql: `
+CREATE TABLE IF NOT EXISTS observability_events (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  sequence_number INTEGER NOT NULL,
+  scope_type TEXT NOT NULL DEFAULT 'workspace',
+  scope_id TEXT,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'info',
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  detail TEXT,
+  actor_type TEXT,
+  actor_id TEXT,
+  target_type TEXT,
+  target_id TEXT,
+  run_id TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  node_id TEXT,
+  approval_id TEXT REFERENCES approval_requests(id) ON DELETE SET NULL,
+  correlation_id TEXT,
+  parent_event_id TEXT,
+  progress TEXT,
+  evidence TEXT NOT NULL DEFAULT '[]',
+  raw_payload_redacted TEXT NOT NULL DEFAULT '{}',
+  source_event TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(workspace_id, sequence_number)
+);
+CREATE INDEX IF NOT EXISTS observability_events_workspace_created
+  ON observability_events(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS observability_events_workspace_sequence
+  ON observability_events(workspace_id, sequence_number);
+CREATE INDEX IF NOT EXISTS observability_events_run_sequence
+  ON observability_events(run_id, sequence_number);
+CREATE INDEX IF NOT EXISTS observability_events_agent_sequence
+  ON observability_events(agent_id, sequence_number);
+CREATE INDEX IF NOT EXISTS observability_events_workflow_sequence
+  ON observability_events(workflow_id, sequence_number);
+CREATE INDEX IF NOT EXISTS observability_events_scope_sequence
+  ON observability_events(scope_type, scope_id, sequence_number);
+`,
+  },
+  {
+    version: 74,
+    name: 'durable_task_spine',
+    sql: `
+PRAGMA foreign_keys = OFF;
+CREATE TABLE IF NOT EXISTS plans_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+  run_ids TEXT NOT NULL DEFAULT '[]',
+  session_id TEXT,
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  active_version INTEGER NOT NULL DEFAULT 1,
+  approved_version INTEGER,
+  decisions TEXT NOT NULL DEFAULT '[]',
+  deviations TEXT NOT NULL DEFAULT '[]',
+  verification TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO plans_next (
+  id, workspace_id, conversation_id, message_id, run_ids, session_id, title, objective, status,
+  active_version, approved_version, decisions, deviations, verification, created_at, updated_at
+)
+SELECT
+  id,
+  workspace_id,
+  conversation_id,
+  message_id,
+  CASE WHEN json_valid(coalesce(run_ids, '[]')) THEN run_ids ELSE '[]' END,
+  session_id,
+  title,
+  objective,
+  status,
+  active_version,
+  approved_version,
+  CASE WHEN json_valid(coalesce(decisions, '[]')) THEN decisions ELSE '[]' END,
+  CASE WHEN json_valid(coalesce(deviations, '[]')) THEN deviations ELSE '[]' END,
+  CASE WHEN verification IS NOT NULL AND json_valid(verification) THEN verification ELSE NULL END,
+  created_at,
+  updated_at
+FROM plans;
+DROP TABLE plans;
+ALTER TABLE plans_next RENAME TO plans;
+PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS plans_conversation ON plans(workspace_id, conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS plans_session ON plans(workspace_id, session_id);
+`,
+  },
+  {
+    version: 75,
+    name: 'channel_conversation_scope',
+    sql: `
+ALTER TABLE conversations ADD COLUMN channel_connection_id TEXT REFERENCES channel_connections(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN channel_chat_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_conversations_channel
+  ON conversations(workspace_id, agent_id, channel_connection_id, channel_chat_id, archived_at);
+`,
+  },
+  {
+    version: 76,
+    name: 'approval_request_payload',
+    sql: `
+ALTER TABLE approval_requests ADD COLUMN payload TEXT NOT NULL DEFAULT '{}';
+`,
+  },
+  {
+    // The issues feature (IssueService + /v1/issues) shipped its schema.ts tables
+    // and the issue_prefix / issue_id columns (added via the embedded idempotent
+    // layer) but never a migration to CREATE the tables. Result: every workspace
+    // hit "no such table: issues" on each /v1/issues poll. This creates them.
+    version: 77,
+    name: 'issues_feature',
+    sql: `
+CREATE TABLE IF NOT EXISTS issues (
+  id                 TEXT PRIMARY KEY,
+  workspace_id       TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  assignee_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  linked_workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+  active_run_id      TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  identifier         TEXT NOT NULL,
+  title              TEXT NOT NULL,
+  description        TEXT,
+  status             TEXT NOT NULL DEFAULT 'backlog',
+  priority           TEXT NOT NULL DEFAULT 'medium',
+  labels             TEXT NOT NULL DEFAULT '[]',
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_issues_workspace ON issues(workspace_id, status);
+
+CREATE TABLE IF NOT EXISTS workspace_counters (
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  counter_name  TEXT NOT NULL,
+  counter_value INTEGER NOT NULL DEFAULT 0,
+  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (workspace_id, counter_name)
+);
+`,
+  },
+  {
+    version: 78,
+    name: 'knowledge_chunks_recall_index',
+    sql: `
+-- The Brain recall hot path (KnowledgeStore candidate scan) filters
+-- knowledge_chunks by (workspace_id, scope_id) and orders by updated_at DESC,
+-- capped at CANDIDATE_SCAN_LIMIT. Until now the table carried only its
+-- primary-key autoindex, so every recall was a full table scan + transient
+-- sort that grew linearly with corpus size — invisible on small dev databases,
+-- a cliff on real ones. memory_episodes already had its equivalents; this
+-- closes the gap. Mirrored in src/sqlite/schema.ts (knowledgeChunks).
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_scope_recency
+  ON knowledge_chunks (workspace_id, scope_id, updated_at);
+`,
+  },
+  {
+    version: 79,
+    name: 'workflow_repair_checkpoints',
+    sql: `
+CREATE TABLE IF NOT EXISTS workflow_repair_checkpoints (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  run_id          TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  workflow_id     TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+  incident_id     TEXT NOT NULL,
+  plan_id         TEXT NOT NULL,
+  revision_before INTEGER NOT NULL,
+  revision_after  INTEGER NOT NULL,
+  graph_before    TEXT NOT NULL,
+  graph_after     TEXT NOT NULL,
+  patch           TEXT NOT NULL,
+  rolled_back_at  TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_repair_checkpoints_run
+  ON workflow_repair_checkpoints (run_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_repair_checkpoints_plan
+  ON workflow_repair_checkpoints (run_id, plan_id);
+`,
+  },
+  {
+    version: 80,
+    name: 'subdomains_and_workflow_owner',
+    sql: `
+-- Manager-owned org structure: a Subdomain is a domains row nested under a parent
+-- Domain (parent_domain_id), with its manager_id pointing at the responsible
+-- specialist. owner_agent_id gives a workflow a direct specialist owner. Both
+-- are idempotent ADD COLUMNs (execMigrationSql tolerates duplicate-column when
+-- the embedded drift path in src/sqlite/index.ts added them first). Mirrored in
+-- src/sqlite/schema.ts (domains.parentDomainId, workflows.ownerAgentId).
+ALTER TABLE domains ADD COLUMN parent_domain_id TEXT REFERENCES domains(id) ON DELETE SET NULL;
+ALTER TABLE workflows ADD COLUMN owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_domains_parent ON domains(workspace_id, parent_domain_id);
+CREATE INDEX IF NOT EXISTS idx_workflows_owner ON workflows(workspace_id, owner_agent_id);
+`,
+  },
+  {
+    version: 81,
+    name: 'workflow_scoped_knowledge_bases',
+    sql: `
+-- Knowledge bases can be shared by the workspace (NULL scope) or belong to
+-- one workflow Brain. The workspace management view still lists both; runtime
+-- retrieval and the workflow Brain use the scope to keep context precise.
+ALTER TABLE knowledge_bases ADD COLUMN scope_id TEXT REFERENCES workflows(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_knowledge_bases_scope ON knowledge_bases(workspace_id, scope_id);
+`,
+  },
+  {
+    version: 82,
+    name: 'agentic_apps',
+    sql: `
+-- Agentic App = first-class deployable unit (AGENTIC-APPS-10X-MASTERPLAN §3).
+-- An App owns workflows (workflows.app_id, nullable = full back-compat: a bare
+-- workflow is an App-of-one). Surfaces (§4) and datastore (§5) land in later
+-- migrations and reference apps(id). Mirrored in src/sqlite/schema.ts
+-- (apps, appMembers, workflows.appId).
+CREATE TABLE IF NOT EXISTS apps (
+  id               TEXT PRIMARY KEY,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  slug             TEXT NOT NULL,
+  name             TEXT NOT NULL,
+  description      TEXT NOT NULL DEFAULT '',
+  version          TEXT NOT NULL DEFAULT '0.1.0',
+  status           TEXT NOT NULL DEFAULT 'draft',
+  entry_surface_id TEXT,
+  icon             TEXT,
+  manifest_json    TEXT NOT NULL DEFAULT '{}',
+  policy_json      TEXT NOT NULL DEFAULT '{}',
+  created_by       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_apps_workspace_slug ON apps(workspace_id, slug);
+
+CREATE TABLE IF NOT EXISTS app_members (
+  app_id   TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  role     TEXT NOT NULL DEFAULT 'worker',
+  PRIMARY KEY (app_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_app_members_agent ON app_members(agent_id);
+
+ALTER TABLE workflows ADD COLUMN app_id TEXT REFERENCES apps(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_workflows_app ON workflows(workspace_id, app_id);
+`,
+  },
+  {
+    version: 83,
+    name: 'app_datastore',
+    sql: `
+-- App Datastore (AGENTIC-APPS-10X-MASTERPLAN §5) — typed collections + records.
+-- NOT the Brain: exact, structured, transactional rows. Records are validated
+-- against the collection's field schema on write; V1 filters via json_extract
+-- on data_json (a later pass projects indexed fields into generated columns).
+-- Mirrored in src/sqlite/schema.ts (appCollections, appRecords).
+CREATE TABLE IF NOT EXISTS app_collections (
+  id           TEXT PRIMARY KEY,
+  app_id       TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  schema_json  TEXT NOT NULL,
+  policy_json  TEXT NOT NULL DEFAULT '{}',
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_collections_app_name ON app_collections(app_id, name);
+
+CREATE TABLE IF NOT EXISTS app_records (
+  id            TEXT PRIMARY KEY,
+  collection_id TEXT NOT NULL REFERENCES app_collections(id) ON DELETE CASCADE,
+  app_id        TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  data_json     TEXT NOT NULL DEFAULT '{}',
+  version       INTEGER NOT NULL DEFAULT 1,
+  created_by    TEXT,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_records_collection ON app_records(collection_id, updated_at DESC);
+`,
+  },
+  {
+    version: 84,
+    name: 'app_surfaces',
+    sql: `
+-- AG-UI surfaces (AGENTIC-APPS-10X-MASTERPLAN §4). An agent-authored ViewNode
+-- tree + declared actions, owned by an App (not coupled to one workflow as the
+-- legacy WorkflowGraph.surfaces JSON was). Mirrored in src/sqlite/schema.ts
+-- (appSurfaces).
+CREATE TABLE IF NOT EXISTS app_surfaces (
+  id           TEXT PRIMARY KEY,
+  app_id       TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'page',
+  view_json    TEXT,
+  actions_json TEXT NOT NULL DEFAULT '[]',
+  shareable    INTEGER NOT NULL DEFAULT 0,
+  revision     INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_surfaces_app_name ON app_surfaces(app_id, name);
+`,
+  },
+  {
+    version: 85,
+    name: 'app_lifecycle_snapshots',
+    sql: `
+-- App lifecycle snapshots (AGENTIC-SYSTEMS-ARCHITECTURE §9): captured before
+-- upgrade so rollback restores both the manifest definition and live collection
+-- rows. Rows are app-scoped and bounded by the lifecycle service.
+CREATE TABLE IF NOT EXISTS app_lifecycle_snapshots (
+  id               TEXT PRIMARY KEY,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id           TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  version          TEXT NOT NULL,
+  manifest_json    TEXT NOT NULL,
+  collections_json TEXT NOT NULL DEFAULT '[]',
+  reason           TEXT NOT NULL DEFAULT 'upgrade',
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_lifecycle_snapshots_app ON app_lifecycle_snapshots(workspace_id, app_id, created_at);
+`,
+  },
+  {
+    version: 86,
+    name: 'app_hub_ready_seams',
+    sql: `
+-- Hub-ready provenance: installed apps remain ordinary App rows while keeping
+-- enough origin metadata for future Hub upgrade/fork flows.
+ALTER TABLE apps ADD COLUMN source_json TEXT;
+ALTER TABLE apps ADD COLUMN installed_checksum TEXT;
+
+-- Indexed App datastore groundwork: fields marked \`indexed\` project into this
+-- sidecar so V1 can accelerate common equality/inclusion filters without
+-- schema-changing per-field generated columns.
+CREATE TABLE IF NOT EXISTS app_record_index (
+  app_id        TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  collection_id TEXT NOT NULL REFERENCES app_collections(id) ON DELETE CASCADE,
+  record_id     TEXT NOT NULL REFERENCES app_records(id) ON DELETE CASCADE,
+  field_key     TEXT NOT NULL,
+  value_text    TEXT,
+  value_number  REAL,
+  value_boolean INTEGER,
+  PRIMARY KEY (collection_id, record_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_app_record_index_text
+  ON app_record_index(collection_id, field_key, value_text);
+CREATE INDEX IF NOT EXISTS idx_app_record_index_number
+  ON app_record_index(collection_id, field_key, value_number);
+CREATE INDEX IF NOT EXISTS idx_app_record_index_boolean
+  ON app_record_index(collection_id, field_key, value_boolean);
+
+-- App environments are manifest snapshots for dev/staging/prod promotion. They
+-- do not create a second runtime model; deploying/promoting still goes through
+-- the same AppManifest -> App rows path.
+CREATE TABLE IF NOT EXISTS app_environments (
+  id                    TEXT PRIMARY KEY,
+  workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id                TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  name                  TEXT NOT NULL,
+  kind                  TEXT NOT NULL DEFAULT 'dev',
+  manifest_json         TEXT NOT NULL,
+  source_environment_id TEXT,
+  promoted_at           TEXT,
+  created_by            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_environments_app_name
+  ON app_environments(workspace_id, app_id, name);
+CREATE INDEX IF NOT EXISTS idx_app_environments_app
+  ON app_environments(workspace_id, app_id, kind);
+`,
+  },
+  {
+    version: 87,
+    name: 'app_lifecycle_origin_checksum',
+    sql: `
+-- Keep the original installed artifact receipt with lifecycle snapshots.
+-- A workspace may have renamed the local slug on install, so recomputing from
+-- the runtime manifest would not always recover the Hub/local artifact checksum.
+ALTER TABLE app_lifecycle_snapshots ADD COLUMN installed_checksum TEXT;
+`,
+  },
+  {
+    version: 88,
+    name: 'app_domain_and_owner',
+    sql: `
+-- Apps as the org primitive: an App is placed under a Domain (or Subdomain) and
+-- owned by a specialist, mirroring workflows.domain_id / workflows.owner_agent_id.
+-- Its workflows inherit this assignment at dispatch (resolveResponsibleSpecialist
+-- app fallback) when they have no own owner/domain. Mirrored in
+-- src/sqlite/schema.ts (apps.spaceId, apps.ownerAgentId) and the index.ts drift path.
+ALTER TABLE apps ADD COLUMN domain_id TEXT REFERENCES domains(id) ON DELETE SET NULL;
+ALTER TABLE apps ADD COLUMN owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_apps_domain ON apps(workspace_id, domain_id);
+CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps(workspace_id, owner_agent_id);
 `,
   },
 ];

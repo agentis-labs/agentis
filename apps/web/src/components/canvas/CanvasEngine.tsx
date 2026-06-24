@@ -1,14 +1,17 @@
-import { useRef, type ComponentProps, type DragEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ComponentProps, type DragEvent, type ReactNode } from 'react';
 import {
+  ControlButton,
   Controls,
   MiniMap,
   ReactFlow,
+  SelectionMode,
   useViewport,
   type Edge,
   type Node,
   type ReactFlowInstance,
   type XYPosition,
 } from '@xyflow/react';
+import { LayoutGrid } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 import { CanvasBackground } from '../home/CanvasBackground';
 
@@ -29,6 +32,7 @@ export interface CanvasEngineProps extends Omit<ReactFlowProps, 'children' | 'on
   dropEffect?: DataTransfer['dropEffect'];
   onReady?: (instance: CanvasEngineInstance) => void;
   onDropCanvas?: (event: DragEvent<HTMLDivElement>, position: XYPosition) => void;
+  onTidy?: () => void;
 }
 
 function CanvasEngineBackground({ backgroundColor }: { backgroundColor?: string }) {
@@ -59,6 +63,7 @@ export function CanvasEngine({
   dropEffect = 'copy',
   onReady,
   onDropCanvas,
+  onTidy,
   className,
   proOptions,
   deleteKeyCode,
@@ -66,9 +71,33 @@ export function CanvasEngine({
   nodesDraggable,
   nodesConnectable,
   elementsSelectable,
+  selectionMode,
   ...flowProps
 }: CanvasEngineProps) {
   const flowRef = useRef<CanvasEngineInstance | null>(null);
+  const [autoMinimapVisible, setAutoMinimapVisible] = useState(false);
+  const hideMinimapTimerRef = useRef<number | null>(null);
+  const lastViewportRef = useRef<{ x: number; y: number; zoom: number } | null>(null);
+  const externalOnMove = flowProps.onMove;
+
+  function scheduleMinimapHide(delay = 1400) {
+    if (showMinimap) return;
+    if (hideMinimapTimerRef.current) window.clearTimeout(hideMinimapTimerRef.current);
+    hideMinimapTimerRef.current = window.setTimeout(() => setAutoMinimapVisible(false), delay);
+  }
+
+  function revealMinimap() {
+    if (showMinimap) return;
+    setAutoMinimapVisible(true);
+    scheduleMinimapHide();
+  }
+
+  useEffect(
+    () => () => {
+      if (hideMinimapTimerRef.current) window.clearTimeout(hideMinimapTimerRef.current);
+    },
+    [],
+  );
 
   return (
     <ReactFlow
@@ -88,17 +117,33 @@ export function CanvasEngine({
         const position = flowRef.current.screenToFlowPosition({ x: event.clientX, y: event.clientY });
         onDropCanvas(event, position);
       }}
+      onMove={(event, viewport) => {
+        externalOnMove?.(event, viewport);
+        const previous = lastViewportRef.current;
+        lastViewportRef.current = viewport;
+        if (!previous) return;
+        const panDelta = Math.hypot(viewport.x - previous.x, viewport.y - previous.y);
+        const zoomDelta = Math.abs(viewport.zoom - previous.zoom);
+        if (panDelta > 34 || zoomDelta > 0.055) revealMinimap();
+      }}
       nodesDraggable={nodesDraggable ?? true}
       nodesConnectable={nodesConnectable ?? true}
       elementsSelectable={elementsSelectable ?? true}
+      selectionMode={selectionMode ?? SelectionMode.Partial}
       deleteKeyCode={deleteKeyCode ?? ['Delete', 'Backspace']}
       multiSelectionKeyCode={multiSelectionKeyCode ?? ['Meta', 'Control']}
       proOptions={{ hideAttribution: true, ...(proOptions ?? {}) }}
       className={['agentis-flow-canvas bg-canvas', className].filter(Boolean).join(' ')}
     >
       <CanvasEngineBackground backgroundColor={backgroundColor} />
-      <Controls position={controlsPosition} className="!bg-surface-2 !border-line" />
-      {showMinimap && (
+      <Controls position={controlsPosition} className="!bg-surface-2 !border-line">
+        {onTidy && (
+          <ControlButton type="button" onClick={onTidy} title="Tidy graph" aria-label="Tidy graph">
+            <LayoutGrid size={14} />
+          </ControlButton>
+        )}
+      </Controls>
+      {(showMinimap || autoMinimapVisible) && (
         <MiniMap
           pannable
           zoomable
@@ -106,6 +151,14 @@ export function CanvasEngine({
           className="!bg-surface-2 !border !border-line"
           maskColor="var(--color-overlay)"
           nodeColor={typeof minimapNodeColor === 'function' ? minimapNodeColor : () => minimapNodeColor}
+          onMouseEnter={() => {
+            if (hideMinimapTimerRef.current) window.clearTimeout(hideMinimapTimerRef.current);
+          }}
+          onMouseLeave={() => scheduleMinimapHide(900)}
+          onFocus={() => {
+            if (hideMinimapTimerRef.current) window.clearTimeout(hideMinimapTimerRef.current);
+          }}
+          onBlur={() => scheduleMinimapHide(900)}
         />
       )}
       {children}

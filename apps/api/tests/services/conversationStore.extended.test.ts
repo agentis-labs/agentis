@@ -106,6 +106,44 @@ describe('ConversationStore — extended', () => {
     expect(msg.deliveryStatus).toBe('failed');
   });
 
+  it('rewriteFromMessage edits an operator message and removes descendants', () => {
+    const c = store.getOrCreateByAgent({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
+    const first = store.appendOutbound({
+      workspaceId: wsA,
+      conversationId: c.id,
+      operatorId: userA,
+      body: 'old prompt',
+      metadata: { clientTurnId: 'old-turn' },
+    });
+    const assistant = store.appendMirrored({
+      workspaceId: wsA,
+      conversationId: c.id,
+      sessionMessageId: 'assistant-a',
+      authorType: 'agent',
+      body: 'old answer',
+    });
+    const second = store.appendOutbound({
+      workspaceId: wsA,
+      conversationId: c.id,
+      operatorId: userA,
+      body: 'later prompt',
+    });
+
+    const result = store.rewriteFromMessage({
+      workspaceId: wsA,
+      conversationId: c.id,
+      messageId: first.id,
+      body: 'new prompt',
+      metadata: { clientTurnId: 'new-turn' },
+    });
+
+    expect(result.message.body).toBe('new prompt');
+    expect(result.deletedIds).toEqual([assistant.id, second.id]);
+    const messages = store.messages(c.id, 10);
+    expect(messages.map((message) => message.body)).toEqual(['new prompt']);
+    expect(messages[0]!.metadata).toMatchObject({ clientTurnId: 'new-turn' });
+  });
+
   it('updateSession updates the title and archives/unarchives the session', () => {
     const c = store.getOrCreateByAgent({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
     expect(c.archivedAt).toBeNull();

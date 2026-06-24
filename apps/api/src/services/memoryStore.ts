@@ -1,32 +1,27 @@
 /**
- * MemoryStore - scoped workspace memory plane.
+ * MemoryStore — typed workspace-memory FACADE over the unified substrate.
  *
- *
- * Owns the `workspace_memory` table. Memory is distinct from knowledge:
+ * Brain 10x §B4: the standalone `workspace_memory` table was retired. Typed
+ * workspace memory (facts / preferences / patterns / rules / lessons) now lives
+ * in the canonical `memory_episodes` table like every other durable atom, tagged
+ * with the `plane:workspace_memory` discriminator. This class keeps the old
+ * ergonomic API (write/list/countByScope/…) and the kind/source contract the
+ * routes + UI depend on, reconstructing `kind`/`source` from episode metadata —
+ * but there is now ONE physical store, one retriever, one decay lifecycle.
  *
  *   - Knowledge is retrieved (you fetch the right paragraph for the question).
  *   - Memory is recalled (you remember the rule that always applies).
  *
- * Three sources, all written through the same surface:
- *   - seed       — packaged with the workspace (`MemorySeed`)
- *   - operator   — user-edited via the UI
- *   - promotion  — written by IntelligencePromotion when a pattern crosses
- *                  the confidence threshold for memorisation
- *
- * Five kinds:
- *   fact       static piece of information ("The fiscal year ends Dec 31")
- *   preference operator-stated preference  ("Always greet with first name")
- *   pattern    distilled regularity         ("Tickets in queue X take 4 days")
- *   rule       a hard constraint            ("Never email before 9am ET")
- *   lesson     a confirmed correction       ("Don't suggest weekend windows")
+ * Sources: seed (packaged) · operator (UI-edited) · promotion (IntelligencePromotion).
+ * Kinds: fact · preference · pattern · rule · lesson.
  */
 
-import { randomUUID } from 'node:crypto';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { MemoryEpisode } from '@agentis/core';
+import type { CreateRuntimeEpisodeInput, MemoryEpisode, RuntimeEpisode, RuntimeEpisodeType } from '@agentis/core';
 import type { Logger } from '../logger.js';
+import { EpisodicMemoryStore } from './episodicMemoryStore.js';
 
 export interface MemoryWriteInput {
   workspaceId: string;
@@ -39,6 +34,8 @@ export interface MemoryWriteInput {
   importance?: number;
   tags?: string[];
   provenance?: Record<string, unknown>;
+  /** §B7.3 — scope-affinity links (workflow/node ids this memory applies to). */
+  appliesTo?: string[];
 }
 
 export interface MemoryListArgs {
@@ -52,20 +49,30 @@ export interface MemoryListArgs {
   limit?: number;
 }
 
-export interface MemoryRecallArgs {
-  workspaceId: string;
-  scopeId: string | null;
-  /** Free-text hint — used by the simple recall scorer. */
-  hint?: string;
-  /** Token budget; the recall trims by importance × trust × recency. */
-  limit?: number;
-  /** Restrict to one or more kinds (e.g. only 'rule' + 'preference' for prompt prelude). */
-  kinds?: MemoryEpisode['kind'][];
-}
+/** Discriminator tag marking an episode as a typed workspace-memory row. */
+export const WORKSPACE_MEMORY_PLANE = 'workspace_memory';
+const PLANE_TAG = `plane:${WORKSPACE_MEMORY_PLANE}`;
 
-const RECALL_CANDIDATE_LIMIT = 300;
+/** Typed-memory `kind` → canonical episode `type`. Real kind kept in metadata. */
+const KIND_TO_TYPE: Record<string, RuntimeEpisodeType> = {
+  fact: 'observation',
+  preference: 'decision',
+  pattern: 'success_pattern',
+  rule: 'decision',
+  lesson: 'distilled_lesson',
+};
+/** Typed-memory `source` → canonical episode `source`. Real source kept in metadata. */
+const MEM_SOURCE_TO_EPISODE: Record<string, CreateRuntimeEpisodeInput['source']> = {
+  seed: 'seed',
+  operator: 'operator_write',
+  promotion: 'run_promotion',
+  agent: 'agent_write',
+  system: 'system_write',
+};
 
 export class MemoryStore {
+  #episodes: EpisodicMemoryStore | null = null;
+
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly logger: Logger,
@@ -73,55 +80,59 @@ export class MemoryStore {
     void this.logger;
   }
 
-  /** Insert one episode; returns the new id. */
+  /** §B4 — wire the canonical episode store (constructed later in bootstrap). */
+  setEpisodicStore(store: EpisodicMemoryStore): void {
+    this.#episodes = store;
+  }
+
+  private get episodes(): EpisodicMemoryStore {
+    // Production wires a resolver-backed store via setEpisodicStore; if a caller
+    // (e.g. a unit test) constructs MemoryStore standalone, lazily self-construct
+    // a functional store over the same db so the facade is always usable.
+    if (!this.#episodes) this.#episodes = new EpisodicMemoryStore(this.db, this.logger);
+    return this.#episodes;
+  }
+
+  /** Insert one typed-memory atom into the unified substrate; returns the new id. */
   write(input: MemoryWriteInput): string {
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    this.db
-      .insert(schema.workspaceMemory)
-      .values({
-        id,
-        workspaceId: input.workspaceId,
-        scopeId: input.scopeId ?? null,
-        kind: input.kind,
-        source: input.source,
-        title: input.title,
-        content: input.content,
-        trust: String(clamp01(input.trust ?? (input.source === 'seed' ? 0.9 : 0.7))),
-        importance: String(clamp01(input.importance ?? 0.5)),
-        tags: input.tags ?? [],
+    const trust = clamp01(input.trust ?? (input.source === 'seed' ? 0.9 : 0.7));
+    const importance = clamp01(input.importance ?? 0.5);
+    const governing = input.source === 'operator'
+      && (input.kind === 'rule' || importance >= 0.8 || (input.tags ?? []).includes('charter'));
+    // Built as a variable (not an object literal at the call site) so the extra
+    // `governing` field — read by the store via a cast — isn't excess-property-checked.
+    const writeInput = {
+      workspaceId: input.workspaceId,
+      scopeId: input.scopeId ?? null,
+      type: KIND_TO_TYPE[input.kind] ?? 'observation',
+      title: input.title,
+      summary: input.content,
+      source: MEM_SOURCE_TO_EPISODE[input.source] ?? 'system_write',
+      confidence: trust,
+      importance,
+      trust,
+      tags: [...(input.tags ?? []), PLANE_TAG],
+      metadata: {
+        plane: WORKSPACE_MEMORY_PLANE,
+        memoryKind: input.kind,
+        memorySource: input.source,
         provenance: input.provenance ?? {},
-        reinforcedAt: null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .run();
-    return id;
+      },
+      governing,
+      appliesTo: input.appliesTo ?? [],
+    } as unknown as CreateRuntimeEpisodeInput;
+    return this.episodes.write(writeInput).id;
   }
 
   writeMany(inputs: MemoryWriteInput[]): string[] {
     return inputs.map((i) => this.write(i));
   }
 
-  /**
-   * Reinforce an existing episode — bumps trust and updates `reinforced_at`.
-   * Promotion calls this when the same pattern appears again.
-   */
+  /** Reinforce an existing atom — bumps trust + reinforcedAt. */
   reinforce(workspaceId: string, episodeId: string, deltaTrust = 0.05): MemoryEpisode | null {
-    const row = this.db
-      .select()
-      .from(schema.workspaceMemory)
-      .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, episodeId)))
-      .get();
-    if (!row) return null;
-    const now = new Date().toISOString();
-    const newTrust = clamp01(Number(row.trust) + deltaTrust);
-    this.db
-      .update(schema.workspaceMemory)
-      .set({ trust: String(newTrust), reinforcedAt: now, updatedAt: now })
-      .where(eq(schema.workspaceMemory.id, episodeId))
-      .run();
-    return rowToEpisode({ ...row, trust: String(newTrust), reinforcedAt: now, updatedAt: now });
+    if (!this.#isPlaneRow(workspaceId, episodeId)) return null;
+    const updated = this.episodes.reinforce(workspaceId, episodeId, { trustDelta: deltaTrust, confidenceDelta: deltaTrust });
+    return updated ? toMemoryEpisode(updated) : null;
   }
 
   /** Update operator-editable fields. Does not allow source/kind changes. */
@@ -131,168 +142,128 @@ export class MemoryStore {
     episodeId: string,
     patch: Partial<Pick<MemoryEpisode, 'title' | 'content' | 'trust' | 'importance' | 'tags'>>,
   ): MemoryEpisode | null {
-    const row = this.db
-      .select()
-      .from(schema.workspaceMemory)
-      .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), scopePredicate(scopeId), eq(schema.workspaceMemory.id, episodeId)))
-      .get();
-    if (!row) return null;
-    const now = new Date().toISOString();
-    const next: Record<string, unknown> = { updatedAt: now };
-    if (patch.title !== undefined) next.title = patch.title;
-    if (patch.content !== undefined) next.content = patch.content;
-    if (patch.trust !== undefined) next.trust = String(clamp01(patch.trust));
-    if (patch.importance !== undefined) next.importance = String(clamp01(patch.importance));
-    if (patch.tags !== undefined) next.tags = patch.tags;
-    this.db.update(schema.workspaceMemory).set(next).where(eq(schema.workspaceMemory.id, episodeId)).run();
-    return this.byId(workspaceId, episodeId);
+    const existing = this.byId(workspaceId, episodeId);
+    if (!existing || (scopeId !== undefined && existing.scopeId !== (scopeId ?? null))) return null;
+    const set: Parameters<EpisodicMemoryStore['update']>[2] = {};
+    if (patch.title !== undefined) set.title = patch.title;
+    if (patch.content !== undefined) set.summary = patch.content;
+    if (patch.trust !== undefined) set.trust = clamp01(patch.trust);
+    if (patch.importance !== undefined) set.importance = clamp01(patch.importance);
+    if (patch.tags !== undefined) set.tags = [...patch.tags, PLANE_TAG];
+    const updated = this.episodes.update(workspaceId, episodeId, set);
+    return updated ? toMemoryEpisode(updated) : null;
   }
 
   delete(workspaceId: string, scopeId: string | null, episodeId: string): boolean {
-    const result = this.db
-      .delete(schema.workspaceMemory)
-      .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), scopePredicate(scopeId), eq(schema.workspaceMemory.id, episodeId)))
-      .run();
-    return result.changes > 0;
+    const existing = this.byId(workspaceId, episodeId);
+    if (!existing || (scopeId !== undefined && existing.scopeId !== (scopeId ?? null))) return false;
+    return this.episodes.delete(workspaceId, episodeId);
   }
 
   byId(workspaceId: string, episodeId: string): MemoryEpisode | null {
-    const row = this.db
-      .select()
-      .from(schema.workspaceMemory)
-      .where(and(eq(schema.workspaceMemory.workspaceId, workspaceId), eq(schema.workspaceMemory.id, episodeId)))
-      .get();
-    return row ? rowToEpisode(row) : null;
+    const ep = this.episodes.byId(workspaceId, episodeId);
+    if (!ep || !ep.tags.includes(PLANE_TAG)) return null;
+    return toMemoryEpisode(ep);
   }
 
   list(args: MemoryListArgs): MemoryEpisode[] {
     const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
-    let query = this.db
-      .select()
-      .from(schema.workspaceMemory)
-      .where(
-        and(
-          eq(schema.workspaceMemory.workspaceId, args.workspaceId),
-          scopePredicate(args.scopeId),
-          ...(args.kind ? [eq(schema.workspaceMemory.kind, args.kind)] : []),
-          ...(args.source ? [eq(schema.workspaceMemory.source, args.source)] : []),
-        ),
-      )
-      .orderBy(desc(schema.workspaceMemory.updatedAt))
-      .limit(limit)
-      .$dynamic();
-    const rows = query.all();
-    let episodes = rows.map(rowToEpisode);
-    if (args.minTrust !== undefined) {
-      episodes = episodes.filter((e) => e.trust >= args.minTrust!);
-    }
-    return episodes;
-  }
-
-  /**
-   * Recall — returns the most relevant episodes within a budget.
-   *
-   * Scoring is intentionally simple and explainable:
-   *
-   *   score = trust × importance × recencyDecay × hintMatch
-   *
-   * - hintMatch = 1.0 baseline; 1.4 if any hint token appears in title/content.
-   * - recencyDecay = 1.0 for ≤ 7 days, 0.85 for 7–30 days, 0.7 for older.
-   *   Reinforcement resets the clock.
-   *
-   * The whole goal is "what should the agent remember right now" — not a
-   * perfect retrieval. Good-enough for V1; replace with embeddings when the
-   * knowledge plane gets them.
-   */
-  recall(args: MemoryRecallArgs): MemoryEpisode[] {
-    const limit = Math.min(Math.max(args.limit ?? 12, 1), 50);
-    const rows = this.db.select().from(schema.workspaceMemory)
-      .where(and(
-        eq(schema.workspaceMemory.workspaceId, args.workspaceId),
-        scopePredicate(args.scopeId),
-        ...(args.kinds && args.kinds.length > 0 ? [inArray(schema.workspaceMemory.kind, args.kinds)] : []),
-      ))
-      .orderBy(desc(schema.workspaceMemory.updatedAt))
-      .limit(RECALL_CANDIDATE_LIMIT)
-      .all();
-    if (rows.length === 0) return [];
-
-    const hintTokens = (args.hint ?? '')
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((t) => t.length >= 3);
-    const now = Date.now();
-
-    const scored = rows
-      .map((row) => {
-        const ep = rowToEpisode(row);
-        const base = ep.trust * (0.5 + ep.importance * 0.5);
-        const recency = recencyDecay(now, ep.reinforcedAt ?? ep.updatedAt);
-        const text = `${ep.title}\n${ep.content}`.toLowerCase();
-        let hintBoost = 1;
-        for (const t of hintTokens) {
-          if (text.includes(t)) {
-            hintBoost = 1.4;
-            break;
-          }
-        }
-        return { ep, score: base * recency * hintBoost };
-      })
-
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, limit).map(({ ep }) => ep);
+    const rows = this.#planeRows(args.workspaceId, args.scopeId);
+    let episodes = rows.map(toMemoryEpisode);
+    if (args.kind) episodes = episodes.filter((e) => e.kind === args.kind);
+    if (args.source) episodes = episodes.filter((e) => e.source === args.source);
+    if (args.minTrust !== undefined) episodes = episodes.filter((e) => e.trust >= args.minTrust!);
+    return episodes.slice(0, limit);
   }
 
   countByScope(workspaceId: string, scopeId: string | null): { total: number; byKind: Record<string, number>; bySource: Record<string, number> } {
-    const rowsByKind = this.db
-      .select({ kind: schema.workspaceMemory.kind, count: sql<number>`count(*)` })
-      .from(schema.workspaceMemory)
-      .where(
-        and(eq(schema.workspaceMemory.workspaceId, workspaceId), scopePredicate(scopeId)),
-      )
-      .groupBy(schema.workspaceMemory.kind)
-      .all();
-    const rowsBySource = this.db
-      .select({ source: schema.workspaceMemory.source, count: sql<number>`count(*)` })
-      .from(schema.workspaceMemory)
-      .where(
-        and(eq(schema.workspaceMemory.workspaceId, workspaceId), scopePredicate(scopeId)),
-      )
-      .groupBy(schema.workspaceMemory.source)
-      .all();
-    let total = 0;
+    const rows = this.#planeRows(workspaceId, scopeId).map(toMemoryEpisode);
     const byKind: Record<string, number> = {};
-    for (const r of rowsByKind) {
-      const c = Number(r.count) || 0;
-      byKind[r.kind] = c;
-      total += c;
-    }
     const bySource: Record<string, number> = {};
-    for (const r of rowsBySource) {
-      bySource[r.source] = Number(r.count) || 0;
+    for (const r of rows) {
+      byKind[r.kind] = (byKind[r.kind] ?? 0) + 1;
+      bySource[r.source] = (bySource[r.source] ?? 0) + 1;
     }
-    return { total, byKind, bySource };
+    return { total: rows.length, byKind, bySource };
+  }
+
+  /** Active plane rows for a workspace/scope, newest first. */
+  #planeRows(workspaceId: string, scopeId: string | null): RuntimeEpisode[] {
+    const conds = [
+      eq(schema.memoryEpisodes.workspaceId, workspaceId),
+      isNull(schema.memoryEpisodes.archivedAt),
+      scopeId == null ? isNull(schema.memoryEpisodes.scopeId) : eq(schema.memoryEpisodes.scopeId, scopeId),
+    ];
+    return this.db.select().from(schema.memoryEpisodes)
+      .where(and(...conds))
+      .orderBy(desc(schema.memoryEpisodes.updatedAt))
+      .limit(1000)
+      .all()
+      .map(rowToRuntimeEpisode)
+      .filter((ep) => ep.tags.includes(PLANE_TAG));
+  }
+
+  #isPlaneRow(workspaceId: string, episodeId: string): boolean {
+    const ep = this.episodes.byId(workspaceId, episodeId);
+    return Boolean(ep && ep.tags.includes(PLANE_TAG));
   }
 }
 
 // ────────────────────────────────────────────────────────────
-// Internal helpers
+// Mapping helpers — episode ⇆ typed MemoryEpisode
 // ────────────────────────────────────────────────────────────
 
-function rowToEpisode(row: typeof schema.workspaceMemory.$inferSelect): MemoryEpisode {
+/** Reconstruct the typed MemoryEpisode contract from a canonical episode. */
+function toMemoryEpisode(ep: RuntimeEpisode): MemoryEpisode {
+  const meta = ep.metadata ?? {};
+  const kind = (typeof meta.memoryKind === 'string' ? meta.memoryKind : 'lesson') as MemoryEpisode['kind'];
+  const source = (typeof meta.memorySource === 'string' ? meta.memorySource : 'system') as MemoryEpisode['source'];
+  const provenance = meta.provenance && typeof meta.provenance === 'object' && !Array.isArray(meta.provenance)
+    ? meta.provenance as Record<string, unknown>
+    : {};
+  return {
+    id: ep.id,
+    workspaceId: ep.workspaceId,
+    scopeId: ep.scopeId ?? null,
+    kind,
+    source,
+    title: ep.title,
+    content: ep.summary,
+    trust: ep.trust,
+    importance: ep.importance,
+    tags: ep.tags.filter((t) => t !== PLANE_TAG),
+    provenance,
+    reinforcedAt: ep.reinforcedAt ?? null,
+    createdAt: ep.createdAt,
+    updatedAt: ep.updatedAt,
+  };
+}
+
+/** Minimal row → RuntimeEpisode for the direct-query read paths. */
+function rowToRuntimeEpisode(row: typeof schema.memoryEpisodes.$inferSelect): RuntimeEpisode {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
     scopeId: row.scopeId,
-    kind: row.kind as MemoryEpisode['kind'],
-    source: row.source as MemoryEpisode['source'],
+    workflowId: row.workflowId,
+    runId: row.runId,
+    agentId: row.agentId,
+    type: row.type as RuntimeEpisode['type'],
     title: row.title,
-    content: row.content,
-    trust: Number(row.trust),
-    importance: Number(row.importance),
+    summary: row.summary,
+    details: row.details,
+    source: row.source as RuntimeEpisode['source'],
+    confidence: Number(row.confidence) || 0,
+    importance: Number(row.importance) || 0,
+    trust: Number(row.trust) || 0,
     tags: parseJsonArray<string>(row.tags),
-    provenance: parseJsonRecord(row.provenance),
+    entities: parseJsonArray<string>(row.entities),
+    outcomeStatus: row.outcomeStatus as RuntimeEpisode['outcomeStatus'],
+    embedding: row.embedding ? parseJsonArray<number>(row.embedding) : null,
+    metadata: parseJsonRecord(row.metadata),
     reinforcedAt: row.reinforcedAt,
+    archivedAt: row.archivedAt,
+    supersededBy: row.supersededBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -310,9 +281,7 @@ function parseJsonArray<T>(raw: unknown): T[] {
 }
 
 function parseJsonRecord(raw: unknown): Record<string, unknown> {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    return raw as Record<string, unknown>;
-  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
   if (typeof raw !== 'string') return {};
   try {
     const v = JSON.parse(raw);
@@ -322,22 +291,9 @@ function parseJsonRecord(raw: unknown): Record<string, unknown> {
   }
 }
 
-function scopePredicate(scopeId: string | null) {
-  return scopeId == null ? isNull(schema.workspaceMemory.scopeId) : eq(schema.workspaceMemory.scopeId, scopeId);
-}
-
 function clamp01(n: number): number {
   if (!Number.isFinite(n)) return 1;
   if (n < 0) return 0;
   if (n > 1) return 1;
   return n;
-}
-
-function recencyDecay(now: number, atIso: string): number {
-  const at = Date.parse(atIso);
-  if (!Number.isFinite(at)) return 0.7;
-  const ageDays = (now - at) / (1000 * 60 * 60 * 24);
-  if (ageDays <= 7) return 1.0;
-  if (ageDays <= 30) return 0.85;
-  return 0.7;
 }

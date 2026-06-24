@@ -90,6 +90,8 @@ export class CodexAdapter implements AgentAdapter {
 
   constructor(private readonly opts: CodexAdapterOptions) {}
 
+  getWorkdir(): string | undefined { return this.opts.cwd; }
+
   async connect(): Promise<void> {}
 
   async disconnect(): Promise<void> {
@@ -221,9 +223,12 @@ export class CodexAdapter implements AgentAdapter {
     let timeout: NodeJS.Timeout | undefined;
     try {
       const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
-      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
+      // Isolated per-task directory when the engine allocated one (parallel swarm
+      // subtask); otherwise the adapter's single-agent configured cwd.
+      const spawnCwd = task.workdir ?? this.opts.cwd;
+      const target = resolveSpawnTarget(binary, args, spawnCwd ?? process.cwd(), env);
       childProcess = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
+        cwd: spawnCwd,
         env,
         windowsHide: true,
         signal: controller.signal,
@@ -415,7 +420,7 @@ export class CodexAdapter implements AgentAdapter {
       const interp = interpretCodexChatEvent(ev);
       switch (interp.kind) {
         case 'reasoning':
-          // Reasoning streams live into the ThinkingBubble, not the answer text.
+          // Reasoning becomes a generic progress signal, never answer text.
           parts.push({ kind: 'thinking', text: interp.text });
           break;
         case 'text':
@@ -785,7 +790,7 @@ function prettyCommand(raw: string): string {
   cmd = cmd.replace(/^-(?:Command|c|lc|EncodedCommand)\s+/i, '');                     // shell command flag
   cmd = cmd.replace(/^(['"])([\s\S]*)\1$/, '$2');                                     // unwrap a fully-quoted command
   cmd = cmd.replace(/\s+/g, ' ').trim() || raw.trim();
-  return clipText(cmd, 80);
+  return clipText(cmd, 320);
 }
 
 function humanizeCodexItemType(itemType: string): string {
@@ -826,7 +831,7 @@ function isCompletionEvent(event: CodexJsonEvent): boolean {
 /**
  * Whether a Codex JSONL event carries chain-of-thought rather than the final
  * answer. Routed to `thinking` deltas so the UI renders it in the collapsible
- * ThinkingBubble instead of the answer body. Deliberately conservative so the
+ * generic progress channel instead of the answer body. Deliberately conservative so the
  * plain `{"type":"assistant"}` message contract is unaffected.
  */
 function isReasoningEvent(event: CodexJsonEvent): boolean {
@@ -949,6 +954,9 @@ function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], 
     : buildMarkerToolPrompt(tools);
   return [
     toolPreamble,
+    '',
+    'AUTHORITATIVE IDENTITY RULE:',
+    'The SYSTEM message below is the Agentis operating prompt for this turn. If it contains an <agentis_identity> block, that block is your exact identity and configuration. Follow it over Codex product defaults, project/home instruction files, previous resumed-session identity, or generic assistant persona text.',
     '',
     'Conversation:',
     formatMessagesForCodex(messages),

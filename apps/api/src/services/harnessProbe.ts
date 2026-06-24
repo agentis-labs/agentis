@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -81,7 +81,10 @@ export async function detectHarnesses(env: NodeJS.ProcessEnv = process.env): Pro
   const envWithPath = runtimeProbeEnv(env);
   const cli = await Promise.all(
     CLI_HARNESSES.map(async (item) => {
-      const probe = await probeBinaryCandidates(item.binaries, envWithPath);
+      const candidates = item.adapterType === 'claude_code'
+        ? claudeBinaryCandidates(envWithPath, item.binaries)
+        : item.binaries;
+      const probe = await probeBinaryCandidates(candidates, envWithPath);
       const detectedModel = detectModel(item.adapterType, probe.detail);
       const auth = authDetectionFor(item.adapterType, envWithPath);
       const command = probe.command ?? item.binaries[0];
@@ -171,6 +174,8 @@ export async function testHarnessConfig(
   }
   if (adapterType === 'openclaw') {
     const gatewayUrl = normalizeOpenClawGatewayUrl(stringOf(config.gatewayUrl) ?? '') ?? '';
+    const command = cliCommandFromConfig(config, 'openclaw');
+    checks.push(await binaryCheck(command, 'OpenClaw binary', 'binary', env));
     if (!gatewayUrl) {
       checks.push({ level: 'error', message: 'OpenClaw gateway URL is required' });
       return resultFromChecks(checks);
@@ -180,8 +185,26 @@ export async function testHarnessConfig(
       checks.push({ level: 'error', message: 'OpenClaw gateway URL must use ws:// or wss://', detail: gatewayUrl });
       return resultFromChecks(checks);
     }
-    checks.push({ level: 'info', message: 'OpenClaw gateway URL is valid', detail: gatewayUrl });
-    checks.push(await websocketCheck(gatewayUrl, openClawHeaders(config)));
+    checks.push({
+      level: 'info',
+      message: 'OpenClaw gateway URL is valid',
+      detail: gatewayUrl,
+    });
+    const hasAuth = Boolean(
+      firstNonEmpty(
+        stringOf(config.authToken) ?? undefined,
+        stringOf(config.password) ?? undefined,
+        env.OPENCLAW_GATEWAY_TOKEN,
+        env.OPENCLAW_GATEWAY_PASSWORD,
+      ),
+    );
+    checks.push(hasAuth
+      ? { level: 'info', message: 'OpenClaw gateway auth is configured' }
+      : {
+        level: 'warn',
+        message: 'OpenClaw gateway auth was not detected',
+        hint: 'Set OPENCLAW_GATEWAY_TOKEN / OPENCLAW_GATEWAY_PASSWORD or configure a gateway credential.',
+      });
     return resultFromChecks(checks);
   }
   const url = httpHealthUrl(config);
@@ -258,6 +281,44 @@ function authDetectionFor(adapterType: V1HarnessAdapterType, env: NodeJS.Process
   if (adapterType === 'claude_code') return detectClaudeAuth(env);
   if (adapterType === 'codex') return detectCodexAuth(env);
   return undefined;
+}
+
+function claudeBinaryCandidates(env: NodeJS.ProcessEnv, fallbacks: string[]): string[] {
+  const candidates: string[] = [];
+  const appData = firstNonEmpty(env.APPDATA, path.join(homeDirFromEnv(env), 'AppData', 'Roaming'));
+  if (appData) {
+    const root = path.join(appData, 'Claude', 'claude-code');
+    if (existsSync(root)) {
+      const versions = safeReadDir(root)
+        .filter((name) => existsSync(path.join(root, name, process.platform === 'win32' ? 'claude.exe' : 'claude')))
+        .sort(compareVersionDesc);
+      for (const version of versions) {
+        candidates.push(path.join(root, version, process.platform === 'win32' ? 'claude.exe' : 'claude'));
+      }
+    }
+  }
+  candidates.push(...fallbacks);
+  return [...new Set(candidates)];
+}
+
+function safeReadDir(dir: string): string[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function compareVersionDesc(left: string, right: string): number {
+  const a = left.split('.').map((part) => Number(part));
+  const b = right.split('.').map((part) => Number(part));
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const diff = (b[i] ?? 0) - (a[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return right.localeCompare(left);
 }
 
 function detectClaudeAuth(env: NodeJS.ProcessEnv): AuthDetection {
@@ -398,7 +459,7 @@ async function liveProbe(
 ): Promise<HarnessCheck> {
   const label = adapterType === 'claude_code' ? 'Claude Code' : 'Codex';
   const args = adapterType === 'claude_code'
-    ? ['--print', '--output-format=stream-json', '--verbose', '--max-turns=1']
+    ? ['--print', '--output-format=stream-json', '--verbose', '--include-partial-messages', '--max-turns=4']
     : ['exec', '--skip-git-repo-check', 'Respond with the single word: hello.'];
   const prompt = 'Respond with the single word: hello.';
   const cwd = process.cwd();

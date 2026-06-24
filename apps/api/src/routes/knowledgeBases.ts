@@ -4,17 +4,28 @@ import { AgentisError } from '@agentis/core';
 import type { AuthService } from '../services/auth.js';
 import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { schema } from '@agentis/db/sqlite';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 
 const createKnowledgeBaseSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().max(1000).nullable().optional(),
+  scopeId: z.string().trim().min(1).optional(),
 });
 
 const updateKnowledgeBaseSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   description: z.string().max(1000).nullable().optional(),
+});
+
+const updateKnowledgeDocumentSchema = z.object({
+  name: z.string().trim().min(1).max(255).optional(),
+  chunks: z.array(z.object({
+    id: z.string().trim().min(1),
+    content: z.string().trim().min(1),
+  })).optional(),
 });
 
 const addDocumentSchema = z.object({
@@ -41,20 +52,29 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
 
   app.get('/', (c) => {
     const ws = getWorkspace(c);
-    return c.json({ knowledgeBases: deps.knowledge.listKnowledgeBases(ws.workspaceId) });
+    const scopeId = workflowScope(deps.db, ws.workspaceId, c.req.query('scopeId'));
+    const knowledgeBases = deps.knowledge
+      .listKnowledgeBases(ws.workspaceId, scopeId === undefined ? undefined : { scopeId })
+      .map((base) => presentKnowledgeBase(deps.db, ws.workspaceId, base));
+    return c.json({ knowledgeBases });
   });
 
   app.post('/', async (c) => {
     const ws = getWorkspace(c);
     const body = createKnowledgeBaseSchema.parse(await c.req.json());
-    const knowledgeBase = deps.knowledge.createKnowledgeBase({ workspaceId: ws.workspaceId, ...body });
-    return c.json({ knowledgeBase }, 201);
+    const queryScopeId = c.req.query('scopeId');
+    if (body.scopeId && queryScopeId && body.scopeId !== queryScopeId) {
+      throw new AgentisError('VALIDATION_FAILED', 'Knowledge base scope does not match the requested workflow');
+    }
+    const scopeId = workflowScope(deps.db, ws.workspaceId, body.scopeId ?? queryScopeId);
+    const knowledgeBase = deps.knowledge.createKnowledgeBase({ workspaceId: ws.workspaceId, ...body, ...(scopeId ? { scopeId } : {}) });
+    return c.json({ knowledgeBase: presentKnowledgeBase(deps.db, ws.workspaceId, knowledgeBase) }, 201);
   });
 
   app.get('/:knowledgeBaseId', (c) => {
     const ws = getWorkspace(c);
     const knowledgeBase = deps.knowledge.getKnowledgeBase(ws.workspaceId, c.req.param('knowledgeBaseId'));
-    return c.json({ knowledgeBase });
+    return c.json({ knowledgeBase: presentKnowledgeBase(deps.db, ws.workspaceId, knowledgeBase) });
   });
 
   app.patch('/:knowledgeBaseId', async (c) => {
@@ -65,7 +85,7 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
       knowledgeBaseId: c.req.param('knowledgeBaseId'),
       ...body,
     });
-    return c.json({ knowledgeBase });
+    return c.json({ knowledgeBase: presentKnowledgeBase(deps.db, ws.workspaceId, knowledgeBase) });
   });
 
   app.delete('/:knowledgeBaseId', (c) => {
@@ -77,6 +97,28 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
     const ws = getWorkspace(c);
     const documents = deps.knowledge.listDocuments(ws.workspaceId, c.req.param('knowledgeBaseId'));
     return c.json({ documents });
+  });
+
+  app.get('/:knowledgeBaseId/documents/:documentId', (c) => {
+    const ws = getWorkspace(c);
+    const knowledgeBaseId = c.req.param('knowledgeBaseId');
+    const documentId = c.req.param('documentId');
+    const document = deps.knowledge.getDocument(ws.workspaceId, knowledgeBaseId, documentId);
+    const chunks = deps.knowledge.listDocumentChunks(ws.workspaceId, knowledgeBaseId, documentId);
+    return c.json({ document, chunks });
+  });
+
+  app.patch('/:knowledgeBaseId/documents/:documentId', async (c) => {
+    const ws = getWorkspace(c);
+    const body = updateKnowledgeDocumentSchema.parse(await c.req.json());
+    const document = deps.knowledge.updateDocument({
+      workspaceId: ws.workspaceId,
+      knowledgeBaseId: c.req.param('knowledgeBaseId'),
+      documentId: c.req.param('documentId'),
+      ...body,
+    });
+    const chunks = deps.knowledge.listDocumentChunks(ws.workspaceId, c.req.param('knowledgeBaseId'), c.req.param('documentId'));
+    return c.json({ document, chunks });
   });
 
   app.post('/:knowledgeBaseId/documents', async (c) => {
@@ -122,6 +164,45 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
   });
 
   return app;
+}
+
+/** Validate that a requested scoped Knowledge surface belongs to this workspace. */
+function workflowScope(db: AgentisSqliteDb, workspaceId: string, scopeId: string | undefined): string | undefined {
+  if (!scopeId) return undefined;
+  const workflow = db.select({ id: schema.workflows.id })
+    .from(schema.workflows)
+    .where(and(eq(schema.workflows.id, scopeId), eq(schema.workflows.workspaceId, workspaceId)))
+    .get();
+  if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow not found');
+  return workflow.id;
+}
+
+function presentKnowledgeBase(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  base: typeof schema.knowledgeBases.$inferSelect,
+) {
+  const ownerWorkflow = base.scopeId
+    ? db.select({ id: schema.workflows.id, title: schema.workflows.title })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.id, base.scopeId), eq(schema.workflows.workspaceId, workspaceId)))
+      .get() ?? null
+    : null;
+  const documentCountRow = db.select({ count: sql<number>`count(*)` })
+    .from(schema.kbDocuments)
+    .where(and(
+      eq(schema.kbDocuments.workspaceId, workspaceId),
+      eq(schema.kbDocuments.knowledgeBaseId, base.id),
+      isNull(schema.kbDocuments.archivedAt),
+    ))
+    .get();
+
+  return {
+    ...base,
+    scopeKind: base.scopeId ? 'workflow' as const : 'workspace' as const,
+    ownerWorkflow,
+    documentCount: Number(documentCountRow?.count ?? 0),
+  };
 }
 
 type DocumentUpload = {

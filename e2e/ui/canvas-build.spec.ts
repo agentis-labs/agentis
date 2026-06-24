@@ -32,15 +32,15 @@ test('canvas opens a blank workflow with the node palette ready', async ({ page,
   await expect(page.getByRole('button', { name: /trigger/i }).first()).toBeVisible();
 });
 
-test('canvas exposes Test run + Publish buttons in the header', async ({ page, request }) => {
+test('canvas exposes Test run + Activate buttons in the header', async ({ page, request }) => {
   await uiAuth(page, request);
   await page.locator('a[title="Workflows"]').click();
   await createBlankWorkflow(page);
   await expect(page.getByRole('button', { name: 'Test run', exact: true })).toBeVisible();
-  const publish = page.getByRole('button', { name: /^Publish$/i });
-  await expect(publish).toBeEnabled();
-  await publish.click();
-  await expect(page.getByText('Manual workflow')).toBeVisible();
+  const activate = page.getByRole('button', { name: /^Activate$/i });
+  await expect(activate).toBeEnabled();
+  await activate.click();
+  await expect(page.getByText('Manual run')).toBeVisible();
 });
 
 test('canvas back-link returns to the workflows list', async ({ page, request }) => {

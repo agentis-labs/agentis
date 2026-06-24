@@ -5,10 +5,13 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { and, desc, eq, like, or, sql } from 'drizzle-orm';
 import { CHAT_TOOL_CATALOG, buildWorkspaceToolCatalog } from './chatToolCatalog.js';
+import { composeOperatingManual, getWorkspaceManual } from './agentOperatingManual.js';
 import { ChatToolExecutor } from './chatToolExecutor.js';
 import { buildOrchestratorSystemPrompt, responseProfileForChannel } from './orchestratorPrompt.js';
+import { agentIdentityChecksum, chatSessionKeyWithIdentity, loadAgentIdentitySnapshot, renderAgentIdentityBlock } from './agentIdentity.js';
 import type { WorkspaceAwarenessService } from './workspaceAwarenessService.js';
 import type { OrchestratorModelRouter } from './orchestratorModelRouter.js';
+import type { ModelRoutingDecision } from './modelRoutingPolicy.js';
 import { recordToolCall, recordTurn } from './chatMetrics.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
@@ -18,7 +21,9 @@ import type { PersonalBrainService } from './personalBrain.js';
 import type { WorkspaceIntelligenceService } from './workspaceIntelligence.js';
 import type { KnowledgeBaseService } from './knowledgeBase.js';
 import type { BrainDiscourseService } from './brainDiscourseService.js';
+import type { SharedIntelligenceService } from './sharedIntelligence.js';
 import type { AbilityService } from './abilityService.js';
+import type { WorkspaceHarnessRuntimeResolver } from './workspaceHarnessRuntime.js';
 
 export interface ChatSessionExecutorDeps {
   db?: AgentisSqliteDb;
@@ -40,7 +45,16 @@ export interface ChatSessionExecutorDeps {
    * static `orchestratorRuntime`. Falls back to `orchestratorRuntime`.
    */
   modelRouter?: OrchestratorModelRouter;
+  /** Live workspace harness fallback when no endpoint model override exists. */
+  workspaceHarnesses?: WorkspaceHarnessRuntimeResolver;
   agentMemory?: AgentMemoryService;
+  /**
+   * §B3 — the single brain context composer. When set, chat injects the SAME
+   * constitutional + relevance + abstention tiers as workflow dispatch
+   * (buildDispatchContext), instead of the old newest-8 agent-memory slice. This
+   * is what makes "never email before 9am" present on every chat turn.
+   */
+  sharedIntelligence?: SharedIntelligenceService;
   personalBrain?: PersonalBrainService;
   workspaceIntelligence?: WorkspaceIntelligenceService;
   knowledgeBases?: KnowledgeBaseService;
@@ -77,6 +91,7 @@ interface PendingChatConfirmation {
   maxTurns: number;
   maxToolCalls: number;
   toolCallCount: number;
+  sessionKey?: string | null;
   createdAt: number;
   expiresAt: number;
 }
@@ -99,7 +114,9 @@ export class ChatSessionExecutor {
    * back to this so the orchestrator can still answer over the channel.
    */
   static orchestratorAdapter(workspaceId?: string): AgentAdapter | undefined {
-    return this.#deps.modelRouter?.resolve('conversation', workspaceId) ?? this.#deps.orchestratorRuntime;
+    return this.#deps.modelRouter?.resolve('conversation', workspaceId)
+      ?? this.#deps.orchestratorRuntime
+      ?? this.#deps.workspaceHarnesses?.resolve(workspaceId)?.adapter;
   }
 
   /**
@@ -116,8 +133,12 @@ export class ChatSessionExecutor {
    * `mcp_native`; before this it silently fell through to the slow CLI path,
    * making chat 3–4× slower after MCP was turned on. Both now fast-path.
    */
-  static #resolveChatAdapter(adapter: AgentAdapter, workspaceId?: string): AgentAdapter {
-    const runtime = this.#deps.modelRouter?.resolve('conversation', workspaceId) ?? this.#deps.orchestratorRuntime;
+  static #resolveChatAdapter(adapter: AgentAdapter, workspaceId?: string, task?: string | null): AgentAdapter {
+    const runtime = task
+      ? this.#deps.modelRouter?.resolveRouted({ role: 'conversation', workspaceId, task, purpose: 'conversation' })
+        ?? this.#deps.orchestratorRuntime
+        ?? this.#deps.workspaceHarnesses?.resolve(workspaceId)?.adapter
+      : this.orchestratorAdapter(workspaceId);
     if (!runtime || runtime === adapter) return adapter;
     const forwarding = adapter.capabilities?.().toolForwarding;
     if ((forwarding === 'marker_protocol' || forwarding === 'mcp_native') && runtime.chat) {
@@ -194,6 +215,33 @@ export class ChatSessionExecutor {
     return kept;
   }
 
+  static #chatRoutingDecision(
+    task: string,
+    workspaceId: string,
+    lightweightConversation: boolean,
+    _tools: ToolDefinition[],
+  ): ModelRoutingDecision | null {
+    if (!this.#deps.modelRouter) return null;
+    const decision = this.#deps.modelRouter.route({
+      role: 'conversation',
+      workspaceId,
+      task,
+      purpose: lightweightConversation ? 'simple chat text' : 'conversation',
+      requiredAffordances: [],
+    });
+    this.#deps.logger?.info?.('chat.model_routed', {
+      workspaceId,
+      taskClass: decision.taskClass,
+      selectedRuntime: decision.selectedRuntime,
+      selectedModel: decision.selectedModel,
+      modelTier: decision.modelTier,
+      explicitPin: decision.explicitPin,
+      reason: decision.reason,
+      alternatives: decision.alternatives.slice(0, 4),
+    });
+    return decision;
+  }
+
   static async *turn(
     adapter: AgentAdapter,
     history: ChatMessage[],
@@ -229,7 +277,8 @@ export class ChatSessionExecutor {
     }
 
     const agentAdapter = adapter;
-    adapter = this.#resolveChatAdapter(adapter, ctx.workspaceId);
+    this.#chatRoutingDecision(effectiveUserMessage, ctx.workspaceId, lightweightConversation, tools);
+    adapter = this.#resolveChatAdapter(adapter, ctx.workspaceId, effectiveUserMessage);
     // Developer observability (not a user prompt — the harness is the intended
     // default brain). A marker-protocol CLI harness (Codex / Claude Code) re-spawns
     // per tool round, so multi-step tasks pay a per-round cold-start. Note it once
@@ -251,12 +300,6 @@ export class ChatSessionExecutor {
       }
     }
 
-    const directBuild = parseDirectWorkflowMutationIntent(userMessage, viewport);
-    if (directBuild && ChatToolExecutor.registeredIds().has('agentis.build_workflow')) {
-      yield* this.#executeDirectWorkflowBuild(ctx, startedAt, directBuild);
-      return;
-    }
-
     const capabilities = adapter.capabilities?.();
     if (!adapter.chat || capabilities?.interactiveChat === false) {
       const reason = capabilities?.limitations?.[0];
@@ -269,15 +312,12 @@ export class ChatSessionExecutor {
     const promptCtx = this.#loadPromptContext(ctx);
     const logger = this.#deps.logger;
 
-    // agentMemory is a synchronous local SQLite read — cheap, leave inline.
+    // §B3 — chat memory is now composed by the SAME injector as workflow
+    // dispatch (buildDispatchContext): constitutional rules + relevance + honest
+    // abstention, refreshed every turn. Resolved concurrently below (it is async
+    // + does retrieval). The legacy newest-8 contextSection remains only as a
+    // fallback when SharedIntelligence is not wired (tests / minimal builds).
     let agentMemory: string | null = null;
-    if (ctx.agentId && this.#deps.agentMemory) {
-      try {
-        agentMemory = this.#deps.agentMemory.contextSection(ctx.agentId, ctx.workspaceId);
-      } catch (err) {
-        logger?.warn?.('chat.agent_memory.failed', { agentId: ctx.agentId, err: (err as Error).message });
-      }
-    }
 
     // The three remote/expensive retrievers — brain discourse, personal brain,
     // and workspace intelligence (which fires a knowledge-base embedding search)
@@ -292,7 +332,8 @@ export class ChatSessionExecutor {
     const knowledgeBases = this.#deps.knowledgeBases;
     const wantKnowledge = hasRetrievalSignal(userMessage);
 
-    const [discourse, personalBrain, workspaceContext] = await Promise.all([
+    const sharedIntelligence = this.#deps.sharedIntelligence;
+    const [discourse, personalBrain, workspaceContext, brainContext] = await Promise.all([
       !lightweightConversation && brainDiscourse
         ? withBudget(async () => {
             try {
@@ -338,7 +379,39 @@ export class ChatSessionExecutor {
             }
           }, CONTEXT_BUILDER_BUDGET_MS, null, () => logger?.warn?.('chat.workspace_context.budget_exceeded', { workspaceId: ctx.workspaceId }))
         : Promise.resolve<string | null>(null),
+
+      // §B3 — the unified brain injector (same path as workflow dispatch).
+      !lightweightConversation && ctx.agentId && sharedIntelligence
+        ? withBudget(async () => {
+            try {
+              const brain = await sharedIntelligence.buildDispatchContext({
+                workspaceId: ctx.workspaceId,
+                scopeId: ctx.agentId,
+                agentId: ctx.agentId,
+                taskDescription: userMessage,
+                limit: 8,
+                surface: 'chat', // §C5 — chat leans working + semantic scales.
+              });
+              return brain.block || null;
+            } catch (err) {
+              logger?.warn?.('chat.brain_context.failed', { agentId: ctx.agentId, err: (err as Error).message });
+              return null;
+            }
+          }, CONTEXT_BUILDER_BUDGET_MS, null, () => logger?.warn?.('chat.brain_context.budget_exceeded', { agentId: ctx.agentId }))
+        : Promise.resolve<string | null>(null),
     ]);
+
+    // §B3 — prefer the unified brain context; fall back to the legacy newest-8
+    // slice only when SharedIntelligence is not wired.
+    if (brainContext) {
+      agentMemory = brainContext;
+    } else if (ctx.agentId && this.#deps.agentMemory) {
+      try {
+        agentMemory = this.#deps.agentMemory.contextSection(ctx.agentId, ctx.workspaceId);
+      } catch (err) {
+        logger?.warn?.('chat.agent_memory.failed', { agentId: ctx.agentId, err: (err as Error).message });
+      }
+    }
 
     if (discourse) {
       effectiveUserMessage = discourse.injectedMessage;
@@ -346,15 +419,17 @@ export class ChatSessionExecutor {
     }
 
     let agentInstructions: string | null = null;
+    let agentIdentity: string | null = null;
+    let identityChecksum: string | null = null;
     const db = this.#deps.db;
     if (db && ctx.agentId) {
       try {
-        const agent = db.select().from(schema.agents).where(eq(schema.agents.id, ctx.agentId)).get();
-        if (agent?.instructions) {
-          agentInstructions = agent.instructions;
-        }
+        const identity = loadAgentIdentitySnapshot(db, ctx.workspaceId, ctx.agentId);
+        agentInstructions = identity?.instructions ?? null;
+        agentIdentity = renderAgentIdentityBlock(identity);
+        identityChecksum = agentIdentityChecksum(identity);
       } catch (err) {
-        this.#deps.logger?.warn?.('chat.agent_instructions.failed', { agentId: ctx.agentId, err: (err as Error).message });
+        this.#deps.logger?.warn?.('chat.agent_identity.failed', { agentId: ctx.agentId, err: (err as Error).message });
       }
     }
 
@@ -386,14 +461,28 @@ export class ChatSessionExecutor {
       ...promptCtx,
       ...this.#extractInlineContext(userMessage, ctx),
       agentInstructions,
+      agentIdentity,
       agentMemory: clampBlock(agentMemory, CONTEXT_BUDGET.agentMemory),
       personalBrain: clampBlock(personalBrain, CONTEXT_BUDGET.personalBrain),
       workspaceContext: clampBlock(workspaceContext, CONTEXT_BUDGET.workspaceContext),
       channelContext,
       situationalModel: clampBlock(situationalModel, CONTEXT_BUDGET.situationalModel),
       responseProfile,
+      routingIntelligence: this.#deps.modelRouter?.describeRouting(ctx.workspaceId, effectiveUserMessage) ?? null,
     });
-    const systemAddendum = [clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), abilitySystemInjection, options.systemAddendum]
+    // W1/W2 — the operating manual reaches CHAT agents too (not only task agents),
+    // so an agent has the same agentic briefing everywhere it runs.
+    let operatingManualBlock: string | null = null;
+    try {
+      const db = this.#deps.db;
+      if (db && ctx.workspaceId) {
+        const role = ctx.agentId
+          ? (db.select({ role: schema.agents.role }).from(schema.agents).where(eq(schema.agents.id, ctx.agentId)).get()?.role ?? null)
+          : null;
+        operatingManualBlock = composeOperatingManual({ role, workspaceManual: getWorkspaceManual(db, ctx.workspaceId) });
+      }
+    } catch { /* best-effort — never block a chat turn on the manual */ }
+    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), abilitySystemInjection, options.systemAddendum]
       .map((value) => value?.trim())
       .filter((value): value is string => Boolean(value));
     const systemPrompt = systemAddendum.length > 0
@@ -418,6 +507,7 @@ export class ChatSessionExecutor {
       fastPath: adapter !== agentAdapter,
       adapterType: adapter.adapterType ?? 'unknown',
       lightweightConversation,
+      sessionKey: cliSessionKey(ctx.conversationId, capabilities?.toolForwarding, identityChecksum),
       // The agent's own harness should answer on the model the operator picked in
       // the UI — not whatever default the harness happens to boot with.
       preferredModel: adapter === agentAdapter && 'agentRuntimeModel' in promptCtx ? promptCtx.agentRuntimeModel : null,
@@ -489,6 +579,7 @@ export class ChatSessionExecutor {
       maxToolCalls: pending.maxToolCalls,
       startedAt: Date.now(),
       toolCallCount: pending.toolCallCount + 1,
+      sessionKey: pending.sessionKey,
       contextMs: null, // resume after a confirmation — no context-build phase
       fastPath: false,
       adapterType: adapter.adapterType ?? 'unknown',
@@ -512,6 +603,8 @@ export class ChatSessionExecutor {
       adapterType: string;
       /** Skip native MCP startup for turns that cannot need platform actions. */
       lightweightConversation?: boolean;
+      /** Runtime-native session key, identity-versioned for CLI harnesses. */
+      sessionKey?: string | null;
       /** The agent's UI-selected runtime model, forwarded to the adapter per call. */
       preferredModel?: string | null;
     },
@@ -577,6 +670,7 @@ export class ChatSessionExecutor {
       }
       const toolCalls: ChatToolCall[] = [];
       let assistantText = '';
+      const bufferedDeltas: ChatDelta[] = [];
       let surfacedConfirmation = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
 
@@ -587,7 +681,7 @@ export class ChatSessionExecutor {
         const chatOptions: ChatInvocationOptions = {
           latencyClass: 'interactive',
           timeoutMs: modelRoundTimeoutMs,
-          sessionKey: ctx.conversationId,
+          sessionKey: options.sessionKey ?? ctx.conversationId,
           ...(adapterMcpNative
             ? { toolMode: options.lightweightConversation ? 'caller_loop' : 'adapter_native' }
             : {}),
@@ -598,7 +692,6 @@ export class ChatSessionExecutor {
         for await (const delta of adapter.chat!(messages, options.tools, Object.keys(chatOptions).length > 0 ? chatOptions : undefined)) {
           if (delta.type === 'text') {
             assistantText += delta.delta;
-            if (delta.delta) producedText = true;
           }
           if (delta.type === 'thinking' && delta.delta) producedThinking = true;
           if ((delta.type === 'text' && delta.delta) || delta.type === 'tool_call') {
@@ -610,7 +703,15 @@ export class ChatSessionExecutor {
             finishReason = delta.finishReason;
             continue;
           }
-          yield delta;
+          // Runtime prose is ambiguous until the round finishes. Buffer text so
+          // tool-round narration cannot leak into the final answer, but stream
+          // factual activity immediately so the operator never stares at a dead
+          // "Waiting for runtime" card while the harness is actively working.
+          if (delta.type === 'activity') {
+            yield delta;
+          } else if (delta.type !== 'thinking') {
+            bufferedDeltas.push(delta);
+          }
         }
         timings.modelMs += Date.now() - roundStart;
       } catch (err) {
@@ -622,7 +723,11 @@ export class ChatSessionExecutor {
       }
 
       if (toolCalls.length === 0 || finishReason !== 'tool_calls') {
-        const noOutput = !producedText && !surfacedConfirmation && finishReason !== 'error';
+        for (const delta of bufferedDeltas) {
+          if (delta.type === 'text' && delta.delta) producedText = true;
+          yield delta;
+        }
+        const noOutput = !assistantText.trim() && !surfacedConfirmation && finishReason !== 'error';
         // Reasoning-only / truncated turn recovery. A reasoning model at high
         // effort can spend its whole output budget thinking and return zero answer
         // text (finish_reason `length`, or a clean `stop` after only `thinking`).
@@ -660,6 +765,13 @@ export class ChatSessionExecutor {
         return;
       }
 
+      // Preserve the tool-call protocol for the executor, but deliberately drop
+      // any text emitted before those calls from the operator transcript.
+      for (const delta of bufferedDeltas) {
+        if (delta.type === 'tool_call' || delta.type === 'confirmation_required') {
+          yield delta;
+        }
+      }
       messages.push({ role: 'assistant', content: assistantText, toolCalls });
 
       // Cap batch to remaining budget before kicking off parallel execution.
@@ -692,6 +804,7 @@ export class ChatSessionExecutor {
           maxTurns: options.maxTurns,
           maxToolCalls: options.maxToolCalls,
           toolCallCount,
+          sessionKey: options.sessionKey ?? ctx.conversationId,
           createdAt: now,
           expiresAt: now + CONFIRMATION_TTL_MS,
         });
@@ -777,81 +890,6 @@ export class ChatSessionExecutor {
         ...(result.error ? { error: result.error } : {}),
       },
     };
-  }
-
-  static async *#executeDirectWorkflowBuild(
-    ctx: ChatTurnContext,
-    startedAt: number,
-    build: { description: string; title?: string; workflowId?: string; mode: 'create' | 'update' },
-  ): AsyncIterable<ChatDelta> {
-    const runId = `build_${ctx.clientTurnId ?? randomUUID()}`;
-    const callId = `build_${randomUUID()}`;
-    const timings: TurnTimings = {
-      contextMs: 0,
-      firstTokenMs: 0,
-      modelMs: 0,
-      toolMs: 0,
-      rounds: 0,
-      fastPath: true,
-      adapterType: 'agentis_direct',
-    };
-    const toolCall: ChatToolCall = {
-      id: callId,
-      name: 'agentis.build_workflow',
-      arguments: {
-        description: build.description,
-        ...(build.title ? { title: build.title } : {}),
-        ...(build.workflowId ? { workflowId: build.workflowId } : {}),
-      },
-    };
-
-    yield {
-      type: 'activity',
-      id: `activity-${ctx.clientTurnId ?? ctx.conversationId}-workflow-fast-path`,
-      phase: 'workflow',
-      status: 'running',
-      label: build.mode === 'update' ? 'Updating workflow' : 'Building workflow',
-      detail: build.mode === 'update'
-        ? 'Applying the requested change to the active workflow.'
-        : 'Creating the requested workflow.',
-      startedAt: new Date().toISOString(),
-      agentId: ctx.agentId,
-      clientTurnId: ctx.clientTurnId,
-      runId,
-    };
-    yield { type: 'tool_call', id: callId, name: toolCall.name, args: toolCall.arguments };
-
-    const toolStart = Date.now();
-    // Run the build and stream its real phase/canvas narration into THIS chat
-    // turn as activity deltas — so the operator watches "analyzing → drafting →
-    // reviewing → placing nodes → complete" live, in the chat, even if the
-    // realtime socket is down. The bus events are published synchronously inside
-    // the build, so by the time it settles they are all drained.
-    const buildHolder: { result?: Awaited<ReturnType<typeof ChatToolExecutor.run>> } = {};
-    yield* this.#streamBuildNarration(ctx, runId, buildHolder, () =>
-      ChatToolExecutor.run(toolCall.name, toolCall.arguments, { ...ctx, runId }));
-    const result = buildHolder.result!;
-    timings.toolMs = Date.now() - toolStart;
-    const ok = !result.error;
-    recordToolCall(toolCall.name, timings.toolMs, ok);
-    yield {
-      type: 'tool_result',
-      id: callId,
-      name: toolCall.name,
-      result: result.data ?? null,
-      ...(result.error ? { error: result.error } : {}),
-    };
-
-    if (result.error) {
-      this.#logTurn(ctx, startedAt, 1, 'error', timings);
-      yield { type: 'done', finishReason: 'error' };
-      return;
-    }
-
-    const summary = directBuildSummary(result.data, build.mode);
-    if (summary) yield { type: 'text', delta: summary };
-    this.#logTurn(ctx, startedAt, 1, 'stop', timings);
-    yield { type: 'done', finishReason: 'stop' };
   }
 
   /**
@@ -1184,78 +1222,6 @@ function resolveTurnDeadlineMs(): number {
   return DEFAULT_TURN_DEADLINE_MS;
 }
 
-function parseDirectWorkflowMutationIntent(
-  message: string,
-  viewport: ViewportContext | null | undefined,
-): { description: string; title?: string; workflowId?: string; mode: 'create' | 'update' } | null {
-  const text = message.trim();
-  if (text.length < 8) return null;
-  const lower = text.toLowerCase();
-  // Command routing is based on action + active resource, not a specific use
-  // case. Explanatory/meta requests stay in ordinary chat.
-  if (/\b(explain|why|how does|what is|compare|design doc|architecture)\b/.test(lower)) return null;
-  // Capability-authoring requests may require multiple ordered tools
-  // (create extension/ability, then build the workflow). Do not collapse them
-  // into the single build_workflow fast path.
-  if (
-    /\b(ability|abilities|extension|extensions|plugin|plugins|connector|listener source|persistent listener)\b/.test(lower)
-    && /\b(create|build|make|generate|add|new|update|revise|modify|change|edit|fix|repair|replace|reconfigure|configure|convert|migrate|set|use|wire|attach)\b/.test(lower)
-  ) return null;
-  const namesWorkflow = /\b(workflow|automation|flow|agentis app)\b/.test(lower);
-  const createAction = /\b(build|create|make|generate|set up|setup)\b/.test(lower);
-  const mutateAction = /\b(update|revise|modify|change|edit|fix|repair|improve|extend|add|remove|replace|reconfigure|configure|convert|migrate)\b/.test(lower);
-  const activeWorkflowId = workflowIdFromViewport(viewport);
-
-  if (mutateAction && activeWorkflowId && (namesWorkflow || refersToActiveResource(lower))) {
-    return { description: text, workflowId: activeWorkflowId, mode: 'update' };
-  }
-  if (createAction && namesWorkflow) {
-    const title = titleFromDirectBuild(text);
-    return { description: text, ...(title ? { title } : {}), mode: 'create' };
-  }
-  return null;
-}
-
-function refersToActiveResource(text: string): boolean {
-  return /\b(this|the current|current|active|it)\b/.test(text);
-}
-
-function titleFromDirectBuild(text: string): string | undefined {
-  const withoutPrefix = text
-    .replace(/^\s*(please\s+)?(build|create|make|generate|set up|setup)\s+(a|an|the)?\s*(workflow|automation|flow|agentis app)?\s*(that|to|for)?\s*/i, '')
-    .trim();
-  const firstLine = (withoutPrefix || text).split(/\r?\n/)[0]!.replace(/\s+/g, ' ').trim();
-  if (!firstLine) return undefined;
-  const clipped = firstLine.length > 60 ? `${firstLine.slice(0, 57)}...` : firstLine;
-  return clipped.replace(/^\w/, (c) => c.toUpperCase());
-}
-
-function directBuildSummary(result: unknown, mode: 'create' | 'update' = 'create'): string {
-  if (!result || typeof result !== 'object') {
-    return mode === 'update' ? 'Workflow updated.' : 'Workflow built.';
-  }
-  const r = result as {
-    title?: unknown;
-    workflowId?: unknown;
-    nodeCount?: unknown;
-    edgeCount?: unknown;
-    deliveryPreview?: Array<{ summary?: string }>;
-    approvalRequired?: unknown;
-    warnings?: unknown[];
-  };
-  const title = typeof r.title === 'string' && r.title.trim() ? r.title.trim() : 'Workflow';
-  const nodes = typeof r.nodeCount === 'number' ? `${r.nodeCount} nodes` : 'built';
-  const delivery = Array.isArray(r.deliveryPreview) && r.deliveryPreview.length > 0
-    ? ` Delivers to: ${r.deliveryPreview.map((d) => d.summary).filter(Boolean).join('; ')}.`
-    : '';
-  const approval = r.approvalRequired === true ? ' Approval required before delivery.' : '';
-  const warnings = Array.isArray(r.warnings) && r.warnings.length > 0
-    ? ` ${r.warnings.length} setup item${r.warnings.length === 1 ? '' : 's'} need attention.`
-    : '';
-  const verb = mode === 'update' ? 'Updated' : 'Built';
-  return `${verb} "${title}" with ${nodes}.${delivery}${approval}${warnings}`;
-}
-
 /** Human labels for the build's WORKFLOW_BUILD_PHASE stages. */
 const BUILD_PHASE_LABEL: Record<string, string> = {
   analyzing: 'Analyzing your request',
@@ -1528,10 +1494,11 @@ function confirmationImpact(toolName: string, args: unknown, fallbackDescription
     let memoryContent = '';
     if (id && db) {
       try {
-        const mem = db.select().from(schema.workspaceMemory).where(eq(schema.workspaceMemory.id, id)).get();
+        // §B4 — typed memory lives in the episode substrate.
+        const mem = db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.id, id)).get();
         if (mem) {
           memoryTitle = mem.title;
-          memoryContent = mem.content;
+          memoryContent = mem.summary;
         }
       } catch (err) {
         // ignore db error
@@ -1658,6 +1625,16 @@ function confirmationImpact(toolName: string, args: unknown, fallbackDescription
     reversible: false,
     externalSideEffects: false,
   };
+}
+
+function cliSessionKey(
+  conversationId: string | null | undefined,
+  forwarding: unknown,
+  checksum: string | null,
+): string | null | undefined {
+  return forwarding === 'marker_protocol' || forwarding === 'mcp_native'
+    ? chatSessionKeyWithIdentity(conversationId, checksum)
+    : conversationId;
 }
 
 function recordFromUnknown(value: unknown): Record<string, unknown> {

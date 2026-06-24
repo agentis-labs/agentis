@@ -31,6 +31,25 @@ function graph(
 }
 
 describe('validateWorkflowGraph', () => {
+  it('rejects duplicate phase ids, missing nodes, and duplicate membership', () => {
+    const duplicateIds = graph([{ id: 'A' }, { id: 'B' }], []);
+    duplicateIds.phases = [
+      { id: 'p', name: 'One', color: '#2563eb', nodeIds: ['A'] },
+      { id: 'p', name: 'Two', color: '#0891b2', nodeIds: ['B'] },
+    ];
+    expect(() => validateWorkflowGraph(duplicateIds)).toThrow(/Duplicate phase id/);
+
+    const missing = graph([{ id: 'A' }], []);
+    missing.phases = [{ id: 'p', name: 'One', color: '#2563eb', nodeIds: ['ghost'] }];
+    expect(() => validateWorkflowGraph(missing)).toThrow(/missing node ghost/);
+
+    const repeated = graph([{ id: 'A' }], []);
+    repeated.phases = [
+      { id: 'p1', name: 'One', color: '#2563eb', nodeIds: ['A'] },
+      { id: 'p2', name: 'Two', color: '#0891b2', nodeIds: ['A'] },
+    ];
+    expect(() => validateWorkflowGraph(repeated)).toThrow(/more than one phase/);
+  });
   it('accepts a linear DAG', () => {
     const g = graph(
       [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
@@ -233,5 +252,52 @@ describe('validateWorkflowGraph', () => {
 
   it('rejects an empty merge subset list', () => {
     expect(() => validateWorkflowGraph(mergeGraph([]))).toThrow(/empty requiredInputs/);
+  });
+});
+
+describe('validateWorkflowGraph — WORKFLOW-UPDATE node kinds', () => {
+  function single(config: Record<string, unknown>): WorkflowGraph {
+    return {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [{ id: 'n', type: String(config.kind), title: 'n', position: { x: 0, y: 0 }, config: config as never }],
+      edges: [],
+    };
+  }
+
+  it('accepts all new node kinds with valid config', () => {
+    expect(validateWorkflowGraph(single({ kind: 'datetime', operation: 'now' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'crypto_util', operation: 'uuid' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'xml_parse', operation: 'parse' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'markdown', operation: 'to_html' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'sticky_note', content: 'hi' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'stop_error', errorMessage: 'stop' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'code', language: 'javascript', code: 'return 1', inputKeys: [] })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'spreadsheet', operation: 'parse', format: 'csv' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'graphql', endpoint: 'https://x/graphql', query: '{ me }' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'html_extract', selector: '.x', extractAs: 'text' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'json_schema_validate', schema: '{"type":"object"}', onViolation: 'flag' })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'error_trigger', onStatus: ['FAILED'] })).ok).toBe(true);
+  });
+
+  it('rejects invalid new-kind config', () => {
+    expect(() => validateWorkflowGraph(single({ kind: 'stop_error' }))).toThrow(/missing errorMessage/);
+    expect(() => validateWorkflowGraph(single({ kind: 'code', language: 'ruby', code: 'x', inputKeys: [] }))).toThrow(/language/);
+    expect(() => validateWorkflowGraph(single({ kind: 'json_schema_validate', schema: 'not json', onViolation: 'flag' }))).toThrow(/not valid JSON/);
+    expect(() => validateWorkflowGraph(single({ kind: 'graphql', endpoint: '', query: '' }))).toThrow(/graphql/);
+    expect(() => validateWorkflowGraph(single({ kind: 'html_extract', selector: '', extractAs: 'text' }))).toThrow(/selector/);
+  });
+
+  it('validates new trigger types', () => {
+    expect(validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'rss_feed', rssFeed: { feedUrl: 'https://x/feed' } })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'error_trigger', errorTrigger: { kind: 'error_trigger', onStatus: ['FAILED'] } })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'email_imap', emailImap: { host: 'imap.x' } })).ok).toBe(true);
+    expect(() => validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'rss_feed' }))).toThrow(/feedUrl/);
+    expect(() => validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'error_trigger' }))).toThrow(/onStatus/);
+  });
+
+  it('accepts a cron trigger configured with scheduleRules only', () => {
+    expect(validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'cron', scheduleRules: [{ expression: '0 9 * * 1' }, { expression: '0 0 * * *' }] })).ok).toBe(true);
+    expect(() => validateWorkflowGraph(single({ kind: 'trigger', triggerType: 'cron' }))).toThrow(/schedule/);
   });
 });

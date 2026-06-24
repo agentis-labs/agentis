@@ -167,7 +167,7 @@ describe('WorkflowEngine evaluator agent fallback', () => {
           position: { x: 400, y: 0 },
           config: {
             kind: 'evaluator',
-            targetPath: 'nodes.write-digest',
+            targetPath: '{{nodes.write-digest}}',
             criteria: 'The digest must be concise and useful.',
             passThreshold: 8,
           },

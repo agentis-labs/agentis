@@ -109,14 +109,29 @@ export interface WorkspaceRequestStatus {
  * workspace busy. Mission Control's full stream still shows everything;
  * this filter only gates *liveness*.
  */
-const WORK_KINDS = new Set<RealtimeActivity['kind']>(['run', 'node', 'tool', 'progress']);
+const WORK_KINDS = new Set<RealtimeActivity['kind']>(['run', 'node', 'agent', 'tool', 'task', 'progress']);
 const BUSY_WINDOW_MS = 20_000;
 
 function isWork(a: RealtimeActivity): boolean {
+  if (a.kind === 'agent') return Boolean(a.runId || a.workflowId || a.agentId);
   return WORK_KINDS.has(a.kind);
 }
 function isTerminal(a: RealtimeActivity): boolean {
-  return a.event.endsWith('completed') || a.event.endsWith('failed');
+  const phase = a.phase?.toLowerCase();
+  return a.event.endsWith('completed')
+    || a.event.endsWith('failed')
+    || a.event.endsWith('blocked')
+    || a.event.endsWith('cancelled')
+    || a.event.endsWith('canceled')
+    || phase === 'complete'
+    || phase === 'completed'
+    || phase === 'fail'
+    || phase === 'failed'
+    || phase === 'blocked'
+    || phase === 'canceled'
+    || phase === 'cancelled'
+    || a.tone === 'success'
+    || a.tone === 'danger';
 }
 
 /** Is the workspace mid-work, and what's the current focus? */
@@ -154,8 +169,11 @@ export function useLiveNodeIds(feed: RealtimeActivity[], windowMs = BUSY_WINDOW_
         for (const k of keys) settled.add(k);
         continue;
       }
-      if (a.agentId && !settled.has(`a:${a.agentId}`)) agentIds.add(a.agentId);
-      if (a.workflowId && !settled.has(`w:${a.workflowId}`)) workflowIds.add(a.workflowId);
+      if (a.workflowId && !settled.has(`w:${a.workflowId}`)) {
+        workflowIds.add(a.workflowId);
+      } else if (a.agentId && !settled.has(`a:${a.agentId}`)) {
+        agentIds.add(a.agentId);
+      }
     }
     return { agentIds, workflowIds };
   }, [feed, windowMs]);

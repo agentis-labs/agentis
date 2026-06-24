@@ -21,8 +21,10 @@ import { GovernancePanel } from '../components/settings/GovernancePanel';
 import { McpConnectionsPanel } from '../components/settings/McpConnectionsPanel';
 import { ChannelIdentitiesPanel } from '../components/settings/ChannelIdentitiesPanel';
 import { OrchestratorModelsPanel } from '../components/settings/OrchestratorModelsPanel';
+import { SelfHealingPanel } from '../components/settings/SelfHealingPanel';
+import { IntegrationsPanel } from '../components/settings/IntegrationsPanel';
 
-type Tab = 'profile' | 'workspace' | 'connections' | 'security' | 'budget' | 'runtimes' | 'governance';
+type Tab = 'profile' | 'workspace' | 'connections' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
 
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -41,6 +43,7 @@ export function SettingsPage() {
           { value: 'profile',     label: 'Profile' },
           { value: 'workspace',   label: 'Workspace' },
           { value: 'connections', label: 'Connections' },
+          { value: 'integrations', label: 'Integrations' },
           { value: 'governance',  label: 'Governance' },
           { value: 'security',    label: 'Security' },
           { value: 'budget',      label: 'Budget' },
@@ -50,7 +53,12 @@ export function SettingsPage() {
       />
       <div className="flex-1 overflow-y-auto px-6 py-5">
         {tab === 'profile' && <ProfileTab />}
-        {tab === 'workspace' && <WorkspaceTab />}
+        {tab === 'workspace' && (
+          <div className="space-y-8">
+            <WorkspaceTab />
+            <SelfHealingPanel />
+          </div>
+        )}
         {tab === 'connections' && (
           <div className="space-y-8">
             <ConnectionsTab />
@@ -58,6 +66,7 @@ export function SettingsPage() {
             <McpConnectionsPanel />
           </div>
         )}
+        {tab === 'integrations' && <IntegrationsPanel />}
         {tab === 'governance' && <GovernancePanel />}
         {tab === 'security' && <SecurityTab />}
         {tab === 'budget' && <BudgetTab />}

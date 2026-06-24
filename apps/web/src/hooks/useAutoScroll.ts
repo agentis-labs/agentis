@@ -83,7 +83,7 @@ export function useAutoScroll(
     const el = scrollRef.current;
     if (!el) return;
 
-    const observer = new ResizeObserver(() => {
+    const pinIfAllowed = () => {
       if (suppressRef.current) {
         suppressRef.current = false;
         return;
@@ -91,14 +91,32 @@ export function useAutoScroll(
       if (!userScrolledRef.current) {
         el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
       }
+    };
+
+    const observer = new ResizeObserver(() => {
+      pinIfAllowed();
     });
 
-    // Observe the first child (the content container)
-    if (el.firstElementChild) {
-      observer.observe(el.firstElementChild);
-    }
+    const observeChildren = () => {
+      observer.disconnect();
+      observer.observe(el);
+      for (const child of Array.from(el.children)) {
+        observer.observe(child);
+      }
+    };
 
-    return () => observer.disconnect();
+    observeChildren();
+
+    const mutationObserver = new MutationObserver(() => {
+      observeChildren();
+      pinIfAllowed();
+    });
+    mutationObserver.observe(el, { childList: true });
+
+    return () => {
+      observer.disconnect();
+      mutationObserver.disconnect();
+    };
   }, [messageCount]); // reconnect when message count changes
 
   // Re-lock on new messages (if user hasn't scrolled up)

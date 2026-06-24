@@ -264,6 +264,41 @@ function seedPausedRun() {
   return { wfId, runId, blockedReason };
 }
 
+/**
+ * A run that FAILED at one node (`evaluate`) while a DIFFERENT node (`draft`)
+ * carries a stale APPLIED ("self-healed") incident. The presenter must NOT
+ * report the run as self-healed — that's the "it says it worked and it didn't"
+ * lie. The failed node has no incident of its own.
+ */
+function seedFailedRunWithStaleAppliedIncident() {
+  const wfId = randomUUID();
+  const runId = randomUUID();
+  const graph: WorkflowGraph = {
+    version: 1,
+    nodes: [
+      { id: 'draft', type: 'agent_task', title: 'Draft', position: { x: 0, y: 0 }, config: { kind: 'agent_task', prompt: 'draft', capabilityTags: [], inputKeys: [], outputKeys: [] } },
+      { id: 'evaluate', type: 'evaluator', title: 'Evaluator', position: { x: 200, y: 0 }, config: { kind: 'evaluator' } as never },
+    ],
+    edges: [{ id: 'e1', source: 'draft', target: 'evaluate' }],
+    viewport: { x: 0, y: 0, zoom: 1 },
+  };
+  const runState = {
+    runId, workflowId: wfId, status: 'FAILED', readyQueue: [], waitingInputs: {},
+    nodeStates: {
+      draft: { nodeId: 'draft', status: 'COMPLETED', outputData: { subject: 'x' } },
+      evaluate: { nodeId: 'evaluate', status: 'FAILED', error: "evaluator: targetPath '{{nodes.draft}}' did not resolve" },
+    },
+    activeExecutions: {}, completedNodeIds: ['draft'], failedNodeIds: ['evaluate'], skippedNodeIds: [],
+    graphRevision: 0, replanCount: 0, lastLedgerSequence: 0,
+    selfHealIncidents: {
+      draft: { nodeId: 'draft', nodeTitle: 'Draft', status: 'APPLIED', mode: 'guarded', attempt: 1, maxAttempts: 2, outcome: 'output_fixed', diagnosis: 'Recovered subject from the node output.', startedAt: '2026-05-20T10:00:00.000Z', updatedAt: '2026-05-20T10:00:02.000Z' },
+    },
+  } as unknown as WorkflowRunState;
+  ctx.db.insert(schema.workflows).values({ id: wfId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, title: 'Digest', graph, settings: {} }).run();
+  ctx.db.insert(schema.workflowRuns).values({ id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, status: 'FAILED', runState, startedAt: '2026-05-20T10:00:00.000Z', completedAt: '2026-05-20T10:00:05.000Z' }).run();
+  return { wfId, runId };
+}
+
 describe('GET /v1/runs', () => {
   it('lists runs in the workspace', async () => {
     seedRun();
@@ -386,6 +421,17 @@ describe('GET /v1/runs/:id', () => {
       inputs: { topic: 'Status update' },
       outputSummary: 'partial',
     });
+  });
+
+  it('never reports a failed run as self-healed using a stale incident from another node', async () => {
+    const { runId } = seedFailedRunWithStaleAppliedIncident();
+    const res = await app().request(`/v1/runs/${runId}`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { run: { status: string; selfHealIncident: unknown | null } };
+    expect(body.run.status).toBe('failed');
+    // The failed `evaluate` node has no incident → must NOT surface the APPLIED
+    // `draft` incident (the lie).
+    expect(body.run.selfHealIncident).toBeNull();
   });
 
   it('returns 404 with WORKFLOW_RUN_NOT_FOUND for unknown id', async () => {

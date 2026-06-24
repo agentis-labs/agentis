@@ -33,6 +33,7 @@ export interface NodeReadiness {
 
 export interface NodeConfigContext {
   integrations?: readonly IntegrationManifestLite[];
+  credentialTypes?: readonly string[];
 }
 
 export interface NodeConfigMeta {
@@ -64,11 +65,25 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   evaluator: { label: 'Evaluator', reason: 'Scores an output against natural-language acceptance criteria.' },
   guardrails: { label: 'Guardrails', reason: 'Applies deterministic policy checks before data continues.' },
   knowledge: { label: 'Brain', reason: 'Retrieves relevant workspace knowledge for downstream work.' },
+  knowledge_ingest: { label: 'Save to Brain', reason: 'Writes upstream content into the workspace Brain so it is recallable later.' },
   artifact_collect: { label: 'Artifact collect', reason: 'Packages generated artifacts into a versioned collection.' },
   return_output: { label: 'Return output', reason: 'Declares the rendered result operators see after a run.' },
   artifact_save: { label: 'Save artifact', reason: 'Persists generated content as a workspace artifact.' },
   browser: { label: 'Browser', reason: 'Uses Chromium to render, navigate, extract, or capture web content.' },
   checkpoint: { label: 'Checkpoint', reason: 'Pauses the run until an operator reviews the work.' },
+  // WORKFLOW-UPDATE — n8n-inspired utility & data primitives.
+  error_trigger: { label: 'Error trigger', reason: 'Starts this workflow when another workflow reaches a failure state.' },
+  stop_error: { label: 'Stop & error', reason: 'Terminates the run immediately with a custom error message.' },
+  code: { label: 'Code', reason: 'Runs sandboxed JavaScript (or Python) over the node input.' },
+  datetime: { label: 'Date & time', reason: 'Parses, formats, diffs, or shifts date values deterministically.' },
+  crypto_util: { label: 'Crypto', reason: 'Hashes, HMACs, base64-encodes, or generates UUIDs locally.' },
+  xml_parse: { label: 'XML', reason: 'Converts between XML and JSON.' },
+  markdown: { label: 'Markdown', reason: 'Converts between Markdown and HTML.' },
+  json_schema_validate: { label: 'Validate schema', reason: 'Validates data against a JSON Schema before it continues.' },
+  sticky_note: { label: 'Sticky note', reason: 'A canvas annotation — it never executes.' },
+  spreadsheet: { label: 'Spreadsheet', reason: 'Parses or builds CSV/XLSX rows.' },
+  html_extract: { label: 'HTML extract', reason: 'Extracts values from an HTML string by CSS selector.' },
+  graphql: { label: 'GraphQL', reason: 'Runs a structured GraphQL query against an endpoint.' },
 };
 
 export function nodeConfigMeta(kind: string): NodeConfigMeta {
@@ -114,7 +129,11 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
       if (!integrationId) return missing('Choose an integration.');
       if (!stringOf(c.operationId)) return missing('Choose an integration operation.');
       const manifest = context.integrations?.find((item) => item.service === integrationId || item.id === integrationId);
-      if (integrationNeedsCredential(manifest) && !stringOf(c.credentialId)) {
+      const credentialTypes = new Set((context.credentialTypes ?? []).map((type) => type.toLowerCase()));
+      const hasWorkspaceCredential = credentialTypes.has(integrationId.toLowerCase())
+        || credentialTypes.has(`integration_${integrationId.toLowerCase()}`)
+        || credentialTypes.has(`oauth_${integrationId.toLowerCase()}`);
+      if (integrationNeedsCredential(manifest) && !stringOf(c.credentialId) && !hasWorkspaceCredential) {
         return missing(`Bind a ${manifest?.name ?? humanizeIdentifier(integrationId)} credential.`);
       }
       const contract = manifest?.operationContracts?.[stringOf(c.operationId)];
@@ -138,6 +157,10 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
       return stringOf(c.workflowId) ? ready() : missing('Choose a reusable workflow.');
     case 'scratchpad':
       return stringOf(c.key).trim() ? ready() : missing('Enter a scratchpad key.');
+    case 'knowledge_ingest':
+      return stringOf(c.content).trim() || stringOf(c.contentPath).trim()
+        ? ready()
+        : missing('Set the content or a content path to ingest.');
     case 'agent_task':
     case 'agent_session':
       return stringOf(c.prompt).trim() ? ready() : missing('Write the agent prompt.');

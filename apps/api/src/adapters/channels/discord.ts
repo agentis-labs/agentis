@@ -11,7 +11,7 @@
  */
 
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
 
 const DISCORD_API = 'https://discord.com/api/v10';
 
@@ -19,6 +19,33 @@ export class DiscordChannelAdapter implements ChannelAdapter {
   readonly kind = 'discord' as const;
 
   fetchImpl: typeof fetch = (...args) => fetch(...args);
+
+  async probeCredential(args: { token: string }): Promise<ChannelHealthCheck> {
+    const checkedAt = new Date().toISOString();
+    const res = await this.fetchImpl(`${DISCORD_API}/users/@me`, {
+      method: 'GET',
+      headers: { authorization: `Bot ${args.token}` },
+    });
+    if (res.ok) {
+      const json = await res.json().catch(() => ({})) as { username?: string; id?: string };
+      return {
+        name: 'credential',
+        ok: true,
+        code: 'discord_bot_identity_ok',
+        message: json.username ? `Discord bot token is valid for ${json.username}.` : 'Discord bot token is valid.',
+        checkedAt,
+      };
+    }
+    const text = await res.text().catch(() => '');
+    return {
+      name: 'credential',
+      ok: false,
+      code: 'discord_bot_identity_failed',
+      message: `Discord bot identity check failed (${res.status}): ${text.slice(0, 180) || res.statusText}`,
+      remediation: 'Paste a valid Discord bot token from the Developer Portal.',
+      checkedAt,
+    };
+  }
 
   async send(args: { token: string; chatId: string; body: string }): Promise<void> {
     const url = `${DISCORD_API}/channels/${encodeURIComponent(args.chatId)}/messages`;
@@ -32,9 +59,14 @@ export class DiscordChannelAdapter implements ChannelAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      const hint = res.status === 403
+        ? ' Check that the bot is in the server and has View Channel + Send Messages permissions.'
+        : res.status === 404
+          ? ' Check that the default channel ID exists and the bot can see it.'
+          : '';
       throw new AgentisError(
         'CHANNEL_SEND_FAILED',
-        `discord sendMessage failed: ${res.status} ${text.slice(0, 200)}`,
+        `discord sendMessage failed: ${res.status} ${text.slice(0, 200)}${hint}`,
       );
     }
   }

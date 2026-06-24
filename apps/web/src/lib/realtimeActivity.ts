@@ -7,6 +7,7 @@ export type RealtimeActivityKind =
   | 'agent'
   | 'tool'
   | 'message'
+  | 'task'
   | 'approval'
   | 'status'
   | 'progress';
@@ -23,10 +24,16 @@ export interface RealtimeActivity {
   at: string;
   runId?: string;
   workflowId?: string;
+  taskId?: string;
+  taskTitle?: string;
   nodeId?: string;
   nodeTitle?: string;
   agentId?: string;
   agentName?: string;
+  conversationId?: string;
+  clientTurnId?: string;
+  phase?: string;
+  tool?: string;
   approvalId?: string;
   progress?: { completed: number; total: number };
   raw: Record<string, unknown>;
@@ -35,6 +42,8 @@ export interface RealtimeActivity {
 export const REALTIME_ACTIVITY_EVENTS = [
   REALTIME_EVENTS.RUN_CREATED,
   REALTIME_EVENTS.RUN_RUNNING,
+  REALTIME_EVENTS.RUN_PAUSED,
+  REALTIME_EVENTS.RUN_CANCELLED,
   REALTIME_EVENTS.RUN_COMPLETED,
   REALTIME_EVENTS.RUN_FAILED,
   REALTIME_EVENTS.NODE_STARTED,
@@ -42,6 +51,17 @@ export const REALTIME_ACTIVITY_EVENTS = [
   REALTIME_EVENTS.NODE_FAILED,
   REALTIME_EVENTS.NODE_RETRY_SCHEDULED,
   REALTIME_EVENTS.NODE_WAITING_FOR_INPUT,
+  REALTIME_EVENTS.TASK_SPINE_ACCEPTED,
+  REALTIME_EVENTS.TASK_SPINE_UPDATED,
+  REALTIME_EVENTS.TASK_SPINE_BOUND,
+  REALTIME_EVENTS.TASK_SPINE_VERIFYING,
+  REALTIME_EVENTS.TASK_SPINE_VERIFIED,
+  REALTIME_EVENTS.TASK_SPINE_COMPLETED,
+  REALTIME_EVENTS.TASK_SPINE_BLOCKED,
+  REALTIME_EVENTS.TASK_SPINE_FAILED,
+  REALTIME_EVENTS.TASK_SPINE_DECISION_RECORDED,
+  REALTIME_EVENTS.TASK_SPINE_DEVIATION_RECORDED,
+  REALTIME_EVENTS.TASK_SPINE_REDIRECTED,
   REALTIME_EVENTS.LOOP_PROGRESS,
   REALTIME_EVENTS.APPROVAL_REQUESTED,
   REALTIME_EVENTS.APPROVAL_RESOLVED,
@@ -59,10 +79,16 @@ export function describeRealtimeActivity(
   const payload = isRecord(env.payload) ? env.payload : {};
   const runId = stringField(payload, ['runId']);
   const workflowId = stringField(payload, ['workflowId']);
+  const taskId = stringField(payload, ['taskId', 'planId']);
+  const taskTitle = stringField(payload, ['taskTitle', 'title']);
   const nodeId = stringField(payload, ['nodeId', 'taskId']);
   const nodeTitle = nodeId ? options.nodeTitle?.(nodeId) : undefined;
   const agentId = stringField(payload, ['agentId']);
   const agentName = stringField(payload, ['agentName', 'actorName']);
+  const conversationId = stringField(payload, ['conversationId']);
+  const clientTurnId = stringField(payload, ['clientTurnId']);
+  const phase = stringField(payload, ['phase', 'status']);
+  const tool = stringField(payload, ['tool', 'toolName', 'name', 'command']);
   const approvalId = stringField(payload, ['approvalId', 'id']);
   const at = stringField(payload, ['at', 'timestamp']) ?? env.emittedAt;
   const baseId = [
@@ -81,10 +107,16 @@ export function describeRealtimeActivity(
     at,
     runId,
     workflowId,
+    taskId,
+    taskTitle,
     nodeId,
     nodeTitle,
     agentId,
     agentName,
+    conversationId,
+    clientTurnId,
+    phase,
+    tool,
     approvalId,
     raw: payload,
   };
@@ -106,6 +138,10 @@ export function describeRealtimeActivity(
           : stringField(payload, ['currentStep', 'status']) ?? 'Execution is underway.',
       };
     }
+    case REALTIME_EVENTS.RUN_PAUSED:
+      return { ...base, kind: 'run', tone: 'warn', title: 'Run paused', detail: 'Execution can resume from its preserved frontier.' };
+    case REALTIME_EVENTS.RUN_CANCELLED:
+      return { ...base, kind: 'run', tone: 'muted', title: 'Run cancelled', detail: 'Execution was stopped.' };
     case REALTIME_EVENTS.RUN_COMPLETED:
       return {
         ...base,
@@ -170,6 +206,107 @@ export function describeRealtimeActivity(
         title: nodeTitle ?? 'Waiting for input',
         detail: stringField(payload, ['summary', 'detail']) ?? 'Human input is required before continuing.',
       };
+    case REALTIME_EVENTS.TASK_SPINE_ACCEPTED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'accent',
+        title: taskTitle ?? 'Task accepted',
+        detail: stringField(payload, ['objective', 'status']) ?? 'A durable task spine was created.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_UPDATED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'muted',
+        title: taskTitle ?? 'Task updated',
+        detail: stringField(payload, ['status', 'objective']) ?? 'The durable task spine changed.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_BOUND: {
+      const binding = stringField(payload, ['binding']);
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'accent',
+        title: taskTitle ?? 'Task connected',
+        detail: binding === 'session'
+          ? 'Linked to an agent session.'
+          : binding === 'run'
+            ? 'Linked to a workflow run.'
+            : 'Linked to execution.',
+      };
+    }
+    case REALTIME_EVENTS.TASK_SPINE_VERIFYING:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'warn',
+        title: taskTitle ?? 'Verifying task',
+        detail: 'Checking the agent output against the durable completion contract.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_VERIFIED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'success',
+        title: taskTitle ?? 'Task verified',
+        detail: stringField(payload, ['verificationStatus', 'status']) ?? 'Completion passed verification.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_COMPLETED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'success',
+        title: taskTitle ?? 'Task completed',
+        detail: stringField(payload, ['status', 'objective']) ?? 'Execution completed successfully.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_BLOCKED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'warn',
+        title: taskTitle ?? 'Task blocked',
+        detail: nestedStringField(payload, 'deviation', ['reason', 'proposed'])
+          ?? failedCriterionReason(payload)
+          ?? stringField(payload, ['reason', 'status'])
+          ?? 'The task needs operator attention before it can complete.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_FAILED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'danger',
+        title: taskTitle ?? 'Task failed',
+        detail: stringField(payload, ['reason', 'error', 'status']) ?? 'Execution failed before the task could complete.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_DECISION_RECORDED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'muted',
+        title: taskTitle ?? 'Decision recorded',
+        detail: nestedStringField(payload, 'decision', ['summary', 'rationale'])
+          ?? stringField(payload, ['summary'])
+          ?? 'A durable decision was added to the task spine.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_DEVIATION_RECORDED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'warn',
+        title: taskTitle ?? 'Deviation recorded',
+        detail: nestedStringField(payload, 'deviation', ['reason', 'proposed'])
+          ?? stringField(payload, ['reason'])
+          ?? 'The agent recorded a change from the original task path.',
+      };
+    case REALTIME_EVENTS.TASK_SPINE_REDIRECTED:
+      return {
+        ...base,
+        kind: 'task',
+        tone: 'warn',
+        title: taskTitle ?? 'Task redirected',
+        detail: stringField(payload, ['instruction', 'reason']) ?? 'An operator redirected the active task.',
+      };
     case REALTIME_EVENTS.LOOP_PROGRESS: {
       const completed = numberField(payload, ['completed', 'done']);
       const total = numberField(payload, ['total']);
@@ -200,7 +337,7 @@ export function describeRealtimeActivity(
       };
     case REALTIME_EVENTS.AGENT_WORK_STEP: {
       const phase = stringField(payload, ['phase']);
-      const text = stringField(payload, ['description', 'text', 'summary', 'step', 'message']) ?? 'Working';
+      const text = stringField(payload, ['detail', 'description', 'text', 'summary', 'step', 'message']) ?? 'Working';
       return {
         ...base,
         kind: 'agent',
@@ -211,13 +348,14 @@ export function describeRealtimeActivity(
       };
     }
     case REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL: {
-      const tool = stringField(payload, ['tool', 'toolName', 'name', 'command']) ?? 'tool call';
+      const toolName = tool ?? 'tool call';
       return {
         ...base,
         kind: 'tool',
         tone: 'accent',
         title: agentName ?? 'Tool call',
-        detail: tool,
+        detail: toolName,
+        tool: toolName,
       };
     }
     case REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE: {
@@ -262,6 +400,20 @@ function numberField(source: Record<string, unknown>, keys: string[]): number | 
     if (typeof value === 'number' && Number.isFinite(value)) return value;
   }
   return undefined;
+}
+
+function nestedStringField(source: Record<string, unknown>, key: string, fields: string[]): string | undefined {
+  const value = source[key];
+  if (!isRecord(value)) return undefined;
+  return stringField(value, fields);
+}
+
+function failedCriterionReason(source: Record<string, unknown>): string | undefined {
+  const verification = source.verification;
+  if (!isRecord(verification) || !Array.isArray(verification.criteria)) return undefined;
+  const failed = verification.criteria.find((criterion) =>
+    isRecord(criterion) && criterion.passed === false);
+  return isRecord(failed) ? stringField(failed, ['reason', 'criterion']) : undefined;
 }
 
 function normalizeProgress(value: unknown): { completed: number; total: number } | undefined {

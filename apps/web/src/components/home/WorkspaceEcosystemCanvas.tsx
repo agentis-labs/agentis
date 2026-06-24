@@ -1,4 +1,5 @@
 import {
+  Children,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -8,6 +9,7 @@ import {
   type Dispatch,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type SetStateAction,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
@@ -20,11 +22,17 @@ import {
   BrainCircuit,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Database,
   FileText,
   Layers,
+  ListTodo,
   PackageOpen,
+  Play,
+  Plus,
+  RotateCcw,
+  Save,
   ShieldCheck,
   Workflow,
   X,
@@ -36,18 +44,33 @@ import {
   Sparkles,
   Activity as ActivityIcon,
   MessageSquare,
+  Maximize2,
+  Minimize2,
+  Users,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../../lib/api';
+import { openRunModal } from '../../lib/runModal';
 import { useRealtime } from '../../lib/realtime';
 import { useRunActivity } from '../../lib/useRunActivity';
 import {
   useWorkspaceActivity,
-  useLiveNodeIds,
   workspaceRequestStatus,
-  isWorkActivity,
   type WorkspaceRequestStatus,
 } from '../../lib/useWorkspaceActivity';
+import {
+  buildWorkSessions,
+  captionMapFromSessions,
+  liveNodeIdsFromSessions,
+  type WorkSession,
+} from '../../lib/workSessions';
+import {
+  isActiveObservation,
+  observationTone,
+  useActivityStream,
+  type ObservationTone,
+  type ObservabilityEvent,
+} from '../../lib/observability';
 import type { RealtimeActivity } from '../../lib/realtimeActivity';
 import type {
   WorkspaceActiveRun,
@@ -56,6 +79,7 @@ import type {
   WorkspaceArtifact,
   WorkspaceFailedRun,
   WorkspaceFleetOverview,
+  WorkspaceIssue,
   WorkspaceUser,
 } from '../../lib/workspaceData';
 import { useChatPanelStore, type ChatPanelState } from '../chat/ChatPanelStore';
@@ -65,7 +89,8 @@ import { CanvasActivityPopover } from './CanvasActivityPopover';
 import { CanvasApprovalNodeBadge } from './CanvasApprovalNode';
 import { CanvasBackground, type CanvasBackgroundHandle } from './CanvasBackground';
 import { CanvasComposerOverlay } from './CanvasComposerOverlay';
-import { CanvasHudBar } from './CanvasHudBar';
+import { CanvasControls } from './CanvasControls';
+import { CanvasLoadingOverlay } from './CanvasLoadingOverlay';
 import { CanvasNodeDetailPanel } from './CanvasNodeDetailPanel';
 import { CanvasRadialLight } from './CanvasRadialLight';
 import type {
@@ -77,6 +102,7 @@ import type {
   EcosystemData,
   EdgeAnimation,
   FleetCounts,
+  HomeApp,
   HomeKnowledgeBase,
   HomeSpace,
   HomeWorkflow,
@@ -90,6 +116,7 @@ interface WorkspaceEcosystemCanvasProps {
   snapshotLoading: boolean;
   approvals?: WorkspaceApproval[];
   failedRuns?: WorkspaceFailedRun[];
+  issues?: WorkspaceIssue[];
   me?: WorkspaceUser | null;
   fleet?: WorkspaceFleetOverview | null;
   counts?: { liveAgents: number; activeRuns: number };
@@ -130,7 +157,7 @@ interface CanvasBounds {
   height: number;
 }
 
-interface TriagePanelFrame {
+interface LiveWorkspaceFrame {
   x: number;
   y: number;
   width: number;
@@ -141,12 +168,15 @@ type EntrancePhase = 'idle' | 'background' | 'orchestrator' | 'managers' | 'work
 
 const EMPTY_DATA: EcosystemData = {
   workflows: [],
+  apps: [],
   knowledgeBases: [],
   spaces: [],
   loading: true,
 };
 const EMPTY_APPROVALS: WorkspaceApproval[] = [];
 const EMPTY_FAILED_RUNS: WorkspaceFailedRun[] = [];
+const EMPTY_ISSUES: WorkspaceIssue[] = [];
+const LIVE_WORKSPACE_KINDS = new Set<string>(['run', 'node', 'agent', 'tool', 'workflow', 'listener']);
 
 const ECOSYSTEM_REFRESH_EVENTS = [
   REALTIME_EVENTS.WORKFLOW_CREATED,
@@ -179,16 +209,33 @@ const NODE = {
   resource: { width: 190, height: 70 },
 };
 
+const RESOURCE_LAYOUT = {
+  sideMargin: 120,
+  rowGap: 92,
+  gridColumnGap: 64,
+  anchoredColumnGap: 38,
+  nodeClearance: 24,
+};
+const RESOURCE_GRID_COLUMN_WIDTH = NODE.workflow.width + RESOURCE_LAYOUT.gridColumnGap;
+const ANCHORED_WORKFLOW_COLUMN_WIDTH = NODE.workflow.width + RESOURCE_LAYOUT.anchoredColumnGap;
+const AUTHORITY_LANE = {
+  columnGap: 24,
+};
+const AUTHORITY_LANE_COLUMN_WIDTH = NODE.workflow.width + AUTHORITY_LANE.columnGap;
+const FULL_VIEW_WORKFLOW_ROWS = 2;
+const FOCUSED_MANAGER_WORKFLOW_ROWS = 3;
+const WORKFLOW_BRANCH_ROW_PATTERN = [2, 3, 4, 5];
+
 const VIEWPORT_MIN = 0.36;
 const VIEWPORT_MAX = 2.25;
-const TRIAGE_PANEL_MARGIN = 12;
-const TRIAGE_PANEL_MIN_WIDTH = 296;
-const TRIAGE_PANEL_MIN_HEIGHT = 272;
-const TRIAGE_PANEL_DEFAULT_FRAME: TriagePanelFrame = {
+const LIVE_WORKSPACE_MARGIN = 12;
+const LIVE_WORKSPACE_MIN_WIDTH = 320;
+const LIVE_WORKSPACE_MIN_HEIGHT = 320;
+const LIVE_WORKSPACE_DEFAULT_FRAME: LiveWorkspaceFrame = {
   x: 14,
   y: 14,
-  width: 332,
-  height: 286,
+  width: 420,
+  height: 500,
 };
 
 export function WorkspaceEcosystemCanvas({
@@ -198,12 +245,14 @@ export function WorkspaceEcosystemCanvas({
   snapshotLoading,
   approvals: approvalsProp,
   failedRuns: failedRunsProp,
+  issues: issuesProp,
   me = null,
   fleet = null,
   counts,
 }: WorkspaceEcosystemCanvasProps) {
   const approvals = approvalsProp ?? EMPTY_APPROVALS;
   const failedRuns = failedRunsProp ?? EMPTY_FAILED_RUNS;
+  const issues = issuesProp ?? EMPTY_ISSUES;
   const nav = useNavigate();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<CanvasViewport>({ pan: { x: 0, y: 0 }, zoom: 1 });
@@ -223,10 +272,10 @@ export function WorkspaceEcosystemCanvas({
   const [viewport, setViewportState] = useState<CanvasViewport>({ pan: { x: 0, y: 0 }, zoom: 1 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
-  const [triageOpen, setTriageOpen] = useState(false);
+  const [liveWorkspaceOpen, setLiveWorkspaceOpen] = useState(false);
   /** Domains the operator expanded past their one-band idle cap ("+N more"). */
   const [expandedDomains, setExpandedDomains] = useState<ReadonlySet<string>>(new Set<string>());
-  const [triageFrame, setTriageFrame] = useState<TriagePanelFrame>(() => ({ ...TRIAGE_PANEL_DEFAULT_FRAME }));
+  const [liveWorkspaceFrame, setLiveWorkspaceFrame] = useState<LiveWorkspaceFrame>(() => ({ ...LIVE_WORKSPACE_DEFAULT_FRAME }));
   const [isPanning, setIsPanning] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -237,13 +286,15 @@ export function WorkspaceEcosystemCanvas({
 
   const refresh = useCallback(async () => {
     setData((current) => ({ ...current, loading: true }));
-    const [workflowsRes, knowledgeRes, spacesRes] = await Promise.allSettled([
+    const [workflowsRes, appsRes, knowledgeRes, spacesRes] = await Promise.allSettled([
       api<{ workflows: HomeWorkflow[] }>('/v1/workflows'),
+      api<{ data: HomeApp[] }>('/v1/apps'),
       api<{ knowledgeBases: HomeKnowledgeBase[] }>('/v1/knowledge-bases'),
-      api<{ data: HomeSpace[] }>('/v1/spaces'),
+      api<{ data: HomeSpace[] }>('/v1/domains'),
     ]);
     setData({
       workflows: workflowsRes.status === 'fulfilled' ? workflowsRes.value.workflows ?? [] : [],
+      apps: appsRes.status === 'fulfilled' ? appsRes.value.data ?? [] : [],
       knowledgeBases: knowledgeRes.status === 'fulfilled' ? knowledgeRes.value.knowledgeBases ?? [] : [],
       spaces: spacesRes.status === 'fulfilled' ? spacesRes.value.data ?? [] : [],
       loading: false,
@@ -332,8 +383,11 @@ export function WorkspaceEcosystemCanvas({
     () => model.nodes.find((node) => node.id === selectedNodeId) ?? null,
     [model.nodes, selectedNodeId],
   );
+  // Focus (drill-in) mode: a real manager is selected — the rest of the canvas
+  // darkens and the view scopes to that manager's subtree.
+  const focusActive = Boolean(selectedNode && selectedNode.role === 'manager' && !selectedNode.ghost);
 
-  // Workspace-wide live activity spine — powers Mission Control's stream and the
+  // Workspace-wide live activity spine — powers Live Workspace and the
   // canvas's "orchestrator is working right now" liveness (nodes/edges pulse).
   const activeRunIds = useMemo(
     () => activeRuns.filter(isActiveRun).map((run) => run.id),
@@ -345,7 +399,15 @@ export function WorkspaceEcosystemCanvas({
   );
   const workspaceActivity = useWorkspaceActivity(activeRunIds, { nodeTitle: nodeTitleFor });
   const requestStatus = useMemo(() => workspaceRequestStatus(workspaceActivity), [workspaceActivity]);
-  const liveIds = useLiveNodeIds(workspaceActivity);
+  const commandCenter = useActivityStream({ type: 'workspace', limit: 160 });
+  const workSessions = useMemo(() => buildWorkSessions({
+    activity: workspaceActivity,
+    activeRuns: activeRuns.filter(isActiveRun),
+    failedRuns,
+    observabilityEvents: commandCenter.events,
+    limit: 16,
+  }), [activeRuns, commandCenter.events, failedRuns, workspaceActivity]);
+  const liveIds = useMemo(() => liveNodeIdsFromSessions(workSessions), [workSessions]);
 
   // Canvas node ids currently working (agent-/workflow- prefixed), plus the
   // orchestrator while it processes a request — drives node/edge pulse.
@@ -361,31 +423,24 @@ export function WorkspaceEcosystemCanvas({
   // Work events only (runs/nodes/tools) — ambient agent chatter (status pings,
   // chat-memory capture) must never caption a node.
   const liveCaptions = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const item of workspaceActivity) {
-      if (!isWorkActivity(item)) continue;
-      const text = item.detail || item.title;
-      if (!text) continue;
-      if (item.agentId) { const k = `agent-${item.agentId}`; if (!map.has(k)) map.set(k, text); }
-      if (item.workflowId) { const k = `workflow-${item.workflowId}`; if (!map.has(k)) map.set(k, text); }
-    }
+    const map = captionMapFromSessions(workSessions);
     if (requestStatus.busy && model.orchestratorId && requestStatus.label && !map.has(model.orchestratorId)) {
       map.set(model.orchestratorId, requestStatus.label);
     }
     return map;
-  }, [workspaceActivity, requestStatus.busy, requestStatus.label, model.orchestratorId]);
+  }, [workSessions, requestStatus.busy, requestStatus.label, model.orchestratorId]);
 
-  // Select a workflow's canvas node (opens its detail card) — used by Mission
-  // Control's failed/active rows so triage stays on the canvas.
+  // Select a workflow's canvas node (opens its detail card) from Live Workspace
+  // while the operator remains in the canvas.
   const selectWorkflowNode = useCallback((workflowId: string) => {
     setSelectedNodeId(`workflow-${workflowId}`);
   }, []);
 
-  // When the orchestrator/agents start working on a request, surface Mission
-  // Control automatically (open-only; never force-closes what the user opened).
+  // When the orchestrator starts a new piece of work, surface Live Workspace
+  // automatically (open-only; never force-closes what the user opened).
   const wasBusyRef = useRef(false);
   useEffect(() => {
-    if (requestStatus.busy && !wasBusyRef.current) setTriageOpen(true);
+    if (requestStatus.busy && !wasBusyRef.current) setLiveWorkspaceOpen(true);
     wasBusyRef.current = requestStatus.busy;
   }, [requestStatus.busy]);
   const hoveredNode = useMemo(
@@ -444,6 +499,14 @@ export function WorkspaceEcosystemCanvas({
   const orchestratorScreen = orchestratorNode ? canvasToScreen(orchestratorNode, viewport) : null;
   const hoverScreen = hoveredNode ? canvasToScreen(hoveredNode, viewport) : null;
   const loading = (data.loading || snapshotLoading) && model.nodes.every((node) => node.ghost);
+  // Boot state: until the first snapshot AND ecosystem have both loaded once,
+  // show a full skeleton instead of the half-assembled tree. Subsequent
+  // refreshes are silent (the small "Syncing" chip covers those).
+  const [bootLoaded, setBootLoaded] = useState(false);
+  useEffect(() => {
+    if (!bootLoaded && !snapshotLoading && !data.loading) setBootLoaded(true);
+  }, [bootLoaded, snapshotLoading, data.loading]);
+  const bootLoading = !bootLoaded && (snapshotLoading || data.loading);
   const runningCount = counts?.activeRuns ?? activeRuns.filter(isActiveRun).length;
   const fleetCounts: FleetCounts = {
     activeAgents: runningCount,
@@ -455,6 +518,11 @@ export function WorkspaceEcosystemCanvas({
     workflows: data.workflows.length || activeRuns.length || fleet?.runs.active || 0,
     artifactsToday: artifactsProducedToday(artifacts),
   };
+  const liveHudCount = Math.max(
+    runningCount,
+    requestStatus.busy ? 1 : 0,
+    workSessions.filter((session) => session.active).length,
+  );
   const recentCompletions = useMemo<ComposerRecentCompletion[]>(
     () => artifacts.map((artifact) => ({
       workflowName: artifact.title,
@@ -555,6 +623,36 @@ export function WorkspaceEcosystemCanvas({
     setSelectedNodeId(null);
     animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth, orchestratorNode), 340);
   }, [chatState, containerSize, contentBounds, dockedWidth, orchestratorNode]);
+
+  function zoomByStep(factor: number) {
+    stopAnimation();
+    userMovedRef.current = true;
+    const current = viewportRef.current;
+    const nextZoom = clamp(current.zoom * factor, VIEWPORT_MIN, VIEWPORT_MAX);
+    const cx = containerSize.width / 2;
+    const cy = containerSize.height / 2;
+    const world = { x: (cx - current.pan.x) / current.zoom, y: (cy - current.pan.y) / current.zoom };
+    animateViewportTo({ zoom: nextZoom, pan: { x: cx - world.x * nextZoom, y: cy - world.y * nextZoom } }, 180);
+  }
+
+  // Drill-in framing: fit the focused manager's subtree, centered, like a fresh
+  // orchestrator view scoped to that branch.
+  const centerOnSubtree = useCallback((ids: ReadonlySet<string>) => {
+    const subtreeNodes = model.nodes.filter((node) => ids.has(node.id));
+    if (subtreeNodes.length === 0) return;
+    const bounds = computeCanvasContentBounds(subtreeNodes);
+    animateViewportTo(computeHomeViewport(containerSize, bounds, chatState, dockedWidth, null), 360);
+  }, [model.nodes, containerSize, chatState, dockedWidth]);
+
+  // When a manager is focused, frame its subtree (workers are revealed in the
+  // recomputed model, so this runs after that settles).
+  useEffect(() => {
+    if (!focusActive || !focusedNodeIds) return;
+    const ids = focusedNodeIds;
+    const raf = window.requestAnimationFrame(() => centerOnSubtree(ids));
+    return () => window.cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusActive, selectedNodeId, focusedNodeIds, centerOnSubtree]);
 
   const toggleFullscreen = useCallback(async () => {
     if (isFullscreen || document.fullscreenElement) {
@@ -784,8 +882,18 @@ export function WorkspaceEcosystemCanvas({
       return;
     }
     userMovedRef.current = true;
-    setSelectedNodeId((current) => (current === node.id ? null : node.id));
-    centerOnNode(node);
+    const willSelect = selectedNodeId !== node.id;
+    setSelectedNodeId(willSelect ? node.id : null);
+    if (!willSelect) {
+      // Deselecting (incl. exiting a manager focus) → animate back to overview.
+      userMovedRef.current = false;
+      animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth, orchestratorNode), 340);
+      return;
+    }
+    const isManagerFocus = node.role === 'manager' && !node.ghost;
+    // Managers get subtree framing via the focus effect; everything else gets a
+    // simple center-on-node.
+    if (!isManagerFocus) centerOnNode(node);
   }
 
   function openNodeChat(node: CanvasNode) {
@@ -890,6 +998,7 @@ export function WorkspaceEcosystemCanvas({
             revealed={phaseReached(entrancePhase, nodeRevealPhase(node))}
             selected={selectedNodeId === node.id}
             dimmed={Boolean(focusedNodeIds && !focusedNodeIds.has(node.id))}
+            focusMode={focusActive}
             live={liveNodeIds.has(node.id)}
             liveCaption={liveCaptions.get(node.id)}
             onClick={() => handleNodeClick(node)}
@@ -926,41 +1035,52 @@ export function WorkspaceEcosystemCanvas({
 
       <CanvasNodeDetailPanel
         node={selectedNode}
+        observabilityEvents={commandCenter.events}
         onClose={() => setSelectedNodeId(null)}
         onNavigate={nav}
         onOpenChat={openNodeChat}
         onRefresh={refresh}
       />
 
-      <CanvasTriagePanel
-        open={triageOpen}
+      <LiveWorkspacePanel
+        open={liveWorkspaceOpen}
+        fleet={fleet}
         activeRuns={activeRuns.filter(isActiveRun)}
         approvals={approvals}
         failedRuns={failedRuns}
+        issues={issues}
         activity={workspaceActivity}
+        workSessions={workSessions}
+        observabilityEvents={commandCenter.events}
+        streamConnected={commandCenter.connected}
         requestStatus={requestStatus}
-        frame={triageFrame}
-        onFrameChange={setTriageFrame}
+        frame={liveWorkspaceFrame}
+        onFrameChange={setLiveWorkspaceFrame}
         containerSize={containerSize}
-        onClose={() => setTriageOpen(false)}
+        onClose={() => setLiveWorkspaceOpen(false)}
         onSelectWorkflow={(workflowId) => selectWorkflowNode(workflowId)}
         onNavigate={(route) => {
-          setTriageOpen(false);
+          setLiveWorkspaceOpen(false);
           nav(route);
         }}
         onRefresh={refresh}
       />
 
-      {/* The HUD controls a populated canvas; in the ghost empty state (no agents)
-          there's nothing to triage, reset, or expand — keep it clean. */}
+      {/* Controls a populated canvas; in the ghost empty state (no agents)
+          there's nothing to zoom, fit, or expand — keep it clean. */}
       {agents.length > 0 && (
-        <CanvasHudBar
-          counts={fleetCounts}
-          connected={fleet?.gateways.connected ? fleet.gateways.connected > 0 : true}
+        <CanvasControls
           isFullscreen={isFullscreen}
-          onOpenTriage={() => setTriageOpen(true)}
+          liveCount={liveHudCount}
+          liveActive={liveHudCount > 0}
+          hasAttention={fleetCounts.attentionCount > 0}
+          focusActive={focusActive}
+          onZoomIn={() => zoomByStep(1.2)}
+          onZoomOut={() => zoomByStep(1 / 1.2)}
+          onFit={resetViewport}
           onToggleFullscreen={() => void toggleFullscreen()}
-          onResetView={resetViewport}
+          onOpenLiveWorkspace={() => setLiveWorkspaceOpen(true)}
+          onExitFocus={resetViewport}
         />
       )}
 
@@ -985,6 +1105,8 @@ export function WorkspaceEcosystemCanvas({
           });
         }}
       />
+
+      {bootLoading && <CanvasLoadingOverlay />}
     </section>
   );
 }
@@ -1005,44 +1127,63 @@ export function buildCanvasModel(
   const managerActiveWorkers = new Map<string, number>();
   const activeWorkflowIds = new Set(activeRuns.map((run) => run.workflowId));
   const availableAgentIds = new Set(agents.filter((agent) => isAvailableAgent(agent.status)).map((agent) => agent.id));
-  const workingAgentIds = new Set(activeRuns.flatMap((run) => run.agents?.map((agent) => agent.id) ?? []));
+  const workingAgentIds = new Set<string>();
   for (const agent of agents) if (isWorkingAgent(agent)) workingAgentIds.add(agent.id);
 
   const roles = classifyAgents(agents);
   const spaces = data.spaces ?? [];
-  const plannedSpaceCount = Math.max(2, spaces.length);
-  const managerCount = Math.max(roles.managers.length, agents.length === 0 ? plannedSpaceCount : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0);
-  const managerPositions = distributeRow(managerCount, canvasSize.width, 350, NODE.manager.width);
   const availableCommandSourceIds = new Set<string>();
-  const spaceSourceIds = new Map<string, string>();
+
+  // Balanced-branch packing: managers + the orchestrator's direct-workflows
+  // group share one centered row so the tree reads as a pyramid and lanes never
+  // collide. Branch identity/spaceId are resolved first (no x needed), then
+  // each branch is sized from its workflow count and packed.
+  const { managerNodeIds, spaceSourceIds, hasDirectBranch, branchCount } = deriveTopBranchLayout(data, agents, roles);
+  const branchSlots = packTopBranches(branchCount, canvasSize.width);
+  const managerSlots = branchSlots.slice(0, managerNodeIds.length);
+  const directSlot = hasDirectBranch ? branchSlots[managerNodeIds.length] ?? null : null;
+  const branchSlotById = new Map<string, BranchSlot>();
+  managerNodeIds.forEach((id, i) => {
+    if (managerSlots[i]) branchSlotById.set(id, managerSlots[i]);
+  });
 
   const orchestratorId = roles.orchestrator ? `agent-${roles.orchestrator.id}` : 'ghost-orchestrator';
   if (roles.orchestrator) {
-    nodes.push(agentNode(roles.orchestrator, 'orchestrator', { x: canvasSize.width / 2, y: 170 }, workingAgentIds, approvals, activeRuns));
+    nodes.push(agentNode(roles.orchestrator, 'orchestrator', { x: canvasSize.width / 2, y: 170 }, workingAgentIds, approvals));
     if (availableAgentIds.has(roles.orchestrator.id)) availableCommandSourceIds.add(orchestratorId);
   } else {
     nodes.push(ghostNode('ghost-orchestrator', 'orchestrator', 'Orchestrator', 'commission your workspace orchestrator', { x: canvasSize.width / 2, y: 170 }, NODE.orchestrator));
   }
 
-  const managerNodeIds: string[] = [];
+  // How many specialists report to each manager — surfaced on the collapsed
+  // manager node so the org depth is visible without drilling in.
+  const specialistCountByManager = new Map<string, number>();
+  for (const worker of roles.workers) {
+    const reportsTo = stringField(worker as unknown as Record<string, unknown>, ['reportsTo', 'managerId', 'parentAgentId']);
+    if (!reportsTo) continue;
+    const manager = roles.managers.find((m) => m.id === reportsTo || m.name === reportsTo);
+    if (!manager) continue;
+    const key = `agent-${manager.id}`;
+    specialistCountByManager.set(key, (specialistCountByManager.get(key) ?? 0) + 1);
+  }
+
   roles.managers.forEach((agent, index) => {
-    const pos = managerPositions[index] ?? { x: canvasSize.width / 2, y: 350 };
-    const node = agentNode(agent, 'manager', pos, workingAgentIds, approvals, activeRuns);
+    const pos = { x: managerSlots[index]?.centerX ?? canvasSize.width / 2, y: 350 };
+    const node = agentNode(agent, 'manager', pos, workingAgentIds, approvals);
+    node.specialistCount = specialistCountByManager.get(node.id) ?? 0;
     nodes.push(node);
-    managerNodeIds.push(node.id);
-    if (node.spaceId) spaceSourceIds.set(node.spaceId, node.id);
     if (availableAgentIds.has(agent.id)) availableCommandSourceIds.add(node.id);
     edges.push(commandEdge(orchestratorId, node.id, workingAgentIds.has(agent.id) && availableCommandSourceIds.has(orchestratorId)));
   });
-  for (let index = roles.managers.length; index < managerCount; index += 1) {
+  for (let index = roles.managers.length; index < managerNodeIds.length; index += 1) {
     const id = `ghost-manager-${index}`;
-    const pos = managerPositions[index] ?? { x: canvasSize.width / 2, y: 350 };
+    const pos = { x: managerSlots[index]?.centerX ?? canvasSize.width / 2, y: 350 };
     const space = spaces[index - roles.managers.length] ?? null;
     const ghost = ghostNode(
       id,
       'manager',
       space ? `${space.name} manager` : index === 0 ? 'Manager layer' : `Manager ${index + 1}`,
-      space ? 'domain owner' : 'assign a team or domain',
+      space ? 'domain owner' : 'assign a domain',
       pos,
       NODE.manager,
     );
@@ -1050,12 +1191,12 @@ export function buildCanvasModel(
     ghost.spaceName = space?.name ?? null;
     ghost.accent = space?.colorHex ?? ghost.accent;
     nodes.push(ghost);
-    managerNodeIds.push(id);
-    if (space) spaceSourceIds.set(space.id, id);
     edges.push(commandEdge(orchestratorId, id, false));
   }
 
   const expandedManagerId = expandedNodeId && managerNodeIds.includes(expandedNodeId) ? expandedNodeId : null;
+  const workerCenterX = (expandedManagerId ? branchSlotById.get(expandedManagerId)?.centerX : undefined) ?? canvasSize.width / 2;
+  const workerShift = workerCenterX - canvasSize.width / 2;
   const visibleWorkers = expandedManagerId
     ? roles.workers.filter((agent, index) => findParentManager(agent, managerNodeIds, roles.managers, index) === expandedManagerId)
     : [];
@@ -1067,8 +1208,11 @@ export function buildCanvasModel(
   const resourceStartY = workerRows > 0 ? 530 + workerRows * (workerSize.height + 42) + 68 : 520;
 
   visibleWorkers.forEach((agent, index) => {
-    const pos = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
-    const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, activeRuns, workerSize);
+    const raw = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
+    // Fan the focused manager's workers out under the manager itself, not the
+    // canvas center, so the drilled-in subtree stays a clean vertical pyramid.
+    const pos = { x: raw.x + workerShift, y: raw.y };
+    const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, workerSize);
     nodes.push(node);
     const parentId = expandedManagerId ?? findParentManager(agent, managerNodeIds, roles.managers, index) ?? orchestratorId;
     if (workingAgentIds.has(agent.id)) managerActiveWorkers.set(parentId, (managerActiveWorkers.get(parentId) ?? 0) + 1);
@@ -1096,6 +1240,9 @@ export function buildCanvasModel(
     sourceXById,
     sourceNodeById,
     expandedDomains,
+    expandedManagerId,
+    branchSlotById,
+    directSlot,
   );
   nodes.push(...resourceNodes);
   for (const resource of resourceNodes) {
@@ -1147,6 +1294,7 @@ function CanvasNodeCard({
   revealed,
   selected,
   dimmed,
+  focusMode = false,
   live = false,
   liveCaption,
   onClick,
@@ -1160,6 +1308,8 @@ function CanvasNodeCard({
   revealed: boolean;
   selected: boolean;
   dimmed: boolean;
+  /** True while a manager is focused — non-subtree nodes darken hard. */
+  focusMode?: boolean;
   /** True while this node is emitting live activity (chat-driven work, not just formal runs). */
   live?: boolean;
   /** The node's current step/thought, from the workspace activity spine. */
@@ -1176,11 +1326,9 @@ function CanvasNodeCard({
   const isLive = Boolean(node.active) || live;
   const compact = node.height <= 60 || node.kind === 'artifact';
   const showSubtitle = !compact || node.kind !== 'worker';
-  const titleClass = node.kind === 'orchestrator'
-    ? 'text-[14px]'
-    : compact
-      ? 'text-[11px]'
-      : 'text-[12px]';
+  // Match the docked-chat header (Orchy / Personal Orchestrator): title 14px,
+  // subtitle 10px, uniform across every node kind.
+  const titleClass = 'text-[14px]';
   const avatarClass = node.kind === 'orchestrator'
     ? 'h-12 w-12'
     : node.kind === 'manager'
@@ -1233,7 +1381,9 @@ function CanvasNodeCard({
         // Visual hierarchy at scale: idle workflows recede so the ones that are
         // running or failing carry the eye. (Focus-dimming below still wins.)
         node.kind === 'workflow' && !isLive && !node.warn && !node.ghost && !selected && 'opacity-75 saturate-[0.85]',
-        dimmed && 'opacity-[0.32] saturate-[0.6]',
+        // Focus (drill-in) darkens the rest of the canvas hard; the normal
+        // selection dim is gentler.
+        dimmed && (focusMode ? 'pointer-events-none opacity-[0.1] saturate-0 blur-[1.5px]' : 'opacity-[0.32] saturate-[0.6]'),
       )}
       style={{ ...style, visibility: revealed ? 'visible' : 'hidden' }}
     >
@@ -1294,6 +1444,12 @@ function CanvasNodeCard({
         <span className="min-w-0 flex-1">
           <span className={clsx('block truncate font-semibold text-text-primary', titleClass)}>{node.title}</span>
           {showSubtitle && <span className="mt-0.5 block truncate text-[10px] text-text-muted">{node.subtitle}</span>}
+          {node.kind === 'manager' && (node.specialistCount ?? 0) > 0 && (
+            <span className="mt-1 inline-flex items-center gap-1 rounded-full border border-line bg-canvas/55 px-1.5 py-0.5 text-[9px] font-medium text-text-secondary">
+              <Users size={9} aria-hidden="true" />
+              {node.specialistCount} specialist{node.specialistCount === 1 ? '' : 's'}
+            </span>
+          )}
           {elapsed && <span className="mt-1 block text-[10px] font-semibold text-accent">{elapsed}</span>}
         </span>
       </div>
@@ -1364,7 +1520,7 @@ function activityIcon(kind: RealtimeActivity['kind']) {
 /**
  * The live mission-control stream — every meaningful thing happening across the
  * workspace right now: the orchestrator's thinking, tool calls, run/node
- * transitions, agent messages. This is what turns Mission Control from a static
+ * transitions, agent messages. This is what turns Live Workspace from a static
  * failed-runs list into "watch the work happen." Newest-first, auto-scrolls.
  */
 function LiveActivityStream({
@@ -1418,12 +1574,17 @@ function LiveActivityStream({
   );
 }
 
-function CanvasTriagePanel({
+function LiveWorkspacePanel({
   open,
+  fleet,
   activeRuns,
   approvals,
   failedRuns,
+  issues,
   activity,
+  workSessions,
+  observabilityEvents,
+  streamConnected,
   requestStatus,
   frame,
   onFrameChange,
@@ -1434,13 +1595,18 @@ function CanvasTriagePanel({
   onRefresh,
 }: {
   open: boolean;
+  fleet: WorkspaceFleetOverview | null;
   activeRuns: WorkspaceActiveRun[];
   approvals: WorkspaceApproval[];
   failedRuns: WorkspaceFailedRun[];
+  issues: WorkspaceIssue[];
   activity: RealtimeActivity[];
+  workSessions: WorkSession[];
+  observabilityEvents: ObservabilityEvent[];
+  streamConnected: boolean;
   requestStatus: WorkspaceRequestStatus;
-  frame: TriagePanelFrame;
-  onFrameChange: Dispatch<SetStateAction<TriagePanelFrame>>;
+  frame: LiveWorkspaceFrame;
+  onFrameChange: Dispatch<SetStateAction<LiveWorkspaceFrame>>;
   containerSize: VirtualCanvasSize;
   onClose: () => void;
   onSelectWorkflow: (workflowId: string) => void;
@@ -1463,13 +1629,22 @@ function CanvasTriagePanel({
     originHeight: number;
     handle: HTMLElement;
   } | null>(null);
+  const [view, setView] = useState<'live' | 'tech'>('live');
+  const [density, setDensity] = useState<'compact' | 'expanded'>('compact');
+  const [panelFullscreen, setPanelFullscreen] = useState(false);
+  const [panelNow, setPanelNow] = useState(() => Date.now());
 
   useEffect(() => {
     onFrameChange((current) => {
-      const next = clampTriagePanelFrame(current, containerSize);
-      return triageFramesEqual(current, next) ? current : next;
+      const next = clampLiveWorkspaceFrame(current, containerSize);
+      return liveWorkspaceFramesEqual(current, next) ? current : next;
     });
   }, [containerSize, onFrameChange]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setPanelNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => () => {
     stopDrag();
@@ -1477,9 +1652,57 @@ function CanvasTriagePanel({
   }, []);
 
   if (!open) return null;
-  const hasLiveTriage = activeRuns.length > 0 || approvals.length > 0 || failedRuns.length > 0;
-  const showStream = activity.length > 0;
-  const showBeacon = hasLiveTriage || requestStatus.busy || showStream;
+  const activeSessions = workSessions.filter((session) => session.active).slice(0, 4);
+  const hasLiveTriage = activeSessions.length > 0 || activeRuns.length > 0 || approvals.length > 0 || failedRuns.length > 0;
+  const activeObservations = observabilityEvents
+    .filter((event) => LIVE_WORKSPACE_KINDS.has(event.kind) && isActiveObservation(event) && isRecentIso(event.createdAt, 30 * 60_000))
+    .slice(0, 5);
+  const waitingObservations = observabilityEvents
+    .filter((event) => event.status === 'waiting' || event.status === 'blocked' || event.kind === 'approval')
+    .slice(0, 4);
+  const incidentObservations = observabilityEvents
+    .filter((event) => event.status === 'failed')
+    .slice(0, 4);
+  const evidenceEvents = observabilityEvents
+    .filter((event) => event.kind === 'tool' || event.kind === 'artifact' || event.kind === 'brain' || event.evidence.length > 0)
+    .slice(0, 5);
+  const recentEvents = observabilityEvents.slice(0, 10);
+  const hasLiveEvents = observabilityEvents.length > 0;
+  const showStream = activity.length > 0 && !hasLiveEvents;
+  const showBeacon = hasLiveTriage || requestStatus.busy || activeObservations.length > 0 || showStream;
+  const focusEvent = activeObservations[0] ?? recentEvents[0] ?? null;
+  const allAttentionGroups = buildAttentionGroups(approvals, failedRuns, waitingObservations, incidentObservations);
+  const attentionGroups = allAttentionGroups.slice(0, 3);
+  const hiddenAttentionCount = Math.max(0, allAttentionGroups.length - attentionGroups.length);
+  const signalEvents = dedupeObservations([...evidenceEvents, ...recentEvents])
+    .filter((event) => !isActiveObservation(event) || !LIVE_WORKSPACE_KINDS.has(event.kind))
+    .slice(0, 3);
+  const liveCount = Math.max(activeSessions.length, activeRuns.length, activeObservations.filter((event) => event.status !== 'waiting' && event.status !== 'blocked').length);
+  const waitingCount = Math.max(approvals.length, waitingObservations.length);
+  const incidentCount = Math.max(failedRuns.length, incidentObservations.length);
+  // Issues — open backlog (exclude done/cancelled)
+  const openIssues = issues.filter((i) => i.status !== 'done' && i.status !== 'cancelled').slice(0, 2);
+  const issueCount = issues.filter((i) => i.status !== 'done' && i.status !== 'cancelled').length;
+  const heroSession = activeSessions[0] ?? null;
+  const heroRun = heroSession?.runId ? activeRuns.find((run) => run.id === heroSession.runId) ?? null : activeRuns[0] ?? null;
+  const panelWide = panelFullscreen || frame.width >= 620;
+  const panelStyle: CSSProperties = panelFullscreen
+    ? {
+        left: LIVE_WORKSPACE_MARGIN,
+        top: LIVE_WORKSPACE_MARGIN,
+        width: Math.max(LIVE_WORKSPACE_MIN_WIDTH, containerSize.width - LIVE_WORKSPACE_MARGIN * 2),
+        height: Math.max(LIVE_WORKSPACE_MIN_HEIGHT, containerSize.height - LIVE_WORKSPACE_MARGIN * 2),
+        maxWidth: containerSize.width - LIVE_WORKSPACE_MARGIN * 2,
+        maxHeight: containerSize.height - LIVE_WORKSPACE_MARGIN * 2,
+      }
+    : {
+        left: frame.x,
+        top: frame.y,
+        width: frame.width,
+        height: frame.height,
+        maxWidth: containerSize.width - LIVE_WORKSPACE_MARGIN * 2,
+        maxHeight: containerSize.height - LIVE_WORKSPACE_MARGIN * 2,
+      };
 
   async function resolveApproval(approval: WorkspaceApproval, decision: 'approve' | 'reject') {
     await api(`/v1/approvals/${approval.id}/resolve`, {
@@ -1519,7 +1742,7 @@ function CanvasTriagePanel({
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    onFrameChange((current) => clampTriagePanelFrame({
+    onFrameChange((current) => clampLiveWorkspaceFrame({
       ...current,
       x: drag.originX + (event.clientX - drag.startX),
       y: drag.originY + (event.clientY - drag.startY),
@@ -1544,7 +1767,7 @@ function CanvasTriagePanel({
     const resize = resizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
     event.preventDefault();
-    onFrameChange((current) => clampTriagePanelFrame({
+    onFrameChange((current) => clampLiveWorkspaceFrame({
       ...current,
       width: resize.originWidth + (event.clientX - resize.startX),
       height: resize.originHeight + (event.clientY - resize.startY),
@@ -1566,6 +1789,7 @@ function CanvasTriagePanel({
   }
 
   function handleHeaderPointerDown(event: ReactPointerEvent<HTMLElement>) {
+    if (panelFullscreen) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     const target = event.target as HTMLElement;
     if (target.closest('button, a, input, select, textarea')) return;
@@ -1588,6 +1812,7 @@ function CanvasTriagePanel({
   }
 
   function handleResizePointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (panelFullscreen) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1611,180 +1836,1370 @@ function CanvasTriagePanel({
     <div
       data-canvas-control
       role="dialog"
-      aria-label="Workspace triage"
-      className="absolute z-50 flex flex-col rounded-2xl border border-line bg-surface/96 shadow-2xl backdrop-blur-xl"
-      style={{
-        left: frame.x,
-        top: frame.y,
-        width: frame.width,
-        height: frame.height,
-        maxWidth: containerSize.width - TRIAGE_PANEL_MARGIN * 2,
-        maxHeight: containerSize.height - TRIAGE_PANEL_MARGIN * 2,
-      }}
+      aria-label="Live Workspace"
+      className={clsx(
+        'absolute z-50 flex flex-col overflow-hidden border border-line/80 bg-surface/[0.97] shadow-[0_24px_80px_rgba(0,0,0,0.38)] backdrop-blur-2xl',
+        panelFullscreen ? 'rounded-2xl' : 'rounded-xl',
+      )}
+      style={panelStyle}
       onPointerDown={(event) => event.stopPropagation()}
     >
       <header
-        className="flex items-center justify-between gap-3 border-b border-line px-4 py-3 cursor-grab active:cursor-grabbing"
+        className={clsx(
+          'flex items-center justify-between gap-3 border-b border-line/80 bg-canvas/30 px-3 py-2.5',
+          panelFullscreen ? 'cursor-default' : 'cursor-grab active:cursor-grabbing',
+        )}
         onPointerDown={handleHeaderPointerDown}
       >
-        <div className="flex min-w-0 items-center gap-2.5">
-          {showBeacon && (
-            <span className="relative flex h-2 w-2 shrink-0">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
-            </span>
-          )}
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={clsx('relative flex h-3 w-3 shrink-0 items-center justify-center', !showBeacon && 'opacity-45')}>
+            {showBeacon && <span className="absolute h-5 w-5 animate-ping rounded-full border border-accent/50" />}
+            <span className={clsx('relative h-2.5 w-2.5 rounded-full', showBeacon ? 'bg-accent shadow-[0_0_16px_rgba(74,222,128,0.72)]' : 'bg-text-muted')} />
+          </span>
           <div className="min-w-0">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent">Mission Control</div>
-            <h2 className="mt-0.5 truncate text-heading text-text-primary">
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent">Live Workspace</div>
+            <h2 className="mt-0.5 truncate text-[15px] font-semibold leading-tight text-text-primary">
               {requestStatus.busy
-                ? 'Working…'
-                : activeRuns.length > 0
-                  ? `${activeRuns.length} agent run${activeRuns.length === 1 ? '' : 's'} live`
-                  : 'Live workspace'}
+                ? 'Work in progress'
+                : waitingCount > 0
+                  ? 'Needs your attention'
+                  : liveCount > 0
+                    ? `${liveCount} active task${liveCount === 1 ? '' : 's'}`
+                    : 'Workspace is quiet'}
             </h2>
-            {requestStatus.busy && requestStatus.label && (
-              <div className="mt-0.5 truncate text-[11px] text-text-secondary">{requestStatus.label}</div>
-            )}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close triage"
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"
-        >
-          <X size={14} />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <div className="flex rounded-md border border-line bg-canvas/60 p-0.5" role="group" aria-label="Live Workspace view">
+            <button type="button" onClick={() => setView('live')} className={clsx('rounded px-1.5 py-1 text-[10px] font-medium transition', view === 'live' ? 'bg-surface-2 text-text-primary shadow-sm' : 'text-text-muted hover:text-text-secondary')}>Live</button>
+            <button type="button" onClick={() => setView('tech')} className={clsx('rounded px-1.5 py-1 text-[10px] font-medium transition', view === 'tech' ? 'bg-surface-2 text-text-primary shadow-sm' : 'text-text-muted hover:text-text-secondary')}>Tech</button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPanelFullscreen((value) => !value)}
+            aria-label={panelFullscreen ? 'Restore Live Workspace' : 'Expand Live Workspace'}
+            title={panelFullscreen ? 'Restore' : 'Expand'}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text-primary"
+          >
+            {panelFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close Live Workspace"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text-primary"
+          >
+            <X size={14} />
+          </button>
+        </div>
       </header>
 
-      <div className={clsx('min-h-0 flex-1 px-4 py-4', hasLiveTriage || showStream ? 'overflow-y-auto' : 'overflow-hidden')}>
-        {!hasLiveTriage && !showStream && (
-          <div className="flex h-full flex-col items-center justify-center rounded-card border border-line bg-canvas/45 px-4 py-4 text-center">
-            <CheckCircle2 size={28} className="mx-auto text-accent" />
-            <div className="mt-3 text-subheading text-text-primary">Nothing needs live triage.</div>
-            <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
-              No runs are executing and there are no pending approvals. Send a request and watch the work stream here.
-            </p>
-          </div>
-        )}
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <LiveWorkspacePulse
+            liveCount={liveCount}
+            waitingCount={waitingCount}
+            incidentCount={incidentCount}
+            evidenceCount={evidenceEvents.length}
+            issueCount={issueCount}
+            connected={streamConnected}
+            fleet={fleet}
+          />
+        </div>
 
-        {showStream && <LiveActivityStream activity={activity} onSelectWorkflow={onSelectWorkflow} />}
+        {view === 'live' ? (
+          <>
+            <HeroTaskCard
+              session={heroSession}
+              run={heroRun}
+              focusEvent={focusEvent}
+              requestStatus={requestStatus}
+              now={panelNow}
+              onOpen={() => {
+                if (heroSession?.runId) openRunModal({ runId: heroSession.runId, workflowId: heroSession.workflowId, source: 'live-workspace-hero' });
+                else if (heroRun) openRunModal({ runId: heroRun.id, workflowId: heroRun.workflowId, source: 'live-workspace-hero' });
+                else if (heroSession?.workflowId) onSelectWorkflow(heroSession.workflowId);
+              }}
+            />
 
-        {activeRuns.length > 0 && (
-          <section className="space-y-2">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
-              <Clock size={13} />
-              Running now
-            </div>
-            {activeRuns.map((run) => (
-              <TriageRunRow key={run.id} run={run} onOpen={() => onNavigate(`/runs/${run.id}`)} />
-            ))}
-          </section>
-        )}
+            {!hasLiveTriage && !showStream && !hasLiveEvents && <LiveWorkspaceEmptyState />}
 
-        {approvals.length > 0 && (
-          <section className={clsx('space-y-2', activeRuns.length > 0 && 'mt-5')}>
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
-              <AlertTriangle size={13} className="text-warn" />
-              Pending approvals
-            </div>
-            {approvals.map((approval) => (
-              <div key={approval.id} className="rounded-card border border-warn/25 bg-warn-soft px-3 py-2">
-                <div className="truncate text-[13px] font-medium text-text-primary">{approval.workflowName ?? 'Approval needed'}</div>
-                <div className="mt-1 text-[12px] leading-relaxed text-text-secondary">{approval.summary ?? approval.agentName ?? 'Waiting for an operator decision.'}</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void resolveApproval(approval, 'approve')}
-                    className="inline-flex h-7 items-center rounded-btn bg-text-primary px-2.5 text-[11px] font-medium text-canvas hover:bg-white"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void resolveApproval(approval, 'reject')}
-                    className="inline-flex h-7 items-center rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-                  >
-                    Reject
-                  </button>
-                </div>
-              </div>
-            ))}
-          </section>
-        )}
+            {(hasLiveEvents || hasLiveTriage) && (
+              <LiveWorkspaceSection storageKey="active" label="Active tasks" icon={<ActivityIcon size={12} />} empty="No active work" count={liveCount}>
+                {activeSessions.map((session) => (
+                  <WorkSessionRow
+                    key={session.id}
+                    session={session}
+                    now={panelNow}
+                    density={panelWide ? 'expanded' : density}
+                    wide={panelWide}
+                    onOpen={() => {
+                      if (session.runId) openRunModal({ runId: session.runId, workflowId: session.workflowId, source: 'live-workspace' });
+                      else if (session.workflowId) onSelectWorkflow(session.workflowId);
+                      else if (session.agentId) onNavigate(`/agents/${session.agentId}`);
+                    }}
+                  />
+                ))}
+                {activeSessions.length === 0 && activeObservations.slice(0, density === 'compact' ? 2 : 5).map((event) => (
+                  <ObservationRow key={event.id} event={event} onSelectWorkflow={onSelectWorkflow} onOpenRun={onNavigate} compact={density === 'compact'} />
+                ))}
+                {activeSessions.length === 0 && activeRuns.slice(0, density === 'compact' ? 2 : 5).map((run) => (
+                  <ActiveRunMiniRow key={run.id} run={run} onOpen={() => openRunModal({ runId: run.id, workflowId: run.workflowId, source: 'live-workspace' })} />
+                ))}
+              </LiveWorkspaceSection>
+            )}
 
-        {failedRuns.length > 0 && (
-          <section className={clsx('space-y-2', (activeRuns.length > 0 || approvals.length > 0) && 'mt-5')}>
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
-              <AlertTriangle size={13} className="text-danger" />
-              Failed workflows
-            </div>
-            {failedRuns.map((run) => (
-              <div
-                key={run.id}
-                className="rounded-card border border-danger/20 bg-danger-soft/50 px-3 py-2 hover:border-danger/40 hover:bg-danger-soft"
-              >
-                <button
-                  type="button"
-                  onClick={() => (run.workflowId ? onSelectWorkflow(run.workflowId) : onNavigate('/history?tab=runs'))}
-                  className="block w-full text-left"
-                  title="Inspect this workflow on the canvas"
-                >
-                  <div className="truncate text-[13px] font-medium text-text-primary">{run.workflowName}</div>
-                  <div className="mt-0.5 truncate text-[11px] text-text-muted">
-                    {run.failedNode ? `Failed at ${run.failedNode}` : 'Needs operator review'}
-                  </div>
-                </button>
-                <div className="mt-2 flex gap-2">
-                  {run.workflowId && (
-                    <button
-                      type="button"
-                      onClick={() => { void api(`/v1/workflows/${run.workflowId}/run`, { method: 'POST' }).catch(() => undefined).finally(onRefresh); }}
-                      className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-                    >
-                      <RefreshCw size={11} /> Retry
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => onNavigate(`/runs/${run.id}`)}
-                    className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-                  >
-                    Details
-                  </button>
-                </div>
-              </div>
-            ))}
-          </section>
+            {allAttentionGroups.length > 0 && (
+              <LiveWorkspaceSection storageKey="attention" label="Needs attention" icon={<AlertTriangle size={12} />} empty="Nothing needs you" count={allAttentionGroups.length} className="mt-3" defaultOpen={allAttentionGroups.length > 0}>
+                {attentionGroups.map((group) => (
+                  <AttentionGroupRow
+                    key={group.id}
+                    group={group}
+                    onApprove={group.approval ? () => void resolveApproval(group.approval!, 'approve') : undefined}
+                    onReject={group.approval ? () => void resolveApproval(group.approval!, 'reject') : undefined}
+                    onInspect={() => {
+                      if (group.workflowId) onSelectWorkflow(group.workflowId);
+                      else if (group.runId) openRunModal({ runId: group.runId, source: 'live-workspace-attention' });
+                      else onNavigate('/history?tab=runs');
+                    }}
+                    onRetry={group.retryWorkflowId ? () => { void api(`/v1/workflows/${group.retryWorkflowId}/run`, { method: 'POST' }).catch(() => undefined).finally(onRefresh); } : undefined}
+                    onDetails={group.runId ? () => openRunModal({ runId: group.runId, workflowId: group.workflowId, source: 'live-workspace-attention-details' }) : undefined}
+                  />
+                ))}
+                {hiddenAttentionCount > 0 && <button type="button" onClick={() => onNavigate('/history?tab=runs')} className="flex h-7 w-full items-center justify-center rounded-md border border-line/70 bg-canvas/35 text-[10px] text-text-muted hover:bg-surface-2 hover:text-text-primary">+{hiddenAttentionCount} more in history</button>}
+              </LiveWorkspaceSection>
+            )}
+
+            {hasLiveEvents && <LiveSignalStrip events={signalEvents} onSelectWorkflow={onSelectWorkflow} onOpenRun={onNavigate} />}
+            {showStream && <LiveActivityStream activity={activity} onSelectWorkflow={onSelectWorkflow} />}
+            {issueCount > 0 && (
+              <LiveWorkspaceSection storageKey="backlog" label="Backlog" icon={<ListTodo size={12} />} empty="No open issues" count={issueCount} className="mt-3" defaultOpen={panelFullscreen}>
+                {openIssues.map((issue) => <IssueControlRow key={issue.id} issue={issue} compact onAccept={async () => { await api(`/v1/issues/${issue.id}/accept`, { method: 'POST', body: JSON.stringify({ agentId: issue.assigneeAgentId ?? null }) }).catch(() => undefined); onRefresh(); }} onOpenRun={issue.activeRunId ? () => openRunModal({ runId: issue.activeRunId, source: 'live-workspace-issue' }) : undefined} />)}
+                {issueCount > 2 && <button type="button" onClick={() => onNavigate('/issues')} className="flex h-7 w-full items-center justify-center rounded-md border border-line/70 bg-canvas/35 text-[10px] text-text-muted hover:bg-surface-2 hover:text-text-primary">+{issueCount - 2} more</button>}
+              </LiveWorkspaceSection>
+            )}
+            {panelFullscreen && <div className="mt-3"><IssueCreateRow onCreated={onRefresh} compact /></div>}
+          </>
+        ) : (
+          <LiveWorkspaceTechnicalFeed events={observabilityEvents} activity={activity} connected={streamConnected} wide={panelWide} />
         )}
       </div>
-      <button
-        type="button"
-        aria-label="Resize triage panel"
-        title="Resize triage panel"
-        className="absolute bottom-1.5 right-1.5 flex h-4 w-4 items-end justify-end rounded-sm text-text-muted/80 hover:bg-surface-2 hover:text-text-primary cursor-se-resize"
-        onPointerDown={handleResizePointerDown}
-      >
-        <span className="pointer-events-none block h-2.5 w-2.5 border-b border-r border-current" />
-      </button>
+      {!panelFullscreen && (
+        <button
+          type="button"
+          aria-label="Resize Live Workspace"
+          title="Resize Live Workspace"
+          className="absolute bottom-1.5 right-1.5 flex h-4 w-4 cursor-se-resize items-end justify-end rounded-sm text-text-muted/80 hover:bg-surface-2 hover:text-text-primary"
+          onPointerDown={handleResizePointerDown}
+        >
+          <span className="pointer-events-none block h-2.5 w-2.5 border-b border-r border-current" />
+        </button>
+      )}
     </div>
   );
 }
 
-function clampTriagePanelFrame(frame: TriagePanelFrame, containerSize: VirtualCanvasSize): TriagePanelFrame {
-  const maxWidth = Math.max(TRIAGE_PANEL_MIN_WIDTH, containerSize.width - TRIAGE_PANEL_MARGIN * 2);
-  const maxHeight = Math.max(TRIAGE_PANEL_MIN_HEIGHT, containerSize.height - TRIAGE_PANEL_MARGIN * 2);
-  const width = clamp(frame.width, TRIAGE_PANEL_MIN_WIDTH, maxWidth);
-  const height = clamp(frame.height, TRIAGE_PANEL_MIN_HEIGHT, maxHeight);
-  const maxX = Math.max(TRIAGE_PANEL_MARGIN, containerSize.width - width - TRIAGE_PANEL_MARGIN);
-  const maxY = Math.max(TRIAGE_PANEL_MARGIN, containerSize.height - height - TRIAGE_PANEL_MARGIN);
-  const x = clamp(frame.x, TRIAGE_PANEL_MARGIN, maxX);
-  const y = clamp(frame.y, TRIAGE_PANEL_MARGIN, maxY);
+const OBSERVATION_TONE_TEXT: Record<ObservationTone, string> = {
+  accent: 'text-accent',
+  success: 'text-emerald-400',
+  warn: 'text-warn',
+  danger: 'text-danger',
+  muted: 'text-text-muted',
+};
+
+const OBSERVATION_TONE_BORDER: Record<ObservationTone, string> = {
+  accent: 'border-accent/25 bg-accent/5',
+  success: 'border-emerald-400/20 bg-emerald-400/5',
+  warn: 'border-warn/25 bg-warn-soft/60',
+  danger: 'border-danger/25 bg-danger-soft/50',
+  muted: 'border-line bg-canvas/40',
+};
+
+function HeroTaskCard({
+  session,
+  run,
+  focusEvent,
+  requestStatus,
+  now,
+  onOpen,
+}: {
+  session: WorkSession | null;
+  run: WorkspaceActiveRun | null;
+  focusEvent: ObservabilityEvent | null;
+  requestStatus: WorkspaceRequestStatus;
+  now: number;
+  onOpen: () => void;
+}) {
+  const title = session?.title ?? run?.workflowName ?? (requestStatus.busy ? 'Work in progress' : 'Workspace is quiet');
+  const step = currentSessionStep(session) ?? run?.currentStep ?? focusEvent?.summary ?? focusEvent?.title ?? requestStatus.label ?? 'No active step';
+  const agentName = session?.participantNames[0] ?? session?.agentName ?? run?.agents?.[0]?.name ?? 'Agentis';
+  const startedAt = run?.startedAt ?? sessionStart(session);
+  const elapsed = startedAt ? formatElapsed(startedAt, now) : null;
+  const pct = progressPercent(session?.progress ?? runProgressObject(run));
+  const active = Boolean(session || run || requestStatus.busy);
+  const actionable = Boolean(session?.runId || session?.workflowId || run);
+
+  return (
+    <button
+      type="button"
+      onClick={actionable ? onOpen : undefined}
+      disabled={!actionable}
+      className="group relative mb-3 w-full overflow-hidden rounded-xl border border-accent/25 bg-gradient-to-br from-accent/12 via-surface/80 to-accent/4 px-4 py-4 text-left shadow-[0_18px_60px_rgba(0,0,0,0.22)] transition hover:border-accent/45 disabled:cursor-default disabled:hover:border-accent/25"
+    >
+      <span aria-hidden="true" className="absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-accent/70 to-transparent" />
+      <div className="flex items-start gap-3">
+        <span className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-canvas/60 text-[15px] font-semibold text-accent shadow-[0_0_28px_rgba(74,222,128,0.12)]">
+          {active && <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full border border-canvas bg-accent shadow-[0_0_18px_rgba(74,222,128,0.8)]" />}
+          {initialsFromName(agentName)}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-accent">{active ? 'Happening now' : 'Standing by'}</span>
+          <span className="mt-1 block truncate text-[17px] font-semibold leading-tight text-text-primary">{title}</span>
+          <span className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-[10px] text-text-muted">
+            <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-line/70 bg-canvas/40 px-2 py-1">
+              <Bot size={11} className="text-accent" />
+              <span className="truncate">{agentName}</span>
+            </span>
+            {elapsed && <span className="rounded-full border border-line/70 bg-canvas/40 px-2 py-1 font-mono tabular-nums">{elapsed}</span>}
+          </span>
+        </span>
+      </div>
+      <div className="mt-4 rounded-lg border border-white/5 bg-canvas/35 px-3 py-2">
+        <div className="flex items-start gap-2 text-[12px] leading-snug text-text-secondary">
+          <span className={clsx('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-accent' : 'bg-text-muted')} />
+          <span className="line-clamp-2 min-w-0">{step}</span>
+        </div>
+        <div className="mt-3 h-1 overflow-hidden rounded-full bg-accent/20">
+          <div
+            className={clsx('h-full rounded-full bg-accent shadow-[0_0_10px_rgba(74,222,128,0.75)] transition-all duration-500', pct == null && active && 'w-2/5 animate-pulse')}
+            style={pct != null ? { width: `${pct}%` } : undefined}
+          />
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function LiveWorkspacePulse({
+  liveCount,
+  waitingCount,
+  incidentCount,
+  evidenceCount,
+  issueCount,
+  connected,
+  fleet,
+}: {
+  liveCount: number;
+  waitingCount: number;
+  incidentCount: number;
+  evidenceCount: number;
+  issueCount: number;
+  connected: boolean;
+  fleet: WorkspaceFleetOverview | null;
+}) {
+  return (
+    <section className="w-full rounded-xl border border-line/70 bg-canvas/35 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+          <ActivityIcon size={12} />
+          System pulse
+        </div>
+        <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+          <span className={clsx('h-1.5 w-1.5 rounded-full', connected ? 'bg-accent' : 'bg-text-muted/50')} />
+          {connected ? 'live' : 'replay'}
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-1.5 min-[400px]:grid-cols-6">
+        <LiveWorkspaceMetric value={liveCount} label="live" tone="accent" />
+        <LiveWorkspaceMetric value={waitingCount} label="waiting" tone={waitingCount > 0 ? 'warn' : 'muted'} />
+        <LiveWorkspaceMetric value={incidentCount} label="risk" tone={incidentCount > 0 ? 'danger' : 'muted'} />
+        <LiveWorkspaceMetric value={evidenceCount} label="evidence" tone="muted" />
+        <LiveWorkspaceMetric value={issueCount} label="backlog" tone={issueCount > 0 ? 'warn' : 'muted'} />
+        <LiveWorkspaceMetric 
+          value={Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(fleet?.runs.totalTokens ?? 0)} 
+          label="tokens" 
+          tone="muted" 
+        />
+      </div>
+    </section>
+  );
+}
+
+function LiveWorkspaceMetric({ value, label, tone }: { value: number | string; label: string; tone: ObservationTone }) {
+  return (
+    <div className="min-w-0 rounded-lg border border-line/50 bg-surface/45 px-2 py-1.5">
+      <div className={clsx('font-mono text-[12px] leading-none tabular-nums', OBSERVATION_TONE_TEXT[tone])}>{value}</div>
+      <div className="mt-0.5 truncate text-[8px] uppercase tracking-[0.08em] text-text-muted">{label}</div>
+    </div>
+  );
+}
+
+function LiveWorkspaceEmptyState() {
+  return (
+    <div className="mt-2.5 flex min-h-[130px] flex-col items-center justify-center rounded-xl border border-line/70 bg-canvas/35 px-4 py-4 text-center">
+      <div className="flex h-11 w-11 animate-pulse items-center justify-center rounded-xl border border-accent/20 bg-accent/5 text-accent">
+        <CheckCircle2 size={20} />
+      </div>
+      <div className="mt-2 text-[13px] font-medium text-text-primary">Office quiet.</div>
+      <div className="mt-0.5 text-[11px] text-text-secondary">No live runs or decisions.</div>
+    </div>
+  );
+}
+
+function LiveWorkspaceTechnicalFeed({
+  events,
+  activity,
+  connected,
+  wide,
+}: {
+  events: ObservabilityEvent[];
+  activity: RealtimeActivity[];
+  connected: boolean;
+  wide: boolean;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = events.find((event) => event.id === selectedId) ?? events[0] ?? null;
+
+  useEffect(() => {
+    if (!selectedId || !events.some((event) => event.id === selectedId)) setSelectedId(events[0]?.id ?? null);
+  }, [events, selectedId]);
+
+  if (events.length === 0) {
+    return (
+      <section className="rounded-card border border-line bg-canvas/35 px-3 py-3">
+        <div className="flex items-center gap-2 text-[12px] text-text-secondary">
+          <span className={clsx('h-1.5 w-1.5 rounded-full', connected ? 'bg-accent animate-pulse-dot' : 'bg-text-muted')} />
+          {connected ? 'Waiting for the first normalized runtime event.' : 'Reconnect to receive the technical event stream.'}
+        </div>
+        {activity.length > 0 && <LiveActivityStream activity={activity} onSelectWorkflow={() => undefined} />}
+      </section>
+    );
+  }
+
+  return (
+    <section className={clsx('gap-3', wide ? 'grid grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]' : 'space-y-3')}>
+      <div className="min-w-0 overflow-hidden rounded-xl border border-line bg-canvas/35">
+        <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted">Event stream</div>
+            <div className="mt-0.5 text-[11px] text-text-secondary">{connected ? 'SSE live · replay merged' : 'Replay · reconnecting'}</div>
+          </div>
+          <span className="font-mono text-[10px] text-text-muted">{events.length}</span>
+        </div>
+        <div className="max-h-[min(64vh,640px)] overflow-y-auto p-1.5">
+          {events.slice(0, 80).map((event) => {
+            const tone = observationTone(event);
+            const selectedRow = selected?.id === event.id;
+            return (
+              <button
+                key={event.id}
+                type="button"
+                onClick={() => setSelectedId(event.id)}
+                className={clsx(
+                  'flex w-full items-start gap-2 rounded-md border-l-4 px-2 py-2 text-left transition',
+                  selectedRow ? 'bg-surface-2 ring-1 ring-line-strong' : 'hover:bg-surface-2/70',
+                  tone === 'danger'
+                    ? 'border-l-danger'
+                    : tone === 'warn'
+                      ? 'border-l-warn'
+                      : tone === 'success'
+                        ? 'border-l-emerald-400'
+                        : tone === 'accent'
+                          ? 'border-l-accent'
+                          : 'border-l-text-muted/40',
+                )}
+              >
+                <span className={clsx('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', tone === 'danger' ? 'bg-danger' : tone === 'warn' ? 'bg-warn' : tone === 'success' ? 'bg-emerald-400' : tone === 'accent' ? 'bg-accent' : 'bg-text-muted')} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-[11px] font-medium text-text-primary">{event.title}</span>
+                    <span className="shrink-0 font-mono text-[8px] uppercase tracking-[0.08em] text-text-muted">{event.kind}</span>
+                  </span>
+                  <span className="mt-0.5 block truncate text-[10px] text-text-secondary">{event.summary || event.detail || event.sourceEvent}</span>
+                </span>
+                <span className="shrink-0 font-mono text-[9px] text-text-muted">{formatAge(event.createdAt)}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="min-w-0 overflow-hidden rounded-xl border border-line bg-surface-2/60">
+        {selected ? (
+          <>
+            <div className="border-b border-line/70 px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="truncate text-[12px] font-semibold text-text-primary">{selected.title}</div>
+                <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[8px] uppercase', OBSERVATION_TONE_TEXT[observationTone(selected)])}>{selected.status}</span>
+              </div>
+              <div className="mt-1 text-[10px] leading-snug text-text-secondary">{selected.summary || selected.detail || selected.sourceEvent}</div>
+            </div>
+            <div className="max-h-[min(50vh,480px)] space-y-3 overflow-y-auto px-3 py-3">
+              <TechnicalField label="Source" value={selected.sourceEvent} />
+              <TechnicalField label="Scope" value={compactStrings([selected.kind, selected.actorType, selected.actorId && `agent:${selected.actorId}`, selected.workflowId && `workflow:${selected.workflowId}`, selected.runId && `run:${selected.runId}`]).join(' · ')} />
+              <TechnicalField label="Correlation" value={selected.correlationId ?? '—'} />
+              {selected.progress && <TechnicalField label="Progress" value={`${selected.progress.label ? `${selected.progress.label} · ` : ''}${selected.progress.completed ?? 0}/${selected.progress.total ?? '?'}`} />}
+              {selected.evidence.length > 0 && <TechnicalJson label={`Evidence (${selected.evidence.length})`} value={selected.evidence} />}
+              <TechnicalJson label="Redacted payload" value={selected.rawPayloadRedacted} />
+            </div>
+          </>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function TechnicalField({ label, value }: { label: string; value: string }) {
+  return <div><div className="font-mono text-[9px] uppercase tracking-[0.12em] text-text-muted">{label}</div><div className="mt-1 break-words text-[11px] leading-snug text-text-secondary">{value}</div></div>;
+}
+
+function TechnicalJson({ label, value }: { label: string; value: unknown }) {
+  return (
+    <div>
+      <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-text-muted">{label}</div>
+      <pre className="mt-1 max-h-48 overflow-auto rounded-md border border-line/70 bg-canvas/80 p-2 font-mono text-[9px] leading-relaxed text-text-secondary">
+        <HighlightedJson value={value} />
+      </pre>
+    </div>
+  );
+}
+
+function HighlightedJson({ value }: { value: unknown }) {
+  const json = JSON.stringify(value, null, 2);
+  const tokens = json.split(/("(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/gi);
+  return (
+    <>
+      {tokens.map((token, index) => {
+        const className = token.match(/^"(?:\\.|[^"\\])*"(?=\s*:)/)
+          ? 'text-accent'
+          : token.startsWith('"')
+            ? 'text-emerald-300'
+            : token === 'true' || token === 'false'
+              ? 'text-warn'
+              : token === 'null'
+                ? 'text-text-muted'
+                : /^-?\d/.test(token)
+                  ? 'text-sky-300'
+                  : undefined;
+        return <span key={`${index}:${token.slice(0, 8)}`} className={className}>{token}</span>;
+      })}
+    </>
+  );
+}
+
+function LiveWorkspaceSection({
+  label,
+  icon,
+  empty,
+  count,
+  storageKey,
+  defaultOpen = true,
+  className,
+  children,
+}: {
+  label: string;
+  icon: ReactNode;
+  empty: string;
+  count?: number;
+  storageKey: string;
+  defaultOpen?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  const items = Children.toArray(children).filter(Boolean);
+  const [open, setOpen] = usePersistentSectionState(storageKey, defaultOpen);
+  return (
+    <section className={clsx('rounded-xl border border-line/70 bg-canvas/30 p-2.5', className)}>
+      <button type="button" onClick={() => setOpen((value) => !value)} className="mb-2 flex w-full items-center justify-between gap-2 text-left">
+        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+          <span className="text-text-muted">{icon}</span>
+          {label}
+        </div>
+        <span className="flex items-center gap-2">
+          <span className="rounded-full border border-line/70 bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-text-muted tabular-nums">{count ?? items.length}</span>
+          <ChevronDown size={13} className={clsx('text-text-muted transition-transform duration-200', !open && '-rotate-90')} />
+        </span>
+      </button>
+      <div className={clsx('grid transition-[grid-template-rows] duration-200 ease-out', open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]')}>
+        <div className="min-h-0 overflow-hidden">
+          <div className="space-y-1.5">
+            {items.length > 0 ? items : (
+              <div className="rounded-card border border-line/70 bg-canvas/35 px-2 py-1.5 text-[11px] text-text-muted">{empty}</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function usePersistentSectionState(key: string, defaultOpen: boolean): [boolean, Dispatch<SetStateAction<boolean>>] {
+  const storageKey = `agentis:live-workspace:${key}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(storageKey);
+      if (saved === 'open') return true;
+      if (saved === 'closed') return false;
+    } catch {
+      /* ignore storage failures */
+    }
+    return defaultOpen;
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(storageKey, open ? 'open' : 'closed');
+    } catch {
+      /* ignore storage failures */
+    }
+  }, [open, storageKey]);
+
+  return [open, setOpen];
+}
+
+interface CommandAttentionGroup {
+  id: string;
+  title: string;
+  summary: string;
+  count: number;
+  tone: ObservationTone;
+  workflowId?: string;
+  runId?: string;
+  retryWorkflowId?: string;
+  approval?: WorkspaceApproval;
+}
+
+function WorkSessionRow({
+  session,
+  onOpen,
+  now,
+  density = 'compact',
+  wide = false,
+}: {
+  session: WorkSession;
+  onOpen: () => void;
+  now: number;
+  density?: 'compact' | 'expanded';
+  wide?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const pct = session.progress && session.progress.total > 0
+    ? clamp(session.progress.completed / session.progress.total, 0.04, 1)
+    : null;
+  const participantLabel = session.participantNames.length > 0
+    ? session.participantNames.slice(0, 2).join(', ')
+    : session.agentName ?? (session.kind === 'workflow' || session.kind === 'run' ? 'workflow tool' : 'agent');
+  const extraParticipants = Math.max(0, session.participantNames.length - 2);
+  const tone = session.status === 'failed'
+    ? 'danger'
+    : session.status === 'waiting' || session.status === 'blocked'
+      ? 'warn'
+      : 'accent';
+  const lastStep = currentSessionStep(session) ?? session.detail;
+  const toolCount = session.events.filter((event) => event.kind === 'tool' || event.tool).length;
+  const startedAt = sessionStart(session);
+  const elapsed = startedAt ? formatElapsed(startedAt, now) : null;
+  const details = session.events
+    .slice(-8)
+    .reverse()
+    .map((event) => ({
+      id: event.id,
+      label: event.phase ?? event.kind,
+      detail: event.detail || event.title,
+      at: event.at,
+    }));
+  const canExpand = details.length > 0;
+
+  return (
+    <div
+      className={clsx(
+        'group w-full text-left transition duration-150',
+        density === 'compact' ? 'rounded-card border border-line/70 bg-canvas/35 px-2.5 py-2' : 'border-t border-line/70 px-1 py-2 first:border-t-0',
+        tone === 'danger'
+          ? 'hover:bg-danger-soft/20'
+          : tone === 'warn'
+            ? 'hover:bg-warn-soft/20'
+            : 'hover:bg-surface-2/45',
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className={clsx(
+            'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
+            tone === 'danger' ? 'bg-danger' : tone === 'warn' ? 'bg-warn' : 'bg-accent animate-pulse-dot',
+          )}
+        />
+        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left active:scale-[0.99]">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-[12px] font-semibold text-text-primary">{session.title}</span>
+            <span className="shrink-0 border border-line/70 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.08em] text-text-muted">
+              {session.kind === 'run' ? 'workflow' : session.kind}
+            </span>
+          </span>
+          <span className={clsx('mt-0.5 block text-[10.5px] text-text-secondary', density === 'compact' ? 'line-clamp-2' : 'truncate')}>-&gt; {lastStep}</span>
+          <span className={clsx('flex min-w-0 items-center gap-1.5', density === 'compact' ? 'mt-1.5' : 'mt-1')}>
+            <span className="truncate text-[9.5px] text-text-muted">{participantLabel}</span>
+            {extraParticipants > 0 && (
+              <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[8px] text-text-muted">+{extraParticipants}</span>
+            )}
+            {toolCount > 0 && <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[8px] text-text-muted">{toolCount} tools</span>}
+            {elapsed && <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[8px] text-text-muted tabular-nums">{elapsed}</span>}
+          </span>
+        </button>
+        {density === 'expanded' && canExpand && (
+          <button
+            type="button"
+            aria-label={expanded ? 'Hide task steps' : 'Show task steps'}
+            onClick={(event) => {
+              event.stopPropagation();
+              setExpanded((value) => !value);
+            }}
+            className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-surface-2 hover:text-text-primary active:scale-[0.96]"
+          >
+            <ChevronDown size={12} className={clsx('transition-transform duration-150', expanded && 'rotate-180')} />
+          </button>
+        )}
+      </div>
+      {pct != null && (
+        <span className="mt-2 block h-px overflow-hidden rounded-full bg-line/70">
+          <span className="block h-full bg-accent transition-[width] duration-300" style={{ width: `${pct * 100}%` }} />
+        </span>
+      )}
+      {density === 'expanded' && expanded && canExpand && (
+        <div className={clsx('ml-[4px] mt-2 space-y-1 border-l border-line/70 pl-3', wide && 'grid grid-cols-2 gap-x-4')}>
+          {details.map((item) => (
+            <div key={item.id} className="grid grid-cols-[64px_minmax(0,1fr)_34px] gap-2 py-0.5 text-[9.5px] leading-snug">
+              <span className="truncate font-mono uppercase tracking-[0.08em] text-text-muted">{item.label}</span>
+              <span className="truncate text-text-secondary">{item.detail}</span>
+              <span className="text-right font-mono text-[9px] text-text-muted">{formatAge(item.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function currentSessionStep(session: WorkSession | null): string | null {
+  if (!session) return null;
+  const event = session.events.at(-1);
+  return event?.detail || event?.title || session.detail || null;
+}
+
+function sessionStart(session: WorkSession | null): string | null {
+  if (!session) return null;
+  return session.events[0]?.at ?? session.at ?? null;
+}
+
+function runProgressObject(run: WorkspaceActiveRun | null | undefined): { completed: number; total: number } | undefined {
+  if (!run?.totalSteps || run.totalSteps <= 0) return undefined;
+  return { completed: run.stepIndex ?? 0, total: run.totalSteps };
+}
+
+function progressPercent(progress: { completed: number; total: number } | undefined): number | null {
+  if (!progress || progress.total <= 0) return null;
+  return clamp((progress.completed / progress.total) * 100, 4, 100);
+}
+
+function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'A';
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('') || 'A';
+}
+
+function ActiveRunMiniRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => void }) {
+  const pct = run.totalSteps && run.totalSteps > 0 ? clamp(((run.stepIndex ?? 0) / run.totalSteps) * 100, 0, 100) : null;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center gap-2 rounded-card border border-accent/20 bg-accent/5 px-2 py-1.5 text-left hover:border-accent/40 hover:bg-surface-2"
+    >
+      <span className="relative flex h-2 w-2 shrink-0">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[11px] font-medium text-text-primary">{run.workflowName}</span>
+        <span className="mt-0.5 block truncate text-[10px] text-text-secondary">{run.currentStep ?? 'Running'}</span>
+        {pct != null && (
+          <span className="mt-1 block h-0.5 overflow-hidden rounded-full bg-line/70">
+            <span className="block h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${pct}%` }} />
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+function AttentionGroupRow({
+  group,
+  onApprove,
+  onReject,
+  onInspect,
+  onRetry,
+  onDetails,
+}: {
+  group: CommandAttentionGroup;
+  onApprove?: () => void;
+  onReject?: () => void;
+  onInspect: () => void;
+  onRetry?: () => void;
+  onDetails?: () => void;
+}) {
+  return (
+    <div className={clsx('rounded-card border px-2 py-1.5', OBSERVATION_TONE_BORDER[group.tone])}>
+      <div className="flex items-center gap-2">
+        <span className={clsx('mt-0.5 shrink-0', OBSERVATION_TONE_TEXT[group.tone])}>
+          {group.tone === 'danger' ? <AlertTriangle size={12} /> : group.approval ? <ShieldCheck size={12} /> : <Clock size={12} />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="truncate text-[12px] font-medium text-text-primary">{group.title}</div>
+            {group.count > 1 && (
+              <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[9px] text-text-muted">x{group.count}</span>
+            )}
+          </div>
+          <div className="mt-0.5 truncate text-[11px] text-text-secondary">{group.summary}</div>
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+        {onApprove && (
+          <button type="button" onClick={onApprove} title="Approve" aria-label="Approve" className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-text-primary text-canvas hover:bg-white">
+            <CheckCircle2 size={12} />
+          </button>
+        )}
+        {onReject && (
+          <button type="button" onClick={onReject} title="Reject" aria-label="Reject" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
+            <X size={12} />
+          </button>
+        )}
+        <button type="button" onClick={onInspect} title="Inspect" aria-label="Inspect" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
+          <Workflow size={12} />
+        </button>
+        {onRetry && (
+          <button type="button" onClick={onRetry} title="Retry latest" aria-label="Retry latest" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
+            <RefreshCw size={12} />
+          </button>
+        )}
+        {onDetails && (
+          <button type="button" onClick={onDetails} title="Run details" aria-label="Run details" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
+            <FileText size={12} />
+          </button>
+        )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LiveSignalStrip({
+  events,
+  onSelectWorkflow,
+  onOpenRun,
+}: {
+  events: ObservabilityEvent[];
+  onSelectWorkflow: (workflowId: string) => void;
+  onOpenRun: (route: string) => void;
+}) {
+  if (events.length === 0) return null;
+  return (
+    <section className="mt-2.5 border-t border-line/70 pt-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+        <Wrench size={12} />
+        Signal
+      </div>
+      <div className="space-y-1">
+        {events.map((event) => (
+          <CommandSignalRow key={event.id} event={event} onSelectWorkflow={onSelectWorkflow} onOpenRun={onOpenRun} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CommandSignalRow({
+  event,
+  onSelectWorkflow,
+  onOpenRun,
+}: {
+  event: ObservabilityEvent;
+  onSelectWorkflow: (workflowId: string) => void;
+  onOpenRun: (route: string) => void;
+}) {
+  const tone = observationTone(event);
+  const clickable = Boolean(event.workflowId || event.runId);
+  const content = (
+    <>
+      <span className={clsx('shrink-0', OBSERVATION_TONE_TEXT[tone])}>{observationIcon(event.kind)}</span>
+      <span className="min-w-0 flex-1 truncate text-[11px] text-text-secondary">{event.title}</span>
+      <span className="shrink-0 font-mono text-[9px] text-text-muted tabular-nums">{formatAge(event.createdAt)}</span>
+    </>
+  );
+  const className = clsx(
+    'flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition',
+    clickable && 'hover:bg-surface-2 hover:text-text-primary',
+  );
+
+  if (clickable) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={() => {
+          if (event.workflowId) onSelectWorkflow(event.workflowId);
+          else if (event.runId) openRunModal({ runId: event.runId, source: 'home-signal' });
+        }}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return <div className={className}>{content}</div>;
+}
+
+function ObservationRow({
+  event,
+  onSelectWorkflow,
+  onOpenRun,
+  compact = false,
+}: {
+  event: ObservabilityEvent;
+  onSelectWorkflow: (workflowId: string) => void;
+  onOpenRun: (route: string) => void;
+  compact?: boolean;
+}) {
+  const tone = observationTone(event);
+  const clickable = Boolean(event.workflowId || event.runId);
+  const content = (
+    <>
+      <span className={clsx('mt-0.5 shrink-0', OBSERVATION_TONE_TEXT[tone])}>{observationIcon(event.kind)}</span>
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className={clsx('truncate font-medium text-text-primary', compact ? 'text-[11px]' : 'text-[12px]')}>{event.title}</span>
+          <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9px] uppercase', OBSERVATION_TONE_TEXT[tone])}>
+            {event.status}
+          </span>
+        </span>
+        <span className={clsx('mt-0.5 block leading-snug text-text-secondary', compact ? 'truncate text-[10px]' : 'line-clamp-2 text-[11px]')}>
+          {event.summary || event.detail || event.sourceEvent}
+        </span>
+        {!compact && <ObservationProgress event={event} />}
+        <span className={clsx('mt-1 flex min-w-0 items-center gap-1.5 text-text-muted', compact ? 'text-[9px]' : 'text-[10px]')}>
+          <span className="truncate">{compactStrings([event.kind, actorLabel(event)]).join(' - ')}</span>
+          <span className="shrink-0 font-mono tabular-nums">{formatAge(event.createdAt)}</span>
+        </span>
+      </span>
+    </>
+  );
+  const className = clsx(
+    'flex w-full items-start gap-2 rounded-card border text-left transition',
+    compact ? 'px-2 py-1.5' : 'px-2.5 py-2',
+    OBSERVATION_TONE_BORDER[tone],
+    clickable && 'hover:border-accent/40 hover:bg-surface-2',
+  );
+  if (clickable) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={() => {
+          if (event.workflowId) onSelectWorkflow(event.workflowId);
+          else if (event.runId) openRunModal({ runId: event.runId, source: 'home-observation' });
+        }}
+      >
+        {content}
+      </button>
+    );
+  }
+  return <div className={className}>{content}</div>;
+}
+
+function ObservationProgress({ event }: { event: ObservabilityEvent }) {
+  const completed = event.progress?.completed;
+  const total = event.progress?.total;
+  if (completed == null || total == null || total <= 0) {
+    return event.progress?.label ? <div className="mt-1 text-[10px] text-text-muted">{event.progress.label}</div> : null;
+  }
+  const pct = clamp(completed / total, 0, 1) * 100;
+  return (
+    <div className="mt-2">
+      <div className="h-1 overflow-hidden rounded-full bg-line/70">
+        <div className="h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-1 font-mono text-[10px] text-text-muted tabular-nums">{completed}/{total}</div>
+    </div>
+  );
+}
+
+function ApprovalDecisionRow({
+  approval,
+  onApprove,
+  onReject,
+}: {
+  approval: WorkspaceApproval;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const selfHeal = isSelfHealApproval(approval);
+  return (
+    <div className={selfHeal
+      ? 'rounded-card border border-accent/25 bg-accent/[0.08] px-3 py-2'
+      : 'rounded-card border border-warn/25 bg-warn-soft/60 px-3 py-2'}
+    >
+      <div className="truncate text-[12px] font-medium text-text-primary">{selfHeal ? 'Self-healing fix ready' : approval.workflowName ?? approval.title ?? 'Approval needed'}</div>
+      <div className="mt-0.5 line-clamp-2 whitespace-pre-line text-[11px] leading-snug text-text-secondary">{approval.summary ?? approval.agentName ?? 'Waiting for an operator decision.'}</div>
+      <div className="mt-2 flex gap-1.5">
+        <button
+          type="button"
+          onClick={onApprove}
+          className="inline-flex h-7 items-center gap-1 rounded-btn bg-text-primary px-2.5 text-[11px] font-medium text-canvas hover:bg-white"
+        >
+          <CheckCircle2 size={12} /> {selfHeal ? 'Approve fix' : 'Approve'}
+        </button>
+        <button
+          type="button"
+          onClick={onReject}
+          className="inline-flex h-7 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+        >
+          <X size={12} /> Reject
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FailedRunControlRow({
+  run,
+  onInspect,
+  onRetry,
+  onDetails,
+}: {
+  run: WorkspaceFailedRun;
+  onInspect: () => void;
+  onRetry: () => void;
+  onDetails: () => void;
+}) {
+  return (
+    <div className="rounded-card border border-danger/25 bg-danger-soft/50 px-3 py-2">
+      <button type="button" onClick={onInspect} className="block w-full text-left">
+        <div className="truncate text-[12px] font-medium text-text-primary">{run.workflowName ?? 'Failed workflow'}</div>
+        <div className="mt-0.5 truncate text-[11px] text-text-muted">{run.failedNode ? `Failed at ${run.failedNode}` : 'Needs operator review'}</div>
+      </button>
+      <div className="mt-2 flex gap-1.5">
+        {run.workflowId && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+          >
+            <RefreshCw size={11} /> Retry
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onDetails}
+          className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+        >
+          Details
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EvidenceRow({
+  event,
+  onSelectWorkflow,
+  onOpenRun,
+}: {
+  event: ObservabilityEvent;
+  onSelectWorkflow: (workflowId: string) => void;
+  onOpenRun: (route: string) => void;
+}) {
+  const evidence = evidenceLabel(event);
+  return (
+    <ObservationRow
+      event={{
+        ...event,
+        summary: evidence || event.summary || event.detail || event.sourceEvent,
+      }}
+      onSelectWorkflow={onSelectWorkflow}
+      onOpenRun={onOpenRun}
+      compact
+    />
+  );
+}
+
+function observationIcon(kind: ObservabilityEvent['kind']) {
+  switch (kind) {
+    case 'agent': return <Sparkles size={12} />;
+    case 'approval': return <AlertTriangle size={12} />;
+    case 'artifact': return <FileText size={12} />;
+    case 'brain': return <BrainCircuit size={12} />;
+    case 'listener': return <Zap size={12} />;
+    case 'node': return <Workflow size={12} />;
+    case 'run': return <ActivityIcon size={12} />;
+    case 'tool': return <Wrench size={12} />;
+    case 'workflow': return <Workflow size={12} />;
+    default: return <ActivityIcon size={12} />;
+  }
+}
+
+function actorLabel(event: ObservabilityEvent): string | null {
+  if (event.actorType && event.actorId) return `${event.actorType}:${event.actorId.slice(0, 8)}`;
+  if (event.agentId) return `agent:${event.agentId.slice(0, 8)}`;
+  if (event.runId) return `run:${event.runId.slice(0, 8)}`;
+  return null;
+}
+
+function evidenceLabel(event: ObservabilityEvent): string | null {
+  const first = event.evidence[0];
+  if (first) {
+    return compactStrings([
+      stringField(first, ['label', 'type', 'name']),
+      stringField(first, ['value', 'title', 'summary']),
+    ]).join(': ') || null;
+  }
+  return stringField(event.rawPayloadRedacted, ['tool', 'toolName', 'name', 'command', 'title', 'summary']) ?? null;
+}
+
+function buildAttentionGroups(
+  approvals: WorkspaceApproval[],
+  failedRuns: WorkspaceFailedRun[],
+  waitingEvents: ObservabilityEvent[],
+  incidentEvents: ObservabilityEvent[],
+): CommandAttentionGroup[] {
+  const groups: CommandAttentionGroup[] = [];
+  for (const approval of approvals) {
+    const selfHeal = isSelfHealApproval(approval);
+    groups.push({
+      id: `approval:${approval.id}`,
+      title: selfHeal ? 'Self-healing fix ready' : approval.workflowName ?? approval.title ?? 'Approval needed',
+      summary: approval.summary ?? approval.agentName ?? 'Operator decision required',
+      count: 1,
+      tone: 'warn',
+      runId: approval.runId,
+      approval,
+    });
+  }
+
+  const failedByWorkflow = new Map<string, CommandAttentionGroup>();
+  for (const run of failedRuns) {
+    if (run.selfHealIncident) {
+      groups.push({
+        id: `self-heal:${run.id}:${run.selfHealIncident.nodeId}`,
+        title: selfHealFailedRunTitle(run.selfHealIncident),
+        summary: selfHealFailedRunSummary(run),
+        count: 1,
+        tone: 'danger',
+        workflowId: run.workflowId,
+        retryWorkflowId: run.workflowId,
+        runId: run.id,
+      });
+      continue;
+    }
+    const key = run.workflowId ?? run.workflowName ?? run.id;
+    const existing = failedByWorkflow.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (!existing.runId) existing.runId = run.id;
+      if (!existing.retryWorkflowId && run.workflowId) existing.retryWorkflowId = run.workflowId;
+      continue;
+    }
+    failedByWorkflow.set(key, {
+      id: `failed:${key}`,
+      title: run.workflowName ?? 'Failed workflow',
+      summary: run.failedNode ? `Failed at ${run.failedNode}` : 'Needs operator review',
+      count: 1,
+      tone: 'danger',
+      workflowId: run.workflowId,
+      retryWorkflowId: run.workflowId,
+      runId: run.id,
+    });
+  }
+  groups.push(...failedByWorkflow.values());
+
+  const knownApprovalIds = new Set(approvals.map((approval) => approval.id));
+  const knownRunIds = new Set(failedRuns.map((run) => run.id));
+  for (const event of [...waitingEvents, ...incidentEvents]) {
+    if (event.approvalId && knownApprovalIds.has(event.approvalId)) continue;
+    if (event.runId && knownRunIds.has(event.runId)) continue;
+    groups.push({
+      id: `event:${event.id}`,
+      title: event.title,
+      summary: event.summary || event.detail || event.sourceEvent,
+      count: 1,
+      tone: observationTone(event),
+      workflowId: event.workflowId ?? undefined,
+      runId: event.runId ?? undefined,
+      retryWorkflowId: event.workflowId ?? undefined,
+    });
+  }
+
+  return groups.sort((a, b) => attentionRank(a) - attentionRank(b));
+}
+
+function isSelfHealApproval(approval: WorkspaceApproval): boolean {
+  return approval.source === 'self_heal';
+}
+
+function selfHealFailedRunTitle(incident: NonNullable<WorkspaceFailedRun['selfHealIncident']>): string {
+  return incident.status === 'EXHAUSTED' ? 'Self-healing exhausted' : 'Self-healing blocked';
+}
+
+function selfHealFailedRunSummary(run: WorkspaceFailedRun): string {
+  const incident = run.selfHealIncident;
+  if (!incident) return run.failedNode ? `Failed at ${run.failedNode}` : 'Needs operator review';
+  const node = incident.nodeTitle ?? run.failedNode ?? incident.nodeId;
+  const reason = incident.reason ?? incident.diagnosis ?? run.failureReason ?? 'Agentis could not certify a safe repair.';
+  return `${run.workflowName ?? 'Workflow'} - ${node}: ${reason}`;
+}
+
+function attentionRank(group: CommandAttentionGroup): number {
+  if (group.tone === 'danger') return 0;
+  if (group.approval) return 1;
+  if (group.tone === 'warn') return 2;
+  return 3;
+}
+
+function dedupeObservations(events: ObservabilityEvent[]): ObservabilityEvent[] {
+  const seen = new Set<string>();
+  const out: ObservabilityEvent[] = [];
+  for (const event of events) {
+    const key = event.id || [event.sourceEvent, event.title, event.createdAt].join(':');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(event);
+  }
+  return out;
+}
+
+function isRecentIso(value: string, windowMs: number): boolean {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && Date.now() - time <= windowMs;
+}
+
+function formatAge(value: string): string {
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return 'now';
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+const ISSUE_STATUS_TONE: Record<string, string> = {
+  backlog: 'bg-surface-2 text-text-muted',
+  todo: 'bg-surface-2 text-text-muted',
+  in_progress: 'bg-sky-500/15 text-sky-200',
+  in_review: 'bg-violet-500/15 text-violet-200',
+  blocked: 'bg-rose-500/15 text-rose-200',
+  done: 'bg-emerald-500/15 text-emerald-200',
+  cancelled: 'bg-surface-2 text-text-muted',
+};
+
+const ISSUE_PRIORITY_TONE: Record<string, string> = {
+  urgent: 'bg-rose-500/15 text-rose-300',
+  high: 'bg-amber-500/15 text-amber-300',
+  medium: 'bg-sky-500/15 text-sky-300',
+  low: 'bg-surface-2 text-text-muted',
+  none: 'bg-surface-2 text-text-muted',
+};
+
+function IssueControlRow({
+  issue,
+  onAccept,
+  onOpenRun,
+  compact = false,
+}: {
+  issue: WorkspaceIssue;
+  onAccept: () => Promise<void>;
+  onOpenRun?: () => void;
+  compact?: boolean;
+}) {
+  const [accepting, setAccepting] = useState(false);
+
+  async function handleAccept() {
+    setAccepting(true);
+    try { await onAccept(); } finally { setAccepting(false); }
+  }
+
+  const humanize = (v: string) => v.replaceAll('_', ' ');
+
+  if (compact) {
+    return (
+      <div className="flex items-center gap-2 rounded-card border border-line bg-canvas/40 px-2 py-1.5">
+        <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', issue.status === 'blocked' ? 'bg-danger' : 'bg-text-muted/60')} />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-[11px] font-medium text-text-primary">{issue.title}</span>
+            <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-semibold', ISSUE_PRIORITY_TONE[issue.priority] ?? 'bg-surface-2 text-text-muted')}>
+              {issue.priority}
+            </span>
+          </div>
+          <div className="mt-0.5 truncate font-mono text-[9px] text-text-muted">{issue.identifier} - {humanize(issue.status)}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {issue.status !== 'in_progress' && issue.status !== 'done' && (
+            <button
+              type="button"
+              disabled={accepting}
+              onClick={() => void handleAccept()}
+              title="Accept"
+              aria-label="Accept issue"
+              className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-accent/10 text-accent hover:bg-accent/20 disabled:opacity-50"
+            >
+              {accepting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+            </button>
+          )}
+          {issue.activeRunId && onOpenRun && (
+            <button
+              type="button"
+              onClick={onOpenRun}
+              title="Inspect run"
+              aria-label="Inspect run"
+              className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary"
+            >
+              <ActivityIcon size={10} />
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-card border border-line bg-canvas/40 px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-text-muted">
+          {issue.identifier}
+        </span>
+        <span className={clsx('rounded-full px-1.5 py-0.5 text-[9px] font-semibold', ISSUE_STATUS_TONE[issue.status] ?? 'bg-surface-2 text-text-muted')}>
+          {humanize(issue.status)}
+        </span>
+        <span className={clsx('rounded-full px-1.5 py-0.5 text-[9px] font-semibold', ISSUE_PRIORITY_TONE[issue.priority] ?? 'bg-surface-2 text-text-muted')}>
+          {issue.priority}
+        </span>
+      </div>
+      <div className="mt-1.5 text-[12px] font-medium leading-snug text-text-primary line-clamp-2">
+        {issue.title}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {issue.status !== 'in_progress' && issue.status !== 'done' && (
+          <button
+            type="button"
+            disabled={accepting}
+            onClick={() => void handleAccept()}
+            className="inline-flex h-6 items-center gap-1 rounded-btn bg-accent/10 px-2 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+          >
+            {accepting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+            Accept
+          </button>
+        )}
+        {issue.activeRunId && onOpenRun && (
+          <button
+            type="button"
+            onClick={onOpenRun}
+            className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[10px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+          >
+            <ActivityIcon size={10} className="shrink-0" />
+            Inspect run
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IssueCreateRow({ onCreated, compact = false }: { onCreated: () => void; compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function handleCreate() {
+    if (!title.trim()) return;
+    setSaving(true);
+    try {
+      await api('/v1/issues', {
+        method: 'POST',
+        body: JSON.stringify({ title: title.trim(), status: 'backlog', priority: 'medium', labels: [] }),
+      });
+      setTitle('');
+      setOpen(false);
+      onCreated();
+    } catch { /* ignore */ } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className={clsx(
+          'flex w-full items-center gap-1.5 rounded-card border border-dashed border-line text-[11px] text-text-muted transition-colors hover:border-accent/40 hover:text-accent',
+          compact ? 'justify-center px-2 py-1.5' : 'mt-2 px-2.5 py-2',
+        )}
+      >
+        <Plus size={11} />
+        New issue
+      </button>
+    );
+  }
+
+  return (
+    <div className={clsx('rounded-card border border-accent/30 bg-canvas/40 px-2.5 py-2', !compact && 'mt-2')}>
+      <input
+        autoFocus
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void handleCreate();
+          if (e.key === 'Escape') { setOpen(false); setTitle(''); }
+        }}
+        placeholder="Issue title…"
+        className="w-full bg-transparent text-[12px] text-text-primary placeholder:text-text-muted outline-none"
+      />
+      <div className="mt-2 flex gap-1.5">
+        <button
+          type="button"
+          disabled={!title.trim() || saving}
+          onClick={() => void handleCreate()}
+          className="inline-flex h-6 items-center gap-1 rounded-btn bg-accent px-2 text-[10px] font-medium text-canvas hover:bg-accent/90 disabled:opacity-50"
+        >
+          {saving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+          Save
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setTitle(''); }}
+          className="inline-flex h-6 items-center rounded-btn border border-line px-2 text-[10px] text-text-muted hover:bg-surface-2"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function clampLiveWorkspaceFrame(frame: LiveWorkspaceFrame, containerSize: VirtualCanvasSize): LiveWorkspaceFrame {
+  const maxWidth = Math.max(LIVE_WORKSPACE_MIN_WIDTH, containerSize.width - LIVE_WORKSPACE_MARGIN * 2);
+  const maxHeight = Math.max(LIVE_WORKSPACE_MIN_HEIGHT, containerSize.height - LIVE_WORKSPACE_MARGIN * 2);
+  const width = clamp(frame.width, LIVE_WORKSPACE_MIN_WIDTH, maxWidth);
+  const height = clamp(frame.height, LIVE_WORKSPACE_MIN_HEIGHT, maxHeight);
+  const maxX = Math.max(LIVE_WORKSPACE_MARGIN, containerSize.width - width - LIVE_WORKSPACE_MARGIN);
+  const maxY = Math.max(LIVE_WORKSPACE_MARGIN, containerSize.height - height - LIVE_WORKSPACE_MARGIN);
+  const x = clamp(frame.x, LIVE_WORKSPACE_MARGIN, maxX);
+  const y = clamp(frame.y, LIVE_WORKSPACE_MARGIN, maxY);
   return { ...frame, x, y, width, height };
 }
 
-function triageFramesEqual(a: TriagePanelFrame, b: TriagePanelFrame): boolean {
+function liveWorkspaceFramesEqual(a: LiveWorkspaceFrame, b: LiveWorkspaceFrame): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
 
@@ -1794,7 +3209,7 @@ function GhostEmptyState({ onCreateOrchestrator }: { onCreateOrchestrator: () =>
       <PackageOpen size={32} className="mx-auto text-text-muted" />
       <h2 className="mt-3 text-heading text-text-primary">Your AI organization will appear here.</h2>
       <p className="mt-2 text-[13px] leading-relaxed text-text-secondary">
-        Start with the orchestrator. Once the workspace orchestrator is commissioned, managers and workers can branch beneath it.
+        Start with the orchestrator. Once the workspace orchestrator is commissioned, managers and specialists can branch beneath it.
       </p>
       <button
         type="button"
@@ -1845,12 +3260,19 @@ function computeVirtualCanvasSize(
   const workerSize = computeWorkerNodeSize(workerCount);
   const workerColumns = computeWorkerColumns(workerCount);
   const workerRows = Math.max(1, Math.ceil(workerCount / Math.max(1, workerColumns)));
+  const linkedWorkflowRowCount = estimateMaxLinkedWorkflowRowCount(data.workflows, agents, activeRuns);
+  // Reserve the full packed branch row (managers + the direct-workflows branch)
+  // INCLUDING each edge lane's half-span plus margins, so the uniform-stride
+  // pyramid never clamps a lane to one column (vertical line) at the canvas edge.
+  const packedContentWidth = packContentWidth(deriveTopBranchLayout(data, agents, roles).branchCount);
   const width = Math.max(
     containerSize.width,
     1040,
     managerCount * (NODE.manager.width + 62) + 320,
+    packedContentWidth + (RESOURCE_LAYOUT.sideMargin + NODE.workflow.width / 2) * 2,
     Math.min(workerCount, workerColumns) * (workerSize.width + 48) + 320,
-    Math.min(resources, 4) * 220 + 260,
+    resourceGridRowWidth(Math.min(resources, 6)) + RESOURCE_LAYOUT.sideMargin * 2,
+    linkedWorkflowRowWidth(linkedWorkflowRowCount) + RESOURCE_LAYOUT.sideMargin * 2,
   );
   const resourceRows = Math.max(1, Math.ceil(Math.max(resources, 3) / Math.max(3, Math.floor(width / 260))));
   const resourceStartY = 530 + workerRows * (workerSize.height + 42) + 68;
@@ -1927,11 +3349,9 @@ function agentNode(
   pos: Vec2,
   workingAgentIds: Set<string>,
   approvals: WorkspaceApproval[],
-  activeRuns: WorkspaceActiveRun[],
   sizeOverride?: { width: number; height: number },
 ): CanvasNode {
   const record = agent as unknown as Record<string, unknown>;
-  const activeRun = activeRuns.find((run) => run.agents?.some((runAgent) => runAgent.id === agent.id));
   const active = workingAgentIds.has(agent.id);
   const online = isAvailableAgent(agent.status);
   const approval = approvals.find((item) => item.agentName === agent.name);
@@ -1977,14 +3397,10 @@ function agentNode(
       : stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? '#a78bfa' : undefined),
     imageUrl: imageFromRecord(record, ['avatarUrl', 'avatarDataUrl', 'imageUrl', 'imageDataUrl', 'iconUrl', 'photoUrl', 'pictureUrl']),
     icon: role === 'orchestrator' ? <BrainCircuit size={20} /> : role === 'manager' ? <ShieldCheck size={18} /> : <Bot size={18} />,
-    currentTask: activeRun?.currentStep ?? stringField(record, ['currentTask', 'currentTaskId']),
-    startedAt: activeRun?.startedAt,
-    progress: runProgress(activeRun),
+    currentTask: stringField(record, ['currentTask', 'currentTaskId']),
     tooltipLines: compactStrings([
       `Status: ${status}`,
       stringField(record, ['description']),
-      activeRun?.workflowName ? `Run: ${activeRun.workflowName}` : undefined,
-      activeRun?.currentStep ? `Step: ${activeRun.currentStep}` : undefined,
       role === 'manager' && spaceName ? `Domain: ${labelize(spaceName)}` : undefined,
       stringField(record, ['runtimeModel']) ? `Model: ${stringField(record, ['runtimeModel'])}` : undefined,
       stringField(record, ['adapterType']) ? `Adapter: ${stringField(record, ['adapterType'])}` : undefined,
@@ -2021,7 +3437,7 @@ function ghostNode(
       ? ['Your orchestrator goes here - it directs the workspace hierarchy.']
       : kind === 'manager'
         ? ['Managers coordinate workers inside a space.']
-        : ['Workers execute tasks, research, writing, and automations.'],
+        : ['Specialists execute tasks, research, writing, and automations.'],
   };
 }
 
@@ -2038,37 +3454,154 @@ function buildResourceNodes(
   sourceXById: Map<string, number>,
   sourceNodeById: Map<string, CanvasNode>,
   expandedDomains: ReadonlySet<string> = new Set<string>(),
+  focusedManagerId: string | null = null,
+  branchSlots: ReadonlyMap<string, BranchSlot> = new Map<string, BranchSlot>(),
+  directSlot: BranchSlot | null = null,
 ): CanvasNode[] {
   const resources: CanvasNode[] = [];
   const workflowPositions = new Map<string, Vec2>();
   const workflowDomainById = new Map<string, { spaceId?: string | null; spaceName?: string | null; accent?: string }>();
   const workflowArtifactIndex = new Map<string, number>();
   const artifactCountsByWorkflow = countArtifactsByWorkflow(artifacts);
+  // Apps are the org primitive: collapse each App's workflows into ONE app node
+  // (clustered under the App's domain/owner, routed to /apps/:id) while bare
+  // workflows (app_id = null) keep rendering as workflow nodes. The app node
+  // reuses a real representative workflow id so run liveness still resolves.
+  const resourceWorkflows = collapseAppsIntoResourceWorkflows(data, activeWorkflowIds);
   const resourceCountEstimate = Math.max(
-    data.workflows.length + data.knowledgeBases.length + artifacts.length + approvals.length,
+    resourceWorkflows.length + data.knowledgeBases.length + artifacts.length + approvals.length,
     3,
   );
-  const columns = Math.max(1, Math.min(resourceCountEstimate, Math.max(3, Math.floor(canvasSize.width / 250))));
-  const anchoredSlots = new Map<string, number>();
+  const gridAvailableWidth = Math.max(NODE.workflow.width, canvasSize.width - RESOURCE_LAYOUT.sideMargin * 2);
+  const maxGridColumns = Math.max(1, Math.floor((gridAvailableWidth + RESOURCE_LAYOUT.gridColumnGap) / RESOURCE_GRID_COLUMN_WIDTH));
+  const columns = Math.max(1, Math.min(resourceCountEstimate, maxGridColumns));
   const gridPosAt = (row: number, col: number): Vec2 => {
-    const margin = 120;
-    const available = canvasSize.width - margin * 2;
-    const gridWidth = Math.min(available, Math.max(1, columns - 1) * 260);
+    const available = canvasSize.width - RESOURCE_LAYOUT.sideMargin * 2;
+    const gridWidth = Math.min(available, Math.max(1, columns - 1) * RESOURCE_GRID_COLUMN_WIDTH);
     const start = canvasSize.width / 2 - gridWidth / 2;
     const x = columns === 1 ? canvasSize.width / 2 : start + (gridWidth * col) / Math.max(1, columns - 1);
-    return { x, y: resourceStartY + row * 104 };
+    return { x, y: resourceStartY + row * RESOURCE_LAYOUT.rowGap };
   };
   const positions = (index: number): Vec2 => gridPosAt(Math.floor(index / columns), index % columns);
-  const anchoredPosition = (sourceId: string): Vec2 => {
-    const slot = anchoredSlots.get(sourceId) ?? 0;
-    anchoredSlots.set(sourceId, slot + 1);
-    const row = Math.floor(slot / 3);
-    const col = slot % 3;
-    const offsets = [0, -190, 190];
-    const sourceX = sourceXById.get(sourceId) ?? canvasSize.width / 2;
+  const workflowMinX = RESOURCE_LAYOUT.sideMargin + NODE.workflow.width / 2;
+  const workflowMaxX = canvasSize.width - RESOURCE_LAYOUT.sideMargin - NODE.workflow.width / 2;
+  const managerSourceXs = Array.from(sourceNodeById.values())
+    .filter((node) => node.role === 'manager')
+    .map((node) => node.x)
+    .sort((a, b) => a - b);
+  const workflowSourceSlot = (sourceX: number): { left: number; right: number } => {
+    const anchorX = clamp(sourceX, workflowMinX, workflowMaxX);
+    const sourceIndex = managerSourceXs.findIndex((x) => Math.abs(x - sourceX) < 0.5);
+    const prevX = sourceIndex > 0 ? managerSourceXs[sourceIndex - 1] : undefined;
+    const nextX = sourceIndex >= 0 ? managerSourceXs[sourceIndex + 1] : undefined;
+    const left = prevX == null
+      ? workflowMinX
+      : Math.max(workflowMinX, (prevX + anchorX) / 2 + RESOURCE_LAYOUT.nodeClearance);
+    const right = nextX == null
+      ? workflowMaxX
+      : Math.min(workflowMaxX, (nextX + anchorX) / 2 - RESOURCE_LAYOUT.nodeClearance);
+    return right >= left ? { left, right } : { left: anchorX, right: anchorX };
+  };
+  type BranchGeometry = {
+    anchorX: number;
+    left: number;
+    right: number;
+    maxColumns: number;
+    direction: 'left' | 'center' | 'right';
+  };
+  const maxBranchColumns = (left: number, right: number): number => {
+    const available = Math.max(NODE.workflow.width, right - left);
+    return Math.max(1, Math.min(5, Math.floor((available + AUTHORITY_LANE.columnGap) / AUTHORITY_LANE_COLUMN_WIDTH)));
+  };
+  const branchRowCapacity = (geometry: BranchGeometry, row: number): number => {
+    return Math.max(1, Math.min(geometry.maxColumns, WORKFLOW_BRANCH_ROW_PATTERN[row] ?? geometry.maxColumns));
+  };
+  const branchCapacity = (geometry: BranchGeometry, rows: number): number => {
+    let total = 0;
+    for (let row = 0; row < rows; row += 1) total += branchRowCapacity(geometry, row);
+    return total;
+  };
+  const branchPositions = (geometry: BranchGeometry, count: number, startRow: number): Vec2[] => {
+    const positions: Vec2[] = [];
+    for (let localRow = 0; positions.length < count; localRow += 1) {
+      const remaining = count - positions.length;
+      const rowCount = Math.min(remaining, branchRowCapacity(geometry, localRow));
+      const rowWidth = Math.max(0, rowCount - 1) * AUTHORITY_LANE_COLUMN_WIDTH;
+      const desiredFirstX = geometry.direction === 'left'
+        ? geometry.anchorX - rowWidth
+        : geometry.direction === 'right'
+          ? geometry.anchorX
+          : geometry.anchorX - rowWidth / 2;
+      const firstX = clamp(desiredFirstX, geometry.left, Math.max(geometry.left, geometry.right - rowWidth));
+      for (let col = 0; col < rowCount; col += 1) {
+        positions.push({
+          x: firstX + col * AUTHORITY_LANE_COLUMN_WIDTH,
+          y: resourceStartY + (startRow + localRow) * RESOURCE_LAYOUT.rowGap,
+        });
+      }
+    }
+    return positions;
+  };
+  const rowsUsedByBranch = (geometry: BranchGeometry, count: number): number => {
+    let remaining = count;
+    let rows = 0;
+    while (remaining > 0) {
+      remaining -= branchRowCapacity(geometry, rows);
+      rows += 1;
+    }
+    return rows;
+  };
+  // A packed branch lane: workflows fan out symmetrically within their own
+  // [left,right] slot so sibling lanes never collide.
+  const geometryFromSlot = (slot: BranchSlot): BranchGeometry => {
+    const left = clamp(slot.left, workflowMinX, workflowMaxX);
+    const right = clamp(Math.max(slot.right, left), workflowMinX, workflowMaxX);
     return {
-      x: clamp(sourceX + (offsets[col] ?? 0), 130, canvasSize.width - 130),
-      y: resourceStartY + row * 104,
+      anchorX: clamp(slot.centerX, left, right),
+      left,
+      right,
+      maxColumns: maxBranchColumns(left, right),
+      direction: 'center',
+    };
+  };
+  const sourceWorkflowGeometry = (sourceId: string | undefined): BranchGeometry => {
+    const slot = sourceId ? branchSlots.get(sourceId) : undefined;
+    if (slot) return geometryFromSlot(slot);
+    // Fallback for non-manager anchors (e.g. a connected worker): keep the
+    // original midpoint-between-neighbours bounds.
+    const anchorX = clamp(sourceId ? sourceXById.get(sourceId) ?? canvasSize.width / 2 : canvasSize.width / 2, workflowMinX, workflowMaxX);
+    const bounds = workflowSourceSlot(anchorX);
+    const center = canvasSize.width / 2;
+    return {
+      anchorX,
+      left: bounds.left,
+      right: bounds.right,
+      maxColumns: maxBranchColumns(bounds.left, bounds.right),
+      direction: anchorX < center - 24 ? 'left' : anchorX > center + 24 ? 'right' : 'center',
+    };
+  };
+  const focusedWorkflowGeometry = (sourceId: string | undefined): BranchGeometry => {
+    // Centered wide lane for the drilled-in manager: up to ~5 columns so the
+    // subtree fans into a balanced pyramid (the dimmed siblings free the room).
+    const anchorX = clamp(sourceId ? sourceXById.get(sourceId) ?? canvasSize.width / 2 : canvasSize.width / 2, workflowMinX, workflowMaxX);
+    const halfWide = Math.min(canvasSize.width / 2 - RESOURCE_LAYOUT.sideMargin, 3 * AUTHORITY_LANE_COLUMN_WIDTH);
+    const left = clamp(anchorX - halfWide, workflowMinX, workflowMaxX);
+    const right = clamp(anchorX + halfWide, workflowMinX, workflowMaxX);
+    return { anchorX, left, right, maxColumns: maxBranchColumns(left, right), direction: 'center' };
+  };
+  const orchestratorWorkflowGeometry = (): BranchGeometry => {
+    // The orchestrator's direct workflows are a first-class packed branch
+    // (centered in their own slot), not a far-right gutter.
+    if (directSlot) return geometryFromSlot(directSlot);
+    const center = canvasSize.width / 2;
+    const left = Math.min(workflowMaxX, center + Math.max(420, NODE.orchestrator.width / 2 + 120));
+    const right = workflowMaxX;
+    return {
+      anchorX: left,
+      left,
+      right,
+      maxColumns: maxBranchColumns(left, right),
+      direction: 'right',
     };
   };
 
@@ -2084,24 +3617,25 @@ function buildResourceNodes(
     workflowSpaceName: string | null;
     workflowAccent: string | undefined;
     anchoredSourceId: string | undefined;
+    laneKind: NonNullable<CanvasNode['laneKind']>;
+    laneGroupKey: string;
     failed: WorkspaceFailedRun | undefined;
     groupKey: string;
     /** 0 = needs attention (failed), 1 = active/running, 2 = idle — floats problems up. */
     statePriority: number;
   }
-  const entries: WorkflowEntry[] = data.workflows.map((workflow) => {
+  const entries: WorkflowEntry[] = resourceWorkflows.map((workflow) => {
     const run = activeRuns.find((item) => item.workflowId === workflow.id);
     const wfLabel = workflowLabel(workflow);
     let connectedAgentIds = run?.agents?.map((agent) => `agent-${agent.id}`);
     if ((!connectedAgentIds || connectedAgentIds.length === 0) && workflow?.graph?.nodes) {
-      connectedAgentIds = workflow.graph.nodes
-        .filter((node: any) => node.config?.kind === 'agent_task' && node.config?.agentId)
-        .map((node: any) => `agent-${node.config.agentId}`);
+      connectedAgentIds = workflowAgentTaskIds(workflow).map((agentId) => `agent-${agentId}`);
     }
-    if ((!connectedAgentIds || connectedAgentIds.length === 0) && workflow.spaceId) {
-      const sourceId = spaceSourceIds.get(workflow.spaceId);
-      if (sourceId) connectedAgentIds = [sourceId];
-    }
+    // Manager-owned org structure: a workflow owned by a specialist anchors under
+    // that specialist (when its node is on-canvas, i.e. its manager is focused),
+    // so the specialist's workflows cluster beneath it.
+    const ownerSourceId = workflow.ownerAgentId ? `agent-${workflow.ownerAgentId}` : undefined;
+    if (ownerSourceId) connectedAgentIds = preferConnectedSource(connectedAgentIds, ownerSourceId);
     let workflowSpaceId = workflow.spaceId ?? null;
     let workflowSpaceName: string | null = null;
     let workflowAccent: string | undefined;
@@ -2109,65 +3643,109 @@ function buildResourceNodes(
     if (!workflowSpaceId && linkedDomain.spaceId) workflowSpaceId = linkedDomain.spaceId;
     if (linkedDomain.spaceName) workflowSpaceName = linkedDomain.spaceName;
     if (linkedDomain.accent) workflowAccent = linkedDomain.accent;
+    let domainSourceId: string | undefined;
     if (workflowSpaceId) {
-      const sourceId = spaceSourceIds.get(workflowSpaceId);
-      if (sourceId && (!connectedAgentIds || connectedAgentIds.length === 0)) connectedAgentIds = [sourceId];
-      const sourceNode = sourceId ? sourceNodeById.get(sourceId) : undefined;
+      domainSourceId = spaceSourceIds.get(workflowSpaceId);
+      if (domainSourceId) connectedAgentIds = preferConnectedSource(connectedAgentIds, domainSourceId);
+      const sourceNode = domainSourceId ? sourceNodeById.get(domainSourceId) : undefined;
       if (!workflowSpaceName) workflowSpaceName = sourceNode?.spaceName ?? null;
       if (!workflowAccent) workflowAccent = sourceNode?.accent;
     }
-    const anchoredSourceId = connectedAgentIds?.find((sourceId) => sourceXById.has(sourceId));
+    // The owning specialist wins the anchor over the domain manager — the
+    // specialist is who actually runs the workflow. Falls back to the domain
+    // source (and then any connected agent) when the specialist isn't on-canvas.
+    const ownerAnchorId = ownerSourceId && sourceXById.has(ownerSourceId) && isWorkflowAnchorSource(ownerSourceId, sourceNodeById)
+      ? ownerSourceId
+      : undefined;
+    const anchoredSourceId = ownerAnchorId
+      ?? (domainSourceId && sourceXById.has(domainSourceId)
+        ? domainSourceId
+        : connectedAgentIds?.find((sourceId) => sourceXById.has(sourceId) && isWorkflowAnchorSource(sourceId, sourceNodeById)));
     const failed = failedRuns.find((item) => item.workflowId === workflow.id || item.workflowName === wfLabel);
+    const statusNeedsAttention = /fail|error|blocked/i.test(workflow.status ?? '');
     const isActive = Boolean(run) || activeWorkflowIds.has(workflow.id);
-    const statePriority = failed ? 0 : isActive ? 1 : 2;
+    const statePriority = failed || statusNeedsAttention ? 0 : isActive ? 1 : 2;
     const groupKey = workflowSpaceName ?? workflowSpaceId ?? '~ungrouped';
-    return { workflow, wfLabel, run, connectedAgentIds, workflowSpaceId, workflowSpaceName, workflowAccent, anchoredSourceId, failed, groupKey, statePriority };
+    const laneKind: NonNullable<CanvasNode['laneKind']> = anchoredSourceId || workflowSpaceId
+      ? 'manager-workflows'
+      : 'orchestrator-workflows';
+    const laneGroupKey = laneKind === 'manager-workflows'
+      ? `manager:${anchoredSourceId ?? workflowSpaceId ?? groupKey}`
+      : 'orchestrator:direct';
+    return { workflow, wfLabel, run, connectedAgentIds, workflowSpaceId, workflowSpaceName, workflowAccent, anchoredSourceId, laneKind, laneGroupKey, failed, groupKey, statePriority };
   });
-
-  // ── Phase 2: group non-anchored workflows into domain bands; within a band,
-  // order attention-first. Anchored workflows stay clustered under their source.
-  const banded = entries.filter((e) => !e.anchoredSourceId);
+  // Phase 2: group workflows into expandable ownership lanes.
   const groups = new Map<string, WorkflowEntry[]>();
-  for (const e of banded) {
-    const list = groups.get(e.groupKey) ?? [];
+  for (const e of entries) {
+    const list = groups.get(e.laneGroupKey) ?? [];
     list.push(e);
-    groups.set(e.groupKey, list);
+    groups.set(e.laneGroupKey, list);
   }
-  // Domains needing attention (or actively running) float to the top bands.
+  // Domains needing attention (or actively running) float to the top of each lane.
   const orderedGroups = [...groups.entries()].sort((a, b) => {
     const aBest = Math.min(...a[1].map((e) => e.statePriority));
     const bBest = Math.min(...b[1].map((e) => e.statePriority));
-    return aBest - bBest || a[0].localeCompare(b[0]);
+    const laneDelta = laneOrder(a[1][0]?.laneKind) - laneOrder(b[1][0]?.laneKind);
+    return laneDelta || aBest - bBest || workflowGroupLabel(a[1][0]).localeCompare(workflowGroupLabel(b[1][0]));
   });
   const bandPos = new Map<string, Vec2>();
   const aggregators: CanvasNode[] = [];
   const hiddenByGroup = new Map<string, WorkflowEntry[]>();
-  let bandRow = 0;
-  for (const [groupKey, groupEntries] of orderedGroups) {
+  let directWorkflowRows = 0;
+  let maxWorkflowRows = 0;
+  for (const [laneGroupKey, groupEntries] of orderedGroups) {
     groupEntries.sort((a, b) => a.statePriority - b.statePriority || a.wfLabel.localeCompare(b.wfLabel));
-    // Scale rule: an unexpanded domain shows at most ONE band row. Failed and
-    // active workflows always show; idle ones fill the remaining slots and the
-    // rest collapse behind a "+N idle" expander. Dozens of workflows stay one
-    // calm row per domain instead of a wall of cards.
-    const expanded = expandedDomains.has(groupKey);
-    const overflows = groupEntries.length > columns;
-    const visibleBudget = !overflows ? groupEntries.length : expanded ? groupEntries.length : columns - 1;
+    // Scale rule: an unexpanded ownership group shows just enough rows to keep
+    // failed and active workflows visible, then hides idle overflow behind a
+    // local expander.
+    const laneKind = groupEntries[0]?.laneKind ?? 'orchestrator-workflows';
+    const focusedManagerGroup = Boolean(
+      focusedManagerId
+        && laneKind === 'manager-workflows'
+        && groupEntries.some((entry) => (
+          entry.anchoredSourceId
+            ? sourceBelongsToManager(entry.anchoredSourceId, focusedManagerId, sourceNodeById)
+            : laneGroupKey === `manager:${focusedManagerId}`
+        )),
+    );
+    // A focused manager's siblings are dimmed out of the way, so give its subtree
+    // a wide lane to fan into a real pyramid (2 → 3 → 4 …) instead of a column.
+    const geometry = focusedManagerGroup
+      ? focusedWorkflowGeometry(groupEntries[0]?.anchoredSourceId)
+      : laneKind === 'manager-workflows'
+        ? sourceWorkflowGeometry(groupEntries[0]?.anchoredSourceId)
+        : orchestratorWorkflowGeometry();
+    const expanded = expandedDomains.has(laneGroupKey) || focusedManagerGroup;
+    const maxRows = focusedManagerGroup ? FOCUSED_MANAGER_WORKFLOW_ROWS : FULL_VIEW_WORKFLOW_ROWS;
+    const rowBudget = branchCapacity(geometry, maxRows);
+    const overflows = groupEntries.length > rowBudget;
+    const mustShowCount = groupEntries.filter((entry) => entry.statePriority < 2).length;
+    const collapsedBudget = Math.max(1, rowBudget - 1);
+    const visibleBudget = !overflows
+      ? groupEntries.length
+      : expanded
+        ? groupEntries.length
+        : Math.max(collapsedBudget, Math.min(mustShowCount, rowBudget - 1));
     const visible = groupEntries.slice(0, visibleBudget);
     const hidden = groupEntries.slice(visibleBudget);
-    if (hidden.length > 0) hiddenByGroup.set(groupKey, hidden);
+    if (hidden.length > 0) hiddenByGroup.set(laneGroupKey, hidden);
 
-    let col = 0;
-    for (const e of visible) {
-      bandPos.set(e.workflow.id, gridPosAt(bandRow, col));
-      col += 1;
-      if (col >= columns) { col = 0; bandRow += 1; }
+    const rowStart = laneKind === 'orchestrator-workflows' ? directWorkflowRows : 0;
+    const needsExpander = overflows && (hidden.length > 0 || expanded);
+    const groupPositions = branchPositions(geometry, visible.length + (needsExpander ? 1 : 0), rowStart);
+    for (const [entryIndex, e] of visible.entries()) {
+      const pos = groupPositions[entryIndex];
+      if (pos) bandPos.set(e.workflow.id, pos);
     }
-    if (overflows) {
+    if (needsExpander) {
       // The expander persists in both states so the band can collapse again.
-      const pos = gridPosAt(bandRow, col);
-      const domainLabel = groupKey === '~ungrouped' ? 'workspace' : groupKey;
+      const pos = groupPositions[visible.length] ?? {
+        x: geometry.anchorX,
+        y: resourceStartY + rowStart * RESOURCE_LAYOUT.rowGap,
+      };
+      const domainLabel = workflowGroupLabel(groupEntries[0]);
       aggregators.push({
-        id: `workflow-more:${encodeURIComponent(groupKey)}`,
+        id: `workflow-more:${encodeURIComponent(laneGroupKey)}`,
         kind: 'workflow',
         tier: 3,
         title: expanded ? 'Show less' : `+${hidden.length} more`,
@@ -2177,6 +3755,12 @@ function buildResourceNodes(
         width: NODE.workflow.width,
         height: NODE.workflow.height,
         ghost: true,
+        laneId: laneGroupKey,
+        laneKind,
+        groupKey: groupEntries[0]?.groupKey,
+        collapsedCount: hidden.length,
+        expanded,
+        connectedAgentIds: groupEntries[0]?.anchoredSourceId ? [groupEntries[0].anchoredSourceId] : undefined,
         tooltipLines: compactStrings([
           expanded
             ? 'Collapse this domain back to one row.'
@@ -2185,32 +3769,36 @@ function buildResourceNodes(
           hidden.length > 6 ? `· …and ${hidden.length - 6} more` : undefined,
         ]),
       });
-      col += 1;
-      if (col >= columns) { col = 0; bandRow += 1; }
     }
-    if (col !== 0) bandRow += 1; // each domain starts a fresh band
+    const usedRows = rowsUsedByBranch(geometry, visible.length + (needsExpander ? 1 : 0));
+    const endRow = rowStart + usedRows;
+    if (laneKind === 'orchestrator-workflows') directWorkflowRows = endRow + 1;
+    maxWorkflowRows = Math.max(maxWorkflowRows, endRow);
   }
   // Knowledge/artifacts continue on the row after the workflow bands.
-  index = bandRow * columns;
+  index = (maxWorkflowRows + 1) * columns;
 
-  // ── Phase 3: emit nodes (anchored first, then the banded order) ──
-  const placementOrder = [
-    ...entries.filter((e) => e.anchoredSourceId),
-    ...orderedGroups.flatMap(([groupKey, groupEntries]) => {
-      const hidden = hiddenByGroup.get(groupKey);
-      return hidden ? groupEntries.filter((e) => !hidden.includes(e)) : groupEntries;
-    }),
-  ];
+  // Phase 3: emit nodes in lane order.
+  const placementOrder = orderedGroups.flatMap(([laneGroupKey, groupEntries]) => {
+    const hidden = hiddenByGroup.get(laneGroupKey);
+    return hidden ? groupEntries.filter((e) => !hidden.includes(e)) : groupEntries;
+  });
   resources.push(...aggregators);
   for (const e of placementOrder) {
-    const { workflow, wfLabel, run, connectedAgentIds, workflowSpaceId, workflowSpaceName, workflowAccent, anchoredSourceId, failed } = e;
-    const pos = anchoredSourceId ? anchoredPosition(anchoredSourceId) : bandPos.get(workflow.id) ?? positions(index++);
+    const { workflow, wfLabel, run, connectedAgentIds, workflowSpaceId, workflowSpaceName, workflowAccent, failed, statePriority } = e;
+    const pos = bandPos.get(workflow.id) ?? positions(index++);
+    const appMeta = workflow.app ?? null;
+    const appSubtitle = appMeta
+      ? `App · ${appMeta.workflowCount} workflow${appMeta.workflowCount === 1 ? '' : 's'}`
+      : null;
+    const appIconImage = appMeta && isImageIcon(appMeta.icon) ? appMeta.icon ?? undefined : undefined;
     resources.push({
       id: `workflow-${workflow.id}`,
       kind: 'workflow',
+      ...(appMeta ? { kindLabel: 'app' } : {}),
       tier: 3,
       title: wfLabel,
-      subtitle: run ? activeRunSubtitle(run) : statusLabel(workflow.status, 'workflow'),
+      subtitle: run ? activeRunSubtitle(run) : appSubtitle ?? statusLabel(workflow.status, 'workflow'),
       x: pos.x,
       y: pos.y,
       width: NODE.workflow.width,
@@ -2218,14 +3806,19 @@ function buildResourceNodes(
       spaceId: workflowSpaceId,
       spaceName: workflowSpaceName,
       active: Boolean(run) || activeWorkflowIds.has(workflow.id),
-      warn: Boolean(failed),
-      route: `/workflows/${workflow.id}`,
+      warn: statePriority === 0,
+      route: appMeta ? `/apps/${appMeta.id}` : `/apps/workflows/${workflow.id}`,
       accent: workflowAccent,
-      imageUrl: workflowImageUrl(workflow),
-      icon: <Workflow size={17} />,
+      imageUrl: appMeta ? appIconImage : workflowImageUrl(workflow),
+      icon: appMeta
+        ? (appMeta.icon && !isImageIcon(appMeta.icon) ? <span className="text-[15px]">{appMeta.icon}</span> : <Boxes size={17} />)
+        : <Workflow size={17} />,
       progress: runProgress(run),
       startedAt: run?.startedAt,
       artifactCount: artifactCountsByWorkflow.get(workflow.id) ?? 0,
+      laneId: e.laneGroupKey,
+      laneKind: e.laneKind,
+      groupKey: e.groupKey,
       tooltipLines: compactStrings([
         `Status: ${run ? activeRunSubtitle(run) : statusLabel(workflow.status, 'idle')}`,
         workflowSpaceName ? `Domain: ${workflowSpaceName}` : undefined,
@@ -2237,6 +3830,12 @@ function buildResourceNodes(
     });
     workflowDomainById.set(workflow.id, { spaceId: workflowSpaceId, spaceName: workflowSpaceName, accent: workflowAccent });
     workflowPositions.set(workflow.id, pos);
+  }
+
+  const positionedWorkflowNodes = resolveResourceCollisions(resources);
+  resources.splice(0, resources.length, ...positionedWorkflowNodes);
+  for (const node of positionedWorkflowNodes) {
+    if (node.workflow) workflowPositions.set(node.workflow.id, { x: node.x, y: node.y });
   }
 
   for (const base of [...data.knowledgeBases].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -2302,6 +3901,7 @@ function buildResourceNodes(
   }
 
   for (const approval of approvals) {
+    const selfHeal = isSelfHealApproval(approval);
     const assignee = approval.agentName
       ? Array.from(sourceNodeById.values()).find((node) => node.agent?.name === approval.agentName)
       : undefined;
@@ -2312,8 +3912,8 @@ function buildResourceNodes(
       id: `approval-${approval.id}`,
       kind: 'approval',
       tier: 3,
-      title: approval.agentName ? `${approval.agentName} needs review` : 'Approval needed',
-      subtitle: approval.workflowName ?? 'human decision',
+      title: selfHeal ? 'Self-healing fix ready' : approval.agentName ? `${approval.agentName} needs review` : 'Approval needed',
+      subtitle: approval.workflowName ?? (selfHeal ? 'repair approval' : 'human decision'),
       x: pos.x,
       y: pos.y,
       width: NODE.approval.width,
@@ -2324,7 +3924,7 @@ function buildResourceNodes(
       warn: true,
       route: '/history?tab=runs',
       accent: approvalDomain.accent,
-      icon: <CanvasApprovalNodeBadge />,
+      icon: <CanvasApprovalNodeBadge source={approval.source} />,
       tooltipLines: compactStrings([
         approvalDomain.spaceName ? `Domain: ${approvalDomain.spaceName}` : undefined,
         approval.summary,
@@ -2356,7 +3956,7 @@ function buildResourceNodes(
         height: NODE.resource.height,
         ghost: true,
         icon,
-        route: '/workflows',
+        route: '/apps',
         tooltipLines: ['Planned resource node'],
         spaceId: defaultSourceId ? sourceNodeById.get(defaultSourceId)?.spaceId ?? null : null,
         spaceName: defaultSourceId ? sourceNodeById.get(defaultSourceId)?.spaceName ?? null : null,
@@ -2366,7 +3966,31 @@ function buildResourceNodes(
     });
   }
 
-  return resources;
+  return resolveResourceCollisions(resources);
+}
+
+function resolveResourceCollisions(resources: CanvasNode[]): CanvasNode[] {
+  const placed: CanvasNode[] = [];
+
+  return resources.map((resource) => {
+    if (resource.kind === 'workflow') {
+      placed.push(resource);
+      return resource;
+    }
+    let y = resource.y;
+    while (placed.some((other) => nodesOverlap({ ...resource, y }, other))) {
+      y += Math.max(resource.height, RESOURCE_LAYOUT.rowGap) + RESOURCE_LAYOUT.nodeClearance;
+    }
+    const positioned = y === resource.y ? resource : { ...resource, y };
+    placed.push(positioned);
+    return positioned;
+  });
+}
+
+function nodesOverlap(a: CanvasNode, b: CanvasNode): boolean {
+  const horizontalClearance = (a.width + b.width) / 2 + RESOURCE_LAYOUT.nodeClearance;
+  const verticalClearance = (a.height + b.height) / 2 + RESOURCE_LAYOUT.nodeClearance;
+  return Math.abs(a.x - b.x) < horizontalClearance && Math.abs(a.y - b.y) < verticalClearance;
 }
 
 function selectCanvasArtifacts(artifacts: WorkspaceArtifact[], focusWorkflowId: string | null): WorkspaceArtifact[] {
@@ -2386,8 +4010,88 @@ function shouldRevealKnowledgeNodes(selectedNodeId: string | null, agents: Works
   const role = agent ? normalizeRole(agent) : null;
   // Authority tiers (orchestrator + managers) own shared workspace memory, so
   // selecting either reveals the knowledge layer — and it persists as you drill
-  // down the chain of command. Workers don't surface workspace-wide knowledge.
+  // down the chain of command. Specialists don't surface workspace-wide knowledge.
   return role === 'orchestrator' || role === 'manager';
+}
+
+function estimateMaxLinkedWorkflowRowCount(
+  workflows: HomeWorkflow[],
+  agents: WorkspaceAgent[],
+  activeRuns: WorkspaceActiveRun[],
+): number {
+  const managerIds = new Set(agents.filter((agent) => normalizeRole(agent) === 'manager').map((agent) => agent.id));
+  const counts = new Map<string, number>();
+  for (const workflow of workflows) {
+    let key = workflow.spaceId ? `space:${workflow.spaceId}` : null;
+    if (!key) {
+      const run = activeRuns.find((item) => item.workflowId === workflow.id);
+      const managerRunAgent = run?.agents?.find((agent) => managerIds.has(agent.id));
+      if (managerRunAgent) key = `agent:${managerRunAgent.id}`;
+    }
+    if (!key) {
+      const managerGraphAgentId = workflowAgentTaskIds(workflow).find((agentId) => managerIds.has(agentId));
+      if (managerGraphAgentId) key = `agent:${managerGraphAgentId}`;
+    }
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Math.max(0, ...counts.values());
+}
+
+function linkedWorkflowRowWidth(count: number): number {
+  if (count <= 0) return 0;
+  return NODE.workflow.width + (count - 1) * ANCHORED_WORKFLOW_COLUMN_WIDTH;
+}
+
+function resourceGridRowWidth(count: number): number {
+  if (count <= 0) return 0;
+  return NODE.workflow.width + (count - 1) * RESOURCE_GRID_COLUMN_WIDTH;
+}
+
+function anchoredWorkflowRowCapacity(total: number, canvasWidth: number): number {
+  if (total <= 0) return 1;
+  const available = Math.max(NODE.workflow.width, canvasWidth - RESOURCE_LAYOUT.sideMargin * 2);
+  const capacity = Math.floor((available + RESOURCE_LAYOUT.anchoredColumnGap) / ANCHORED_WORKFLOW_COLUMN_WIDTH);
+  return Math.max(1, Math.min(total, capacity));
+}
+
+function workflowAgentTaskIds(workflow: HomeWorkflow): string[] {
+  return (workflow.graph?.nodes ?? [])
+    .map((node) => node.config?.kind === 'agent_task' && typeof node.config.agentId === 'string' ? node.config.agentId : null)
+    .filter((agentId): agentId is string => Boolean(agentId));
+}
+
+function preferConnectedSource(candidateIds: string[] | undefined, preferredId: string): string[] {
+  return [preferredId, ...(candidateIds ?? []).filter((id) => id !== preferredId)];
+}
+
+function laneOrder(kind: CanvasNode['laneKind'] | undefined): number {
+  return kind === 'manager-workflows' ? 0 : 1;
+}
+
+function workflowGroupLabel(entry: { laneKind: CanvasNode['laneKind']; groupKey: string; workflowSpaceName?: string | null } | undefined): string {
+  if (!entry) return 'workspace';
+  if (entry.laneKind === 'orchestrator-workflows') return 'orchestrator';
+  if (entry.workflowSpaceName) return entry.workflowSpaceName;
+  if (entry.groupKey === '~ungrouped') return 'workspace';
+  if (entry.groupKey.startsWith('space-')) return 'workspace';
+  return entry.groupKey;
+}
+
+function isWorkflowAnchorSource(sourceId: string, sourceNodeById: Map<string, CanvasNode>): boolean {
+  const source = sourceNodeById.get(sourceId);
+  return source?.role === 'manager' || source?.role === 'worker';
+}
+
+function sourceBelongsToManager(sourceId: string, managerId: string, sourceNodeById: Map<string, CanvasNode>): boolean {
+  if (sourceId === managerId) return true;
+  const source = sourceNodeById.get(sourceId);
+  const manager = sourceNodeById.get(managerId);
+  if (!source || !manager) return false;
+  if (source.spaceId && manager.spaceId && source.spaceId === manager.spaceId) return true;
+  if (source.role !== 'worker' || !source.agent || !manager.agent) return false;
+  const reportsTo = stringField(source.agent, ['reportsTo', 'managerId', 'parentAgentId']);
+  return reportsTo === manager.agent.id || reportsTo === manager.agent.name || reportsTo === managerId;
 }
 
 function countArtifactsByWorkflow(artifacts: WorkspaceArtifact[]): Map<string, number> {
@@ -2424,12 +4128,109 @@ function computeWorkerColumns(count: number): number {
   return 10;
 }
 
-function distributeRow(count: number, width: number, y: number, nodeWidth: number): Vec2[] {
+/** One packed horizontal slot for a top-level branch under the orchestrator. */
+export interface BranchSlot {
+  centerX: number;
+  left: number;
+  right: number;
+}
+
+const BRANCH_GAP = 40;
+
+/**
+ * Uniform horizontal stride between sibling branches. The non-overlap guarantee
+ * is structural, not spacing-based: every branch gets a symmetric lane exactly
+ * `stride` wide, and `maxBranchColumns` caps each lane's workflow columns to fit
+ * that width — so nodes can never cross into a neighbour no matter how tightly
+ * managers pack. Few branches get roomy 2-column lanes; as the row fills up the
+ * stride tapers toward a single column, so even ~15 managers stay compact.
+ */
+function branchStride(count: number): number {
+  const roomy = 2 * AUTHORITY_LANE_COLUMN_WIDTH + BRANCH_GAP;
+  const tight = Math.max(NODE.manager.width, AUTHORITY_LANE_COLUMN_WIDTH) + BRANCH_GAP;
+  if (count <= 4) return roomy;
+  if (count >= 9) return tight;
+  const t = (count - 4) / 5;
+  return roomy + (tight - roomy) * t;
+}
+
+/**
+ * Full horizontal span of the branch row INCLUDING each edge lane's half-span,
+ * so the virtual canvas is wide enough that no edge lane clamps to a single
+ * column at the canvas border (the cause of workflows stacking as a vertical
+ * line). Each lane is one stride wide minus clearance, centered on its branch.
+ */
+function packContentWidth(count: number): number {
+  if (count <= 0) return 0;
+  const stride = branchStride(count);
+  const halfSpan = stride / 2 - RESOURCE_LAYOUT.nodeClearance;
+  return (count - 1) * stride + 2 * halfSpan;
+}
+
+/**
+ * Pack the orchestrator's direct branches (managers + the direct-workflows
+ * group) into one centered row beneath the orchestrator, at a uniform stride.
+ * Center-out: the middle branch lands directly under the orchestrator and the
+ * row stays a balanced pyramid. Each branch's lane is symmetric and exactly one
+ * stride wide, so sibling lanes can never collide.
+ */
+function packTopBranches(count: number, canvasWidth: number): BranchSlot[] {
   if (count <= 0) return [];
-  const spacing = Math.max(nodeWidth + 70, 230);
-  const rowWidth = (count - 1) * spacing;
-  const start = width / 2 - rowWidth / 2;
-  return Array.from({ length: count }, (_, index) => ({ x: start + index * spacing, y }));
+  const stride = branchStride(count);
+  const center = canvasWidth / 2;
+  const half = stride / 2 - RESOURCE_LAYOUT.nodeClearance;
+  return Array.from({ length: count }, (_, i) => {
+    const centerX = center + (i - (count - 1) / 2) * stride;
+    return { centerX, left: centerX - half, right: centerX + half };
+  });
+}
+
+/**
+ * Resolve the orchestrator's top-level branches (manager node ids + their
+ * spaceIds, the space→manager map, and a per-branch workflow tally) without
+ * needing any x positions. Shared by buildCanvasModel (authoritative placement)
+ * and computeVirtualCanvasSize (so the virtual canvas is wide enough). The
+ * workflow tally only *sizes* slots — placement stays authoritative in
+ * buildResourceNodes, and undersizing merely makes a lane taller, never
+ * overlapping.
+ */
+function deriveTopBranchLayout(
+  data: EcosystemData,
+  agents: WorkspaceAgent[],
+  roles: ReturnType<typeof classifyAgents>,
+): {
+  managerNodeIds: string[];
+  spaceSourceIds: Map<string, string>;
+  hasDirectBranch: boolean;
+  branchCount: number;
+} {
+  const spaces = data.spaces ?? [];
+  const plannedSpaceCount = Math.max(2, spaces.length);
+  const managerCount = Math.max(
+    roles.managers.length,
+    agents.length === 0 ? plannedSpaceCount : roles.workers.length > 0 && roles.managers.length === 0 ? 1 : 0,
+  );
+  const managerNodeIds: string[] = [];
+  const spaceSourceIds = new Map<string, string>();
+  roles.managers.forEach((agent) => {
+    const id = `agent-${agent.id}`;
+    const spaceId = stringField(agent as unknown as Record<string, unknown>, ['spaceId']) ?? null;
+    managerNodeIds.push(id);
+    if (spaceId) spaceSourceIds.set(spaceId, id);
+  });
+  for (let index = roles.managers.length; index < managerCount; index += 1) {
+    const id = `ghost-manager-${index}`;
+    const space = spaces[index - roles.managers.length] ?? null;
+    managerNodeIds.push(id);
+    if (space) spaceSourceIds.set(space.id, id);
+  }
+  // The orchestrator's direct-workflows group is a branch too (a workflow with
+  // no space, or whose space has no manager).
+  const hasDirectBranch = data.workflows.some(
+    (workflow) => !(workflow.spaceId && spaceSourceIds.has(workflow.spaceId)),
+  );
+  const branchCount = managerNodeIds.length + (hasDirectBranch ? 1 : 0);
+  return { managerNodeIds, spaceSourceIds, hasDirectBranch, branchCount };
 }
 
 function distributeLayer(count: number, width: number, startY: number, nodeWidth: number, rowGap: number, maxColumns: number): Vec2[] {
@@ -2570,7 +4371,47 @@ function dedupeEdges(edges: CanvasEdge[]): CanvasEdge[] {
 }
 
 function workflowLabel(workflow: HomeWorkflow): string {
+  if (workflow.app) return workflow.app.name;
   return workflow.title ?? workflow.name ?? 'Untitled workflow';
+}
+
+/** An icon string is an image when it's a URL or data URI (vs an emoji/glyph). */
+function isImageIcon(icon: string | null | undefined): boolean {
+  return Boolean(icon && (icon.startsWith('http://') || icon.startsWith('https://') || icon.startsWith('data:image/')));
+}
+
+/**
+ * Collapse Apps into single canvas resource units. Each App with ≥1 workflow
+ * becomes one entry (labelled/routed as the App, clustered by the App's
+ * domain/owner), anchored on a representative workflow — a currently-running one
+ * if any, else the first — so run liveness still lights the node. Workflows with
+ * no App (or whose App is missing) pass through as bare workflow nodes.
+ */
+function collapseAppsIntoResourceWorkflows(data: EcosystemData, activeWorkflowIds: Set<string>): HomeWorkflow[] {
+  const appById = new Map((data.apps ?? []).map((app) => [app.id, app]));
+  const byApp = new Map<string, HomeWorkflow[]>();
+  const bare: HomeWorkflow[] = [];
+  for (const workflow of data.workflows) {
+    const appId = workflow.appId ?? null;
+    if (appId && appById.has(appId)) {
+      (byApp.get(appId) ?? byApp.set(appId, []).get(appId)!).push(workflow);
+    } else {
+      bare.push(workflow);
+    }
+  }
+  const appUnits: HomeWorkflow[] = [];
+  for (const [appId, workflows] of byApp) {
+    const app = appById.get(appId)!;
+    const representative = workflows.find((wf) => activeWorkflowIds.has(wf.id)) ?? workflows[0]!;
+    appUnits.push({
+      ...representative,
+      // Inherit the App's org placement (workflows page assigns it on the App).
+      spaceId: representative.spaceId ?? app.domainId ?? null,
+      ownerAgentId: representative.ownerAgentId ?? app.ownerAgentId ?? null,
+      app: { id: app.id, name: app.name, icon: app.icon ?? null, workflowCount: workflows.length },
+    });
+  }
+  return [...appUnits, ...bare];
 }
 
 function activeRunSubtitle(run: WorkspaceActiveRun): string {
@@ -2580,18 +4421,18 @@ function activeRunSubtitle(run: WorkspaceActiveRun): string {
 }
 
 /**
- * Mission-Control triage row: not a title — the live agent reasoning / current
+ * Live Workspace run row: the live agent reasoning / current
  * step / progress for one active run, streamed via the activity spine. This is
- * the "see what's happening" surface the triage card was supposed to be.
+ * the operator-facing surface for following active execution.
  */
 /**
- * Mission-Control run card: an immersive, alive view of one running workflow —
+ * Live Workspace run card: an immersive view of one running workflow —
  * pulsing live beacon, elapsed + step progress, the agent currently working, and a
  * scrolling LIVE REASONING TERMINAL streaming the agent's thoughts and tool calls
  * as they happen. Click to open the full run; Stop to halt it. Fed by the
  * socket-independent run activity stream.
  */
-function TriageRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => void }) {
+function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => void }) {
   const feed = useRunActivity(run.id, { cap: 40 });
   const [stopping, setStopping] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -2923,3 +4764,4 @@ const PHASE_ORDER: Record<EntrancePhase, number> = {
   resources: 5,
   complete: 6,
 };
+

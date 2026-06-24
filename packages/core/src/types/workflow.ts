@@ -39,6 +39,7 @@ export type WorkflowNodeType =
   | 'guardrails'
   // Knowledge & enrichment
   | 'knowledge'
+  | 'knowledge_ingest'     // write upstream content into the workspace Brain (KnowledgeBaseService)
   | 'artifact_collect'
   // Output surface — Layer 6
   | 'return_output'
@@ -46,13 +47,30 @@ export type WorkflowNodeType =
   // Native browser control — Layer 3 §3.2
   | 'browser'
   // Human interaction
-  | 'checkpoint';
+  | 'checkpoint'
+  // Utility & data primitives (WORKFLOW-UPDATE — n8n-inspired) — deterministic
+  | 'error_trigger'        // fires a workflow on another workflow's failure
+  | 'stop_error'           // terminate the run with a custom error
+  | 'code'                 // sandboxed JS (and best-effort Python) execution
+  | 'datetime'             // date/time parse, format, diff, add/subtract
+  | 'crypto_util'          // hash, HMAC, base64 encode/decode, uuid
+  | 'xml_parse'            // XML ↔ JSON
+  | 'markdown'             // Markdown ↔ HTML
+  | 'json_schema_validate' // validate data against a JSON Schema
+  | 'sticky_note'          // canvas annotation; no execution
+  | 'spreadsheet'          // parse/build .csv / .xlsx
+  | 'html_extract'         // CSS-selector extraction from an HTML string
+  | 'graphql';             // structured GraphQL query
 
 /**
  * How a node's output should be rendered on the operator-facing Output Surface
  * (WORKFLOW-10X-MASTERPLAN §6). Drives viewer selection in the web Output tab.
  */
 export type OutputRenderAs = 'html' | 'markdown' | 'table' | 'json' | 'text';
+
+// UI surfaces now live on the Agentic App, not the workflow graph
+// (AGENTIC-APPS-10X §4 — the legacy fixed-block "Studio" was replaced by the
+// AG-UI ViewNode protocol + app_surfaces). See packages/core/src/types/view.ts.
 
 export interface WorkflowGraph {
   version: 1;
@@ -116,6 +134,8 @@ export interface WorkflowContract {
 export interface WorkflowPhase {
   id: string;
   name: string;
+  /** Plain-language purpose shown in the phase lane and inspector. */
+  description?: string;
   /** Hex color used for the canvas region background. */
   color: string;
   nodeIds: string[];
@@ -154,6 +174,7 @@ export type WorkflowNodeConfig = (
   | AgentSessionNodeConfig
   | ExtensionTaskNodeConfig
   | KnowledgeNodeConfig
+  | KnowledgeIngestNodeConfig
   | RouterNodeConfig
   | MergeNodeConfig
   | CheckpointNodeConfig
@@ -177,7 +198,32 @@ export type WorkflowNodeConfig = (
   | ReturnOutputNodeConfig
   | ArtifactSaveNodeConfig
   | BrowserNodeConfig
+  | ErrorTriggerNodeConfig
+  | StopErrorNodeConfig
+  | CodeNodeConfig
+  | DateTimeNodeConfig
+  | CryptoUtilNodeConfig
+  | XmlParseNodeConfig
+  | MarkdownNodeConfig
+  | JsonSchemaValidateNodeConfig
+  | StickyNoteNodeConfig
+  | SpreadsheetNodeConfig
+  | HtmlExtractNodeConfig
+  | GraphQlNodeConfig
 ) & WorkflowOutputConfig;
+
+/**
+ * Multi-rule schedule (n8n-inspired). Each rule is an independent cron
+ * expression on the same trigger, so one trigger can fire on several unrelated
+ * cadences (e.g. "every Monday 9am" AND "every day at midnight").
+ */
+export interface ScheduleRule {
+  /** Five-field cron expression. */
+  expression: string;
+  /** IANA timezone; defaults to the trigger's timezone. */
+  timezone?: string;
+  label?: string;
+}
 
 /** Trigger node config. */
 export interface TriggerNodeConfig {
@@ -186,14 +232,48 @@ export interface TriggerNodeConfig {
     | 'manual'
     | 'cron'
     | 'webhook'
-    | 'persistent_listener';
+    | 'persistent_listener'
+    | 'error_trigger'   // fires when a target workflow reaches FAILED/CANCELLED
+    | 'email_imap'      // IMAP inbox poller
+    | 'rss_feed';       // RSS/Atom feed poller
   triggerId?: string;
   /** Five-field cron expression authored on the canvas. */
   schedule?: string;
   /** IANA timezone used by node-cron. Defaults to UTC. */
   timezone?: string;
+  /**
+   * Multiple independent cron rules on one trigger. When present (and non-empty)
+   * the runtime schedules one cron job per rule; `schedule` still applies as the
+   * single-expression form for backward compatibility.
+   */
+  scheduleRules?: ScheduleRule[];
   /** Structured persistent-listener authoring config. */
   listenerConfig?: ListenerConfig;
+  /** error_trigger scope: which workflow's failure fires this trigger. */
+  errorTrigger?: ErrorTriggerNodeConfig;
+  /** email_imap poller config. */
+  emailImap?: EmailImapTriggerConfig;
+  /** rss_feed poller config. */
+  rssFeed?: RssFeedTriggerConfig;
+}
+
+/** IMAP inbox poller authoring config (for `triggerType: 'email_imap'`). */
+export interface EmailImapTriggerConfig {
+  host: string;
+  port?: number;
+  secure?: boolean;
+  /** Credential id holding { username, password }. */
+  credentialId?: string;
+  mailbox?: string;
+  /** Only emit messages matching this search (e.g. 'UNSEEN'). */
+  search?: string;
+  pollIntervalMs?: number;
+}
+
+/** RSS/Atom feed poller authoring config (for `triggerType: 'rss_feed'`). */
+export interface RssFeedTriggerConfig {
+  feedUrl: string;
+  pollIntervalMs?: number;
 }
 
 /**
@@ -385,6 +465,30 @@ export interface KnowledgeNodeConfig {
   queryPath?: string;
   retrievalMode?: 'contextual' | 'strict' | 'exploratory';
   topK?: number;
+}
+
+/**
+ * knowledge_ingest — the write-side twin of the `knowledge` node. Delegates to
+ * the same `KnowledgeBaseService` the retrieval node reads from, so anything a
+ * workflow produces (a fetched doc, a parsed spreadsheet, a transform result)
+ * becomes semantically recallable by future agents and `knowledge` nodes.
+ */
+export interface KnowledgeIngestNodeConfig {
+  kind: 'knowledge_ingest';
+  /** Target knowledge base. When omitted, the first base is used (or one is created). */
+  knowledgeBaseId?: string;
+  /** Name for the knowledge base to create when none exists / id is unset. */
+  knowledgeBaseName?: string;
+  /** Static document content. Used when `contentPath` is unset or resolves empty. */
+  content?: string;
+  /** Dot-path into the node input for the document content (e.g. `body`, `page.text`). */
+  contentPath?: string;
+  /** Static document name/title shown in the Brain. */
+  documentName?: string;
+  /** Dot-path into the node input for the document name. */
+  documentNamePath?: string;
+  /** MIME-type hint to drive text extraction (e.g. text/markdown, text/html, application/json). */
+  mimeType?: string;
 }
 
 export interface RouterNodeConfig {
@@ -690,6 +794,145 @@ export interface BrowserNodeConfig {
 }
 
 // ────────────────────────────────────────────────────────────
+// Utility & data primitives (WORKFLOW-UPDATE — n8n-inspired)
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Error-trigger entry node. A workflow whose entry is an `error_trigger` is run
+ * when a *target* workflow reaches a terminal failure state. `targetWorkflowId`
+ * undefined → any workflow in this workspace (except error-handler workflows
+ * themselves, to prevent trigger loops).
+ */
+export interface ErrorTriggerNodeConfig {
+  kind: 'error_trigger';
+  targetWorkflowId?: string;
+  onStatus: Array<'FAILED' | 'CANCELLED'>;
+}
+
+/** Explicitly terminate the run with a custom error (n8n "Stop and Error"). */
+export interface StopErrorNodeConfig {
+  kind: 'stop_error';
+  errorMessage: string;
+  errorCode?: string;
+}
+
+/**
+ * Sandboxed code execution. JavaScript runs in the engine's guarded VM realm
+ * (no Node globals, no require/import). Python is best-effort via a child
+ * `python3` process when available on the host; absent → a clean error.
+ */
+export interface CodeNodeConfig {
+  kind: 'code';
+  language: 'javascript' | 'python';
+  code: string;
+  /** Keys lifted from the node input into the script's `input` object. Empty = whole input. */
+  inputKeys: string[];
+  outputKey?: string;
+  timeoutMs?: number;
+}
+
+/** Date/time parse, format, diff, arithmetic. Deterministic except `now`. */
+export interface DateTimeNodeConfig {
+  kind: 'datetime';
+  operation: 'parse' | 'format' | 'diff' | 'add' | 'subtract' | 'now';
+  /** Dot path into the node input for the primary date value. */
+  inputPath?: string;
+  inputFormat?: string;
+  outputFormat?: string;
+  timezone?: string;
+  /** For `diff`: the unit of the returned difference. */
+  diffUnit?: 'seconds' | 'minutes' | 'hours' | 'days' | 'months' | 'years';
+  /** Second date for `diff` (dot path); defaults to now. */
+  comparePath?: string;
+  /** For add/subtract. */
+  amount?: number;
+  unit?: 'seconds' | 'minutes' | 'hours' | 'days' | 'months' | 'years';
+  outputKey?: string;
+}
+
+/** Hash / HMAC / base64 / uuid primitives. */
+export interface CryptoUtilNodeConfig {
+  kind: 'crypto_util';
+  operation: 'hash' | 'hmac' | 'base64_encode' | 'base64_decode' | 'uuid';
+  algorithm?: 'sha256' | 'sha512' | 'md5';
+  inputPath?: string;
+  /** Dot path to the HMAC secret. */
+  secretPath?: string;
+  outputKey?: string;
+}
+
+/** XML ↔ JSON. */
+export interface XmlParseNodeConfig {
+  kind: 'xml_parse';
+  operation: 'parse' | 'build';
+  inputPath?: string;
+  outputKey?: string;
+}
+
+/** Markdown ↔ HTML. */
+export interface MarkdownNodeConfig {
+  kind: 'markdown';
+  operation: 'to_html' | 'from_html';
+  inputPath?: string;
+  outputKey?: string;
+}
+
+/** Validate the input (or a sub-path) against a JSON Schema string. */
+export interface JsonSchemaValidateNodeConfig {
+  kind: 'json_schema_validate';
+  /** JSON Schema as a JSON string. */
+  schema: string;
+  inputPath?: string;
+  /** `block` → throw on violation (routes to error edge); `flag` → add `violations` and continue. */
+  onViolation: 'block' | 'flag';
+}
+
+/** Canvas annotation. No execution; a passthrough at run time. */
+export interface StickyNoteNodeConfig {
+  kind: 'sticky_note';
+  content: string;
+  color?: string;
+  fontSize?: number;
+}
+
+/** Parse/build CSV or XLSX. */
+export interface SpreadsheetNodeConfig {
+  kind: 'spreadsheet';
+  operation: 'parse' | 'build';
+  format: 'csv' | 'xlsx';
+  /** Dot path to CSV/base64-xlsx string (parse) or row array (build). */
+  inputPath?: string;
+  /** Sheet name or index for xlsx. */
+  sheet?: string;
+  hasHeaders?: boolean;
+  outputKey?: string;
+}
+
+/** Extract values from an HTML string by CSS selector. */
+export interface HtmlExtractNodeConfig {
+  kind: 'html_extract';
+  inputPath?: string;
+  selector: string;
+  extractAs: 'text' | 'html' | 'attribute';
+  attribute?: string;
+  multiple?: boolean;
+  outputKey?: string;
+}
+
+/** Structured GraphQL query with variable binding. */
+export interface GraphQlNodeConfig {
+  kind: 'graphql';
+  endpoint: string;
+  query: string;
+  /** `{{variable}}` templates resolved at dispatch. */
+  variables?: Record<string, string>;
+  headers?: Record<string, string>;
+  credentialId?: string;
+  outputKey?: string;
+  timeoutMs?: number;
+}
+
+// ────────────────────────────────────────────────────────────
 // Run state
 // ────────────────────────────────────────────────────────────
 
@@ -697,6 +940,8 @@ export type WorkflowRunStatus =
   | 'CREATED'
   | 'PLANNING'
   | 'RUNNING'
+  /** Operator-paused execution. The run can be resumed from its preserved frontier. */
+  | 'PAUSED'
   | 'WAITING'
   | 'COMPLETED'
   /** The graph ran to completion but the final output did not match the declared outputContract. */
@@ -728,6 +973,82 @@ export interface WorkflowRunState {
   graphRevision: number;
   replanCount: number;
   lastLedgerSequence: number;
+  /** Durable per-node self-heal attempt counts. Prevents restart-reset retry loops. */
+  selfHealAttempts?: Record<string, number>;
+  /** Durable per-node self-heal incidents. Keeps repair/blocked state visible across refresh/restart. */
+  selfHealIncidents?: Record<string, WorkflowSelfHealIncident>;
+}
+
+/** How much autonomy the workspace grants the recovery ladder. */
+export type WorkflowRecoveryMode = 'guarded' | 'bypass';
+
+/** Ordered recovery ladder. A tier is never retried with the same repair fingerprint. */
+export type WorkflowRecoveryTier = 'deterministic' | 'minimal_patch' | 'rebuild';
+
+export type WorkflowRepairPlanStatus = 'planned' | 'awaiting_approval' | 'applied' | 'rejected' | 'blocked' | 'rolled_back';
+
+/** A durable record of one distinct repair plan within a failure lineage. */
+export interface WorkflowRepairPlanRecord {
+  id: string;
+  tier: WorkflowRecoveryTier;
+  /** Canonical patch fingerprint; duplicates are a hard circuit-breaker. */
+  fingerprint: string;
+  status: WorkflowRepairPlanStatus;
+  requiresApproval: boolean;
+  patchId?: string;
+  checkpointId?: string;
+  resumeNodeId?: string;
+  riskReason?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export type WorkflowSelfHealIncidentStatus =
+  | 'DIAGNOSING'
+  | 'PLANNING'
+  | 'RETRYING'
+  | 'AWAITING_APPROVAL'
+  | 'APPLYING'
+  | 'APPLIED'
+  | 'BLOCKED'
+  | 'EXHAUSTED'
+  | 'ROLLED_BACK';
+
+export interface WorkflowSelfHealIncident {
+  /** Stable lineage key. Legacy incidents use their node id. */
+  incidentId?: string;
+  nodeId: string;
+  nodeTitle?: string;
+  status: WorkflowSelfHealIncidentStatus;
+  mode: WorkflowRecoveryMode;
+  attempt: number;
+  maxAttempts: number;
+  tier?: WorkflowRecoveryTier;
+  /** Normalized root-cause signature; survives engine restarts and graph revisions. */
+  failureFingerprint?: string;
+  /** All distinct plans considered for this incident, in execution order. */
+  plans?: WorkflowRepairPlanRecord[];
+  error?: string;
+  diagnosis?: string;
+  reason?: string;
+  riskReason?: string;
+  approvalId?: string;
+  checkpointId?: string;
+  resumeNodeId?: string;
+  outcome?:
+    | 'output_fixed'
+    | 'graph_patch_applied'
+    | 'graph_patch_awaiting_approval'
+    | 'retrying'
+    | 'retry_awaiting_approval'
+    | 'runtime_rebound'
+    | 'runtime_rerouted'
+    | 'blocked'
+    | 'exhausted'
+    | 'rolled_back';
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
 }
 
 export interface ReadyQueueItem {
@@ -756,6 +1077,12 @@ export interface WorkflowNodeState {
   completedAt?: string;
   inputData?: Record<string, unknown>;
   outputData?: Record<string, unknown>;
+  /**
+   * Present when an agent-like node completed with useful output, but could not
+   * ground every declared output key. The run stays auditable and is downgraded
+   * to COMPLETED_WITH_CONTRACT_VIOLATION at terminal status.
+   */
+  contractDeviation?: WorkflowNodeContractDeviation;
   /** Immutable presentation-safe snapshot of a message delivered by an integration. */
   deliveryReceipt?: IntegrationDeliveryReceipt;
   error?: string;
@@ -766,6 +1093,15 @@ export interface WorkflowNodeState {
    * scheduled/approval WAITING.
    */
   blockedReason?: string;
+}
+
+export interface WorkflowNodeContractDeviation {
+  kind: 'missing_declared_output_keys';
+  declaredKeys: string[];
+  missingKeys: string[];
+  recoveredKeys: string[];
+  message: string;
+  outputPreview: Record<string, unknown>;
 }
 
 export interface IntegrationDeliveryReceipt {
@@ -806,7 +1142,7 @@ export interface ActiveExecution {
 
 export interface WorkflowGraphPatch {
   patchId: string;
-  reason: 'planner_replan' | 'user_edit' | 'hub_package_update';
+  reason: 'planner_replan' | 'user_edit' | 'hub_package_update' | 'self_heal';
   baseGraphRevision: number;
   addNodes: WorkflowNode[];
   updateNodes: WorkflowNode[];

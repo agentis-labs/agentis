@@ -49,6 +49,8 @@ export class CursorAdapter implements AgentAdapter {
 
   constructor(private readonly opts: CursorAdapterOptions) {}
 
+  getWorkdir(): string | undefined { return this.opts.cwd; }
+
   async connect(): Promise<void> {}
 
   async disconnect(): Promise<void> {
@@ -154,8 +156,10 @@ export class CursorAdapter implements AgentAdapter {
     this.#inFlight.set(task.taskId, controller);
     const binary = this.opts.binaryPath || 'agent';
     const args = [
+      '-p',
       '--output-format',
       'stream-json',
+      '--stream-partial-output',
       ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.extraArgs ?? []),
     ];
@@ -164,9 +168,12 @@ export class CursorAdapter implements AgentAdapter {
     let timeout: NodeJS.Timeout | undefined;
     try {
       const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
-      const target = resolveSpawnTarget(binary, args, this.opts.cwd ?? process.cwd(), env);
+      // Isolated per-task directory when the engine allocated one (parallel swarm
+      // subtask); otherwise the adapter's single-agent configured cwd.
+      const spawnCwd = task.workdir ?? this.opts.cwd;
+      const target = resolveSpawnTarget(binary, args, spawnCwd ?? process.cwd(), env);
       childProcess = spawn(target.command, target.args, {
-        cwd: this.opts.cwd,
+        cwd: spawnCwd,
         env,
         windowsHide: true,
         signal: controller.signal,
@@ -300,8 +307,10 @@ export class CursorAdapter implements AgentAdapter {
         ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
         : undefined);
     const args = [
+      '-p',
       '--output-format',
       'stream-json',
+      '--stream-partial-output',
       ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
       ...(storedSession ? ['--resume', storedSession] : []),
       ...(this.opts.extraArgs ?? []),
@@ -328,15 +337,7 @@ export class CursorAdapter implements AgentAdapter {
           });
         }
       }
-      if (isReasoningEvent(ev)) {
-        const reasoning = extractText(ev);
-        return reasoning ? { kind: 'thinking', text: reasoning } : { kind: 'ignore' };
-      }
-      const text = extractText(ev);
-      if (text) return { kind: 'text', text };
-      const toolCall = extractToolCall(ev);
-      if (toolCall) return { kind: 'tool', name: toolCall.tool, args: toolCall.input };
-      return { kind: 'ignore' };
+      return cursorJsonEventToChatPart(ev);
     };
 
     yield* runCliChatTurn({
@@ -352,6 +353,7 @@ export class CursorAdapter implements AgentAdapter {
       idleTimeoutMs,
       hardCeilingMs: chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_CURSOR_CHAT_HARD_CEILING_MS'),
       interpret,
+      formatExitError: (_code, stderr, stdoutError) => stdoutError.trim() || stderr.trim(),
     });
   }
 
@@ -380,6 +382,9 @@ export class CursorAdapter implements AgentAdapter {
 
 type CursorJsonEvent = {
   type?: unknown;
+  subtype?: unknown;
+  is_error?: unknown;
+  error?: unknown;
   text?: unknown;
   content?: unknown;
   message?: unknown;
@@ -387,6 +392,9 @@ type CursorJsonEvent = {
   item?: unknown;
   result?: unknown;
   output?: unknown;
+  tool_call?: unknown;
+  call_id?: unknown;
+  request_id?: unknown;
   name?: unknown;
   tool?: unknown;
   input?: unknown;
@@ -424,6 +432,14 @@ function extractText(event: CursorJsonEvent): string {
   const message = objectOf(event.message);
   const messageText = firstString(message?.text, message?.content);
   if (messageText) return messageText;
+  const choice = Array.isArray((event as { choices?: unknown }).choices)
+    ? (event as { choices?: unknown[] }).choices?.[0]
+    : null;
+  const choiceObject = objectOf(choice);
+  const delta = objectOf(choiceObject?.delta);
+  const choiceMessage = objectOf(choiceObject?.message);
+  const choiceText = firstString(delta?.content, delta?.text, choiceMessage?.content, choiceObject?.text);
+  if (choiceText) return choiceText;
   const item = objectOf(event.item);
   return firstString(item?.text, item?.content) ?? '';
 }
@@ -431,9 +447,30 @@ function extractText(event: CursorJsonEvent): string {
 function extractToolCall(event: CursorJsonEvent): { tool: string; input: unknown } | null {
   const type = String(event.type ?? '').toLowerCase();
   if (!type.includes('tool') && !type.includes('function')) return null;
+  const toolCall = objectOf(event.tool_call);
   const item = objectOf(event.item);
-  const tool = firstString(event.name, event.tool, item?.name, item?.tool) ?? 'tool';
-  return { tool, input: event.input ?? event.arguments ?? item?.input ?? item?.arguments ?? {} };
+  const nested = firstObjectValueWithSuffix(toolCall, 'ToolCall');
+  const tool = firstString(
+    event.name,
+    event.tool,
+    toolCall?.name,
+    toolCall?.tool,
+    item?.name,
+    item?.tool,
+    nested?.key,
+  ) ?? 'tool';
+  return {
+    tool: prettyToolName(tool),
+    input: event.input
+      ?? event.arguments
+      ?? toolCall?.input
+      ?? toolCall?.arguments
+      ?? nested?.value?.args
+      ?? nested?.value?.arguments
+      ?? item?.input
+      ?? item?.arguments
+      ?? {},
+  };
 }
 
 function isCompletionEvent(event: CursorJsonEvent): boolean {
@@ -465,6 +502,92 @@ function firstString(...values: unknown[]): string | undefined {
     }
   }
   return undefined;
+}
+
+export function cursorJsonEventToChatPart(event: CursorJsonEvent): CliChatPart {
+  const streamError = cursorStreamError(event);
+  if (streamError) return { kind: 'error', message: streamError };
+  if (isReasoningEvent(event)) {
+    const reasoning = extractText(event);
+    return reasoning ? { kind: 'thinking', text: reasoning } : { kind: 'ignore' };
+  }
+  const toolCall = extractToolCall(event);
+  if (toolCall) {
+    return {
+      kind: 'activity',
+      delta: cursorToolActivity(event, toolCall.tool),
+    };
+  }
+  if (isCompletionEvent(event)) {
+    const result = objectOf(event.result) ?? objectOf(event.output);
+    const text = firstString(
+      event.text,
+      event.content,
+      event.result,
+      event.output,
+      result?.text,
+      result?.content,
+      result?.message,
+    );
+    return text ? { kind: 'final', text } : { kind: 'ignore' };
+  }
+  const text = extractText(event);
+  if (text) return { kind: 'text', text };
+  return { kind: 'ignore' };
+}
+
+function cursorStreamError(event: CursorJsonEvent): string | null {
+  const type = String(event.type ?? '').toLowerCase();
+  const subtype = String(event.subtype ?? '').toLowerCase();
+  const flagged = event.is_error === true || type === 'error' || subtype.includes('error');
+  if (!flagged) return null;
+  const errorObject = objectOf(event.error);
+  return firstString(
+    errorObject?.message,
+    event.error,
+    event.message,
+    event.result,
+    event.output,
+    event.text,
+  ) ?? 'Cursor reported an error.';
+}
+
+function cursorToolActivity(
+  event: CursorJsonEvent,
+  tool: string,
+): Extract<ChatDelta, { type: 'activity' }> {
+  const subtype = String(event.subtype ?? '').toLowerCase();
+  const failed = /fail|error|cancel/.test(subtype);
+  const completed = failed || /complete|success|done|finished/.test(subtype);
+  const id = firstString(event.call_id, event.request_id) ?? `cursor-${tool}`;
+  return {
+    type: 'activity',
+    id: `cursor-${id}`,
+    phase: 'tool',
+    status: failed ? 'error' : completed ? 'success' : 'running',
+    label: failed ? `Failed ${tool}` : completed ? `Used ${tool}` : `Using ${tool}`,
+    ...(completed
+      ? { completedAt: new Date().toISOString() }
+      : { startedAt: new Date().toISOString() }),
+  };
+}
+
+function firstObjectValueWithSuffix(
+  object: Record<string, unknown> | null,
+  suffix: string,
+): { key: string; value: Record<string, unknown> } | null {
+  if (!object) return null;
+  for (const [key, value] of Object.entries(object)) {
+    const nested = objectOf(value);
+    if (nested && key.endsWith(suffix)) {
+      return { key: prettyToolName(key.replace(new RegExp(`${suffix}$`), '')), value: nested };
+    }
+  }
+  return null;
+}
+
+function prettyToolName(raw: string): string {
+  return raw.replace(/^mcp__[^_]+__/, '').replace(/[_-]?tool$/i, '').replace(/[._-]/g, ' ').trim() || 'tool';
 }
 
 function buildCursorChatPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {

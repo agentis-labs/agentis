@@ -83,6 +83,7 @@ export class ChatToolExecutor {
         userId: ctx.userId,
         runId: ctx.runId,
         conversationId: ctx.conversationId,
+        executionMode: ctx.executionMode,
         viewport: ctx.viewport ?? null,
         caller: 'chat',
         ...(ctx.signal ? { signal: ctx.signal } : {}),

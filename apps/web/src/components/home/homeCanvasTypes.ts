@@ -30,6 +30,15 @@ export interface HomeWorkflow {
   name?: string;
   status?: string;
   spaceId?: string | null;
+  /** Specialist agent that owns this workflow (direct per-workflow responsibility). */
+  ownerAgentId?: string | null;
+  appId?: string | null;
+  /**
+   * Set when this entry stands in for an Agentic App on the canvas (one node per
+   * App). The node is labelled/routed as the App; the underlying `id` is a real
+   * representative workflow so run liveness still resolves.
+   */
+  app?: { id: string; name: string; icon?: string | null; workflowCount: number } | null;
   iconUrl?: string | null;
   imageUrl?: string | null;
   coverUrl?: string | null;
@@ -45,6 +54,15 @@ export interface HomeWorkflow {
     }>;
     edges?: Array<{ id: string; source: string; target: string }>;
   } | null;
+}
+
+export interface HomeApp {
+  id: string;
+  name: string;
+  icon?: string | null;
+  status?: string;
+  domainId?: string | null;
+  ownerAgentId?: string | null;
 }
 
 export interface HomeKnowledgeBase {
@@ -66,6 +84,8 @@ export interface HomeSpace {
 
 export interface EcosystemData {
   workflows: HomeWorkflow[];
+  /** Agentic Apps — the org primitive. Optional so partial callers/tests omit it. */
+  apps?: HomeApp[];
   knowledgeBases: HomeKnowledgeBase[];
   spaces: HomeSpace[];
   loading: boolean;
@@ -74,6 +94,8 @@ export interface EcosystemData {
 export interface CanvasNode {
   id: string;
   kind: CanvasNodeKind;
+  /** Optional display label overriding `kind` in the UI (e.g. "app" for an App node). */
+  kindLabel?: string;
   tier: number;
   title: string;
   subtitle: string;
@@ -102,6 +124,7 @@ export interface CanvasNode {
   runtimeError?: string | null;
   progress?: number;
   startedAt?: string;
+  workflowRunId?: string | null;
   tooltipLines: string[];
   agent?: WorkspaceAgent;
   workflow?: HomeWorkflow;
@@ -109,6 +132,13 @@ export interface CanvasNode {
   artifact?: WorkspaceArtifact;
   approval?: WorkspaceApproval;
   connectedAgentIds?: string[];
+  laneId?: string;
+  laneKind?: 'manager-workflows' | 'orchestrator-workflows';
+  groupKey?: string;
+  collapsedCount?: number;
+  expanded?: boolean;
+  /** Specialists reporting to this manager (shown on manager nodes when collapsed). */
+  specialistCount?: number;
 }
 
 export interface CanvasEdge {

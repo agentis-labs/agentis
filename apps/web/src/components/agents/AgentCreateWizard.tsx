@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, Check, Loader2, Upload, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -17,7 +17,7 @@ import { ManagerGlyph, OrchestratorGlyph, WorkerGlyph } from './AgentRoleGlyphs'
 import { DomainEditorSheet, type DomainOption } from './DomainEditorSheet';
 import { specialistsApi, type SpecialistSummary } from '../../lib/specialists';
 type AgentRole = 'orchestrator' | 'manager' | 'worker';
-type ChannelKind = 'telegram' | 'discord';
+type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp';
 type GlyphComponent = (props: { size?: number }) => JSX.Element;
 
 interface ExistingAgent {
@@ -54,6 +54,10 @@ interface ChannelDraft {
   open: boolean;
   token: string;
   defaultChatId: string;
+  signingSecret?: string;
+  phoneNumberId?: string;
+  appSecret?: string;
+  verifyToken?: string;
 }
 
 interface AgentCreateWizardProps {
@@ -62,6 +66,8 @@ interface AgentCreateWizardProps {
   onCreated: (agent: { id: string; name: string; role?: string }) => void;
   initialRole?: AgentRole | null;
   initialSpaceId?: string | null;
+  /** Preset manager a created specialist reports to (e.g. when owning a subdomain). */
+  initialReportsTo?: string | null;
   lockInitialRole?: boolean;
   flipFrom?: unknown;
   heading?: string;
@@ -73,6 +79,8 @@ const EMPTY_PLAYBOOKS: PlaybookEntry[] = [];
 const DEFAULT_CHANNELS: Record<ChannelKind, ChannelDraft> = {
   telegram: { kind: 'telegram', open: false, token: '', defaultChatId: '' },
   discord: { kind: 'discord', open: false, token: '', defaultChatId: '' },
+  slack: { kind: 'slack', open: false, token: '', defaultChatId: '', signingSecret: '' },
+  whatsapp: { kind: 'whatsapp', open: false, token: '', defaultChatId: '', phoneNumberId: '', appSecret: '', verifyToken: '' },
 };
 
 const ROLE_COLOR: Record<AgentRole, string> = {
@@ -157,6 +165,8 @@ function cloneChannels(): Record<ChannelKind, ChannelDraft> {
   return {
     telegram: { ...DEFAULT_CHANNELS.telegram },
     discord: { ...DEFAULT_CHANNELS.discord },
+    slack: { ...DEFAULT_CHANNELS.slack },
+    whatsapp: { ...DEFAULT_CHANNELS.whatsapp },
   };
 }
 
@@ -194,6 +204,7 @@ export function AgentCreateWizard({
   onCreated,
   initialRole,
   initialSpaceId,
+  initialReportsTo,
   lockInitialRole = false,
   flipFrom,
   heading,
@@ -239,6 +250,18 @@ export function AgentCreateWizard({
     if (role === 'worker') return [...managers, ...(orchestrator ? [orchestrator] : [])];
     return [] as ExistingAgent[];
   }, [managers, orchestrator, role]);
+  // For a specialist, an inline new domain is a Subdomain under its manager's domain.
+  const managerDomainId = useMemo(() => {
+    if (role !== 'worker' || !reportsTo) return null;
+    const supervisor = agents.find((agent) => agent.id === reportsTo);
+    const sid = supervisor?.spaceId ?? null;
+    // Only nest under a top-level domain (not a subdomain).
+    return sid && !spaces.find((s) => s.id === sid)?.parentDomainId ? sid : null;
+  }, [agents, reportsTo, role, spaces]);
+  const specialistOwnerOptions = useMemo(
+    () => agents.filter((a) => a.role && a.role !== 'orchestrator' && a.role !== 'manager').map((a) => ({ id: a.id, name: a.name, role: a.role ?? null })),
+    [agents],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -250,7 +273,7 @@ export function AgentCreateWizard({
     setRole(nextRole);
     setSpecialty('');
     setCustomRole('');
-    setReportsTo('');
+    setReportsTo(nextRole === 'orchestrator' ? '' : initialReportsTo ?? '');
     setDetections(EMPTY_DETECTIONS);
     setDetecting(true);
     setPlaybookEntries(EMPTY_PLAYBOOKS);
@@ -273,13 +296,13 @@ export function AgentCreateWizard({
       api<{ agents: ExistingAgent[] }>('/v1/agents'),
       api<DetectResponse>('/v1/harness/detect'),
       api<PlaybookResponse>('/v1/agents/playbook-library'),
-      api<{ data: DomainOption[] }>('/v1/spaces'),
+      api<{ data: DomainOption[] }>('/v1/domains'),
     ]).then(([agentsResult, detectResult, playbookResult, spacesResult]) => {
       const loadedAgents = agentsResult.status === 'fulfilled' ? agentsResult.value.agents ?? [] : [];
       setAgents(loadedAgents);
       setSpaces(spacesResult.status === 'fulfilled' ? spacesResult.value.data ?? [] : []);
       const existingOrchestrator = loadedAgents.find((agent) => agent.role === 'orchestrator');
-      if (nextRole === 'manager' && existingOrchestrator) {
+      if (nextRole === 'manager' && existingOrchestrator && !initialReportsTo) {
         setReportsTo(existingOrchestrator.id);
       }
 
@@ -292,7 +315,7 @@ export function AgentCreateWizard({
       setDetecting(false);
       setPlaybookEntries(playbookResult.status === 'fulfilled' ? playbookResult.value.entries ?? [] : []);
     });
-  }, [initialRole, initialSpaceId, open]);
+  }, [initialRole, initialReportsTo, initialSpaceId, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -439,6 +462,7 @@ export function AgentCreateWizard({
         for (const channel of Object.values(channels)) {
           if (!channel.token.trim()) continue;
           try {
+            const isWhatsAppCloud = channel.kind === 'whatsapp';
             await api('/v1/channels', {
               method: 'POST',
               body: JSON.stringify({
@@ -447,6 +471,16 @@ export function AgentCreateWizard({
                 agentId: created.agent.id,
                 token: channel.token.trim(),
                 defaultChatId: channel.defaultChatId.trim() || undefined,
+                ...(channel.kind === 'slack' && channel.signingSecret?.trim() ? { signingSecret: channel.signingSecret.trim() } : {}),
+                ...(isWhatsAppCloud
+                  ? {
+                      mode: 'cloud',
+                      defaultRecipient: channel.defaultChatId.trim() || undefined,
+                      phoneNumberId: channel.phoneNumberId?.trim() || undefined,
+                      appSecret: channel.appSecret?.trim() || undefined,
+                      verifyToken: channel.verifyToken?.trim() || undefined,
+                    }
+                  : {}),
               }),
             });
           } catch (channelError) {
@@ -521,7 +555,6 @@ export function AgentCreateWizard({
 
   const canCreate = name.trim().length >= 2
     && !(role === 'orchestrator' && Boolean(orchestrator))
-    && !(role === 'manager' && !spaceId)
     && !(role === 'worker' && specialty === CUSTOM_SPECIALTY && slugifySpecialty(customRole).length === 0);
 
   return (
@@ -610,18 +643,23 @@ export function AgentCreateWizard({
                         onChange={(event) => handleDomainChange(event.target.value)}
                         className={clsx(inputCls, 'appearance-none pr-8')}
                       >
-                        <option value="">{role === 'manager' ? 'Select a domain' : 'Inherit supervisor domain'}</option>
-                        {spaces.map(s => (
-                          <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                        <option value="__create__">Create new domain...</option>
+                        <option value="">{role === 'manager' ? 'No domain' : 'Inherit supervisor domain'}</option>
+                        {spaces.map(s => {
+                          const parent = s.parentDomainId ? spaces.find((d) => d.id === s.parentDomainId) : null;
+                          return <option key={s.id} value={s.id}>{parent ? `${parent.name} › ${s.name}` : s.name}</option>;
+                        })}
+                        <option value="__create__">{managerDomainId ? 'Create new subdomain...' : 'Create new domain...'}</option>
                       </select>
                       <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
                         <svg className="h-4 w-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                       </div>
                     </div>
                     <p className="text-[11px] text-text-muted">
-                      {role === 'manager' ? 'Managers need a domain so the fleet can route work cleanly.' : 'Workers can inherit their manager domain or be placed manually.'}
+                      {role === 'manager'
+                        ? 'Optional. Use a domain when this manager owns a clear area.'
+                        : managerDomainId
+                          ? 'Pick a subdomain this specialist is responsible for, or create one under its manager’s domain.'
+                          : 'Specialists can inherit their manager domain or be placed manually.'}
                     </p>
                   </label>
                 )}
@@ -766,6 +804,66 @@ export function AgentCreateWizard({
                         onTokenChange={(value) => updateChannel('discord', { token: value })}
                         onChatChange={(value) => updateChannel('discord', { defaultChatId: value })}
                       />
+                      <InboxChannelCard
+                        draft={channels.slack}
+                        title="Slack"
+                        chatLabel="Default channel ID"
+                        help="Bot token, signing secret, and a Slack channel ID. Invite the bot to the channel."
+                        onToggle={() => updateChannel('slack', { open: !channels.slack.open })}
+                        onTokenChange={(value) => updateChannel('slack', { token: value })}
+                        onChatChange={(value) => updateChannel('slack', { defaultChatId: value })}
+                        extra={(
+                          <label className="block space-y-1.5">
+                            <span className="text-xs font-medium text-text-secondary">Signing secret</span>
+                            <input
+                              type="password"
+                              value={channels.slack.signingSecret ?? ''}
+                              onChange={(event) => updateChannel('slack', { signingSecret: event.target.value })}
+                              placeholder="Slack signing secret"
+                              className={inputCls}
+                            />
+                          </label>
+                        )}
+                      />
+                      <InboxChannelCard
+                        draft={channels.whatsapp}
+                        title="WhatsApp Cloud"
+                        chatLabel="Default recipient"
+                        help="Recommended production WhatsApp path. QR linking is available from the agent Channels tab after creation."
+                        onToggle={() => updateChannel('whatsapp', { open: !channels.whatsapp.open })}
+                        onTokenChange={(value) => updateChannel('whatsapp', { token: value })}
+                        onChatChange={(value) => updateChannel('whatsapp', { defaultChatId: value })}
+                        extra={(
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <label className="block space-y-1.5">
+                              <span className="text-xs font-medium text-text-secondary">Phone number ID</span>
+                              <input
+                                value={channels.whatsapp.phoneNumberId ?? ''}
+                                onChange={(event) => updateChannel('whatsapp', { phoneNumberId: event.target.value })}
+                                className={inputCls}
+                              />
+                            </label>
+                            <label className="block space-y-1.5">
+                              <span className="text-xs font-medium text-text-secondary">Verify token</span>
+                              <input
+                                type="password"
+                                value={channels.whatsapp.verifyToken ?? ''}
+                                onChange={(event) => updateChannel('whatsapp', { verifyToken: event.target.value })}
+                                className={inputCls}
+                              />
+                            </label>
+                            <label className="block space-y-1.5 sm:col-span-2">
+                              <span className="text-xs font-medium text-text-secondary">App secret</span>
+                              <input
+                                type="password"
+                                value={channels.whatsapp.appSecret ?? ''}
+                                onChange={(event) => updateChannel('whatsapp', { appSecret: event.target.value })}
+                                className={inputCls}
+                              />
+                            </label>
+                          </div>
+                        )}
+                      />
                     </div>
                   )}
                 </section>
@@ -811,6 +909,9 @@ export function AgentCreateWizard({
       <DomainEditorSheet
         open={domainEditorOpen}
         managers={managers}
+        parentOptions={spaces.filter((space) => !space.parentDomainId)}
+        specialists={specialistOwnerOptions}
+        initialParentDomainId={managerDomainId}
         onClose={() => setDomainEditorOpen(false)}
         onSaved={(domain) => {
           if (!domain) return;
@@ -908,7 +1009,7 @@ function HierarchyNotice({
     return (
       <div className={clsx('rounded-lg border px-3 py-3 text-sm', orchestrator ? 'border-danger/30 bg-danger/5 text-danger' : 'border-line bg-surface-2 text-text-muted')}>
         {orchestrator
-          ? `A workspace orchestrator already exists: ${orchestrator.name}. Commission this agent as a manager or worker instead.`
+          ? `A workspace orchestrator already exists: ${orchestrator.name}. Commission this agent as a manager or specialist instead.`
           : 'This agent will be the workspace orchestrator. One orchestrator per workspace.'}
       </div>
     );
@@ -942,6 +1043,7 @@ function InboxChannelCard({
   onToggle,
   onTokenChange,
   onChatChange,
+  extra,
 }: {
   draft: ChannelDraft;
   title: string;
@@ -950,6 +1052,7 @@ function InboxChannelCard({
   onToggle: () => void;
   onTokenChange: (value: string) => void;
   onChatChange: (value: string) => void;
+  extra?: ReactNode;
 }) {
   return (
     <div className="rounded-lg border border-line bg-canvas">
@@ -981,6 +1084,8 @@ function InboxChannelCard({
             />
           </label>
 
+          {extra}
+
           <div className="text-[11px] text-text-muted">{help}</div>
         </div>
       )}
@@ -991,3 +1096,4 @@ function InboxChannelCard({
 const inputCls = 'mt-1 h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
 const secondaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn border border-line px-3 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary';
 const primaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40';
+

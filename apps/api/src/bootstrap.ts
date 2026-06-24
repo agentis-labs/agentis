@@ -9,13 +9,15 @@
  */
 
 import { type Server as HttpServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { and, eq, inArray } from 'drizzle-orm';
-import { REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type WorkflowGraph } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { AgentisRuntimeHandle, AgentisRuntimeStartResult } from '@agentis/runtime';
 import { loadEnv, type AgentisEnv } from './env.js';
 import { createLogger, type Logger } from './logger.js';
 import { loadOrCreateSecrets, type AgentisSecrets } from './secrets.js';
@@ -28,6 +30,7 @@ import { AuthService } from './services/auth.js';
 import { LedgerService } from './services/ledger.js';
 import { ScratchpadService } from './services/scratchpad.js';
 import { ActivityFeedService } from './services/activityFeed.js';
+import { ObservabilityService } from './services/observability.js';
 import { ApprovalInboxService } from './services/approvalInbox.js';
 import { ExtensionRuntime } from './services/extensionRuntime.js';
 import { SubflowExecutor } from './services/subflowExecutor.js';
@@ -43,6 +46,7 @@ import { CommandIndex } from './services/commandIndex.js';
 import { KnowledgeBaseService } from './services/knowledgeBase.js';
 import { DurableJobQueue } from './services/jobQueue.js';
 import { AgentisToolRegistry } from './services/agentisToolRegistry.js';
+import { CapabilityRegistry } from './services/capabilityRegistry.js';
 import { registerAllTools } from './services/agentisToolHandlers/index.js';
 import { ChatToolExecutor } from './services/chatToolExecutor.js';
 import { ChatSessionExecutor } from './services/chatSessionExecutor.js';
@@ -51,7 +55,9 @@ import { ViewportStore } from './services/viewportStore.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
 import { AdapterManager } from './adapters/AdapterManager.js';
-import { OrchestratorModelRouter } from './services/orchestratorModelRouter.js';
+import { WorktreeManager } from './services/worktreeManager.js';
+import { OrchestratorModelRouter, type ModelProfile } from './services/orchestratorModelRouter.js';
+import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from './services/workspaceHarnessRuntime.js';
 import { ChannelTurnDispatcher } from './services/channelTurnDispatcher.js';
 import { ChannelConnectionSupervisor } from './services/channelConnectionSupervisor.js';
 import { WorkspaceAwarenessService } from './services/workspaceAwarenessService.js';
@@ -83,18 +89,22 @@ import { buildEphemeralRoutes } from './routes/ephemeral.js';
 import { buildRunRoutes } from './routes/runs.js';
 import { buildExtensionRoutes } from './routes/extensions.js';
 import { buildActivityRoutes } from './routes/activity.js';
+import { buildObservabilityRoutes } from './routes/observability.js';
 import { buildApprovalRoutes } from './routes/approvals.js';
 import { buildDashboardRoutes } from './routes/dashboard.js';
 import { buildAgentRoutes } from './routes/agents.js';
 import { buildHarnessRoutes } from './routes/harness.js';
+import { buildHarnessImportRoutes } from './routes/harnessImport.js';
+import { HarnessImportSyncService } from './services/harnessImportSync.js';
 import { buildGatewayRoutes } from './routes/gateways.js';
 import { buildGatewayMutationRoutes } from './routes/gatewayMutations.js';
 import { buildAmbientRoutes } from './routes/ambients.js';
-import { buildSpaceRoutes } from './routes/spaces.js';
+import { buildDomainRoutes } from './routes/domains.js';
+import { buildAppRoutes } from './routes/apps.js';
+import { buildCapabilityRoutes } from './routes/capabilities.js';
+import { buildAppStores } from '@agentis/app';
 import { buildScratchpadRoutes } from './routes/scratchpad.js';
 import { buildTaskRoutes } from './routes/tasks.js';
-import { buildTeamRoutes } from './routes/teams.js';
-import { TeamService } from './services/teams.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
 import { BudgetService } from './services/budget.js';
 import { defaultConnectorRegistry } from '@agentis/integrations';
@@ -107,12 +117,17 @@ import { AgentLibraryService } from './services/agentLibrary.js';
 import { AgentToolRuntime, type AgentToolRuntimeDeps } from './services/agentToolRuntime.js';
 import { AgentSessionService } from './services/agentSession.js';
 import { AgentSessionRuntime } from './services/agentSessionRuntime.js';
+import { PlanService } from './services/planService.js';
 import { LlmSessionAdapter } from './services/llmSessionAdapter.js';
 import { PlatformModelService } from './services/platformModelService.js';
 import { AgentMemoryService } from './services/agentMemory.js';
 import { PersonalBrainService } from './services/personalBrain.js';
 import { FailureReflectionService } from './services/failureReflection.js';
 import { FeynmanReflectionService } from './services/feynmanReflection.js';
+import { WorkflowSelfHealService } from './services/workflowSelfHeal.js';
+import { MemoryReflectionService } from './services/memoryReflectionService.js';
+import { BrainAskService } from './services/brainAskService.js';
+import { clipRealtimeText, publishAgentWorkStep, workCorrelationId } from './services/agentWorkProgress.js';
 import { AbilityService } from './services/abilityService.js';
 import { SpecialistLoadoutService } from './services/specialistLoadoutService.js';
 import { SpecialistProfileService } from './services/specialistProfileService.js';
@@ -127,25 +142,23 @@ import { AbilityComposer } from './services/abilityComposer.js';
 import { buildAbilityRoutes } from './routes/abilities.js';
 import { buildSpecialistRoutes } from './routes/specialists.js';
 import { buildBrainRoutes } from './routes/brain.js';
-// CORA — the Workspace Brain's organizational reasoning engine.
-import { buildCoraRoutes, buildCoraWebhookRoutes } from './routes/cora.js';
-import { EvidenceLedgerService } from './cora/evidenceLedger.js';
-import { CoraSourceFabric } from './cora/sourceFabric.js';
-import { AgentisNativeSource } from './cora/sources/agentisNativeSource.js';
-import { SlackSource } from './cora/sources/slackSource.js';
-import { GoogleDriveSource } from './cora/sources/googleDriveSource.js';
-import { GitHubSource } from './cora/sources/githubSource.js';
-import { CoraInvestigationService } from './cora/investigationService.js';
-import { ClaimService } from './cora/claimService.js';
-import { IdentityService } from './cora/identityService.js';
-import { CoraModelService } from './cora/modelService.js';
-import { CoraContextComposer } from './cora/contextComposer.js';
-import { CoraMigrationService } from './cora/migrationService.js';
-import { CoraDiscoveryService } from './cora/discovery.js';
-import { CoraExtractionService } from './cora/extractionService.js';
-import { CoraRuntime } from './cora/coraRuntime.js';
+// Grounding — the Workspace Brain's organizational reasoning engine.
+import { buildGroundingRoutes, buildGroundingWebhookRoutes } from './routes/grounding.js';
+import { EvidenceLedgerService } from './grounding/evidenceLedger.js';
+import { GroundingSourceFabric } from './grounding/sourceFabric.js';
+import { AgentisNativeSource } from './grounding/sources/agentisNativeSource.js';
+import { GroundingInvestigationService } from './grounding/investigationService.js';
+import { ClaimService } from './grounding/claimService.js';
+import { IdentityService } from './grounding/identityService.js';
+import { GroundingModelService } from './grounding/modelService.js';
+import { GroundingContextComposer } from './grounding/contextComposer.js';
+import { GroundingMigrationService } from './grounding/migrationService.js';
+import { GroundingDiscoveryService } from './grounding/discovery.js';
+import { GroundingExtractionService } from './grounding/extractionService.js';
+import { GroundingRuntime } from './grounding/groundingRuntime.js';
 // Brain — knowledge graph + memory subsystem.
-import { HashingEmbeddingProvider } from './services/embeddingProvider.js';
+import { LocalEmbeddingProvider } from './services/embeddingProvider.js';
+import { EmbeddingProviderRegistry } from './services/embeddingProviderRegistry.js';
 import { KnowledgeStore } from './services/knowledgeStore.js';
 import { MemoryStore } from './services/memoryStore.js';
 import { EvaluatorExampleStore } from './services/evaluatorExampleStore.js';
@@ -208,6 +221,7 @@ import { buildIssueRoutes } from './routes/issues.js';
 import { buildKnowledgeBaseRoutes } from './routes/knowledgeBases.js';
 import { buildPersonalBrainRoutes } from './routes/personalBrain.js';
 import { buildToolRoutes } from './routes/tools.js';
+import { runPublishedWorkflow } from './engine/runPublishedWorkflow.js';
 import { buildTestHarnessRoutes } from './routes/testHarness.js';
 import { listenHttpServer } from './httpServer.js';
 import { createRealtimeServer, type RealtimeServer } from './websocket/rooms.js';
@@ -215,15 +229,13 @@ import { IssueService } from './services/issues.js';
 import { EventChainService, SchedulerService } from './services/scheduler.js';
 import { RunCompactionService } from './services/runCompactionService.js';
 
-export interface BootstrapResult {
+export interface BootstrapResult extends AgentisRuntimeHandle<AgentisRuntimeStartResult<HttpServer>> {
   env: AgentisEnv;
   secrets: AgentisSecrets;
   logger: Logger;
   db: DbHandle;
   bus: EventBus;
   seed: SeedResult | null;
-  start(): Promise<{ url: string; httpServer: HttpServer }>;
-  stop(): Promise<void>;
 }
 
 /** Build an OAuth client config only when both id + secret are present. */
@@ -285,14 +297,15 @@ function publishAdapterRealtime(
     runId,
     workflowId,
     nodeId,
+    taskId: nodeId,
     agentId: event.agentId,
     agentName: agent?.name,
-    timestamp: event.timestamp,
+    at: event.timestamp,
   };
 
   switch (event.eventType) {
     case 'task.started':
-      deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+      publishAgentWorkStep(deps.bus, {
         ...base,
         phase: 'start',
         step: 'agent_task',
@@ -300,21 +313,37 @@ function publishAdapterRealtime(
       });
       break;
     case 'task.progress':
-      deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+      publishAgentWorkStep(deps.bus, {
         ...base,
         phase: 'progress',
         step: 'agent_task',
-        description: clipRealtimeText(event.message),
+        description: event.message,
       });
       deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE, {
         ...base,
         message: clipRealtimeText(event.message),
+      }, workCorrelationId(base));
+      break;
+    case 'task.completed':
+      publishAgentWorkStep(deps.bus, {
+        ...base,
+        phase: 'complete',
+        step: 'agent_task',
+        description: 'Agent task completed',
+      });
+      break;
+    case 'task.failed':
+      publishAgentWorkStep(deps.bus, {
+        ...base,
+        phase: 'fail',
+        step: 'agent_task',
+        description: `Agent task failed: ${event.error}`,
       });
       break;
     case 'agent.thinking': {
       const text = clipRealtimeText(event.text ?? '');
       if (!text) return;
-      deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+      publishAgentWorkStep(deps.bus, {
         ...base,
         phase: 'thinking',
         step: 'reasoning',
@@ -323,11 +352,11 @@ function publishAdapterRealtime(
       deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE, {
         ...base,
         message: text,
-      });
+      }, workCorrelationId(base));
       break;
     }
     case 'agent.tool_call':
-      deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, {
+      publishAgentWorkStep(deps.bus, {
         ...base,
         phase: 'tool',
         step: event.tool,
@@ -338,16 +367,11 @@ function publishAdapterRealtime(
         tool: event.tool,
         input: event.input,
         result: event.result,
-      });
+      }, workCorrelationId(base));
       break;
     default:
       break;
   }
-}
-
-function clipRealtimeText(text: string, max = 2_000): string {
-  const trimmed = text.trim();
-  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}...` : trimmed;
 }
 
 export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Promise<BootstrapResult> {
@@ -381,6 +405,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const ledger = new LedgerService(sqlite, bus);
   const scratchpad = new ScratchpadService(bus, logger);
   const activity = new ActivityFeedService(sqlite, bus);
+  const observability = new ObservabilityService(sqlite, bus, logger);
+  observability.startLegacyBridge();
   const approvals = new ApprovalInboxService(sqlite, bus);
   const extensionKv = new ExtensionKvStore(sqlite);
   const extensions = new ExtensionRuntime(sqlite, logger, { dockerEnabled: !!env.AGENTIS_EXTENSION_DOCKER }, extensionKv);
@@ -399,6 +425,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   );
 
   const adapters = new AdapterManager(logger, telemetry);
+  // Per-task filesystem isolation for parallel agents (swarm subtasks each get
+  // their own git worktree / temp dir instead of sharing one checkout).
+  const worktreeManager = new WorktreeManager(logger);
+  const workspaceHarnesses = new WorkspaceHarnessRuntimeResolver({ db: sqlite, adapters });
+  const workspaceHarnessCompleter = new WorkspaceHarnessStructuredCompleter(workspaceHarnesses);
 
   const subflows = new SubflowExecutor({ db: sqlite, ledger, scratchpad });
   const conversations = new ConversationStore({ db: sqlite, bus });
@@ -414,7 +445,6 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const viewportStore = new ViewportStore();
 
   const knowledgeBaseService = new KnowledgeBaseService(sqlite);
-  const teamService = new TeamService(sqlite, bus);
   const auditTrail = new AuditTrailService(sqlite, logger);
   const budgetService = new BudgetService({ db: sqlite, bus, approvals, audit: auditTrail });
   const workflowStoreService = new WorkflowStoreService(sqlite);
@@ -436,18 +466,40 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // to the canonical `memory_episodes` table (scope_id = agentId), so the same
   // episodic store backs it. A dedicated instance keeps construction order
   // simple; episodes are a stateless table writer.
-  const agentMemoryService = new AgentMemoryService(sqlite, new EpisodicMemoryStore(sqlite, logger, new HashingEmbeddingProvider()));
-  const personalBrain = new PersonalBrainService(sqlite, new HashingEmbeddingProvider());
+  // §B1.1 — ONE embedding provider owner, constructed before any memory store so
+  // every store embeds writes with the workspace's configured provider (not a
+  // hard-wired hashing instance). This is the keystone of the semantic-recall fix.
+  const embeddingRegistry = new EmbeddingProviderRegistry(sqlite, logger);
+  const embeddingResolver = embeddingRegistry.resolver();
+  const agentMemoryService = new AgentMemoryService(sqlite, new EpisodicMemoryStore(sqlite, logger, embeddingResolver));
+  // PersonalBrain is USER-scoped (cross-workspace); there is no per-user provider
+  // config, so it uses a default local (semantic) embedder until an account-level
+  // setting exists. Tracked as a known §B1 gap, not an oversight.
+  const personalBrain = new PersonalBrainService(sqlite, new LocalEmbeddingProvider());
   const failureReflection = new FailureReflectionService(agentMemoryService, logger);
   const abilityService = new AbilityService(sqlite, logger);
   const specialistLoadouts = new SpecialistLoadoutService(sqlite);
   const specialistProfiles = new SpecialistProfileService(sqlite);
+  // Agentic App stores (AGENTIC-APPS-10X §4/§5) — datastore + surfaces with
+  // realtime emit wired to the bus; shared by the agent tool runtime and routes.
+  const appStores = buildAppStores({ db: sqlite, bus });
   const agentToolRuntimeDeps: AgentToolRuntimeDeps = {
     volume: workspaceVolume,
     knowledgeBases: knowledgeBaseService,
     workflowStore: workflowStoreService,
     agentMemory: agentMemoryService,
+    memory: memoryStore,
     logger,
+    appData: appStores.data,
+    appSurfaces: appStores.surfaces,
+    resolveAppIdForWorkflow: (workspaceId, workflowId) => {
+      const row = sqlite
+        .select({ appId: schema.workflows.appId })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, workflowId)))
+        .get();
+      return row?.appId ?? undefined;
+    },
   };
   const agentToolRuntime = new AgentToolRuntime(agentToolRuntimeDeps);
   // Native Playwright runtime for `browser` nodes (lazy: Chromium installs on
@@ -458,22 +510,58 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // workspace agent (seeding the built-in specialists on first use).
   const specialistAgents = new SpecialistAgentService(sqlite, agentLibrary);
 
-  // EvaluatorRuntime — only constructed when an LLM endpoint is configured.
-  // Without these env vars, `evaluator` nodes throw at dispatch time and
-  // `router` llm_route mode falls back to first-match. This keeps v1.0 usable
-  // without forcing operators to configure a model on day one.
-  const evaluatorRuntime = (env.AGENTIS_EVALUATOR_BASE_URL && env.AGENTIS_EVALUATOR_MODEL)
+  // Zero-config model derivation from the first connected agent runtime.
+  const platformModel = new PlatformModelService({ db: sqlite, vault: credentialVault, logger });
+  const orchestratorModelRouter = OrchestratorModelRouter.fromEnv(env, logger);
+  // Per-workspace model-role overrides (§4.4) — wired into the router so the
+  // conversation runtime (and any workspace-aware consumer) honors them.
+  const workspaceModelConfig = new WorkspaceModelConfigService({ db: sqlite, vault: credentialVault, logger });
+  orchestratorModelRouter.setConfigProvider(workspaceModelConfig.asConfigProvider());
+  // Zero-config fallback: when neither Settings nor env name a model for a
+  // workspace, derive one from its first connected agent runtime — so connecting
+  // any HTTP/LLM agent lights up the whole autonomy stack (sessions, evaluation,
+  // tool loop) without touching `.env`. Sits BELOW Settings + env in precedence.
+  orchestratorModelRouter.setFallbackProvider((workspaceId) => platformModel.deriveProfile(workspaceId));
+  const evaluatorRuntimeFactory = new WorkspaceEvaluatorRuntimeFactory({ router: orchestratorModelRouter, logger });
+  const modelAssistedRuntimeEnabled = (workspaceId: string): boolean => {
+    const row = sqlite.select({ brainSettings: schema.workspaces.brainSettings })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .get();
+    const value = row?.brainSettings;
+    let settings: Record<string, unknown> = {};
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      settings = value as Record<string, unknown>;
+    } else if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) settings = parsed as Record<string, unknown>;
+      } catch {
+        settings = {};
+      }
+    }
+    return settings.modelAssistedRuntimeEnabled !== false;
+  };
+  const evaluatorRuntimeForProfile = (profile: ModelProfile | null): EvaluatorRuntime | undefined => profile
     ? new EvaluatorRuntime({
-        baseUrl: env.AGENTIS_EVALUATOR_BASE_URL,
-        apiKey: env.AGENTIS_EVALUATOR_API_KEY,
-        model: env.AGENTIS_EVALUATOR_MODEL,
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+        ...(profile.apiKey ? { apiKey: profile.apiKey } : {}),
         logger,
       })
     : undefined;
+
+  // EvaluatorRuntime — the legacy/global path now follows the orchestrator model
+  // router too: Settings/env evaluator → orchestrator default → first HTTP agent.
+  const evaluatorRuntimeProfile = orchestratorModelRouter.profile('evaluation') ?? orchestratorModelRouter.profile('conversation');
+  const evaluatorRuntime = evaluatorRuntimeForProfile(evaluatorRuntimeProfile);
+  const defaultCognitiveCompleter: StructuredCompleter = evaluatorRuntime ?? workspaceHarnessCompleter;
   if (!evaluatorRuntime) {
-    logger.info('engine.evaluator.disabled', {
-      reason: 'AGENTIS_EVALUATOR_BASE_URL or AGENTIS_EVALUATOR_MODEL not set',
+    logger.info('engine.evaluator.endpoint_unconfigured', {
+      fallback: 'workspace orchestrator harness after agent runtime hydration',
     });
+  } else {
+    logger.info('engine.evaluator.enabled', { model: evaluatorRuntimeProfile?.model });
   }
 
   // Dedicated workflow-synthesis runtime (§6) — decouples `build_workflow` LLM
@@ -503,8 +591,6 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       slack: new SlackChannelAdapter(),
     },
   });
-  channelBridge.bindOutbound();
-
   const seed = await seedIfEmpty({ db: sqlite, env, auth, logger });
 
   // Forward-declare the workspace embedding-provider resolver so the engine can
@@ -512,9 +598,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   let resolveAbilityEmbeddingProvider: ((workspaceId: string) => import('./services/embeddingProvider.js').EmbeddingProvider) | undefined;
   const abilityEmbeddings = (workspaceId: string) => {
     if (!resolveAbilityEmbeddingProvider) {
-      // Bootstrap hasn't finished wiring SharedIntelligence yet — fall back to
-      // the deterministic hashing provider so dispatch never crashes.
-      return new HashingEmbeddingProvider();
+      // Bootstrap hasn't finished wiring SharedIntelligence yet — use a default
+      // local (semantic) embedder so dispatch never crashes.
+      return new LocalEmbeddingProvider();
     }
     return resolveAbilityEmbeddingProvider(workspaceId);
   };
@@ -550,8 +636,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // `canRun(workspaceId)` gate degrades that workspace's `agent_task`s to the
   // tool loop / single-shot dispatch instead of failing.
   const sessionStore = new AgentSessionService(sqlite, logger);
-  // Zero-config model derivation from the first connected agent runtime.
-  const platformModel = new PlatformModelService({ db: sqlite, vault: credentialVault, logger });
+  const planService = new PlanService(sqlite, bus);
   // Late-bound (assigned once the model router exists, below) per-workspace
   // session-adapter resolver + cache so the hot path reuses one adapter instance.
   let resolveSessionAdapter: ((workspaceId: string) => LlmSessionAdapter | undefined) | undefined;
@@ -570,17 +655,15 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     ...(envSessionAdapter ? { adapter: envSessionAdapter } : {}),
     resolveAdapter: (workspaceId: string) => resolveSessionAdapter?.(workspaceId),
     scratchpad,
+    plans: planService,
     bus,
     logger,
     agentTools: agentToolRuntime,
   });
 
-  // Assigned once the model router is built (below); referenced via late-bound
-  // closures in engineDeps + toolHandlerDeps (both invoked lazily at run time).
-  let evaluatorRuntimeFactory: WorkspaceEvaluatorRuntimeFactory | undefined;
   // LAYER 0: mints/caches a real model-backed runtime per agent (bound to its id)
   // using the workspace default model — so agent_task always has a working brain.
-  let agentRuntimeResolver: ((workspaceId: string, agentId: string) => AgentAdapter | undefined) | undefined;
+  let agentRuntimeResolver: ((workspaceId: string, agentId: string, task?: string | null, explicitModel?: string | null) => AgentAdapter | undefined) | undefined;
 
   const engineDeps: EngineDeps = {
     db: sqlite,
@@ -598,14 +681,22 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     connectors: defaultConnectorRegistry,
     workflowStore: workflowStoreService,
     workspaceStore: workspaceStoreService,
-    evaluatorRuntime,
     // Per-workspace evaluation model overrides (§4.4); late-bound factory.
-    resolveEvaluatorRuntime: (workspaceId: string, role: 'synthesis' | 'evaluation') => evaluatorRuntimeFactory?.for(workspaceId, role),
-    resolveAgentRuntime: (workspaceId: string, agentId: string) => agentRuntimeResolver?.(workspaceId, agentId),
+    resolveEvaluatorRuntime: (workspaceId: string, role: 'synthesis' | 'evaluation', hint?: { task?: string | null; purpose?: string | null; explicitModel?: string | null }) =>
+      !modelAssistedRuntimeEnabled(workspaceId)
+        ? undefined
+        : hint?.task
+        ? evaluatorRuntimeFactory?.forTask(workspaceId, role, hint.task, hint.purpose ?? role, hint.explicitModel)
+        : evaluatorRuntimeFactory?.for(workspaceId, role),
+    resolveAgentRuntime: (workspaceId: string, agentId: string, task?: string | null, explicitModel?: string | null) =>
+      modelAssistedRuntimeEnabled(workspaceId) ? agentRuntimeResolver?.(workspaceId, agentId, task, explicitModel) : undefined,
+    modelAssistedRuntimeEnabled,
     vault: credentialVault,
     workspaceIntelligence,
     browserPool,
     specialists: specialistAgents,
+    specialistProfiles,
+    specialistRuntime,
     audit: auditTrail,
     instincts: instinctEngine,
     agentTools: agentToolRuntime,
@@ -619,19 +710,27 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     abilityComposer: new AbilityComposer(),
     sessions: sessionStore,
     sessionRuntime,
+    plans: planService,
     specialistRouter,
+    worktrees: worktreeManager,
     telemetry,
   };
   const engine = new WorkflowEngine(engineDeps);
   // Brain — knowledge graph + memory subsystem (workspace-scoped).
-  const embeddingProvider = new HashingEmbeddingProvider();
+  // §B1.1 — KnowledgeStore keeps a default instance for its synchronous lexical
+  // path; the KnowledgeBase service already resolves the per-workspace provider
+  // for semantic writes/queries via the registry resolver (wired below).
+  const embeddingProvider = new LocalEmbeddingProvider();
   const knowledgeStore = new KnowledgeStore(sqlite, logger, embeddingProvider);
   // memoryStore is constructed earlier (backs authored workspace context too).
   const evaluatorExampleStore = new EvaluatorExampleStore(sqlite, logger);
   const workflowBaselineStore = new WorkflowBaselineStore(sqlite);
   const datasetIngestion = new DatasetIngestion(sqlite, knowledgeStore, memoryStore, evaluatorExampleStore, logger);
   const intelligencePromotion = new IntelligencePromotion(sqlite, memoryStore, logger);
-  const episodicMemoryStore = new EpisodicMemoryStore(sqlite, logger, embeddingProvider);
+  const episodicMemoryStore = new EpisodicMemoryStore(sqlite, logger, embeddingResolver);
+  // §B4 — typed workspace memory now lives in the canonical episode store; wire
+  // the facade so MemoryStore writes/reads flow through the unified substrate.
+  memoryStore.setEpisodicStore(episodicMemoryStore);
   const harnessMemoryIngestion = new HarnessMemoryIngestionService(episodicMemoryStore, logger);
   const brainComposer = new BrainComposer(
     sqlite,
@@ -645,16 +744,17 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     logger,
   );
   const rollingBaselineStore = new RollingBaselineStore(sqlite);
-  const SharedIntelligence = new SharedIntelligenceService(sqlite, bus, episodicMemoryStore, logger);
-  // Wire the Formation Judge model (§P3) — when an evaluator endpoint is
-  // configured, run-promotion forms typed durable memory instead of staging raw
-  // episodic traces. Reuses the same runtime as Brain enrichment.
-  if (evaluatorRuntime) {
-    SharedIntelligence.setFormationCompleter(evaluatorRuntime as unknown as StructuredCompleter);
-    logger.info('brain.formation_judge.enabled', { model: env.AGENTIS_EVALUATOR_MODEL });
-  } else {
-    logger.info('brain.formation_judge.disabled', { reason: 'no evaluator runtime; run output is staged as episodic traces only' });
-  }
+  const SharedIntelligence = new SharedIntelligenceService(sqlite, bus, episodicMemoryStore, logger, embeddingRegistry);
+  SharedIntelligence.setModelAssistedRuntimeEnabled(modelAssistedRuntimeEnabled);
+  // A configured endpoint wins, otherwise each call resolves its workspace's
+  // connected orchestrator harness. This keeps brain features available on a
+  // zero-config Codex/Claude workspace as well as HTTP model deployments.
+  SharedIntelligence.setFormationCompleter(defaultCognitiveCompleter);
+  harnessMemoryIngestion.setFormationPromoter(SharedIntelligence);
+  logger.info('brain.formation_judge.enabled', {
+    source: evaluatorRuntime ? 'configured_model' : 'workspace_orchestrator_harness',
+    model: evaluatorRuntimeProfile?.model ?? null,
+  });
   resolveAbilityEmbeddingProvider = (workspaceId: string) => SharedIntelligence.embeddingProvider(workspaceId);
   knowledgeBaseService.setEmbeddingProviderResolver((workspaceId) => SharedIntelligence.embeddingProvider(workspaceId));
   const brainEnrichment = new ConfiguredBrainEnrichmentProvider(sqlite, logger, {
@@ -669,7 +769,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   knowledgeBaseService.setEnrichmentProvider(brainEnrichment, enrichedGraph);
   const embeddingBackfill = new EmbeddingBackfillService(knowledgeBaseService, logger);
   const brainQueue = new CognitivePromotionQueueWorker(sqlite, SharedIntelligence, logger);
-  const SessionMoments = new SessionMomentService(sqlite, bus, logger);
+  const SessionMoments = new SessionMomentService(sqlite, bus, logger, embeddingResolver);
   const PeerProfiles = new PeerProfileService(sqlite, bus, logger);
   agentToolRuntimeDeps.memory = memoryStore;
   instinctEngine = new InstinctEngine(sqlite, bus, memoryStore, logger);
@@ -681,17 +781,34 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   brainQueue.PeerProfiles = PeerProfiles;
   const Reflection = new ReflectionService(sqlite, bus, logger, PeerProfiles, SharedIntelligence);
   brainQueue.Reflection = Reflection;
-  // Phase 4 — Feynman repair loop. Reuses the evaluator runtime as its grading
-  // model; without one it falls back to grounded deterministic lessons only.
+  // Phase 4 — Feynman repair loop. It inherits the workspace orchestrator
+  // harness when no endpoint model has been configured.
   const feynmanReflection = new FeynmanReflectionService(sqlite, SharedIntelligence, logger);
-  if (evaluatorRuntime) {
-    feynmanReflection.setCompleter(evaluatorRuntime as unknown as StructuredCompleter);
-    logger.info('brain.feynman_reflection.enabled', { model: env.AGENTIS_EVALUATOR_MODEL });
-  } else {
-    logger.info('brain.feynman_reflection.disabled', { reason: 'no evaluator runtime; deterministic-only repair lessons' });
-  }
+  feynmanReflection.setModelAssistedRuntimeEnabled(modelAssistedRuntimeEnabled);
+  feynmanReflection.setCompleter(defaultCognitiveCompleter);
+  logger.info('brain.feynman_reflection.enabled', {
+    source: evaluatorRuntime ? 'configured_model' : 'workspace_orchestrator_harness',
+    model: evaluatorRuntimeProfile?.model ?? null,
+  });
   brainQueue.Feynman = feynmanReflection;
   engineDeps.feynmanReflection = feynmanReflection;
+  engineDeps.selfHeal = new WorkflowSelfHealService(logger);
+  // §C1 — cross-session memory Reflection Engine ("dreaming"). Reuses the
+  // evaluator runtime for grounded deduction; deterministic-only (no fabricated
+  // rules) without one.
+  const memoryReflection = new MemoryReflectionService(sqlite, SharedIntelligence, logger);
+  memoryReflection.setModelAssistedRuntimeEnabled(modelAssistedRuntimeEnabled);
+  memoryReflection.setCompleter(defaultCognitiveCompleter);
+  logger.info('brain.memory_reflection.enabled', {
+    source: evaluatorRuntime ? 'configured_model' : 'workspace_orchestrator_harness',
+    model: evaluatorRuntimeProfile?.model ?? null,
+  });
+  brainQueue.MemoryReflection = memoryReflection;
+  // §C4 — cited-answer recall ("interrogate the brain"). Reuses the evaluator
+  // runtime for grounded synthesis; deterministic cited list without one.
+  const brainAsk = new BrainAskService(SharedIntelligence, logger);
+  brainAsk.setModelAssistedRuntimeEnabled(modelAssistedRuntimeEnabled);
+  brainAsk.setCompleter(defaultCognitiveCompleter);
   const brainDiscourse = new BrainDiscourseService(sqlite, SharedIntelligence, PeerProfiles, SessionMoments, bus, logger);
   const chatMemoryCapture = new ChatMemoryCaptureService({
     db: sqlite,
@@ -702,7 +819,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 	    memory: memoryStore,
 	  });
   const brainCompression = new BrainCompressionService(sqlite, logger, brainQueue);
-  const brainMaintenance = new BrainMaintenanceService(sqlite, bus, logger, brainCompression, SessionMoments);
+  const brainMaintenance = new BrainMaintenanceService(sqlite, bus, logger, brainCompression, SessionMoments, (ws) => SharedIntelligence.reembedPending(ws), (ws) => {
+    brainQueue.enqueue({ workspaceId: ws, itemType: 'memory_reflection', priority: 'low', payload: { workspaceId: ws, trigger: 'scheduled' } });
+  });
   const brainHealth = new BrainHealthService(sqlite);
   const knowledgeAutoLinker = new KnowledgeAutoLinker(
     SharedIntelligence,
@@ -737,6 +856,13 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     logger,
     abilities: abilityService,
     llm: evaluatorRuntime,
+  });
+  // §C6 — close the memory→skill flywheel: a reinforced procedural rule the
+  // reflection engine derives is proposed as a draft Ability ('run' origin),
+  // which still passes self-eval/review before activation. Fire-and-forget.
+  memoryReflection.setSkillProposer((args) => {
+    void abilityCreation.draft({ workspaceId: args.workspaceId, from: 'run', intent: args.intent, name: args.title })
+      .catch((err) => logger.warn('brain.skill_proposal_failed', { workspaceId: args.workspaceId, message: (err as Error).message }));
   });
   abilityService.attachCompileHook((abilityId, workspaceId) => {
     brainQueue.enqueue({
@@ -817,23 +943,61 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     activity,
     replay,
     knowledgeBases: knowledgeBaseService,
-    evaluatorRuntime,
-    synthesisRuntime,
+    memory: memoryStore,
     // Late-bound: the model router is constructed below. The closure is only
     // invoked at build_workflow time, by which point the factory is assigned.
-    resolveEvaluatorRuntime: (workspaceId: string, role: 'synthesis' | 'evaluation') => evaluatorRuntimeFactory?.for(workspaceId, role),
+    resolveEvaluatorRuntime: (workspaceId: string, role: 'synthesis' | 'evaluation', hint?: { task?: string | null; purpose?: string | null; explicitModel?: string | null }) =>
+      !modelAssistedRuntimeEnabled(workspaceId)
+        ? undefined
+        : hint?.task
+        ? evaluatorRuntimeFactory?.forTask(workspaceId, role, hint.task, hint.purpose ?? role, hint.explicitModel)
+        : evaluatorRuntimeFactory?.for(workspaceId, role),
     workspaceIntelligence,
     agentLibrary,
     extensionLibrary,
     abilityCreation,
     specialists: specialistAgents,
+    specialistProfiles,
+    specialistRuntime,
     specialistRouter,
+    plans: planService,
+    channels: channelBridge,
     // Assigned once the model router is constructed below. Build handlers close
     // over this object by reference, so the late assignment is visible to them.
     modelRouter: undefined as OrchestratorModelRouter | undefined,
+    modelAssistedRuntimeEnabled,
   };
   registerAllTools(toolRegistry, toolHandlerDeps);
   ChatToolExecutor.configure({ registry: toolRegistry, logger });
+  const capabilityRegistry = new CapabilityRegistry({
+    db: sqlite,
+    logger,
+    nativeTools: toolRegistry,
+    toolRuntime: agentToolRuntime,
+    ledger,
+    recordInvocation: (record) => logger.info('capability.invoke', { ...record }),
+    callWorkflow: async (args) => {
+      const workflow = sqlite
+        .select({ id: schema.workflows.id, ambientId: schema.workflows.ambientId, graph: schema.workflows.graph })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, args.workspaceId), eq(schema.workflows.id, args.workflowId)))
+        .get();
+      if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found: ${args.workflowId}`);
+      return runPublishedWorkflow({
+        db: sqlite,
+        engine,
+        workspaceId: args.workspaceId,
+        ambientId: args.ambientId ?? workflow.ambientId ?? null,
+        userId: args.actingSeatId,
+        workflowId: workflow.id,
+        graph: workflow.graph as WorkflowGraph,
+        inputs: args.inputs,
+      });
+    },
+  });
+  // Give the self-heal deep replan the SAME full tool surface chat has, so the
+  // orchestrator can CREATE what a failed run needs (agents, extensions, abilities).
+  engineDeps.toolRegistry = toolRegistry;
 
   // Workflow-dispatched agents get a concise awareness manifest of the
   // platform tools (mcp-exposed subset) so CLI agents running a node know the
@@ -843,29 +1007,14 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     toolRegistry.catalog({ mcpOnly: true }).tools.map((tool) => ({ name: tool.id, description: tool.description })),
   );
 
-  // Orchestrator model router (OMNICHANNEL-ORCHESTRATOR-10X §4.4) — resolves a
-  // model per cognition role (conversation, planning, synthesis, …). The
-  // conversation role is the fast-path chat runtime: it gives the operator-facing
-  // chat a native function-calling brain even when the selected agent runs on a
-  // slow marker-protocol CLI (Codex / Claude Code). With only the default model
-  // set, one high model serves every role; per-role env vars override.
   // Workspace situational model — the orchestrator's channel-independent
   // awareness (roster, in-motion runs, approvals, channels). OMNICHANNEL §4.1.
   const workspaceAwareness = new WorkspaceAwarenessService({ db: sqlite, logger });
 
-  const orchestratorModelRouter = OrchestratorModelRouter.fromEnv(env, logger);
-  // Per-workspace model-role overrides (§4.4) — wired into the router so the
-  // conversation runtime (and any workspace-aware consumer) honors them.
-  const workspaceModelConfig = new WorkspaceModelConfigService({ db: sqlite, vault: credentialVault, logger });
-  orchestratorModelRouter.setConfigProvider(workspaceModelConfig.asConfigProvider());
-  // Zero-config fallback: when neither Settings nor env name a model for a
-  // workspace, derive one from its first connected agent runtime — so connecting
-  // any HTTP/LLM agent lights up the whole autonomy stack (sessions, evaluation,
-  // tool loop) without touching `.env`. Sits BELOW Settings + env in precedence.
-  orchestratorModelRouter.setFallbackProvider((workspaceId) => platformModel.deriveProfile(workspaceId));
-  // Now that the router exists, the session runtime can resolve its per-workspace
-  // cognitive model through it (Settings → env → first connected agent).
+  // The session runtime resolves its per-workspace cognitive model through the
+  // orchestrator router (Settings → env → first connected agent).
   resolveSessionAdapter = (workspaceId: string): LlmSessionAdapter | undefined => {
+    if (!modelAssistedRuntimeEnabled(workspaceId)) return undefined;
     const profile = orchestratorModelRouter.profile('evaluation', workspaceId)
       ?? orchestratorModelRouter.profile('conversation', workspaceId);
     if (!profile) return undefined;
@@ -886,12 +1035,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Wire the router into build_workflow so synthesis can route around a slow
   // per-call CLI harness through the configured streaming model — zero extra setup.
   toolHandlerDeps.modelRouter = orchestratorModelRouter;
-  // Per-workspace synthesis/evaluation runtimes (wired into build_workflow via
-  // the late-bound closure in toolHandlerDeps.resolveEvaluatorRuntime).
-  evaluatorRuntimeFactory = new WorkspaceEvaluatorRuntimeFactory({ router: orchestratorModelRouter, logger });
   // LAYER 0: agent_task runtime inheritance — bind the workspace default model to
   // any agent that has no explicit adapter, so specialists actually run.
-  agentRuntimeResolver = (workspaceId: string, agentId: string) => orchestratorModelRouter.resolveForAgent(agentId, workspaceId);
+  agentRuntimeResolver = (workspaceId: string, agentId: string, task?: string | null, explicitModel?: string | null) =>
+    modelAssistedRuntimeEnabled(workspaceId) ? orchestratorModelRouter.resolveForAgent(agentId, workspaceId, task, explicitModel) : undefined;
   const orchestratorRuntime = orchestratorModelRouter.resolve('conversation');
   logger.info('chat.orchestrator_runtime', {
     enabled: Boolean(orchestratorRuntime),
@@ -904,7 +1051,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     adapters,
     orchestratorRuntime,
     modelRouter: orchestratorModelRouter,
+    workspaceHarnesses,
     agentMemory: agentMemoryService,
+    sharedIntelligence: SharedIntelligence,
     personalBrain,
     workspaceIntelligence,
     knowledgeBases: knowledgeBaseService,
@@ -924,6 +1073,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     adapters,
     conversations,
     logger,
+    bus,
     deliver: (args) => channelBridge.deliverToConnection(args),
     setTyping: (connectionId, chatId, on) => channelBridge.setTyping(connectionId, chatId, on),
     identity: channelIdentity,
@@ -1046,9 +1196,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     logger,
     bus,
   }));
-  app.route('/v1/workspaces', buildWorkspaceRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/dashboard', buildDashboardRoutes({ db: sqlite, auth }));
   app.route('/v1/activity', buildActivityRoutes({ db: sqlite, auth, activity }));
+  app.route('/v1/observability', buildObservabilityRoutes({ db: sqlite, auth, bus, observability }));
   app.route('/v1/approvals', buildApprovalRoutes({ db: sqlite, auth, approvals }));
   app.route('/v1/workflows', buildWorkflowRoutes({
     db: sqlite,
@@ -1074,69 +1224,71 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
   app.route('/v1/workspace/intelligence', buildWorkspaceIntelligenceRoutes({ db: sqlite, auth, intelligence: SharedIntelligence, backfill: embeddingBackfill, logger }));
-  app.route('/v1/memory', buildMemoryRoutes({ db: sqlite, auth, memory: memoryStore, episodes: episodicMemoryStore }));
-  // CORA — evidence ledger, source fabric, claims, grants, migration. The
+  app.route('/v1/memory', buildMemoryRoutes({ db: sqlite, auth, memory: memoryStore, episodes: episodicMemoryStore, brainAsk }));
+  // Grounding — evidence ledger, source fabric, claims, grants, migration. The
   // claim service hears about evidence invalidation; the dispatch composer is
   // wired into SharedIntelligence (extends buildDispatchContext, RFC §12.2).
-  const coraLedger = new EvidenceLedgerService({ db: sqlite, logger });
-  const coraClaims = new ClaimService({ db: sqlite, logger, ledger: coraLedger });
-  coraLedger.setInvalidationHandler(coraClaims.onEvidenceInvalidated);
-  const coraIdentity = new IdentityService({ db: sqlite, logger });
-  const coraFabric = new CoraSourceFabric({
+  const groundingLedger = new EvidenceLedgerService({ db: sqlite, logger });
+  const groundingClaims = new ClaimService({ db: sqlite, logger, ledger: groundingLedger });
+  groundingLedger.setInvalidationHandler(groundingClaims.onEvidenceInvalidated);
+  const groundingIdentity = new IdentityService({ db: sqlite, logger });
+  const groundingFabric = new GroundingSourceFabric({
     db: sqlite,
     logger,
-    ledger: coraLedger,
+    ledger: groundingLedger,
     vault: credentialVault,
-    identity: coraIdentity,
+    identity: groundingIdentity,
   });
-  coraFabric.register(new AgentisNativeSource(sqlite));
-  coraFabric.register(new SlackSource());
-  coraFabric.register(new GoogleDriveSource());
-  coraFabric.register(new GitHubSource());
-  const coraModel = new CoraModelService({ db: sqlite, logger, claims: coraClaims });
-  const coraComposer = new CoraContextComposer({ db: sqlite, logger });
-  const coraMigration = new CoraMigrationService({ db: sqlite, logger, claims: coraClaims });
-  const coraDiscovery = new CoraDiscoveryService({ db: sqlite, logger, fabric: coraFabric, composer: coraComposer });
-  const coraExtraction = new CoraExtractionService({
+  groundingFabric.register(new AgentisNativeSource(sqlite));
+  const groundingModel = new GroundingModelService({ db: sqlite, logger, claims: groundingClaims });
+  const groundingComposer = new GroundingContextComposer({ db: sqlite, logger });
+  const groundingMigration = new GroundingMigrationService({ db: sqlite, logger, claims: groundingClaims });
+  const groundingDiscovery = new GroundingDiscoveryService({ db: sqlite, logger, fabric: groundingFabric, composer: groundingComposer });
+  const groundingExtraction = new GroundingExtractionService({
     db: sqlite,
     logger,
-    claims: coraClaims,
-    identity: coraIdentity,
-    migration: coraMigration,
+    claims: groundingClaims,
+    identity: groundingIdentity,
+    migration: groundingMigration,
   });
   // Adaptive-mode extraction reuses the Formation Judge's model source: when an
   // evaluator runtime is configured, free-text evidence gets model extraction;
   // otherwise Adaptive is an honest no-op (Core mode still extracts native shapes).
-  const coraInvestigations = new CoraInvestigationService({ db: sqlite, logger, claims: coraClaims });
-  if (evaluatorRuntime) {
-    coraExtraction.setAdaptiveCompleter(evaluatorRuntime as unknown as StructuredCompleter);
-    coraInvestigations.setCompleter(evaluatorRuntime as unknown as StructuredCompleter);
-  }
-  const coraRuntime = new CoraRuntime({
+  const groundingInvestigations = new GroundingInvestigationService({ db: sqlite, logger, claims: groundingClaims });
+  groundingExtraction.setAdaptiveCompleter(defaultCognitiveCompleter);
+  groundingInvestigations.setCompleter(defaultCognitiveCompleter);
+  const groundingRuntime = new GroundingRuntime({
     db: sqlite,
     logger,
-    fabric: coraFabric,
-    extraction: coraExtraction,
-    model: coraModel,
-    discovery: coraDiscovery,
+    fabric: groundingFabric,
+    extraction: groundingExtraction,
+    model: groundingModel,
+    discovery: groundingDiscovery,
   });
-  SharedIntelligence.setCoraComposer(coraComposer);
-  app.route('/v1/cora', buildCoraRoutes({
+  SharedIntelligence.setGroundingComposer(groundingComposer);
+  app.route('/v1/workspaces', buildWorkspaceRoutes({
     db: sqlite,
     auth,
-    fabric: coraFabric,
-    ledger: coraLedger,
-    claims: coraClaims,
-    identity: coraIdentity,
-    model: coraModel,
-    composer: coraComposer,
-    migration: coraMigration,
-    discovery: coraDiscovery,
-    runtime: coraRuntime,
-    investigations: coraInvestigations,
+    bus,
+    groundingDiscovery,
+    groundingRuntime,
   }));
-  // Separate prefix: /v1/cora/* is auth-gated; webhook ingress must not nest under it.
-  app.route('/v1/cora-webhooks', buildCoraWebhookRoutes({ fabric: coraFabric }));
+  app.route('/v1/grounding', buildGroundingRoutes({
+    db: sqlite,
+    auth,
+    fabric: groundingFabric,
+    ledger: groundingLedger,
+    claims: groundingClaims,
+    identity: groundingIdentity,
+    model: groundingModel,
+    composer: groundingComposer,
+    migration: groundingMigration,
+    discovery: groundingDiscovery,
+    runtime: groundingRuntime,
+    investigations: groundingInvestigations,
+  }));
+  // Separate prefix: /v1/grounding/* is auth-gated; webhook ingress must not nest under it.
+  app.route('/v1/grounding-webhooks', buildGroundingWebhookRoutes({ fabric: groundingFabric }));
   app.route('/v1/brain', buildBrainRoutes({
     db: sqlite,
     auth,
@@ -1168,9 +1320,14 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/issues', buildIssueRoutes({ db: sqlite, auth, issues, replay, engine }));
   app.route('/v1/knowledge-bases', buildKnowledgeBaseRoutes({ db: sqlite, auth, knowledge: knowledgeBaseService }));
   app.route('/v1/tools', buildToolRoutes({ db: sqlite, auth, toolRegistry }));
-  app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations, harnessMemoryIngestion, mcpHarness }));
-  app.route('/v1/spaces', buildSpaceRoutes({ db: sqlite, auth, logger, adapters, bus }));
+  app.route('/v1/capabilities', buildCapabilityRoutes({ db: sqlite, auth, capabilities: capabilityRegistry }));
+  app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations, harnessMemoryIngestion, mcpHarness, episodes: episodicMemoryStore }));
+  app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
+  app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
+  app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }));
+  const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }, bus, logger);
   app.route('/v1/adapters', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/agents', buildTerminalRoutes({ db: sqlite, auth, conversations }));
   app.route('/v1/gateways', buildGatewayRoutes({ db: sqlite, auth, vault: credentialVault }));
@@ -1189,7 +1346,13 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));
   app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge, supervisor: channelSupervisor, identity: channelIdentity }));
-  app.route('/v1/orchestrator/models', buildOrchestratorModelRoutes({ db: sqlite, auth, config: workspaceModelConfig, router: orchestratorModelRouter }));
+  app.route('/v1/orchestrator/models', buildOrchestratorModelRoutes({
+    db: sqlite,
+    auth,
+    config: workspaceModelConfig,
+    router: orchestratorModelRouter,
+    harnesses: workspaceHarnesses,
+  }));
   app.route('/v1/extensions/registry', buildExtensionRegistryRoutes({ db: sqlite, auth, registry: extensionRegistry, activity }));
   // Mounted ONLY when AGENTIS_TEST_MODE=true AND NODE_ENV !== 'production'.
   if (env.AGENTIS_TEST_MODE) {
@@ -1252,6 +1415,16 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       } catch (err) {
         logger.error('agentis.agent_runtime_hydrate_failed', { err: (err as Error).message });
       }
+      const harnessDefaults = [...new Set(
+        sqlite.select({ workspaceId: schema.agents.workspaceId }).from(schema.agents).all().map((agent) => agent.workspaceId),
+      )].flatMap((workspaceId) => {
+        const runtime = workspaceHarnesses.resolve(workspaceId);
+        return runtime ? [{ agentId: runtime.agentId, adapterType: runtime.adapterType, model: runtime.model }] : [];
+      });
+      logger.info('cognitive_runtime.defaults_ready', {
+        configuredEndpoint: Boolean(evaluatorRuntime),
+        harnessDefaults,
+      });
       // Hydrate active triggers so cron schedules + persistent listeners come back online.
       try {
         await triggerRuntime.hydrate();
@@ -1261,22 +1434,36 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       eventChain.start();
       scheduler.start();
       jobQueue.start();
-      coraRuntime.start();
+      groundingRuntime.start();
       runCompaction.start();
       brainQueue.start(); // ability compile pipeline + brain promotions
+      harnessImportSync.start(); // P4: notify when imported agents accrue new memory
 
-      // Recover runs interrupted by the previous process. Wait-only runs are
-      // resumed (timers re-armed for their remaining delay); runs with
-      // non-recoverable external work in flight are failed loud. See
-      // WorkflowEngine.recoverInterruptedRuns.
-      try {
-        const recovery = await engine.recoverInterruptedRuns();
-        if (recovery.resumed > 0 || recovery.failed > 0) {
-          logger.info('agentis.run_recovery', recovery);
+      // Brain — fill deferred embeddings. The default local (ONNX) embedder is
+      // async, so a memory write stores a null vector + needs_reembed=1; this
+      // light sweep embeds those shortly after, so a just-formed memory is
+      // retrievable on the next run (closes the fresh-write recall gap). Unref'd
+      // so it never holds the process open.
+      const reembedSweep = setInterval(() => {
+        try {
+          const pending = sqlite
+            .selectDistinct({ workspaceId: schema.memoryEpisodes.workspaceId })
+            .from(schema.memoryEpisodes)
+            .where(eq(schema.memoryEpisodes.needsReembed, true))
+            .all();
+          for (const { workspaceId } of pending) {
+            void SharedIntelligence.reembedPending(workspaceId).catch((err) =>
+              logger.warn('brain.reembed_sweep_failed', { workspaceId, message: (err as Error).message }));
+          }
+        } catch (err) {
+          logger.warn('brain.reembed_sweep_error', { message: (err as Error).message });
         }
-      } catch (err) {
-        logger.warn('agentis.run_recovery_failed', { err: (err as Error).message });
-      }
+      }, 15_000);
+      reembedSweep.unref();
+
+      // Interrupted workflow runs are now operator-controlled. Active triggers
+      // still hydrate above, but RUNNING/WAITING runs remain visible through
+      // /v1/runs/interrupted until the operator resumes or cancels them.
       const url = `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`;
       logger.info('agentis.listening', { url });
       return { url, httpServer };
@@ -1285,10 +1472,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       logger.info('agentis.shutdown');
       runCompaction.stop();
       jobQueue.stop();
-      coraRuntime.stop();
+      harnessImportSync.stop();
+      groundingRuntime.stop();
       brainQueue.stop();
       scheduler.shutdown();
       eventChain.shutdown();
+      observability.stop();
       orchestratorBridge.stop();
       channelBridge.shutdown();
       await channelSupervisor.shutdown().catch((err) => logger.warn('agentis.shutdown.channel_supervisor', { err: (err as Error).message }));

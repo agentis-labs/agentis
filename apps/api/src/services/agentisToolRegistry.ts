@@ -130,6 +130,17 @@ export class AgentisToolRegistry {
       };
     }
 
+    if (ctx.executionMode === 'plan' && tool.definition.mutating) {
+      return {
+        id: callId,
+        toolId: req.toolId,
+        ok: false,
+        errorCode: 'PLAN_MODE_MUTATION_BLOCKED',
+        errorMessage: `tool '${req.toolId}' cannot mutate workspace state while the conversation is in Plan mode`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
     // Argument validation up front — keeps handlers focused on logic.
     const v = this.#validate(tool.definition.inputSchema, req.arguments);
     if (!v.ok) {

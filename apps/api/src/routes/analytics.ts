@@ -8,7 +8,7 @@
  */
 
 import { Hono } from 'hono';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { AgentisError, type WorkflowGraph, type WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -64,13 +64,26 @@ export function buildAnalyticsRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     // Cost from the audit trail (sum of recorded node costs across these runs).
     const runIds = runs.map((r) => r.id);
     let costSum = 0;
+    let totalTokensIn = 0;
+    let totalTokensOut = 0;
     if (runIds.length > 0) {
       const audit = deps.db.select({ runId: schema.auditEntries.runId, costCents: schema.auditEntries.costCents })
         .from(schema.auditEntries)
         .where(and(eq(schema.auditEntries.workspaceId, ws.workspaceId), inArray(schema.auditEntries.runId, runIds)))
         .all();
       for (const a of audit) costSum += a.costCents ?? 0;
+
+      const tokenRows = deps.db.select({
+        tokensIn: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensIn}), 0)`.mapWith(Number),
+        tokensOut: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensOut}), 0)`.mapWith(Number),
+      })
+        .from(schema.agentSessions)
+        .where(and(eq(schema.agentSessions.workspaceId, ws.workspaceId), inArray(schema.agentSessions.runId, runIds)))
+        .all();
+      totalTokensIn = tokenRows[0]?.tokensIn ?? 0;
+      totalTokensOut = tokenRows[0]?.tokensOut ?? 0;
     }
+    const totalTokens = totalTokensIn + totalTokensOut;
 
     const graph = wf.graph as WorkflowGraph;
     const nodeTitle = new Map((graph.nodes ?? []).map((n) => [n.id, n.title] as const));
@@ -83,6 +96,10 @@ export function buildAnalyticsRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       avgDurationMs: durN > 0 ? Math.round(durSum / durN) : null,
       avgCostCents: runs.length > 0 ? Number((costSum / runs.length).toFixed(2)) : 0,
       totalCostCents: costSum,
+      totalTokensIn,
+      totalTokensOut,
+      totalTokens,
+      avgTokensPerRun: runs.length > 0 ? Math.round(totalTokens / runs.length) : 0,
       nodeFailures: [...nodeFailures.entries()]
         .map(([nodeId, v]) => ({ nodeId, title: nodeTitle.get(nodeId) ?? nodeId, failures: v.count, sampleError: v.sample }))
         .sort((a, b) => b.failures - a.failures),

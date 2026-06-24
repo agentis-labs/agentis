@@ -1,5 +1,11 @@
 export * from './adapter.js';
 export * from './workflow.js';
+export * from './app.js';
+export * from './appEnvironment.js';
+export * from './datastore.js';
+export * from './view.js';
+export * from './manifest.js';
+export * from './capability.js';
 export * from './nodeCapabilities.js';
 export * from './specialist.js';
 export * from './extension.js';
@@ -16,3 +22,4 @@ export * from './memory.js';
 export * from './retrieval.js';
 export * from './baseline.js';
 export * from './ability.js';
+export * from './plan.js';

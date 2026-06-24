@@ -246,3 +246,83 @@ export function pacerRouting(cls: PacerClass): PacerRouting {
 export function coercePacerClass(value: unknown): PacerClass | null {
   return typeof value === 'string' && value in ROUTING ? (value as PacerClass) : null;
 }
+
+// ────────────────────────────────────────────────────────────
+// §B5.2 — prototype-vector fallback (optional, semantic)
+//
+// The deterministic classifier above is English-cue-driven. When cues are weak
+// or absent (a lesson phrased without modality, or in another language), this
+// nearest-prototype fallback classifies by MEANING: embed the candidate, compare
+// to one embedded descriptor per class, pick the closest. Deterministic given a
+// fixed embedding model (prototypes cached per model id). The caller supplies the
+// embed fn, so brainPacer stays free of provider/DB wiring; callers should only
+// invoke this with a SEMANTIC provider (hashing degrades to lexical anyway).
+// ────────────────────────────────────────────────────────────
+
+const PROTOTYPE_DESCRIPTORS: Record<PacerClass, string> = {
+  procedural: 'a step-by-step rule, convention, or repair procedure — always do this, never do that, when X fails do Y, retry, ensure, make sure to',
+  conceptual: 'a generalized rule with rationale or cause — because, therefore, the underlying reason, the root cause, as a rule, in general',
+  reference: 'stable lookup material — a file path, identifier, endpoint, config key, environment variable, api url, version number',
+  evidence: 'a grounded run-local observation or fact — found, observed, the result was, the response showed, as of this date, contained',
+  analogical: 'a similarity statement — this resembles, similar to, the same pattern as, analogous to, like the earlier case',
+};
+
+let prototypeCache: { modelKey: string; vectors: Record<PacerClass, number[]> } | null = null;
+
+function cosine(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
+  return Math.max(-1, Math.min(1, dot));
+}
+
+/**
+ * Classify by nearest class prototype. Returns null when the text is empty or
+ * the embed fn fails — callers keep the deterministic verdict in that case.
+ * `modelKey` keys the prototype cache so a provider change re-embeds them.
+ */
+export async function classifyPacerByPrototype(
+  text: string,
+  embed: (t: string) => Promise<number[]>,
+  modelKey: string,
+): Promise<PacerVerdict | null> {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed) return null;
+  try {
+    if (!prototypeCache || prototypeCache.modelKey !== modelKey) {
+      const vectors = {} as Record<PacerClass, number[]>;
+      for (const cls of Object.keys(PROTOTYPE_DESCRIPTORS) as PacerClass[]) {
+        vectors[cls] = await embed(PROTOTYPE_DESCRIPTORS[cls]);
+      }
+      prototypeCache = { modelKey, vectors };
+    }
+    const qv = await embed(trimmed);
+    let best: PacerClass = 'evidence';
+    let bestSim = -Infinity;
+    for (const cls of Object.keys(prototypeCache.vectors) as PacerClass[]) {
+      const sim = cosine(qv, prototypeCache.vectors[cls]);
+      if (sim > bestSim) { bestSim = sim; best = cls; }
+    }
+    return { pacerClass: best, confidence: Math.max(0.2, Math.min(1, (bestSim + 1) / 2)), reason: `prototype:${bestSim.toFixed(2)}` };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic-first PACER classification with an optional semantic refinement:
+ * when the cue-based verdict is LOW confidence and a semantic embed fn is given,
+ * fall back to the nearest-prototype class. The deterministic verdict wins
+ * whenever it is confident, so this never overrides a strong cue match.
+ */
+export async function classifyPacerRefined(
+  signals: PacerSignals,
+  embed: ((t: string) => Promise<number[]>) | null,
+  modelKey: string | null,
+  lowConfidence = 0.45,
+): Promise<PacerVerdict> {
+  const deterministic = classifyPacer(signals);
+  if (deterministic.confidence >= lowConfidence || !embed || !modelKey) return deterministic;
+  const semantic = await classifyPacerByPrototype(signals.text, embed, modelKey);
+  return semantic ?? deterministic;
+}

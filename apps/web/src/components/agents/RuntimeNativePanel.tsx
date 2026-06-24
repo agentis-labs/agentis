@@ -40,9 +40,11 @@ interface EffectiveContextLayer {
 export function RuntimeNativePanel({
   agentId,
   mode = 'overview',
+  onRuntimeChanged,
 }: {
   agentId: string;
   mode?: PanelMode;
+  onRuntimeChanged?: () => void;
 }) {
   const toast = useToast();
   const [runtime, setRuntime] = useState<RuntimeDescriptor | null>(null);
@@ -139,6 +141,7 @@ export function RuntimeNativePanel({
       );
       setRuntime(result.runtime);
       toast.success('Runtime probed', 'Effective profile and health were refreshed.');
+      onRuntimeChanged?.();
     } catch (error) {
       toast.error('Runtime probe failed', apiErrorMessage(error));
     } finally {

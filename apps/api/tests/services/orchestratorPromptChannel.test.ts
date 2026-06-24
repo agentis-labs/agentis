@@ -67,6 +67,60 @@ describe('role-true identity header', () => {
     expect(prompt.lastIndexOf('ESCALATION RULES')).toBe(idx);
   });
 
+  it('uses the authoritative identity block once instead of duplicating instructions', () => {
+    const identityBlock = [
+      '<agentis_identity authoritative="true">',
+      'name: hermes',
+      'role: manager',
+      'config: {"cwd":"C:/repo","secret":"[redacted]"}',
+      'instructions:',
+      'You are Department Manager. ESCALATION RULES: request approval before budget changes.',
+      '</agentis_identity>',
+    ].join('\n');
+
+    const prompt = buildOrchestratorSystemPrompt({
+      context: baseContext,
+      workspaceName: 'Personal',
+      agentName: 'hermes',
+      agentRole: 'manager',
+      agentDomain: 'General',
+      agentInstructions: 'You are Department Manager. ESCALATION RULES: request approval before budget changes.',
+      agentIdentity: identityBlock,
+    });
+
+    expect(prompt).not.toContain('You are the Agentis platform orchestrator');
+    expect(prompt.startsWith('You are hermes, a manager agent for the "General" domain')).toBe(true);
+    expect(prompt).toContain(identityBlock);
+    expect(prompt.match(/<agentis_identity/g)).toHaveLength(1);
+    expect(prompt).not.toContain('YOUR OPERATING INSTRUCTIONS');
+    expect(prompt).not.toContain('AGENT OPERATING INSTRUCTIONS');
+    const idx = prompt.indexOf('ESCALATION RULES');
+    expect(idx).toBeGreaterThan(-1);
+    expect(prompt.lastIndexOf('ESCALATION RULES')).toBe(idx);
+  });
+
+  it('legacy null-role agents become generic non-orchestrator Agentis agents', () => {
+    const prompt = buildOrchestratorSystemPrompt({
+      context: baseContext,
+      workspaceName: 'Personal',
+      agentName: 'Legacy Specialist',
+      agentRole: null,
+      agentIdentity: [
+        '<agentis_identity authoritative="true">',
+        'name: Legacy Specialist',
+        'role: agent',
+        'instructions:',
+        'Answer as the persisted specialist.',
+        '</agentis_identity>',
+      ].join('\n'),
+    });
+
+    expect(prompt).not.toContain('You are the Agentis platform orchestrator');
+    expect(prompt.startsWith('You are Legacy Specialist, an Agentis agent working inside the Agentis workspace "Personal".')).toBe(true);
+    expect(prompt).toContain('You are NOT the platform orchestrator');
+    expect(prompt).toContain('role: agent');
+  });
+
   it('the orchestrator keeps the central-intelligence header and trailing instructions block', () => {
     const prompt = buildOrchestratorSystemPrompt({
       context: baseContext,

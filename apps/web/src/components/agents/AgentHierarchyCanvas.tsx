@@ -47,6 +47,12 @@ export interface AgentHierarchyAgent {
   spaceName?: string | null;
   spaceColorHex?: string | null;
   spaceTag?: string | null;
+  /** Top-level Domain (parent of the subdomain when the agent is a specialist). */
+  domainId?: string | null;
+  domainName?: string | null;
+  /** Subdomain the specialist is responsible for (a domain row with a parent). */
+  subdomainId?: string | null;
+  subdomainName?: string | null;
   lastActiveAt?: string | null;
   lastHeartbeatAt?: string | null;
   currentMonthSpendCents?: number | null;
@@ -67,6 +73,8 @@ interface AgentNodeData extends Record<string, unknown> {
   agent: AgentHierarchyAgent;
   onGhostCreate?: (preset?: AgentHierarchyCreatePreset) => void;
   tierCount?: number;
+  /** Specialists render as compact nodes clustered under their manager. */
+  isSpecialist?: boolean;
 }
 
 const TIER_Y: Record<'orchestrator' | 'manager' | 'worker' | 'unassigned', number> = {
@@ -107,7 +115,9 @@ export function AgentHierarchyCanvas({
     [],
   );
   const visibleAgents = useMemo(
-    () => agents.filter((agent) => normalizeRole(agent) !== 'worker' && matchesFleetFilter(agent, filter) && matchesFleetSearch(agent, search)),
+    // Specialists (workers) are now first-class on the canvas: they render as
+    // smaller nodes clustered under the manager they report to.
+    () => agents.filter((agent) => matchesFleetFilter(agent, filter) && matchesFleetSearch(agent, search)),
     [agents, filter, search],
   );
   const graph = useMemo(
@@ -251,6 +261,7 @@ export function AgentHierarchyCanvas({
         open={Boolean(selectedAgent)}
         agent={selectedAgent}
         onClose={onCloseSelection}
+        onAgentUpdated={onChanged}
       />
     </div>
   );
@@ -270,7 +281,7 @@ function buildGraph(
   };
 
   const nodes: Node<AgentNodeData>[] = [];
-  for (const [tier, list] of Object.entries(groups) as Array<[keyof typeof groups, AgentHierarchyAgent[]]>) {
+  const placeTier = (tier: 'orchestrator' | 'manager' | 'unassigned', list: AgentHierarchyAgent[]) => {
     list.sort((a, b) => a.name.localeCompare(b.name)).forEach((agent, index) => {
       const fallback = fallbackPosition(tier, index, list.length);
       nodes.push({
@@ -280,7 +291,50 @@ function buildGraph(
         data: { agent, onGhostCreate, tierCount: list.length },
       });
     });
+  };
+  placeTier('orchestrator', groups.orchestrator);
+  placeTier('manager', groups.manager);
+  placeTier('unassigned', groups.unassigned);
+
+  // Specialists (workers) cluster under the manager they report to, rendered as
+  // smaller nodes. Workers whose manager isn't visible fall back to a global row.
+  const managerXById = new Map<string, number>();
+  for (const node of nodes) {
+    if (normalizeRole(node.data.agent) === 'manager') managerXById.set(node.id, node.position.x);
   }
+  const workersByManager = new Map<string, AgentHierarchyAgent[]>();
+  const unplacedWorkers: AgentHierarchyAgent[] = [];
+  for (const worker of groups.worker) {
+    if (worker.reportsTo && managerXById.has(worker.reportsTo)) {
+      const list = workersByManager.get(worker.reportsTo) ?? [];
+      list.push(worker);
+      workersByManager.set(worker.reportsTo, list);
+    } else {
+      unplacedWorkers.push(worker);
+    }
+  }
+  const totalWorkers = groups.worker.length;
+  for (const [managerId, workers] of workersByManager) {
+    const baseX = managerXById.get(managerId) ?? 0;
+    workers.sort(bySubdomainThenName).forEach((agent, index) => {
+      const fallback = specialistFallbackUnderManager(baseX, index, workers.length);
+      nodes.push({
+        id: agent.id,
+        type: 'agentHierarchy',
+        position: forceAutoLayout ? fallback : safeCanvasPosition('worker', agent.canvasPosition, fallback),
+        data: { agent, onGhostCreate, tierCount: totalWorkers, isSpecialist: true },
+      });
+    });
+  }
+  unplacedWorkers.sort((a, b) => a.name.localeCompare(b.name)).forEach((agent, index) => {
+    const fallback = fallbackPosition('worker', index, unplacedWorkers.length);
+    nodes.push({
+      id: agent.id,
+      type: 'agentHierarchy',
+      position: forceAutoLayout ? fallback : safeCanvasPosition('worker', agent.canvasPosition, fallback),
+      data: { agent, onGhostCreate, tierCount: totalWorkers, isSpecialist: true },
+    });
+  });
 
   // Ghost orchestrator — shown when no orchestrator exists
   if (options.showGhostOrchestrator) {
@@ -434,7 +488,27 @@ interface NodeVisualSpec {
   compactProgress: boolean;
 }
 
-function nodeVisualSpec(role: 'orchestrator' | 'manager' | 'worker' | 'unassigned', tierCount: number): NodeVisualSpec {
+function nodeVisualSpec(role: 'orchestrator' | 'manager' | 'worker' | 'unassigned', tierCount: number, isSpecialist = false): NodeVisualSpec {
+  // Specialists are deliberately compact (smaller than managers) and sized
+  // independent of the global worker count — a manager's small cluster should
+  // stay readable even when the workspace has many specialists overall.
+  if (isSpecialist) {
+    return {
+      width: 150,
+      padding: 9,
+      glyph: 24,
+      icon: 12,
+      handle: 7,
+      gap: 8,
+      titleSize: 11,
+      subtitleSize: 9.5,
+      activitySize: 9.5,
+      showSubtitle: true,
+      showActivity: false,
+      showProgress: false,
+      compactProgress: true,
+    };
+  }
   if (role === 'orchestrator') {
     return {
       width: 268,
@@ -578,11 +652,12 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   const isSettingUp = installActive;
   const readiness = installComplete ? 'live' : installFailed || staleSetup ? 'failed' : isSettingUp ? 'setting_up' : readinessOf(agent);
   const GlyphIcon = role === 'orchestrator' ? OrchestratorGlyph : role === 'manager' ? ManagerGlyph : WorkerGlyph;
-  const visual = nodeVisualSpec(role, data.tierCount ?? 1);
+  const visual = nodeVisualSpec(role, data.tierCount ?? 1, data.isSpecialist === true);
   const activity = isSettingUp ? installActivity(installSession) : liveActivity(agent, readiness);
   const running = readiness === 'running';
   const settingUp = readiness === 'setting_up';
-  const domainName = agent.spaceName ?? agent.spaceTag ?? null;
+  // For a specialist the badge is its Subdomain (its area of responsibility).
+  const domainName = agent.subdomainName ?? agent.spaceName ?? agent.spaceTag ?? null;
   const domainColor = agent.spaceColorHex ?? null;
   const subtitle = settingUp 
     ? 'setting up runtime' 
@@ -782,6 +857,28 @@ function fallbackPosition(tier: 'orchestrator' | 'manager' | 'worker' | 'unassig
   return {
     x: (col - (columnsInRow - 1) / 2) * layout.spacingX,
     y: TIER_Y[tier] + row * layout.spacingY,
+  };
+}
+
+/** Group specialists by subdomain (so same-subdomain peers sit together), then name. */
+function bySubdomainThenName(a: AgentHierarchyAgent, b: AgentHierarchyAgent): number {
+  const sa = (a.subdomainName ?? a.spaceTag ?? '').toLowerCase();
+  const sb = (b.subdomainName ?? b.spaceTag ?? '').toLowerCase();
+  if (sa !== sb) return sa.localeCompare(sb);
+  return a.name.localeCompare(b.name);
+}
+
+/** Compact grid of specialist nodes centered under their manager's column. */
+function specialistFallbackUnderManager(managerX: number, index: number, count: number) {
+  const perRow = Math.min(count, count > 6 ? 4 : 3);
+  const row = Math.floor(index / perRow);
+  const col = index % perRow;
+  const colsInRow = Math.min(perRow, count - row * perRow);
+  const spacingX = 158;
+  const spacingY = 104;
+  return {
+    x: managerX + (col - (colsInRow - 1) / 2) * spacingX,
+    y: TIER_Y.worker + row * spacingY,
   };
 }
 

@@ -10,9 +10,11 @@ import { TelegramChannelAdapter } from '../../src/adapters/channels/telegram.js'
 
 describe('TelegramChannelAdapter', () => {
   describe('verify()', () => {
-    it('returns true when no secret is configured', () => {
+    it('fails closed when no secret is configured (unauthenticated inbound is rejected)', () => {
       const a = new TelegramChannelAdapter();
-      expect(a.verify({ headers: {}, rawBody: '', secret: null })).toBe(true);
+      expect(a.verify({ headers: {}, rawBody: '', secret: null })).toBe(false);
+      // Even with an attacker-supplied header, no configured secret = reject.
+      expect(a.verify({ headers: { 'x-telegram-bot-api-secret-token': 'anything' }, rawBody: '', secret: null })).toBe(false);
     });
 
     it('returns true when the X-Telegram-Bot-Api-Secret-Token header matches', () => {

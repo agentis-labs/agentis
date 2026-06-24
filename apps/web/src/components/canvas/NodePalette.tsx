@@ -43,6 +43,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'loop',     label: 'Loop',     glyph: '↻', description: 'Iterate over an array with concurrency control', defaults: { maxConcurrency: 1, onIterationError: 'stop_all', outputArrayKey: 'results' } },
       { type: 'parallel', label: 'Parallel', glyph: '⫴', description: 'Fan out to N branches in parallel', defaults: { waitFor: 'all', onBranchError: 'fail_all', mergeStrategy: 'merge_keys' } },
       { type: 'subflow',  label: 'Subflow',  glyph: '▦', description: 'Embed another workflow inline', defaults: { inputMapping: {}, outputMapping: {} } },
+      { type: 'stop_error', label: 'Stop & Error', glyph: '⛔', description: 'Terminate the run with a custom error', defaults: { errorMessage: 'Stopped' } },
     ],
   },
   {
@@ -56,6 +57,15 @@ const SECTIONS: PaletteSection[] = [
       { type: 'workflow_store',  label: 'Workflow Store',  glyph: '◧', description: 'Read/write workflow-scoped persistent KV', defaults: { operations: [] } },
       { type: 'workspace_store', label: 'Workspace Store', glyph: '▤', description: 'Read/write workspace-wide KV (shared across all workflows)', defaults: { operations: [] } },
       { type: 'scratchpad',      label: 'Scratchpad',      glyph: '◈', description: 'Run-scoped ephemeral state', defaults: { operation: 'write', key: 'note' } },
+      { type: 'code',           label: 'Code',           glyph: '⌗', description: 'Run sandboxed JavaScript (or Python)', defaults: { language: 'javascript', code: 'return input;', inputKeys: [] } },
+      { type: 'datetime',       label: 'Date & Time',    glyph: '◷', description: 'Parse, format, diff, or shift dates', defaults: { operation: 'format', outputFormat: 'iso' } },
+      { type: 'crypto_util',    label: 'Crypto',         glyph: '⚿', description: 'Hash, HMAC, base64, or UUID', defaults: { operation: 'hash', algorithm: 'sha256' } },
+      { type: 'markdown',       label: 'Markdown',       glyph: '⓶', description: 'Convert Markdown ↔ HTML', defaults: { operation: 'to_html' } },
+      { type: 'xml_parse',      label: 'XML',            glyph: '‹›', description: 'Convert XML ↔ JSON', defaults: { operation: 'parse' } },
+      { type: 'html_extract',   label: 'HTML Extract',   glyph: '⧉', description: 'Extract values from HTML by CSS selector', defaults: { selector: '', extractAs: 'text' } },
+      { type: 'json_schema_validate', label: 'Validate Schema', glyph: '✔', description: 'Validate data against a JSON Schema', defaults: { schema: '{\n  "type": "object"\n}', onViolation: 'flag' } },
+      { type: 'spreadsheet',    label: 'Spreadsheet',    glyph: '▦', description: 'Parse/build CSV or XLSX rows', defaults: { operation: 'parse', format: 'csv', hasHeaders: true } },
+      { type: 'graphql',        label: 'GraphQL',        glyph: '◭', description: 'Run a structured GraphQL query', defaults: { endpoint: '', query: '' } },
     ],
   },
   {
@@ -66,7 +76,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'agent_session', label: 'Agent Session', glyph: '◉', description: 'Persistent agent that thinks, uses tools, and can pause for events/approvals', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
       { type: 'extension_task',  label: 'Extension',       glyph: '⬡', description: 'Run a typed deterministic extension operation', defaults: { operationName: 'execute', inputMapping: {}, outputMapping: {} } },
       { type: 'agent_swarm', label: 'Agent Swarm', glyph: '⨳', description: 'Parallel agent fan-out over an array', defaults: { capabilityTags: [], maxParallel: 3, mergeStrategy: 'collect_all', inputArrayPath: '', prompt: '', outputKey: 'results' } },
-      { type: 'dynamic_swarm', label: 'Dynamic Swarm', glyph: '⧉', description: 'A planner decomposes a goal into tasks, then workers run them in parallel', defaults: { goal: '', maxTasks: 5, maxParallel: 3, mergeStrategy: 'collect_all', outputKey: 'results', capabilityTags: [] } },
+      { type: 'dynamic_swarm', label: 'Dynamic Swarm', glyph: '⧉', description: 'A planner decomposes a goal into tasks, then specialists run them in parallel', defaults: { goal: '', maxTasks: 5, maxParallel: 3, mergeStrategy: 'collect_all', outputKey: 'results', capabilityTags: [] } },
       { type: 'planner',     label: 'Planner',     glyph: '⊞', description: 'Decompose a goal into sequential agent steps and run them in order', defaults: { goal: '', maxNodes: 8, inputKeys: [], outputKeys: [] } },
       { type: 'evaluator',   label: 'Evaluator',   glyph: '⚖', description: 'LLM-as-judge — score & route pass/fail', defaults: { targetPath: '', criteria: '', passThreshold: 7, maxRetries: 3 } },
       { type: 'guardrails',  label: 'Guardrails',  glyph: '⛨', description: 'Deterministic policy enforcement', defaults: { rules: [], onViolation: 'block' } },
@@ -77,6 +87,7 @@ const SECTIONS: PaletteSection[] = [
     title: 'Brain',
     nodes: [
       { type: 'knowledge',         label: 'Brain',             glyph: '◇', description: 'Retrieve relevant context from the workspace Brain', defaults: { queryMode: 'static', topK: 5, retrievalMode: 'contextual' } },
+      { type: 'knowledge_ingest',  label: 'Save to Brain',     glyph: '◆', description: 'Write upstream content into the workspace Brain', defaults: { contentPath: '', mimeType: 'text/markdown' } },
       { type: 'artifact_collect',  label: 'Artifact Collect',  glyph: '⛁', description: 'Package generated artifacts into a versioned collection', defaults: { collectionName: 'Untitled', versioned: true } },
     ],
   },
@@ -87,6 +98,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'return_output', label: 'Return Output', glyph: '▣', description: 'Declare the rendered result (html/markdown/table/json/text)', defaults: { renderAs: 'json' } },
       { type: 'artifact_save', label: 'Save Artifact',  glyph: '⭳', description: 'Persist a file artifact to the workspace', defaults: { name: 'output.txt' } },
       { type: 'browser',       label: 'Browser',        glyph: '◐', description: 'Render HTML / screenshot / PDF in real Chromium', defaults: { operation: 'serve_html' } },
+      { type: 'sticky_note',   label: 'Sticky Note',    glyph: '✎', description: 'Canvas annotation — no execution', defaults: { content: 'Note', color: '#fde68a' } },
     ],
   },
   {
@@ -111,9 +123,12 @@ interface ReusableWorkflow {
 export function NodePalette({
   onPick,
   className,
+  bare = false,
 }: {
   onPick?: (type: string, data?: Record<string, unknown>) => void;
   className?: string;
+  /** Drop the standalone aside chrome (width/border) so a parent panel can host it. */
+  bare?: boolean;
 }) {
   const [reusable, setReusable] = useState<ReusableWorkflow[]>([]);
   const [collapsed, setCollapsed] = useState<Record<PaletteTier, boolean>>({
@@ -143,11 +158,14 @@ export function NodePalette({
   return (
     <aside
       className={clsx(
-        'flex min-h-0 w-48 shrink-0 flex-col gap-1 overflow-x-hidden overflow-y-auto border-r border-line bg-surface p-2 text-xs',
+        'flex min-h-0 flex-col gap-1 overflow-x-hidden overflow-y-auto p-2 text-xs',
+        bare ? 'flex-1' : 'w-48 shrink-0 border-r border-line bg-surface',
         className,
       )}
     >
-      <h3 className="px-1 pb-1 text-[10px] uppercase tracking-wider text-text-muted">Palette</h3>
+      {!bare && (
+        <h3 className="px-1 pb-1 text-[10px] uppercase tracking-wider text-text-muted">Palette</h3>
+      )}
 
       {SECTIONS.map((section) => (
         <div key={section.tier} className="flex flex-col gap-1">

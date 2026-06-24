@@ -42,7 +42,7 @@ Model features are opt-in to prevent hidden cost and latency:
 | Mandatory classic HyDE for exploration | Invalidated | HyDE generates an ungrounded pseudo-document before seeing corpus evidence and adds latency on every exploratory request. |
 | Grounded adaptive expansion | Implemented | Retrieval starts with actual corpus snippets, then generates multiple facets and applies RRF only for `exploratory` mode. This preserves breadth without making generated fiction the retrieval anchor. |
 | Contextualized chunks | Implemented optionally | Anthropic's Contextual Retrieval pattern supports prepending grounded context before embedding and lexical indexing; deterministic context protects zero-provider installs. |
-| Entity/community navigation | Implemented with existing atom contract | Microsoft GraphRAG/DRIFT uses entity relations and community summaries to broaden exploration. Existing `knowledge_chunk` atoms and temporal links can express that model without new orphan tables. |
+| Entity/community navigation | Implemented with existing atom contract | Microsoft GraphRAG/DRIFT uses entity relations and community summaries to broaden exploration. Existing `knowledge_chunk` atoms and temporal links can express that model without new disconnected tables. |
 | Always-on media description | Invalidated | Images incur model cost and may include sensitive content; visual description is user opt-in and stores only compact text. |
 | Training export/QA generation | Removed | It is not needed for the Brain retrieval vision and creates quality/governance obligations unrelated to the requested features. |
 
@@ -1239,7 +1239,7 @@ like responses?") stored as a memory atom badged "PATTERN".
 | A question captured as a `preference` | `chatMemoryCapture.classifySignal` matched "I like" inside the interrogative; no question guard. The 68%/80% confidence/trust on the node matched the preference capture path (trust 0.8 → confidence 0.8×0.85). |
 | Badge said "PATTERN" for a `preference` | `nodeTypeForAtom` collapsed every `workspace_memory` atom to `memory_pattern`; the detail badge ignored `metadata.kind`, so all facts/preferences/rules/lessons mislabeled as "Pattern". |
 | Agent `memory_append` could store junk | No question/low-value guard; `kindFromSection`'s `\bpref\b` never matched "preference". |
-| Agent-private brain felt write-only/dead | `agent_memories` was an orphan table disconnected from the graph/retrieval/promotion. |
+| Agent-private brain felt write-only/dead | `agent_memories` was a disconnected table outside the graph/retrieval/promotion path. |
 
 ### F.2 Code changes
 
@@ -1286,7 +1286,7 @@ Removed Markdown as an internal authored-context backend. `WORKSPACE/DECISIONS/W
 - `WorkflowEngine` dropped the separate authored-context `block` (charter arrives via the constitutional tier, KB via relevance/`kb_chunk`).
 - chat + creation keep `buildContextBlock` (now DB-backed charter + KB) — no regression; the route is repurposed onto atoms.
 
-**Decisions / follow-ups:** each document is one charter atom for v1 (operators can atomize finer via memory APIs later). Full brain dispatch in chat (relevance episodes, not just charter + KB) is a deferred enhancement — chat still lacks `buildDispatchContext`. Existing orphaned `context/*.md` volume files are inert (nothing reads them; defaults were placeholder-empty in practice).
+**Decisions / follow-ups:** each document is one charter atom for v1 (operators can atomize finer via memory APIs later). Full brain dispatch in chat (relevance episodes, not just charter + KB) is a deferred enhancement — chat still lacks `buildDispatchContext`. Existing unused `context/*.md` volume files are inert (nothing reads them; defaults were placeholder-empty in practice).
 
 ### F.6 Verification (Issue #1)
 

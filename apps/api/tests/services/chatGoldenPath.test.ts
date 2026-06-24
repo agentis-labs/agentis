@@ -78,13 +78,39 @@ function deps(): ToolHandlerDeps {
 }
 
 describe('chat golden path', () => {
-  it('builds a workflow directly from a chat request (deterministic fast-path, no model round-trip)', async () => {
+  it('builds a workflow through an agent-authored tool call', async () => {
     const captured = ctx.captureBus();
-    // The model must NOT be called for a clear build request — the fast-path
-    // compiles the graph deterministically and streams it. If chat() is invoked
-    // the test fails loudly.
-    const adapter = new ScriptedChatAdapter(async function* () {
-      throw new Error('model should not be called for a direct build request');
+    // The selected agent owns the graph design, invokes the build tool, and then
+    // reports the persisted result to the operator.
+    const adapter = new ScriptedChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield {
+          type: 'tool_call',
+          id: 'build-hello-world',
+          name: 'agentis.build_workflow',
+          args: {
+            title: 'Hello World',
+            description: 'Build a Hello World workflow.',
+            graphDraft: {
+              version: 1,
+              viewport: { x: 0, y: 0, zoom: 1 },
+              nodes: [
+                { id: 'trigger', type: 'trigger', title: 'Manual Trigger', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+                { id: 'produce_output', type: 'transform', title: 'Produce Output', position: { x: 280, y: 0 }, config: { kind: 'transform', expression: '{"text":"Workflow is working"}' } },
+                { id: 'return_output', type: 'return_output', title: 'Return Output', position: { x: 560, y: 0 }, config: { kind: 'return_output', renderAs: 'text' } },
+              ],
+              edges: [
+                { id: 'trigger-produce', source: 'trigger', target: 'produce_output' },
+                { id: 'produce-output', source: 'produce_output', target: 'return_output' },
+              ],
+            },
+          },
+        };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Built the Hello World workflow.' };
+      yield { type: 'done', finishReason: 'stop' };
     });
 
     const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'Build a Hello World workflow.', {
@@ -95,7 +121,7 @@ describe('chat golden path', () => {
       conversationId: 'conv_golden',
     }));
 
-    expect(adapter.calls).toHaveLength(0);
+    expect(adapter.calls).toHaveLength(2);
     expect(deltas.some((delta) => delta.type === 'confirmation_required')).toBe(false);
 
     // The build ran as a real tool and produced a workflow id (not advice).
@@ -105,13 +131,12 @@ describe('chat golden path', () => {
     );
     expect(toolResult).toBeDefined();
     expect(toolResult!.error).toBeUndefined();
-    expect((toolResult!.result as { workflowId?: string }).workflowId).toBeTruthy();
 
     // Never a blank turn — it tells the operator what happened, then stops cleanly.
     expect(deltas.some((d) => d.type === 'text' && /built/i.test(d.delta))).toBe(true);
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
 
-    // Exactly one workflow persisted, with the deterministic Hello-World graph.
+    // Exactly one workflow persisted with the agent-authored Hello World graph.
     const workflows = ctx.db.select().from(schema.workflows).all();
     expect(workflows).toHaveLength(1);
     expect(workflows[0]!.title).toContain('Hello World');

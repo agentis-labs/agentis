@@ -7,9 +7,11 @@ export interface ChatMessageLike {
   createdAt: string;
   metadata?: {
     clientTurnId?: string;
+    turn?: {
+      clientTurnId?: string;
+      startedAt?: string;
+    };
     toolCalls?: ToolCallData[];
-    thinking?: string;
-    [key: string]: unknown;
   };
 }
 
@@ -30,16 +32,42 @@ function localIdRank(id: string): number {
   return 2;
 }
 
+function turnId(message: ChatMessageLike): string | null {
+  return message.metadata?.clientTurnId
+    ?? message.metadata?.turn?.clientTurnId
+    ?? turnIdFromLocalId(message.id);
+}
+
+function messageTurnTime(message: ChatMessageLike): number {
+  const startedAt = message.metadata?.turn?.startedAt;
+  if (typeof startedAt === 'string') {
+    const parsed = timestamp(startedAt);
+    if (parsed > 0) return parsed;
+  }
+  return timestamp(message.createdAt);
+}
+
 export function sortMessages<T extends ChatMessageLike>(messages: T[]): T[] {
+  const turnTimes = new Map<string, number>();
+  for (const message of messages) {
+    const id = turnId(message);
+    if (!id) continue;
+    const current = turnTimes.get(id);
+    const next = messageTurnTime(message);
+    if (current === undefined || next < current) turnTimes.set(id, next);
+  }
+
   return [...messages].sort((a, b) => {
-    const turnA = a.metadata?.clientTurnId ?? turnIdFromLocalId(a.id);
-    const turnB = b.metadata?.clientTurnId ?? turnIdFromLocalId(b.id);
+    const turnA = turnId(a);
+    const turnB = turnId(b);
     if (turnA && turnA === turnB) {
       const kindDiff = localKindRank(a) - localKindRank(b);
       if (kindDiff !== 0) return kindDiff;
     }
 
-    const timeDiff = timestamp(a.createdAt) - timestamp(b.createdAt);
+    const timeA = turnA ? turnTimes.get(turnA) ?? messageTurnTime(a) : timestamp(a.createdAt);
+    const timeB = turnB ? turnTimes.get(turnB) ?? messageTurnTime(b) : timestamp(b.createdAt);
+    const timeDiff = timeA - timeB;
     if (timeDiff !== 0) return timeDiff;
 
     const localDiff = localIdRank(a.id) - localIdRank(b.id);
@@ -74,7 +102,7 @@ export function mergeMessage<T extends ChatMessageLike>(messages: T[], incoming:
     return upsertMessage(messages, incoming);
   }
 
-  const incomingTurnId = incoming.metadata?.clientTurnId;
+  const incomingTurnId = turnId(incoming);
   if (incoming.authorKind === 'operator') {
     const optimisticIndex = messages.findIndex((message) => {
       if (!message.id.startsWith('tmp-') || message.authorKind !== 'operator') return false;
@@ -83,20 +111,24 @@ export function mergeMessage<T extends ChatMessageLike>(messages: T[], incoming:
       return message.text === incoming.text;
     });
     if (optimisticIndex >= 0) {
-      return dedupeMessages(messages.map((message, index) => (index === optimisticIndex ? incoming : message)));
+      return dedupeMessages(messages.map((message, index) => (
+        index === optimisticIndex ? { ...incoming, createdAt: message.createdAt } : message
+      )));
     }
   }
 
   if (incoming.authorKind === 'agent') {
     const streamingIndex = messages.findIndex((message) => {
       if (!message.id.startsWith('stream-') || message.authorKind !== 'agent') return false;
-      const turnId = message.metadata?.clientTurnId ?? turnIdFromLocalId(message.id);
+      const turnId = message.metadata?.clientTurnId ?? message.metadata?.turn?.clientTurnId ?? turnIdFromLocalId(message.id);
       if (incomingTurnId || turnId) return incomingTurnId === turnId;
       const currentText = message.text.trim();
       return currentText.length === 0 || currentText === incoming.text;
     });
     if (streamingIndex >= 0) {
-      return dedupeMessages(messages.map((message, index) => (index === streamingIndex ? incoming : message)));
+      return dedupeMessages(messages.map((message, index) => (
+        index === streamingIndex ? { ...incoming, createdAt: message.createdAt } : message
+      )));
     }
   }
 

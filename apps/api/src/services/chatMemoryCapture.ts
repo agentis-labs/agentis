@@ -7,6 +7,7 @@ import type { MemoryStore } from './memoryStore.js';
 import type { PeerProfileService } from './peerProfileService.js';
 import type { SessionMomentService } from './sessionMomentService.js';
 import { classifyPacer } from './brainPacer.js';
+import { looksSensitive } from './brainText.js';
 
 type CapturedMemoryKind = 'fact' | 'preference' | 'rule' | 'lesson';
 
@@ -37,6 +38,14 @@ export interface CaptureChatTurnArgs {
   userMessage: string;
   assistantMessage?: string | null;
   finishReason?: string | null;
+  /**
+   * §B7.3 — when the turn is about a specific workflow/node (the operator is
+   * discussing or editing it), a captured correction is scoped to that context
+   * via `appliesTo`, so it never pollutes unrelated tasks. Absent → workspace
+   * scope (the default). The chat surface threads these when it has them.
+   */
+  activeWorkflowId?: string | null;
+  activeNodeId?: string | null;
 }
 
 export interface CaptureChatTurnResult {
@@ -179,6 +188,11 @@ export class ChatMemoryCaptureService {
       surface: 'operator_chat',
       tags: [signal.kind],
     });
+    // §B7.3 — narrow-write: a correction made while discussing a specific
+    // workflow/node is scoped to that context via appliesTo (+ a scope tag), so
+    // it is not injected into unrelated tasks. Generalization to broader scope is
+    // earned later by the reflection engine, never assumed here.
+    const appliesTo = [args.activeWorkflowId, args.activeNodeId].filter((v): v is string => Boolean(v));
     return memory.write({
       workspaceId: args.workspaceId,
       scopeId,
@@ -188,7 +202,8 @@ export class ChatMemoryCaptureService {
       content: signal.content,
       trust: signal.confidence,
       importance: signal.importance,
-      tags: [...signal.tags, `pacer:${pacer.pacerClass}`],
+      appliesTo,
+      tags: [...signal.tags, `pacer:${pacer.pacerClass}`, ...(appliesTo.length > 0 ? ['scope:workflow'] : [])],
       provenance: {
 	        source: 'chat_memory_capture',
 	        conversationId: args.conversationId,
@@ -202,19 +217,11 @@ export class ChatMemoryCaptureService {
   }
 
   #workspaceMemoryExists(workspaceId: string, scopeId: string | null, content: string): boolean {
+    // §B4 — read through the unified MemoryStore facade (one substrate).
+    const memory = this.deps.memory;
+    if (!memory) return false;
     const key = normalizeKey(content);
-    const rows = this.deps.db.select({
-      title: schema.workspaceMemory.title,
-      content: schema.workspaceMemory.content,
-    })
-      .from(schema.workspaceMemory)
-      .where(and(
-        eq(schema.workspaceMemory.workspaceId, workspaceId),
-        scopeId == null ? or(isNull(schema.workspaceMemory.scopeId), eq(schema.workspaceMemory.scopeId, ''))! : eq(schema.workspaceMemory.scopeId, scopeId),
-      ))
-      .orderBy(desc(schema.workspaceMemory.updatedAt))
-      .limit(200)
-      .all();
+    const rows = memory.list({ workspaceId, scopeId, limit: 200 });
     return rows.some((row) => normalizeKey(row.content) === key || normalizeKey(row.title) === key);
   }
 
@@ -229,6 +236,13 @@ function extractOperatorSignals(message: string, actorLabel: string): OperatorMe
 
     const kind = classifySignal(text);
     if (!kind) continue;
+    // §B7.1/§B7.3 — narrow-write principle: a one-shot task command ("create a
+    // workflow that watches AI posts", "remember to email the report") is
+    // orchestrator work to be DONE, not durable memory to be remembered. Drop it
+    // so it never pollutes the workspace brain as a standing rule. A standing
+    // policy ("always create a backup before deploy") carries modality and is
+    // kept.
+    if (looksLikeTaskCommand(text)) continue;
 
     signals.push({
       kind,
@@ -256,6 +270,23 @@ function splitStableSignalCandidates(message: string): string[] {
     .split(/\r?\n|(?<=[.!?])\s+/)
     .map((part) => part.trim())
     .filter((part) => part.length >= 8 && part.length <= 700);
+}
+
+/**
+ * §B7.1 — distinguish a transient TASK COMMAND from a durable STANDING POLICY.
+ * An imperative verb targeting a deliverable ("create a workflow", "send the
+ * report", "remember to scrape X") is work the orchestrator performs now, not
+ * knowledge the brain should remember. It is a command EVEN when phrased
+ * "remember to …". A command that also carries standing modality
+ * ("always create a backup before deploy") is a recurring rule and is kept.
+ */
+export function looksLikeTaskCommand(text: string): boolean {
+  const t = text.trim().toLowerCase()
+    .replace(/^(please|kindly|can you|could you|would you|now|go ahead and|i need you to|i want you to|remember to|remind me to|don'?t forget to)\s+/i, '');
+  const TASK_VERB = /^(create|build|make|set ?up|add|generate|watch|monitor|schedule|draft|write|design|deploy|run|fetch|scrape|email|send|post|publish|find|search|look up|check|update|delete|remove|configure|connect|integrate|summari[sz]e|analy[sz]e|review|compile|export|import|download|upload|set)\b/;
+  if (!TASK_VERB.test(t)) return false;
+  const STANDING = /\b(always|never|every time|whenever|each time|by default|going forward|from now on|any time)\b/;
+  return !STANDING.test(t);
 }
 
 function classifySignal(text: string): CapturedMemoryKind | null {
@@ -321,12 +352,6 @@ function isQuestion(text: string): boolean {
   if (/\?\s*$/.test(trimmed)) return true;
   if (/^(do not|don'?t)\b/i.test(trimmed)) return false;
   return /^(how|what|why|when|where|who|which|whose|whom|do|does|did|is|are|was|were|can|could|would|should|will|shall|may|might|am)\b/i.test(trimmed);
-}
-
-function looksSensitive(text: string): boolean {
-  return /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text)
-    || /\b(?:sk|pk|ghp|gho|xoxb|xoxp)_[A-Za-z0-9_-]{16,}\b/.test(text)
-    || /\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b/.test(text);
 }
 
 function normalizeKey(value: string): string {

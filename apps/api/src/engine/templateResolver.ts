@@ -95,7 +95,10 @@ export function resolveTemplateDeep<T>(value: T, ctx: TemplateContext): T {
  * Returns `undefined` if any segment in the path is missing.
  */
 export function readTemplatePath(ctx: TemplateContext, expression: string): unknown {
-  const trimmed = expression.trim();
+  // Typed consumers (evaluator, loop, transform) receive the raw config, so
+  // accept the same exact {{path}} syntax as ordinary template resolution.
+  const exact = expression.trim().match(/^\{\{\s*([\s\S]*?)\s*\}\}$/);
+  const trimmed = exact?.[1]?.trim() ?? expression.trim();
   if (trimmed.startsWith('=')) return evaluateTemplateExpression(ctx, trimmed.slice(1).trim());
   return readPath(ctx, trimmed);
 }

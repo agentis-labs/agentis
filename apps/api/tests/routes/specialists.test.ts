@@ -1,7 +1,7 @@
 /**
  * /v1/specialists — route unit tests.
  *
- * Verifies the registry surface lists platform + custom specialists with
+ * Verifies the registry surface lists custom/generated specialists with
  * materialization status, and that POST authors a specialist that the engine
  * can route to immediately (custom agentRole becomes legal at dispatch).
  */
@@ -25,7 +25,7 @@ import { SpecialistTemplateService } from '../../src/services/specialistTemplate
 import { AbilityService } from '../../src/services/abilityService.js';
 import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
 import { createLogger } from '../../src/logger.js';
-import { HashingEmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -50,7 +50,7 @@ beforeEach(async () => {
   const logger = createLogger({ level: 'error' });
   abilities = new AbilityService(ctx.db, logger);
   profiles = new SpecialistProfileService(ctx.db);
-  mind = new SpecialistMindService({ db: ctx.db, logger, embeddings: () => new HashingEmbeddingProvider() });
+  mind = new SpecialistMindService({ db: ctx.db, logger, embeddings: () => new StubEmbeddingProvider() });
   runtime = new SpecialistRuntimeService(ctx.db);
   evals = new SpecialistEvalService(ctx.db, mind);
   templates = new SpecialistTemplateService(ctx.db);
@@ -78,14 +78,12 @@ function seedAbility(name: string): string {
 }
 
 describe('GET /v1/specialists', () => {
-  it('lists the platform specialists with draft status before materialization', async () => {
+  it('does not list platform specialists in an empty workspace', async () => {
     const res = await app().request('/v1/specialists', { headers: ctx.authHeaders });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { specialists: SpecialistSummary[]; count: number };
-    const coder = body.specialists.find((s) => s.role === 'coder');
-    expect(coder?.source).toBe('platform');
-    expect(coder?.status).toBe('draft');
-    expect(coder?.agentId).toBeNull();
+    expect(body.count).toBe(0);
+    expect(body.specialists).toEqual([]);
   });
 
   it('reflects materialization status for a seeded specialist', async () => {

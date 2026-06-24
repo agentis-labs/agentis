@@ -1,24 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronRight, ExternalLink, MessageCircle, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronRight, ExternalLink, MessageCircle, Wrench, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
 import { useRunActivity } from '../../lib/useRunActivity';
+import { openRunModal } from '../../lib/runModal';
 import {
   REALTIME_ACTIVITY_EVENTS,
   describeRealtimeActivity,
   type RealtimeActivity,
 } from '../../lib/realtimeActivity';
+import {
+  isActiveObservation,
+  type ObservationTone,
+  type ObservabilityEvent,
+} from '../../lib/observability';
+import { SelectedAgentModelControl } from '../agents/SelectedAgentModelControl';
 import type { CanvasNode } from './homeCanvasTypes';
 
 export function CanvasNodeDetailPanel({
   node,
+  observabilityEvents = [],
   onClose,
   onNavigate,
   onOpenChat,
   onRefresh,
 }: {
   node: CanvasNode | null;
+  observabilityEvents?: ObservabilityEvent[];
   onClose: () => void;
   onNavigate: (route: string) => void;
   onOpenChat: (node: CanvasNode) => void;
@@ -28,6 +37,7 @@ export function CanvasNodeDetailPanel({
   const hasRoute = Boolean(node.route);
   const canChat = Boolean(node.agent);
   const state = node.operationalState ?? (node.warn ? 'attention' : node.active ? 'active' : 'idle');
+  const nodeEvents = observabilityEvents.filter((event) => eventMatchesNode(event, node)).slice(0, 8);
 
   async function resolveApproval(decision: 'approve' | 'reject') {
     if (!node?.approval?.id) return;
@@ -39,12 +49,12 @@ export function CanvasNodeDetailPanel({
   }
 
   return (
-    <div data-canvas-control className="pointer-events-none absolute inset-y-0 right-0 z-50 flex w-full max-w-[420px] items-stretch p-4">
-      <aside className="pointer-events-auto flex min-h-0 w-full flex-col rounded-2xl border border-line bg-surface/96 shadow-2xl backdrop-blur-xl">
-        <header className="flex items-start gap-3 border-b border-line px-4 py-4">
+    <div data-canvas-control className="pointer-events-none absolute inset-y-0 right-0 z-50 flex w-full max-w-[380px] items-stretch p-3">
+      <aside className="pointer-events-auto flex min-h-0 w-full flex-col rounded-xl border border-line/90 bg-surface/96 shadow-xl backdrop-blur-xl">
+        <header className="flex items-start gap-2.5 border-b border-line/80 px-3 py-3">
           <div
             className={clsx(
-              'flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-card border',
+              'flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-card border',
               state === 'error'
                 ? 'border-danger/45 bg-danger/10 text-danger'
                 : state === 'attention'
@@ -58,34 +68,43 @@ export function CanvasNodeDetailPanel({
             {node.imageUrl ? <img src={node.imageUrl} alt="" className="h-full w-full object-cover" /> : node.icon ?? <Bot size={18} />}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase text-text-muted">
-              <span>{node.kind}</span>
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase text-text-muted">
+              <span>{node.kindLabel ?? node.kind}</span>
               {state === 'active' && <span className="rounded-pill bg-white/10 px-1.5 py-0.5 text-text-primary">executing</span>}
               {state === 'attention' && <span className="rounded-pill bg-warn-soft px-1.5 py-0.5 text-warn">attention</span>}
               {state === 'error' && <span className="rounded-pill bg-danger-soft px-1.5 py-0.5 text-danger">error</span>}
             </div>
-            <h2 className="mt-1 truncate text-heading text-text-primary">{node.title}</h2>
-            <p className="mt-1 text-[12px] text-text-secondary">{node.subtitle}</p>
+            <h2 className="mt-1 truncate text-[15px] font-semibold leading-tight text-text-primary">{node.title}</h2>
+            <p className="mt-0.5 truncate text-[11px] text-text-secondary">{node.subtitle}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close detail panel"
             title="Close"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text-primary"
           >
-            <X size={15} />
+            <X size={14} />
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+          {node.agent && (
+            <SelectedAgentModelControl
+              agentId={node.agent.id}
+              adapterType={node.agent.adapterType}
+              onUpdated={onRefresh}
+              variant="rail"
+            />
+          )}
+          <NodeRealtimeSummary node={node} state={state} events={nodeEvents} />
           {(node.agent || node.workflow) && <NodeLiveFeed node={node} />}
           {node.agent && <AgentLiveState node={node} />}
           {node.workflow && <WorkflowRuntimeSection workflowId={node.workflow.id} onNavigate={onNavigate} />}
 
-          {/* Workflow nodes get the runtime section above — repeating
-              "Status: failed / Failed at: X" as plain lines is pure noise. */}
-          {!node.workflow && node.tooltipLines.length > 0 && (
+          {/* Workflow and agent nodes already have live state above; keep static
+              metadata for quieter resource/knowledge nodes only. */}
+          {!node.workflow && !node.agent && node.tooltipLines.length > 0 && (
             <section className="space-y-2">
               {node.tooltipLines.map((line) => (
                 <div key={line} className="rounded-card border border-line bg-canvas/35 px-3 py-2 text-[12px] text-text-secondary">
@@ -96,10 +115,17 @@ export function CanvasNodeDetailPanel({
           )}
 
           {node.kind === 'approval' && (
-            <section className="mt-4 rounded-card border border-warn/25 bg-warn-soft px-3 py-3">
+            <section className={node.approval?.source === 'self_heal'
+              ? 'mt-4 rounded-card border border-accent/25 bg-accent/[0.08] px-3 py-3'
+              : 'mt-4 rounded-card border border-warn/25 bg-warn-soft px-3 py-3'}
+            >
               <div className="flex gap-2 text-[12px] text-text-secondary">
-                <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" />
-                <span>{node.approval?.summary ?? 'This run is waiting for an operator decision.'}</span>
+                {node.approval?.source === 'self_heal' ? (
+                  <Wrench size={14} className="mt-0.5 shrink-0 text-accent" />
+                ) : (
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" />
+                )}
+                <span className="whitespace-pre-line">{node.approval?.summary ?? 'This run is waiting for an operator decision.'}</span>
               </div>
               <div className="mt-3 flex gap-2">
                 <button
@@ -108,7 +134,7 @@ export function CanvasNodeDetailPanel({
                   className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-text-primary px-2.5 text-[12px] font-medium text-canvas hover:bg-white active:scale-[0.98]"
                 >
                   <Check size={13} />
-                  Approve
+                  {node.approval?.source === 'self_heal' ? 'Approve fix' : 'Approve'}
                 </button>
                 <button
                   type="button"
@@ -128,12 +154,12 @@ export function CanvasNodeDetailPanel({
           )}
         </div>
 
-        <footer className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+        <footer className="flex flex-wrap items-center gap-2 border-t border-line/80 px-3 py-2.5">
           {canChat && (
             <button
               type="button"
               onClick={() => onOpenChat(node)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-text-primary px-3 text-[12px] font-medium text-canvas hover:bg-white active:scale-[0.98]"
+              className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-text-primary px-2.5 text-[12px] font-medium text-canvas hover:bg-white active:scale-[0.98]"
             >
               <MessageCircle size={14} />
               Give instruction
@@ -143,7 +169,7 @@ export function CanvasNodeDetailPanel({
             <button
               type="button"
               onClick={() => node.route && onNavigate(node.route)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+              className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
             >
               <ExternalLink size={14} />
               Open
@@ -153,7 +179,7 @@ export function CanvasNodeDetailPanel({
             <button
               type="button"
               onClick={() => onNavigate('/agents')}
-              className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+              className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
             >
               <ArrowRight size={14} />
               Configure agents
@@ -163,6 +189,103 @@ export function CanvasNodeDetailPanel({
       </aside>
     </div>
   );
+}
+
+type NodeDetailState = NonNullable<CanvasNode['operationalState']>;
+
+const NODE_TONE_TEXT: Record<ObservationTone, string> = {
+  accent: 'text-accent',
+  success: 'text-emerald-400',
+  warn: 'text-warn',
+  danger: 'text-danger',
+  muted: 'text-text-muted',
+};
+
+function NodeRealtimeSummary({
+  node,
+  state,
+  events,
+}: {
+  node: CanvasNode;
+  state: NodeDetailState;
+  events: ObservabilityEvent[];
+}) {
+  const live = events.filter(isActiveObservation).length + (node.active ? 1 : 0);
+  const waiting = events.filter((event) => event.status === 'waiting' || event.status === 'blocked' || event.kind === 'approval').length;
+  const risk = events.filter((event) => event.status === 'failed').length + (state === 'error' || node.warn ? 1 : 0);
+  const evidence = events.filter((event) => event.evidence.length > 0 || event.kind === 'tool' || event.kind === 'artifact' || event.kind === 'brain').length;
+  const focus = events[0] ?? null;
+  const tone = nodeSummaryTone(state, focus);
+  const summary =
+    focus?.summary ||
+    focus?.detail ||
+    focus?.title ||
+    node.currentTask ||
+    (state === 'idle' ? 'No active work in this node.' : 'Waiting for the next live signal.');
+
+  return (
+    <section className="mb-3 border-b border-line/70 pb-3">
+      <div className="grid grid-cols-4 gap-1">
+        <NodeSignalMetric value={live} label="work" tone={live > 0 ? 'accent' : 'muted'} />
+        <NodeSignalMetric value={waiting} label="wait" tone={waiting > 0 ? 'warn' : 'muted'} />
+        <NodeSignalMetric value={risk} label="risk" tone={risk > 0 ? 'danger' : 'muted'} />
+        <NodeSignalMetric value={node.artifactCount ?? evidence} label="made" tone="muted" />
+      </div>
+      <div className="mt-2 flex items-center gap-2 rounded-md bg-canvas/35 px-2 py-1.5">
+        <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', nodeToneDot(tone), tone === 'accent' && 'animate-pulse')} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[11px] font-medium text-text-primary">{nodeStateLabel(state)}</div>
+          <div className="truncate text-[10px] text-text-secondary">{summary}</div>
+        </div>
+        {focus && <span className="shrink-0 font-mono text-[9px] text-text-muted tabular-nums">{relTime(focus.createdAt)}</span>}
+      </div>
+    </section>
+  );
+}
+
+function NodeSignalMetric({ value, label, tone }: { value: number; label: string; tone: ObservationTone }) {
+  return (
+    <div className="min-w-0 px-1 py-0.5">
+      <div className={clsx('font-mono text-[12px] leading-none tabular-nums', NODE_TONE_TEXT[tone])}>{value}</div>
+      <div className="mt-0.5 truncate text-[8px] uppercase tracking-[0.08em] text-text-muted">{label}</div>
+    </div>
+  );
+}
+
+function eventMatchesNode(event: ObservabilityEvent, node: CanvasNode): boolean {
+  if (node.workflow?.id && event.workflowId === node.workflow.id) return true;
+  if (node.agent?.id && (event.agentId === node.agent.id || event.actorId === node.agent.id)) return true;
+  if (node.approval?.id && event.approvalId === node.approval.id) return true;
+  return false;
+}
+
+function nodeSummaryTone(state: NodeDetailState, focus: ObservabilityEvent | null): ObservationTone {
+  if (focus?.status === 'failed' || state === 'error') return 'danger';
+  if (focus?.status === 'waiting' || focus?.status === 'blocked' || state === 'attention') return 'warn';
+  if (focus && isActiveObservation(focus)) return 'accent';
+  if (state === 'active') return 'accent';
+  if (state === 'idle') return 'muted';
+  return 'success';
+}
+
+function nodeToneDot(tone: ObservationTone): string {
+  switch (tone) {
+    case 'accent': return 'bg-accent';
+    case 'success': return 'bg-emerald-400';
+    case 'warn': return 'bg-warn';
+    case 'danger': return 'bg-danger';
+    default: return 'bg-text-muted/60';
+  }
+}
+
+function nodeStateLabel(state: NodeDetailState): string {
+  switch (state) {
+    case 'active': return 'Working';
+    case 'attention': return 'Needs operator';
+    case 'error': return 'Failed';
+    case 'offline': return 'Offline';
+    default: return 'Available';
+  }
 }
 
 /**
@@ -190,16 +313,16 @@ function NodeLiveFeed({ node }: { node: CanvasNode }) {
   if (feed.length === 0) return null;
 
   return (
-    <section className="mb-4 rounded-card border border-accent/25 bg-accent-soft/5 px-3 py-3">
+    <section className="mb-3 rounded-card border border-accent/25 bg-accent-soft/5 px-2.5 py-2.5">
       <div className="flex items-center gap-2">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-        <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-accent">Live activity</span>
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-accent">Live activity</span>
       </div>
-      <div className="mt-2 space-y-1.5">
+      <div className="mt-2 space-y-1">
         {feed.map((item) => (
           <div key={item.id} className="flex items-start gap-2">
             <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-accent/70" />
-            <span className="min-w-0 flex-1 line-clamp-2 font-mono text-[11px] leading-snug text-text-secondary">
+            <span className="min-w-0 flex-1 line-clamp-2 font-mono text-[10px] leading-snug text-text-secondary">
               {item.agentName ? `${item.agentName}: ` : ''}{item.detail}
             </span>
           </div>
@@ -302,11 +425,11 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
   }, [liveFeed.length]);
 
   if (runs === null) {
-    return <div className="mb-4 rounded-card border border-line bg-canvas/55 px-3 py-3 text-[12px] text-text-muted">Loading runs…</div>;
+    return <div className="mb-3 rounded-card border border-line bg-canvas/55 px-3 py-2.5 text-[12px] text-text-muted">Loading runs...</div>;
   }
   if (runs.length === 0) {
     return (
-      <div className="mb-4 rounded-card border border-line bg-canvas/55 px-3 py-3 text-[12px] text-text-muted">
+      <div className="mb-3 rounded-card border border-line bg-canvas/55 px-3 py-2.5 text-[12px] text-text-muted">
         No runs yet. Trigger this workflow to see its steps, outputs, and live progress here.
       </div>
     );
@@ -317,7 +440,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
   const outputText = step ? renderOutput(step.output) : '';
 
   return (
-    <section className="mb-4 overflow-hidden rounded-card border border-line bg-canvas/55">
+    <section className="mb-3 overflow-hidden rounded-card border border-line bg-canvas/55">
       {/* Latest run status */}
       <div className="flex items-center justify-between gap-2 border-b border-line/60 px-3 py-2.5">
         <span className="flex items-center gap-2 text-[12px] font-semibold text-text-primary">
@@ -325,7 +448,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
           {headMeta.label}
           {detail?.durationMs != null && <span className="font-mono text-[10px] font-normal text-text-muted">· {fmtDuration(detail.durationMs)}</span>}
         </span>
-        <button type="button" onClick={() => selectedRunId && onNavigate(`/runs/${selectedRunId}`)} className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-accent">
+        <button type="button" onClick={() => selectedRunId && openRunModal({ runId: selectedRunId, workflowId, source: 'home-node-detail' })} className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-accent">
           <ExternalLink size={10} /> Run
         </button>
       </div>
@@ -471,12 +594,16 @@ function AgentLiveState({ node }: { node: CanvasNode }) {
             : 'Idle';
   const output = node.outputLines?.slice(-5) ?? [];
 
+  if (state === 'idle' && !node.currentTask && !node.currentTool && !node.runtimeError && output.length === 0) {
+    return null;
+  }
+
   return (
-    <section className="mb-4 rounded-card border border-line bg-canvas/55 px-3 py-3">
+    <section className="mb-3 rounded-card border border-line bg-canvas/55 px-2.5 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
-          <div className="mt-1 text-[13px] text-text-primary">
+          <div className="mt-1 text-[12px] text-text-primary">
             {node.currentTask ?? (state === 'idle' ? 'No active run. Showing last known workspace state.' : 'Awaiting live execution details.')}
           </div>
         </div>

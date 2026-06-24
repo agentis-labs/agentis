@@ -100,14 +100,14 @@ export class EvaluatorRuntime {
     });
     const parsed = parseVerdict(raw);
     if (!parsed) {
-      // The model failed to return parseable JSON — score 0 with a structured
-      // critique so the eval-retry loop can still react.
       this.opts.logger.warn('evaluator.parse_failed', { raw });
-      return {
-        score: 0,
-        passed: false,
-        critique: 'evaluator response was not valid JSON; treating as failure',
-      };
+      // A missing or malformed judge response is infrastructure failure, not a
+      // quality verdict. Returning `passed: false` here would silently skip the
+      // success path while leaving error-only recovery branches unreachable.
+      throw new AgentisError(
+        'INTEGRATION_OPERATION_FAILED',
+        'evaluator runtime did not produce a valid verdict',
+      );
     }
     return {
       score: parsed.score,

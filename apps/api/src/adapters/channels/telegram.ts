@@ -15,7 +15,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -24,6 +24,114 @@ export class TelegramChannelAdapter implements ChannelAdapter {
 
   // Override for tests to capture outgoing requests.
   fetchImpl: typeof fetch = (...args) => fetch(...args);
+
+  async probeCredential(args: { token: string }): Promise<ChannelHealthCheck> {
+    const checkedAt = new Date().toISOString();
+    const res = await this.fetchImpl(`${TELEGRAM_API}/bot${encodeURIComponent(args.token)}/getMe`, {
+      method: 'GET',
+    });
+    if (res.ok) {
+      const json = await res.json().catch(() => ({})) as { ok?: boolean; result?: { username?: string }; description?: string };
+      if (json.ok !== false) {
+        return {
+          name: 'credential',
+          ok: true,
+          code: 'telegram_get_me_ok',
+          message: json.result?.username ? `Telegram bot token is valid (@${json.result.username}).` : 'Telegram bot token is valid.',
+          checkedAt,
+        };
+      }
+      return {
+        name: 'credential',
+        ok: false,
+        code: 'telegram_get_me_failed',
+        message: json.description ?? 'Telegram rejected the bot token.',
+        remediation: 'Paste the full bot token from @BotFather and save again.',
+        checkedAt,
+      };
+    }
+    const text = await res.text().catch(() => '');
+    return {
+      name: 'credential',
+      ok: false,
+      code: 'telegram_get_me_failed',
+      message: `Telegram getMe failed (${res.status}): ${text.slice(0, 180) || res.statusText}`,
+      remediation: 'Check that the bot token is complete and has not been revoked in @BotFather.',
+      checkedAt,
+    };
+  }
+
+  async configureTransport(args: {
+    token: string;
+    webhookUrl?: string;
+    secret?: string | null;
+    transport?: string;
+  }): Promise<ChannelHealthCheck> {
+    const checkedAt = new Date().toISOString();
+    if (args.transport === 'polling') {
+      const res = await this.fetchImpl(`${TELEGRAM_API}/bot${encodeURIComponent(args.token)}/deleteWebhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ drop_pending_updates: false }),
+      });
+      if (res.ok) {
+        return {
+          name: 'transport',
+          ok: true,
+          code: 'telegram_polling_ready',
+          message: 'Telegram webhook is cleared, so long polling can receive updates.',
+          checkedAt,
+        };
+      }
+      const text = await res.text().catch(() => '');
+      return {
+        name: 'transport',
+        ok: false,
+        code: 'telegram_polling_webhook_clear_failed',
+        message: `Telegram deleteWebhook failed (${res.status}): ${text.slice(0, 180) || res.statusText}`,
+        remediation: 'Retry the test, or clear the webhook from Telegram before using polling.',
+        checkedAt,
+      };
+    }
+
+    if (!args.webhookUrl) {
+      return {
+        name: 'transport',
+        ok: false,
+        code: 'missing_public_url',
+        message: 'Telegram webhook mode needs a public Agentis URL.',
+        remediation: 'Set AGENTIS_PUBLIC_URL or switch Telegram to long polling.',
+        checkedAt,
+      };
+    }
+
+    const res = await this.fetchImpl(`${TELEGRAM_API}/bot${encodeURIComponent(args.token)}/setWebhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        url: args.webhookUrl,
+        ...(args.secret ? { secret_token: args.secret } : {}),
+      }),
+    });
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; description?: string };
+    if (res.ok && json.ok !== false) {
+      return {
+        name: 'transport',
+        ok: true,
+        code: 'telegram_webhook_ready',
+        message: 'Telegram webhook is configured.',
+        checkedAt,
+      };
+    }
+    return {
+      name: 'transport',
+      ok: false,
+      code: 'telegram_set_webhook_failed',
+      message: json.description ?? `Telegram setWebhook failed (${res.status}).`,
+      remediation: 'Check that AGENTIS_PUBLIC_URL is reachable by Telegram and retry the test.',
+      checkedAt,
+    };
+  }
 
   async send(args: { token: string; chatId: string; body: string }): Promise<void> {
     const url = `${TELEGRAM_API}/bot${encodeURIComponent(args.token)}/sendMessage`;
@@ -61,7 +169,11 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     rawBody: string;
     secret: string | null;
   }): boolean {
-    if (!args.secret) return true; // no secret configured → accept (not recommended)
+    // Fail closed: with no configured secret_token an inbound webhook cannot be
+    // authenticated, so a POST from anywhere on the internet would otherwise
+    // dispatch an orchestrator turn. Reject until the operator sets a secret
+    // (Telegram echoes it in x-telegram-bot-api-secret-token on every update).
+    if (!args.secret) return false;
     const presented = args.headers['x-telegram-bot-api-secret-token'] ?? '';
     const a = Buffer.from(presented);
     const b = Buffer.from(args.secret);

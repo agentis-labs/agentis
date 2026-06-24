@@ -453,7 +453,8 @@ fallbacks): `command_execution` → live `activity` deltas (visible, NEVER an
 executable `tool_call` — Agentis must not re-run what the harness already ran),
 `reasoning` → `thinking`, `agent_message` → text. Same live-streaming rework
 applied to **`ClaudeCodeAdapter`** (walks `stream-json` content blocks: thinking →
-ThinkingBubble, native Bash/Read/MCP tool use → activity, text → answer; markers
+raw reasoning → private generic progress, native Bash/Read/MCP tool use → activity,
+terminal text → answer; markers
 still extracted from text at exit). Cursor already streamed reasoning.
 
 **Front 2 — idle budget + never-discard (Codex/Claude/Cursor chat).** The
@@ -515,7 +516,7 @@ from the in-flight skills→extensions/abilities rename (error-code renames
 `SKILL_*`→`EXTENSION_*`; `buildSkillRegistryRoutes`→`buildExtensionRegistryRoutes`;
 `{skills}`→`{extensions}` registry key; `ExtensionLibraryService` API; bundle
 `extensions` field; `agentis.skills.list` → `extensions` output; HermesAdapter
-`AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE`; removed the orphaned `workflowBuild` route
+`AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE`; removed the unused `workflowBuild` route
 test). Fixed two real bugs found en route: `personalBrain.graph().atomCount`
 counted synthetic core/folder nodes (now counts note atoms); `agents.test`
 capability assertion is now `toMatchObject` (the capability surface is
@@ -651,7 +652,7 @@ fix the one genuine gap, not to add parallel machinery.
   `agentis.knowledge.{write,archive}` tools exist with coverage in
   `agentisMemoryAndKnowledgeTools.test.ts`.
 - *Adaptive forgetting* — `BrainMaintenanceService` stale-marks → archives managed,
-  unpinned episodes off `lastAccessedAt`/`updatedAt` cutoffs, prunes orphaned
+  unpinned episodes off `lastAccessedAt`/`updatedAt` cutoffs, prunes detached
   `knowledge_links`, expires session atoms, and runs `BrainCompressionService`.
 - *Reflections / synthesis* — `CognitivePromotionQueueWorker.curator_pass` distils
   episode clusters into higher-order atoms (auto-enqueued by
@@ -767,3 +768,78 @@ re-ingest (idempotent + cron-triggerable), and Pillars 1–6 (capability routing
 node-config clarity, brain sharpening, agent interaction surface, MCP/A2A,
 access tokens/governance) — every one is now built end-to-end. See the Completion
 entry at the top of this log.
+
+---
+
+## Impl log — HAL supply view: never a dead "missing native browser" (2026-06-16)
+
+**Problem (from a workspace screenshot).** Every agent on a node requiring
+`Native browser` rendered `missing Native browser`, with no path forward, and the
+orchestrator kept casting agent_task nodes onto offline `http` specialists that
+could *never* satisfy a runtime requirement. Two root causes:
+
+1. **No supply view.** The canvas only knew an agent's *live* affordances
+   (`adapterCapabilities.affordances`, populated when connected). An offline-but-
+   capable runtime, or one a config toggle away from capable, was indistinguishable
+   from one that can never do the work — so the UI said `missing` for all of them.
+2. **Over-requiring + offline casting.** Generic web work ("log in, scrape a
+   page") minted `requires.browser`, then `materializeCast` pinned the node to a
+   freshly-seeded offline `http` role specialist that advertises nothing.
+
+**Fix — a configured/potential supply view, single-sourced in core.**
+
+- `packages/core/src/halAffordances.ts`:
+  - `configuredAffordances(adapterType, config)` — what a runtime advertises *by
+    configuration*, no live connection needed; an exact mirror of each adapter's
+    `capabilities().affordances` (Codex's `browser`/`computerUse` gated on its
+    `browser` opt-in).
+  - `potentialAffordances(adapterType)` — the *ceiling* a runtime could advertise
+    with the right config (only Codex has a latent power), to tell "enablable"
+    apart from "incapable".
+  - `agentMatchSummary` now returns a `state`: `ready` (connected + live) →
+    `offline_capable` (configured, not connected) → `enablable` (a config toggle
+    away, e.g. Codex native browser) → `incapable`, plus `enablableKeys`.
+  - `agentRequirementMatches(agents, requires)` ranks ALL workspace agents by that
+    state (not just connected ones), so the canvas can show a real path to green.
+  - 8 core tests (supply view + state ranking).
+
+- `apps/api/src/routes/agents.ts` — `presentAgent` attaches
+  `configuredAffordances` + `potentialAffordances` (computed from the row, no live
+  adapter), so the canvas reasons about offline agents.
+
+- **Phase 2 — one-click supply actions** (`ContextInspector.tsx`): the HAL
+  requirements panel now renders per-agent state and actions: `ready` (green),
+  `configured · offline`, and an **Enable Native browser** button for `enablable`
+  Codex agents (PATCH `/v1/agents/:id` with `config.browser=true`, then reload).
+  The gap banner steers to the platform **Browser node** first (the default for
+  ordinary web automation), then enable-on-Codex / connect-OpenClaw.
+
+- **Phase 4 — stop over-requiring** (`build.ts`): `mentionsNativeBrowserControl`
+  dropped the old click/login/"page"-proximity heuristics; only explicit
+  agent-owned control phrasing ("live/native browser", "drive/operate a browser",
+  chromium/playwright) keeps `requires.browser`. The build-agent prompt now tells
+  the model to use a `browser` node for open/login/scrape/screenshot. 4 tests.
+
+- **Phase 3 — runtime-aware specialists** (`specialistAgents.ts`, `build.ts`):
+  `ensureRole`/`authorSpecialist` accept an optional runtime seed (adapterType +
+  config) so a role can be created already bound to a real harness; the
+  `create_specialist` tool exposes `adapterType`/`runtimeConfig`. `materializeCast`
+  now, for a node with hard HAL requirements, binds a **connected, capable**
+  workspace agent (preferring one matching the role) instead of an offline `http`
+  specialist — falling through to readiness when none exists.
+
+- **Phase 5 — honest readiness** (`workflowReadiness.ts`): a new HAL check flags
+  any agent node whose `requires` (minus `fileSystem`, covered by the platform
+  loop) no workspace runtime can satisfy — with an actionable message ("Enable it
+  on <Codex>… or connect OpenClaw… or use a Browser node"). Computed from the
+  supply view, so it needs no live adapters. 4 added tests (10 total).
+
+**Verified:** `@agentis/core`, `@agentis/api`, `@agentis/web` typecheck clean;
+core (28), `workflowReadiness` (10), `specialistAgents` (7),
+`halRequirementNormalization` (4) all pass.
+
+**Decision:** the supply view lives once in core and is mirrored by the adapters
+(documented contract, parity confirmed by reading all six `capabilities()`); no
+parallel capability subsystem. Per the operator's call, the **Browser node is the
+default** for web automation and `requires.browser` is reserved for genuine
+agent-owned native control.

@@ -12,7 +12,7 @@ import { createLogger, type Logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 
-const providerSchema = z.enum(['hashing', 'openai']);
+const providerSchema = z.enum(['local', 'openai']);
 const providerConfigSchema = z.object({
   endpoint: z.string().url().optional(),
   model: z.string().trim().min(1).max(200).optional(),
@@ -67,7 +67,7 @@ export function buildWorkspaceIntelligenceRoutes(deps: {
       const vector = await embedText(selectEmbeddingProvider(body.embeddingProviderType, body.embeddingProviderConfig), 'Agentis embedding connection test');
       return c.json({
         ok: true,
-        degraded: body.embeddingProviderType === 'hashing',
+        degraded: false,
         providerType: body.embeddingProviderType,
         dimension: vector.length,
         latencyMs: Date.now() - startedAt,

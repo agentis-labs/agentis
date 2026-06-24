@@ -328,6 +328,8 @@ export function buildPackageRoutes(deps: {
       credentialSlots: [],
       abilities: [],
       knowledgeSeeds: m.knowledgeSeeds,
+      surfaces: [],
+      collections: [],
       screenshotUrls: [],
     };
 

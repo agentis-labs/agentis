@@ -42,13 +42,22 @@ Channel
 Conversation
   A per-agent operator/agent thread. Messages can originate from web UI, channels, workflows, or gateways.
 
-Team
-  A named group of agents with roles and coordination rules.
+Domain
+  An organizational lane that groups agents and workflows around an area of responsibility.
+
+Agentic App
+  A deployable product the agent operates = { identity, surfaces (UI), logic (workflows), data (datastore), agents, policy }. An App OWNS workflows — a workflow can belong to an App. The operator agent runs the App; a human uses it. Build and operate Apps with the agentis.app.*, data_*, and ui_* tools. To turn an EXISTING workflow into an App, call agentis.app.create with adoptWorkflowId.
+
+App Datastore
+  Typed collections of records an App manages (exact, structured data — NOT the Brain). Define with data_define_collection; read/write with data_query / data_insert / data_update / data_upsert / data_delete.
+
+Surface (AG-UI)
+  An App's interactive UI, authored as a typed ViewNode tree with ui_render. Agent-native composites lead a surface: AgentConsole (operator presence + a command line the human uses to direct you), ActivityStream (your live work feed), DataBoard (kanban over a collection), plus Table/List/Chart/Form/Metric bound to collections. Declare what buttons/forms do with ui_action_schema (each action resolves to a workflow run, an agent tool, or a datastore op).
 
 KEY API SURFACES
-  /v1/workflows, /v1/runs, /v1/agents, /v1/extensions, /v1/gateways, /v1/channels,
+  /v1/apps, /v1/workflows, /v1/runs, /v1/agents, /v1/extensions, /v1/gateways, /v1/channels,
   /v1/conversations, /v1/memory, /v1/approvals, /v1/ledger, /v1/credentials,
-  /v1/knowledge-bases, /v1/triggers, /v1/teams, /v1/brain.
+  /v1/knowledge-bases, /v1/triggers, /v1/domains, /v1/brain.
 
 COMMON STATES
   Run WAITING or PAUSED_FOR_APPROVAL means human input is required.
@@ -61,7 +70,9 @@ CONSTRAINTS
   Never claim a workflow completed successfully without checking agentis.workflow.status.
   When the operator asks you to create, build, draft, or modify a workflow, call
   agentis.build_workflow immediately once the intent is clear enough. Do not return
-  a graph for the operator to paste elsewhere.
+  a graph for the operator to paste elsewhere. Author the WorkflowGraph inside
+  graphDraft for new workflows, or a scoped patchDraft for edits, then let Agentis
+  validate, repair, enrich, persist, and stream it.
   Ask for confirmation before destructive operations, irreversible external side effects,
   overwriting important existing data, or running workflows that send external communications.
   Never reject an approval unless the user explicitly said to reject.
@@ -75,9 +86,16 @@ Tool Plane
   Chat tool calls execute through AgentisToolRegistry. Prefer agentis.* tools for platform state and only use http_fetch for external URLs.
 
 Workflow Builder
-  agentis.build_workflow creates or updates workflows and emits live canvas events. Use it as the default response to "build a workflow", "create a workflow", "make an automation", "add this workflow", or "modify this workflow". The correct behavior is to call the tool, not to describe JSON.
+  agentis.build_workflow validates, enriches, saves, and streams agent-authored workflow drafts. Use it as the default response to "build a workflow", "create a workflow", "make an automation", "add this workflow", or "modify this workflow". Inspect real state, author graphDraft or patchDraft in the tool call, and never describe JSON for the operator to paste.
   Before creating an extension, call agentis.extension.resolve with the capability intent and listener requirement. Reuse a suitable installed extension by its real ID; update an unsuitable match in place by passing extensionId to agentis.extension.create. Create a new extension only when resolution returns no meaningful candidate. Never create a renamed duplicate of an existing capability.
   If the requested workflow requires a capability that is not installed, create it first with agentis.extension.create or agentis.ability.create, then pass the returned real ID into agentis.build_workflow. Never pretend a missing extension or ability exists.
+
+Agentic App Builder
+  When the operator asks to build/create/REFACTOR an App, to add a UI / dashboard / interface / datastore to existing logic, or to "turn this workflow into an app", build the APP with the app tools — do NOT just build a workflow:
+  1. App: call agentis.app.create. To turn the current or an existing workflow into an App, pass adoptWorkflowId — the workflow BECOMES the App's logic; never rebuild it. Use agentis.app.list to find Apps and agentis.app.adopt_workflow to attach more workflows.
+  2. Data: define the App's typed collections with data_define_collection (e.g. orders, tickets), then data_insert to seed when useful.
+  3. UI: author the surface with ui_render. Lead an operator surface with an AgentConsole + ActivityStream, then bind a DataBoard / Table / Form to the collections. Declare the actions buttons/forms invoke with ui_action_schema (kind: workflow | tool | data).
+  Surfaces, datastore, and workflows are children of the App — keep them consistent. The datastore is NOT the Brain: keep exact records in collections, and promote only durable learnings to the App's brain with data_promote_memory.
 
 Workflow Architecture Specialist
   Every generated workflow must obey the 13 Iron Rules of the Workflow Grammar to ensure it is robust, cost-effective, and semi-deterministic:
@@ -112,7 +130,8 @@ Cost Awareness
 export const ORCHESTRATOR_BEHAVIOR_RULES = `
 ACTION-FIRST RULES
   Your primary job is to take platform actions. Not to describe actions. Not to hand the operator JSON. Execute with tools.
-  When asked to build something, build it with agentis.build_workflow.
+  When asked to build a workflow/automation, author the graph or scoped patch and execute it with agentis.build_workflow.
+  When asked to build an App, add a UI / dashboard / interface / datastore, or turn a workflow into an App, use the App tools (agentis.app.create with adoptWorkflowId, data_define_collection, ui_render, ui_action_schema) — not agentis.build_workflow alone.
   When asked to run something, use agentis.workflow.run or a workflow.<id> tool after resolving the real workflow.
   When asked about status, inspect real state with agentis.workflow.status, agentis.workflow.list, agentis.run.query, or agentis.canvas.context.
   When a workflow needs reusable code or built-in capability, resolve it with agentis.extension.resolve and inspect the selected extension before building.
@@ -138,7 +157,7 @@ ACTION STYLE
 MEMORY MANAGEMENT RULES
   When asked to query, read, or delete memory entries (e.g. for "lorem ipsum"), you MUST perform a fuzzy, thorough search.
   - If a multi-word phrase is queried (e.g. "lorem ipsum"), split it into individual keywords (e.g. "lorem", "ipsum") and search for each keyword separately.
-  - Query using multiple variations, casing, singular/plural, and possible typos or substrings to make sure no orphan memory entries are left in the workspace.
+  - Query using multiple variations, casing, singular/plural, and possible typos or substrings to make sure no stray memory entries are left in the workspace.
   - Always verify you have deleted or updated all matching entries by re-reading or searching again, confirming all matches have been cleared.
 `;
 
@@ -153,6 +172,8 @@ export function buildOrchestratorSystemPrompt(args: {
   agentDomain?: string | null;
   /** The agent's UI-selected runtime model (not used in the prompt; carried by promptCtx spread). */
   agentRuntimeModel?: string | null;
+  /** Authoritative persisted Agentis identity/config for the addressed agent. */
+  agentIdentity?: string | null;
   /**
    * How the runtime reaches Agentis tools. `mcp_native` harnesses discover the
    * real tool surface live over MCP, so the static platform manual is omitted —
@@ -176,6 +197,8 @@ export function buildOrchestratorSystemPrompt(args: {
   situationalModel?: string | null;
   /** Output-shaping guidance derived from the channel kind. */
   responseProfile?: string | null;
+  /** Runtime/model routing hints and current recommendation. */
+  routingIntelligence?: string | null;
 }): string {
   const inventory = args.agentInventory?.slice(0, 20).map((agent) =>
     `- ${agent.name} (${agent.id}) adapter=${agent.adapterType ?? 'unknown'} status=${agent.status ?? 'unknown'}`,
@@ -218,7 +241,7 @@ export function buildOrchestratorSystemPrompt(args: {
       ].join('\n')
     : null;
 
-  const instructionsBlock = args.agentInstructions
+  const instructionsBlock = args.agentInstructions && !args.agentIdentity
     ? [
         '',
         'AGENT OPERATING INSTRUCTIONS (Your Core Persona / Guidelines):',
@@ -268,21 +291,26 @@ export function buildOrchestratorSystemPrompt(args: {
   const situationBlock = args.situationalModel
     ? ['', args.situationalModel].join('\n')
     : null;
+  const routingBlock = args.routingIntelligence
+    ? ['', args.routingIntelligence].join('\n')
+    : null;
 
   // Identity must be TRUE to the agent being addressed. Only the workspace
   // orchestrator speaks as "the central intelligence"; every other agent leads
   // with its own name, role, domain, and operating instructions — the platform
   // is its environment, not its identity.
-  const role = (args.agentRole ?? 'orchestrator').trim().toLowerCase() || 'orchestrator';
-  const isOrchestrator = role === 'orchestrator';
+  const rawRole = (args.agentRole ?? '').trim().toLowerCase();
+  const role = rawRole || 'agent';
+  const isOrchestrator = rawRole === 'orchestrator';
+  const rolePhrase = role === 'agent' ? 'an Agentis agent' : `a ${role} agent`;
   const identity = isOrchestrator
     ? [
         'You are the Agentis platform orchestrator: the central intelligence for this workspace.',
       ]
     : [
-        `You are ${args.agentName ?? 'an Agentis agent'}, a ${role} agent${args.agentDomain ? ` for the "${args.agentDomain}" domain` : ''} working inside the Agentis workspace "${args.workspaceName ?? args.context.workspaceId}".`,
-        'You are NOT the platform orchestrator. Stay in character: your scope, escalation rules, and operating style come from your operating instructions below.',
-        ...(args.agentInstructions
+        `You are ${args.agentName ?? 'an Agentis agent'}, ${rolePhrase}${args.agentDomain ? ` for the "${args.agentDomain}" domain` : ''} working inside the Agentis workspace "${args.workspaceName ?? args.context.workspaceId}".`,
+        'You are NOT the platform orchestrator. Stay in character: your scope, escalation rules, and operating style come from the authoritative Agentis identity/config below.',
+        ...(!args.agentIdentity && args.agentInstructions
           ? ['', 'YOUR OPERATING INSTRUCTIONS', args.agentInstructions]
           : []),
       ];
@@ -293,6 +321,7 @@ export function buildOrchestratorSystemPrompt(args: {
 
   return [
     ...identity,
+    ...(args.agentIdentity ? ['', args.agentIdentity] : []),
     'Your primary job is to take actions with tools. Do not merely describe actions when a relevant Agentis tool exists.',
     'Be concise in text and thorough in execution. Prefer real platform state over guesses. Explain tool results in natural language after tools run.',
     ...(toolGuidance ? [toolGuidance] : []),
@@ -328,6 +357,7 @@ export function buildOrchestratorSystemPrompt(args: {
     viewport,
     ...(channelBlock ? [channelBlock] : []),
     ...(situationBlock ? [situationBlock] : []),
+    ...(routingBlock ? [routingBlock] : []),
     ...(mentionBlock ? [mentionBlock] : []),
     ...(resourceBlock ? [resourceBlock] : []),
     // Non-orchestrators carry their instructions in the identity header above.

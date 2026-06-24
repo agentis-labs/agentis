@@ -1,8 +1,8 @@
 /**
  * CommandIndex — Cmd+K command palette backend (V1-SPEC §13).
  *
- * Returns the union of workflows, agents, gateways, runs, approvals, extensions
- * and registry entries (when configured) matching a free-text query, ordered by
+ * Returns the union of apps, workflows, agents, gateways, runs, approvals,
+ * extensions and registry entries (when configured) matching a free-text query, ordered by
  * a small relevance heuristic. Callers cap the result to
  * COMMAND_PALETTE_RESULT_LIMIT.
  */
@@ -13,7 +13,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, CONSTANTS } from '@agentis/core';
 
 export interface CommandHit {
-  type: 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'extension' | 'conversation';
+  type: 'app' | 'workflow' | 'agent' | 'gateway' | 'run' | 'approval' | 'extension' | 'conversation';
   id: string;
   title: string;
   subtitle?: string;
@@ -46,6 +46,15 @@ export class CommandIndex {
   execute(workspaceId: string, req: CommandExecuteRequest): CommandExecuteResult {
     const { type, id } = req;
     switch (type) {
+      case 'app': {
+        const row = this.db
+          .select()
+          .from(schema.apps)
+          .where(and(eq(schema.apps.id, id), eq(schema.apps.workspaceId, workspaceId)))
+          .get();
+        if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `App ${id} not found`);
+        return { type, id, href: `/apps/${id}` };
+      }
       case 'workflow': {
         const row = this.db
           .select()
@@ -83,7 +92,7 @@ export class CommandIndex {
           .where(and(eq(schema.workflowRuns.id, id), eq(schema.workflowRuns.workspaceId, workspaceId)))
           .get();
         if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `Run ${id} not found`);
-        return { type, id, href: `/runs/${id}` };
+        return { type, id, href: `/history?tab=runs&runId=${id}` };
       }
       case 'approval': {
         const row = this.db
@@ -119,6 +128,16 @@ export class CommandIndex {
     if (q.length < 2) return [];
     const hits: CommandHit[] = [];
     const pattern = `%${escapeLike(q)}%`;
+
+    // Apps are the org primitive — surface them first.
+    const apps = this.db.select().from(schema.apps)
+      .where(and(eq(schema.apps.workspaceId, workspaceId), like(schema.apps.name, pattern)))
+      .limit(20)
+      .all();
+    for (const a of apps) {
+      const score = relevance(q, a.name, a.description ?? '');
+      if (score > 0) hits.push({ type: 'app', id: a.id, title: a.name, subtitle: a.description || 'Agentic App', href: `/apps/${a.id}`, score });
+    }
 
     const workflows = this.db.select().from(schema.workflows)
       .where(and(eq(schema.workflows.workspaceId, workspaceId), like(schema.workflows.title, pattern)))
@@ -157,7 +176,7 @@ export class CommandIndex {
       .all();
     for (const r of runs) {
       const score = relevance(q, r.id.slice(0, 8), r.status);
-      if (score > 0) hits.push({ type: 'run', id: r.id, title: `Run ${r.id.slice(0, 8)}`, subtitle: r.status, href: `/runs/${r.id}`, score });
+      if (score > 0) hits.push({ type: 'run', id: r.id, title: `Run ${r.id.slice(0, 8)}`, subtitle: r.status, href: `/history?tab=runs&runId=${r.id}`, score });
     }
 
     const approvals = this.db.select().from(schema.approvalRequests)

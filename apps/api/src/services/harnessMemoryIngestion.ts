@@ -39,6 +39,7 @@ import type { RuntimeEpisode, RuntimeEpisodeType } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { EpisodicMemoryStore } from './episodicMemoryStore.js';
 import { listAgentInstructionFiles, type AgentInstructionFile } from './agentInstructionFiles.js';
+import type { ImportMemoryFile, ImportScopeHint } from './harnessImport/types.js';
 
 /** The minimal agent shape ingestion needs. Matches the `agents` row. */
 export interface IngestibleAgent {
@@ -68,6 +69,12 @@ export interface HarnessMemoryCandidate {
   /** Suggested importance (rule-strength derived). */
   importance: number;
   tags: string[];
+  /**
+   * Where this atom should land. 'agent' → the agent's private Brain
+   * (scopeId = agentId); 'workspace' → the shared workspace Brain (scopeId null).
+   * Scope = applicability, not source location (Brain B7).
+   */
+  scopeHint: ImportScopeHint;
   /** Provenance: which harness file this came from. */
   origin: {
     adapterType: string;
@@ -114,11 +121,39 @@ export const DEFAULT_MIN_QUALITY = 0.55;
 /** Semantic-dedup cosine threshold (matches EpisodicMemoryStore.findSimilar). */
 const SEMANTIC_DEDUP_THRESHOLD = 0.82;
 
+/**
+ * The canonical formation pipeline, narrowed to what import needs. Satisfied by
+ * `SharedIntelligenceService.promote`. When wired, imported memory is FORMED
+ * exactly like natively-captured memory (third-person rewrite, typed,
+ * reconciled ADD/UPDATE/NOOP against existing) instead of written verbatim.
+ */
+export interface FormationPromoter {
+  promote(input: {
+    workspaceId: string;
+    agentId?: string | null;
+    scopeId?: string | null;
+    adapterType?: string | null;
+    taskOutput: unknown;
+    taskTitle?: string | null;
+  }): Promise<{ created: number; reinforced: number; linked: number }>;
+}
+
 export class HarnessMemoryIngestionService {
+  #formationPromoter: FormationPromoter | null = null;
+
   constructor(
     private readonly episodes: EpisodicMemoryStore,
     private readonly logger: Logger,
   ) {}
+
+  /**
+   * Wire the formation pipeline (AGENT-TRANSITION §5). Optional: without it,
+   * import falls back to the deterministic quality-gate write (operator-curated,
+   * always safe). Set once at bootstrap after SharedIntelligence is built.
+   */
+  setFormationPromoter(promoter: FormationPromoter | null): void {
+    this.#formationPromoter = promoter;
+  }
 
   /**
    * Read + distil + quality-gate the agent's harness memory, then annotate each
@@ -160,37 +195,152 @@ export class HarnessMemoryIngestionService {
   commit(agent: IngestibleAgent, options: IngestionCommitOptions = {}): IngestionCommitResult {
     const minQuality = options.minQuality ?? DEFAULT_MIN_QUALITY;
     const { candidates } = this.preview(agent, minQuality);
-    const accept = options.acceptHashes ? new Set(options.acceptHashes) : null;
+    return this.#commitCandidates(agent, candidates, { ...options, minQuality });
+  }
 
-    const result: IngestionCommitResult = {
-      agentId: agent.id,
-      written: 0,
-      reinforced: 0,
-      skipped: 0,
-      episodeIds: [],
-    };
+  /**
+   * Dedup against the agent's existing Brain: exact content-hash match first
+   * (cheap, authoritative), then semantic near-duplicate via the store's
+   * embedding search.
+   */
+  #findDuplicate(agent: IngestibleAgent, cand: HarnessMemoryCandidate): { episodeId: string; kind: 'exact' | 'semantic' } | null {
+    // Dedup within the scope the candidate will land in: agent-private atoms
+    // dedup against the agent scope, workspace atoms against the workspace scope.
+    const scopeId = cand.scopeHint === 'workspace' ? undefined : agent.id;
+
+    // Exact: a prior ingest of the same line, identified by stored content hash.
+    const existing = this.episodes.list({ workspaceId: agent.workspaceId, scopeId, limit: 500 });
+    for (const ep of existing) {
+      const hash = harnessContentHash(ep);
+      if (hash && hash === cand.hash) return { episodeId: ep.id, kind: 'exact' };
+    }
+
+    // Semantic: a paraphrase already in the Brain (from a prior file, a manual
+    // note, or a promoted lesson). Reinforce rather than duplicate.
+    const similar = this.episodes.findSimilar(
+      agent.workspaceId,
+      { title: cand.title, summary: cand.summary, scopeId: scopeId ?? null },
+      SEMANTIC_DEDUP_THRESHOLD,
+    );
+    if (similar.length > 0) return { episodeId: similar[0]!.id, kind: 'semantic' };
+    return null;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Import path — ingest arbitrary scope-hinted files (AGENT-TRANSITION L3)
+  // ────────────────────────────────────────────────────────────
+
+  /**
+   * Preview distillation of explicit import files (instruction + real memory
+   * stores), each carrying a scope hint. Pure read; annotates dedup verdicts.
+   */
+  previewImport(agent: IngestibleAgent, files: ImportMemoryFile[], minQuality = DEFAULT_MIN_QUALITY): IngestionPreview {
+    const adapterType = typeof agent.adapterType === 'string' ? agent.adapterType : 'unknown';
+    const scannedFiles: IngestionPreview['scannedFiles'] = [];
+    const candidates: HarnessMemoryCandidate[] = [];
+    const batchHashes = new Set<string>();
+
+    for (const file of files) {
+      if (!file.content || file.content.trim().length === 0) {
+        scannedFiles.push({ fileName: file.name, source: file.scopeHint, candidateCount: 0, skipped: true });
+        continue;
+      }
+      const fileCandidates = distillImportFile(file, adapterType, minQuality, batchHashes);
+      scannedFiles.push({ fileName: file.name, source: file.scopeHint, candidateCount: fileCandidates.length, skipped: fileCandidates.length === 0 });
+      candidates.push(...fileCandidates);
+    }
+
+    for (const cand of candidates) {
+      cand.duplicateOf = this.#findDuplicate(agent, cand);
+    }
+    return { agentId: agent.id, scannedFiles, candidates, minQuality };
+  }
+
+  /**
+   * Commit accepted import candidates, scope-routed + idempotent. When a
+   * formation promoter is wired, the accepted set is FORMED through the canonical
+   * pipeline (per scope group); otherwise the deterministic write is used. The
+   * deterministic path is also the fallback if formation forms nothing, so an
+   * operator-curated atom is never silently lost.
+   */
+  async commitImport(agent: IngestibleAgent, files: ImportMemoryFile[], options: IngestionCommitOptions = {}): Promise<IngestionCommitResult> {
+    const minQuality = options.minQuality ?? DEFAULT_MIN_QUALITY;
+    const { candidates } = this.previewImport(agent, files, minQuality);
+
+    if (this.#formationPromoter) {
+      const accept = options.acceptHashes ? new Set(options.acceptHashes) : null;
+      const accepted = candidates.filter((c) => (!accept || accept.has(c.hash)) && c.quality >= minQuality);
+      if (accepted.length > 0) {
+        const formed = await this.#formViaPromoter(agent, accepted);
+        if (formed) return formed;
+      }
+    }
+    return this.#commitCandidates(agent, candidates, { ...options, minQuality });
+  }
+
+  /**
+   * Route accepted candidates through the formation pipeline, grouped by scope.
+   * Returns null (→ deterministic fallback) when formation forms nothing, so
+   * curated content is protected.
+   */
+  async #formViaPromoter(agent: IngestibleAgent, accepted: HarnessMemoryCandidate[]): Promise<IngestionCommitResult | null> {
+    const promoter = this.#formationPromoter;
+    if (!promoter) return null;
+    const adapterType = typeof agent.adapterType === 'string' ? agent.adapterType : null;
+    const groups: Array<{ scopeId: string | null; cands: HarnessMemoryCandidate[] }> = [
+      { scopeId: null, cands: accepted.filter((c) => c.scopeHint === 'workspace') },
+      { scopeId: agent.id, cands: accepted.filter((c) => c.scopeHint === 'agent') },
+    ];
+
+    let created = 0;
+    let reinforced = 0;
+    for (const group of groups) {
+      if (group.cands.length === 0) continue;
+      const taskOutput = group.cands.map((c) => `- ${c.summary}`).join('\n');
+      try {
+        const r = await promoter.promote({
+          workspaceId: agent.workspaceId,
+          agentId: agent.id,
+          scopeId: group.scopeId,
+          adapterType,
+          taskOutput,
+          taskTitle: `Transitioned memory from ${adapterType ?? 'harness'}`,
+        });
+        created += r.created;
+        reinforced += r.reinforced;
+      } catch (err) {
+        this.logger.warn('harness.memory.formation_failed', { agentId: agent.id, message: (err as Error).message });
+        return null; // fall back to deterministic write
+      }
+    }
+
+    // The judge is strict; if it formed nothing from a curated set, fall back so
+    // the operator's reviewed atoms still land.
+    if (created === 0 && reinforced === 0) return null;
+
+    this.logger.info('harness.memory.formed', { agentId: agent.id, workspaceId: agent.workspaceId, created, reinforced });
+    return { agentId: agent.id, written: created, reinforced, skipped: Math.max(0, accepted.length - created - reinforced), episodeIds: [] };
+  }
+
+  /** Shared commit core for both the instruction-file and import paths. */
+  #commitCandidates(agent: IngestibleAgent, candidates: HarnessMemoryCandidate[], options: IngestionCommitOptions & { minQuality: number }): IngestionCommitResult {
+    const accept = options.acceptHashes ? new Set(options.acceptHashes) : null;
+    const result: IngestionCommitResult = { agentId: agent.id, written: 0, reinforced: 0, skipped: 0, episodeIds: [] };
 
     for (const cand of candidates) {
       if (accept && !accept.has(cand.hash)) continue;
-      if (cand.quality < minQuality) {
-        result.skipped += 1;
-        continue;
-      }
+      if (cand.quality < options.minQuality) { result.skipped += 1; continue; }
 
-      // Re-resolve the duplicate at commit time (preview may be stale).
       const dup = cand.duplicateOf ?? this.#findDuplicate(agent, cand);
       if (dup) {
-        this.episodes.reinforce(agent.workspaceId, dup.episodeId, {
-          confidenceDelta: 0.03,
-          trustDelta: 0.02,
-        });
+        this.episodes.reinforce(agent.workspaceId, dup.episodeId, { confidenceDelta: 0.03, trustDelta: 0.02 });
         result.reinforced += 1;
         continue;
       }
 
       const episode = this.episodes.write({
         workspaceId: agent.workspaceId,
-        scopeId: agent.id,
+        scopeId: cand.scopeHint === 'workspace' ? null : agent.id,
         agentId: agent.id,
         type: cand.type,
         title: cand.title,
@@ -202,7 +352,7 @@ export class HarnessMemoryIngestionService {
         tags: cand.tags,
         metadata: {
           section: cand.section,
-          privateScope: 'agent',
+          privateScope: cand.scopeHint,
           harness: {
             adapterType: cand.origin.adapterType,
             fileKey: cand.origin.fileKey,
@@ -224,31 +374,6 @@ export class HarnessMemoryIngestionService {
       skipped: result.skipped,
     });
     return result;
-  }
-
-  /**
-   * Dedup against the agent's existing Brain: exact content-hash match first
-   * (cheap, authoritative), then semantic near-duplicate via the store's
-   * embedding search.
-   */
-  #findDuplicate(agent: IngestibleAgent, cand: HarnessMemoryCandidate): { episodeId: string; kind: 'exact' | 'semantic' } | null {
-    // Exact: a prior ingest of the same line. Scan agent-scoped episodes for the
-    // stored content hash. (Agent-scoped sets are small — a full list is fine.)
-    const existing = this.episodes.list({ workspaceId: agent.workspaceId, scopeId: agent.id, limit: 500 });
-    for (const ep of existing) {
-      const hash = harnessContentHash(ep);
-      if (hash && hash === cand.hash) return { episodeId: ep.id, kind: 'exact' };
-    }
-
-    // Semantic: a paraphrase already in the Brain (from a prior file, a manual
-    // note, or a promoted lesson). Reinforce rather than duplicate.
-    const similar = this.episodes.findSimilar(
-      agent.workspaceId,
-      { title: cand.title, summary: cand.summary, scopeId: agent.id },
-      SEMANTIC_DEDUP_THRESHOLD,
-    );
-    if (similar.length > 0) return { episodeId: similar[0]!.id, kind: 'semantic' };
-    return null;
   }
 }
 
@@ -284,23 +409,75 @@ function distillFile(
   minQuality: number,
   batchHashes: Set<string>,
 ): HarnessMemoryCandidate[] {
-  const out: HarnessMemoryCandidate[] = [];
-  const lines = file.content.split(/\r?\n/);
-  let section = 'General';
-  let inCodeFence = false;
-
   // Source-derived base trust: operator-authored project/platform files are
   // trusted more than machine-global runtime defaults.
   const baseTrust = file.source === 'platform' ? 0.82
     : file.source === 'workspace' ? 0.78
     : 0.68; // runtime (home-dir) files
+  return distillContent(file.content, {
+    adapterType,
+    minQuality,
+    batchHashes,
+    baseTrust,
+    // Instruction-file ingestion stays agent-scoped (preserves existing panel).
+    scopeHint: 'agent',
+    origin: { adapterType, fileKey: file.key, fileName: file.name, instructionSource: file.source },
+    extraTags: [],
+  });
+}
+
+/**
+ * Distil an explicit import file (instruction or real memory store), honoring
+ * its scope hint and frontmatter type hint (AGENT-TRANSITION L3).
+ */
+function distillImportFile(
+  file: ImportMemoryFile,
+  adapterType: string,
+  minQuality: number,
+  batchHashes: Set<string>,
+): HarnessMemoryCandidate[] {
+  // Memory-store entries the operator curated are trusted a touch higher than
+  // raw instruction prose; workspace rules higher than agent-private notes.
+  const baseTrust = file.kind === 'memory' ? 0.8 : file.scopeHint === 'workspace' ? 0.78 : 0.7;
+  const instructionSource: AgentInstructionFile['source'] = file.scopeHint === 'workspace' ? 'workspace' : 'runtime';
+  const extraTags = file.typeHint ? [`type:${file.typeHint}`] : [];
+  return distillContent(file.content, {
+    adapterType,
+    minQuality,
+    batchHashes,
+    baseTrust,
+    scopeHint: file.scopeHint,
+    origin: { adapterType, fileKey: file.path, fileName: file.name, instructionSource },
+    extraTags,
+  });
+}
+
+interface DistillCtx {
+  adapterType: string;
+  minQuality: number;
+  batchHashes: Set<string>;
+  baseTrust: number;
+  scopeHint: ImportScopeHint;
+  origin: HarnessMemoryCandidate['origin'];
+  extraTags: string[];
+}
+
+/**
+ * Shared distillation: walk the markdown, tracking the current heading as the
+ * section, treat each list item / prose line as a candidate atom, score, gate,
+ * classify, and stamp scope. Used by both the instruction-file and import paths.
+ */
+function distillContent(content: string, ctx: DistillCtx): HarnessMemoryCandidate[] {
+  const out: HarnessMemoryCandidate[] = [];
+  const lines = content.split(/\r?\n/);
+  let section = 'General';
+  let inCodeFence = false;
 
   for (const raw of lines) {
     const line = raw.trim();
     if (line.startsWith('```')) { inCodeFence = !inCodeFence; continue; }
     if (inCodeFence || line.length === 0) continue;
 
-    // Heading → update section; never an atom itself.
     const heading = line.match(/^#{1,6}\s+(.*)$/);
     if (heading) {
       section = cleanHeading(heading[1] ?? 'General');
@@ -311,30 +488,24 @@ function distillFile(
     if (!atomText) continue;
 
     const quality = scoreAtom(atomText, section);
-    if (quality < minQuality) continue;
+    if (quality < ctx.minQuality) continue;
 
     const hash = sha256(atomText.toLowerCase());
-    if (batchHashes.has(hash)) continue; // de-dupe within this batch
-    batchHashes.add(hash);
+    if (ctx.batchHashes.has(hash)) continue; // de-dupe within this batch
+    ctx.batchHashes.add(hash);
 
-    const type = classifyType(atomText);
-    const importance = ruleStrength(atomText);
     out.push({
       hash,
       title: makeTitle(atomText, section),
       summary: atomText,
-      type,
+      type: classifyType(atomText),
       section,
       quality,
-      trust: clamp01(baseTrust),
-      importance,
-      tags: ['harness_ingest', 'harness_transition', adapterType],
-      origin: {
-        adapterType,
-        fileKey: file.key,
-        fileName: file.name,
-        instructionSource: file.source,
-      },
+      trust: clamp01(ctx.baseTrust),
+      importance: ruleStrength(atomText),
+      scopeHint: ctx.scopeHint,
+      tags: ['harness_ingest', 'harness_transition', ctx.adapterType, ...ctx.extraTags],
+      origin: ctx.origin,
       duplicateOf: null,
     });
   }

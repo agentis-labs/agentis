@@ -38,6 +38,68 @@ describe('OrchestratorModelRouter', () => {
     expect(router.resolve('conversation')).toBe(router.resolve('synthesis'));
   });
 
+  it('routes an env default flagship down to balanced for unpinned simple text', () => {
+    const router = OrchestratorModelRouter.fromEnv({
+      AGENTIS_ORCHESTRATOR_BASE_URL: 'https://api.example.com',
+      AGENTIS_ORCHESTRATOR_API_KEY: 'k',
+      AGENTIS_ORCHESTRATOR_MODEL: 'claude-opus-4-8',
+    });
+
+    const routed = router.routeProfile({
+      role: 'conversation',
+      task: 'Write a short welcome email.',
+      purpose: 'conversation',
+    });
+
+    expect(router.profile('conversation')?.model).toBe('claude-opus-4-8');
+    expect(routed.profile?.model).toBe('claude-sonnet-4-6');
+    expect(routed.decision.explicitPin).toBe(false);
+    expect(routed.decision.modelTier).toBe('balanced');
+    expect(routed.decision.alternatives.some((alt) => alt.model === 'claude-opus-4-8')).toBe(true);
+  });
+
+  it('keeps an explicit route pin even when the task is simple', () => {
+    const router = OrchestratorModelRouter.fromEnv({
+      AGENTIS_ORCHESTRATOR_BASE_URL: 'https://api.example.com',
+      AGENTIS_ORCHESTRATOR_MODEL: 'claude-sonnet-4-6',
+    });
+
+    const routed = router.routeProfile({
+      role: 'conversation',
+      task: 'Write a short welcome email.',
+      purpose: 'conversation',
+      explicitModel: 'claude-opus-4-8',
+    });
+
+    expect(routed.profile?.model).toBe('claude-opus-4-8');
+    expect(routed.decision.explicitPin).toBe(true);
+    expect(routed.decision.source).toBe('explicit_pin');
+  });
+
+  it('binds inherited agent runtimes with an explicit model pin when provided', async () => {
+    const router = OrchestratorModelRouter.fromEnv({
+      AGENTIS_ORCHESTRATOR_BASE_URL: 'https://api.example.com',
+      AGENTIS_ORCHESTRATOR_MODEL: 'claude-opus-4-8',
+    });
+
+    const adapter = router.resolveForAgent('agent_1', 'ws_1', 'Write a short welcome email.', 'claude-opus-4-8');
+    const context = await adapter?.getRuntimeContext?.();
+
+    expect(context?.currentModel).toBe('claude-opus-4-8');
+  });
+
+  it('binds inherited agent runtimes to balanced candidates when unpinned', async () => {
+    const router = OrchestratorModelRouter.fromEnv({
+      AGENTIS_ORCHESTRATOR_BASE_URL: 'https://api.example.com',
+      AGENTIS_ORCHESTRATOR_MODEL: 'claude-opus-4-8',
+    });
+
+    const adapter = router.resolveForAgent('agent_1', 'ws_1', 'Write a short welcome email.');
+    const context = await adapter?.getRuntimeContext?.();
+
+    expect(context?.currentModel).toBe('claude-sonnet-4-6');
+  });
+
   it('per-role override: planning and synthesis target different models', () => {
     const env: OrchestratorEnv = {
       AGENTIS_ORCHESTRATOR_BASE_URL: 'https://api.example.com',
@@ -117,6 +179,29 @@ describe('OrchestratorModelRouter', () => {
     }
     // A different workspace with no config still resolves nothing.
     expect(router.profile('synthesis', 'ws-2')).toBeNull();
+  });
+
+  it('treats a workspace conversation model as a routing candidate for other roles', () => {
+    const router = OrchestratorModelRouter.fromEnv({});
+    router.setConfigProvider((workspaceId, role) =>
+      workspaceId === 'ws-1' && role === 'conversation'
+        ? { model: 'claude-opus-4-8', baseUrl: 'https://api.example.com/v1', apiKey: 'k' }
+        : null);
+
+    const routed = router.routeProfile({
+      role: 'synthesis',
+      workspaceId: 'ws-1',
+      task: 'Build a simple workflow that formats incoming text.',
+      purpose: 'workflow_synthesis',
+    });
+
+    expect(router.profile('synthesis', 'ws-1')?.model).toBe('claude-opus-4-8');
+    expect(routed.profile).toEqual({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'claude-sonnet-4-6',
+      apiKey: 'k',
+    });
+    expect(routed.decision.explicitPin).toBe(false);
   });
 
   it('an explicit env role profile beats the per-workspace conversation default', () => {

@@ -1,15 +1,14 @@
 /**
  * Layer 2 — SpecialistAgentService.
  *
- * Verifies the built-in specialist library seeds idempotently into a workspace
- * and resolves an AgentRole to a concrete agentId carrying that role.
+ * Verifies built-in specialist seeding is disabled and custom roles still
+ * resolve to concrete agentIds carrying that role.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { SPECIALIST_AGENTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
 import { AgentLibraryService } from '../../src/services/agentLibrary.js';
@@ -34,15 +33,15 @@ afterEach(async () => {
 });
 
 describe('SpecialistAgentService', () => {
-  it('seeds every built-in specialist exactly once (idempotent)', () => {
+  it('does not seed built-in specialists', () => {
     const first = specialists.ensureAll(ctx.workspace.id, ctx.user.id);
-    expect(first).toHaveLength(SPECIALIST_AGENTS.length);
+    expect(first).toHaveLength(0);
 
     const second = specialists.ensureAll(ctx.workspace.id, ctx.user.id);
-    expect(second).toHaveLength(0); // already present
+    expect(second).toHaveLength(0);
 
     const rows = ctx.db.select().from(schema.agents).where(eq(schema.agents.workspaceId, ctx.workspace.id)).all();
-    expect(rows.filter((r) => r.role && SPECIALIST_AGENTS.some((s) => s.role === r.role))).toHaveLength(SPECIALIST_AGENTS.length);
+    expect(rows).toHaveLength(0);
   });
 
   it('ensureRole creates on demand and is stable across calls', () => {
@@ -51,7 +50,7 @@ describe('SpecialistAgentService', () => {
     expect(a).toBe(b);
     const row = ctx.db.select().from(schema.agents).where(eq(schema.agents.id, a)).get();
     expect(row?.role).toBe('writer');
-    expect(row?.instructions).toMatch(/Content Writer/);
+    expect(row?.instructions).toMatch(/Writer/);
     expect((row?.config as { specialist?: boolean })?.specialist).toBe(true);
   });
 
@@ -61,9 +60,9 @@ describe('SpecialistAgentService', () => {
     expect(specialists.resolveRole(ctx.workspace.id, 'reviewer')).toBe(id);
   });
 
-  it('defForRole resolves built-ins, generic fallback for unknown roles', () => {
-    expect(specialists.defForRole(ctx.workspace.id, 'coder').source).toBe('platform');
-    expect(specialists.defForRole(ctx.workspace.id, 'coder').systemPrompt).toMatch(/Code Writer/);
+  it('defForRole resolves every role through custom/library data or generic fallback', () => {
+    expect(specialists.defForRole(ctx.workspace.id, 'coder').source).toBe('generated');
+    expect(specialists.defForRole(ctx.workspace.id, 'coder').systemPrompt).toMatch(/specialist/i);
 
     // An unknown custom role never throws — it synthesizes a generic specialist.
     const generic = specialists.defForRole(ctx.workspace.id, 'frontend_architect');

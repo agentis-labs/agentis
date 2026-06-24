@@ -2,10 +2,15 @@
  * /v1/orchestrator/models — per-workspace model-role config routes (§4.4).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import type { AgentAdapter } from '@agentis/core';
+import { schema } from '@agentis/db/sqlite';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { WorkspaceModelConfigService } from '../../src/services/workspaceModelConfigService.js';
 import { OrchestratorModelRouter } from '../../src/services/orchestratorModelRouter.js';
 import { buildOrchestratorModelRoutes } from '../../src/routes/orchestratorModels.js';
+import { AdapterManager } from '../../src/adapters/AdapterManager.js';
+import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from '../../src/services/workspaceHarnessRuntime.js';
 
 let ctx: TestContext;
 let config: WorkspaceModelConfigService;
@@ -88,4 +93,67 @@ describe('/v1/orchestrator/models', () => {
     const res = await app().request('/v1/orchestrator/models');
     expect(res.status).toBe(401);
   });
+
+  it('uses the connected orchestrator harness as the default cognitive runtime', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'The Brain',
+      role: 'orchestrator',
+      adapterType: 'codex',
+      capabilityTags: [],
+      config: { model: 'gpt-5.3-codex' },
+      runtimeModel: 'gpt-5.3-codex',
+      status: 'online',
+    }).run();
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, harnessAdapter());
+    const harnesses = new WorkspaceHarnessRuntimeResolver({ db: ctx.db, adapters });
+    const emptyRouter = new OrchestratorModelRouter();
+    const localApp = ctx.buildApp([
+      {
+        path: '/v1/orchestrator/models',
+        app: buildOrchestratorModelRoutes({ db: ctx.db, auth: ctx.auth, config, router: emptyRouter, harnesses }),
+      },
+    ]);
+
+    const res = await localApp.request('/v1/orchestrator/models', { headers: ctx.authHeaders });
+    const body = await res.json() as {
+      autonomy: { enabled: boolean; model: string | null; source: string; agentName?: string; adapterType?: string };
+    };
+    expect(body.autonomy).toMatchObject({
+      enabled: true,
+      model: 'gpt-5.3-codex',
+      source: 'agent_harness',
+      agentName: 'The Brain',
+      adapterType: 'codex',
+    });
+
+    const completer = new WorkspaceHarnessStructuredCompleter(harnesses);
+    await expect(completer.completeStructured<{ ok: boolean }>({
+      workspaceId: ctx.workspace.id,
+      system: 'Return JSON.',
+      user: 'Ping',
+    })).resolves.toEqual({ ok: true });
+  });
 });
+
+function harnessAdapter(): AgentAdapter {
+  return {
+    adapterType: 'codex',
+    connect: async () => {},
+    disconnect: async () => {},
+    healthCheck: async () => ({ isHealthy: true, checkedAt: new Date().toISOString() }),
+    capabilities: () => ({ interactiveChat: true, toolCalling: false, toolForwarding: 'none' }),
+    dispatchTask: async () => {},
+    cancelTask: async () => {},
+    onEvent: () => {},
+    chat: async function* () {
+      yield { type: 'text', delta: '{"ok":true}' };
+      yield { type: 'done', finishReason: 'stop' };
+    },
+  } as AgentAdapter;
+}

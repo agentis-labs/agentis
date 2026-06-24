@@ -34,7 +34,7 @@ describe('<Sidebar />', () => {
         <Sidebar />
       </MemoryRouter>,
     );
-    for (const label of ['Home', 'Agents', 'Workflows', 'Packages', 'Brain']) {
+    for (const label of ['Home', 'Apps', 'Agents', 'Packages', 'Brain']) {
       const link = document.querySelector(`a[title="${label}"]`);
       expect(link, `expected an <a title="${label}"> in Sidebar`).not.toBeNull();
     }
@@ -49,6 +49,8 @@ describe('<Sidebar />', () => {
     for (const removed of [
       'Fleet',
       'Activity',
+      'Workflows',
+      'Issues',
       'Runs',
       'Gateways',
       'Channels',

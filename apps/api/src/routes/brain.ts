@@ -69,13 +69,13 @@ export function buildBrainRoutes(deps: BrainRoutesDeps) {
   app.get('/health', (c) => {
     if (!deps.health) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain health service not available');
     const ws = getWorkspace(c);
-    return c.json(deps.health.snapshot(ws.workspaceId));
+    return c.json(deps.health.snapshot(ws.workspaceId, c.req.query('scopeId') ?? null));
   });
 
   app.get('/activity', (c) => {
     if (!deps.health) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain health service not available');
     const ws = getWorkspace(c);
-    return c.json({ activity: deps.health.snapshot(ws.workspaceId).recentActivity });
+    return c.json({ activity: deps.health.snapshot(ws.workspaceId, c.req.query('scopeId') ?? null).recentActivity });
   });
 
   app.post('/dream-pass', async (c) => {

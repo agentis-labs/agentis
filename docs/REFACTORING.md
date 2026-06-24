@@ -119,7 +119,7 @@ No service, route, or engine module imports `better-sqlite3` or `pg` directly. E
 1. **Unit tests** (existing). Mocks allowed. Coverage of branches inside one module.
 2. **Integration tests** (new). Real `WorkflowEngine` + real `Persistence` (sqlite in-memory or Postgres testcontainer) + real `LedgerService`. No engine mocks. Required for: every workflow shape primitive (linear, fan-out, merge, router, subflow, replay-from-failed, replay-from-checkpoint).
 3. **Property-based tests** (new). `fast-check` generators emit random valid DAGs (bounded depth, bounded width, mixed kinds) and assert invariants:
-   - Every started run reaches a terminal status (no orphans).
+   - Every started run reaches a terminal status (no stranded runs).
    - Ledger event sequence is monotonic and gap-free per run.
    - Settle predicate fires exactly once per run.
    - Cancellation always reaches all in-flight nodes within `RUN_CANCEL_GRACE_MS`.

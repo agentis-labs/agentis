@@ -2,7 +2,7 @@ import { WorkspaceEcosystemCanvas } from '../components/home/WorkspaceEcosystemC
 import { useWorkspaceData } from '../lib/workspaceData';
 
 export function HomePage() {
-  const { me, agents, approvals, activeRuns, failedRuns, artifacts, loading, fleet, counts } = useWorkspaceData();
+  const { me, agents, approvals, activeRuns, failedRuns, artifacts, loading, fleet, counts, issues } = useWorkspaceData();
 
   return (
     <div className="h-full min-h-0 bg-canvas">
@@ -16,6 +16,7 @@ export function HomePage() {
         failedRuns={failedRuns}
         fleet={fleet}
         counts={counts}
+        issues={issues}
       />
     </div>
   );

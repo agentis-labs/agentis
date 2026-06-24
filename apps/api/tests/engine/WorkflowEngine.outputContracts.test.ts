@@ -30,7 +30,20 @@ class JsonEnvelopeAgentAdapter implements AgentAdapter {
   readonly adapterType: AdapterType = 'codex';
   readonly #handlers = new Set<(event: NormalizedAgentEvent) => void>();
 
-  constructor(private readonly agentId: string) {}
+  constructor(
+    private readonly agentId: string,
+    private readonly output: Record<string, unknown> = {
+      text: [
+        '```json',
+        JSON.stringify({
+          subject: 'Daily AI News Insights',
+          sentCount: 0,
+          markdown: 'Ready-to-send digest body.',
+        }),
+        '```',
+      ].join('\n'),
+    },
+  ) {}
 
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
@@ -52,17 +65,7 @@ class JsonEnvelopeAgentAdapter implements AgentAdapter {
           taskId: task.taskId,
           runId: task.runId,
           workflowId: task.workflowId,
-          output: {
-            text: [
-              '```json',
-              JSON.stringify({
-                subject: 'Daily AI News Insights',
-                sentCount: 0,
-                markdown: 'Ready-to-send digest body.',
-              }),
-              '```',
-            ].join('\n'),
-          },
+          output: this.output,
           timestamp: new Date().toISOString(),
         });
       }
@@ -200,6 +203,216 @@ describe('WorkflowEngine output and integration contracts', () => {
       sentStoryKeys: [],
       sentCount: 0,
     });
+  });
+
+  it('recovers digest fields from fenced JSON without cross-filling unrelated arrays', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Digest Writer',
+      adapterType: 'codex',
+      capabilityTags: [],
+      config: {},
+      role: 'worker',
+      status: 'online',
+    }).run();
+
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new JsonEnvelopeAgentAdapter(agentId, {
+      text: [
+        '```json',
+        JSON.stringify({
+          subject: 'AI Dispatch',
+          html: '<p>Two grounded stories.</p>',
+          topStories: [{ key: 'story-a', title: 'Story A' }],
+          sentStoryKeys: ['story-a', 'story-b'],
+        }),
+        '```',
+      ].join('\n'),
+    }));
+    const engine = makeEngine(adapters);
+    adapters.onEvent((event) => {
+      if (event.eventType === 'task.completed') {
+        void engine.notifyTaskCompleted({
+          runId: event.runId,
+          nodeId: event.taskId,
+          output: event.output,
+        });
+      }
+    });
+
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        {
+          id: 'trigger',
+          type: 'trigger',
+          title: 'Manual',
+          position: { x: 0, y: 0 },
+          config: { kind: 'trigger', triggerType: 'manual' },
+        },
+        {
+          id: 'draft',
+          type: 'agent_task',
+          title: 'Draft',
+          position: { x: 200, y: 0 },
+          config: {
+            kind: 'agent_task',
+            agentId,
+            prompt: 'Return a digest payload.',
+            inputKeys: [],
+            outputKeys: ['subject', 'htmlBody', 'topStories', 'sentStoryKeys', 'sentCount'],
+            capabilityTags: [],
+          },
+        },
+      ],
+      edges: [{ id: 'trigger-to-draft', source: 'trigger', target: 'draft' }],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph);
+    const terminal = waitForTerminal(runId);
+
+    await engine.startRun({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId,
+      userId: ctx.user.id,
+      triggerId: null,
+      inputs: {},
+      initialState,
+      graph,
+    });
+    await terminal;
+
+    const run = ctx.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId))
+      .get()!;
+    const state = run.runState as {
+      nodeStates: Record<string, {
+        outputData?: Record<string, unknown>;
+        contractDeviation?: unknown;
+      }>;
+    };
+    expect(run.status).toBe('COMPLETED');
+    expect(state.nodeStates.draft?.contractDeviation).toBeUndefined();
+    expect(state.nodeStates.draft?.outputData).toMatchObject({
+      subject: 'AI Dispatch',
+      htmlBody: '<p>Two grounded stories.</p>',
+      topStories: [{ key: 'story-a', title: 'Story A' }],
+      sentStoryKeys: ['story-a', 'story-b'],
+      sentCount: 2,
+    });
+    expect(state.nodeStates.draft?.outputData?.sentStoryKeys).not.toEqual(state.nodeStates.draft?.outputData?.topStories);
+  });
+
+  it('completes agent nodes with contractDeviation when declared keys remain missing', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Digest Writer',
+      adapterType: 'codex',
+      capabilityTags: [],
+      config: {},
+      role: 'worker',
+      status: 'online',
+    }).run();
+
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new JsonEnvelopeAgentAdapter(agentId, {
+      text: 'Useful digest draft, but not a strict JSON contract.',
+    }));
+    const engine = makeEngine(adapters);
+    adapters.onEvent((event) => {
+      if (event.eventType === 'task.completed') {
+        void engine.notifyTaskCompleted({
+          runId: event.runId,
+          nodeId: event.taskId,
+          output: event.output,
+        });
+      }
+    });
+
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        {
+          id: 'trigger',
+          type: 'trigger',
+          title: 'Manual',
+          position: { x: 0, y: 0 },
+          config: { kind: 'trigger', triggerType: 'manual' },
+        },
+        {
+          id: 'draft',
+          type: 'agent_task',
+          title: 'Draft',
+          position: { x: 200, y: 0 },
+          config: {
+            kind: 'agent_task',
+            agentId,
+            prompt: 'Return a digest payload.',
+            inputKeys: [],
+            outputKeys: ['subject', 'htmlBody', 'topStories', 'sentStoryKeys', 'sentCount'],
+            capabilityTags: [],
+          },
+        },
+      ],
+      edges: [{ id: 'trigger-to-draft', source: 'trigger', target: 'draft' }],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph);
+    const terminal = waitForTerminal(runId);
+
+    await engine.startRun({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId,
+      userId: ctx.user.id,
+      triggerId: null,
+      inputs: {},
+      initialState,
+      graph,
+    });
+    await terminal;
+
+    const run = ctx.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId))
+      .get()!;
+    const state = run.runState as {
+      nodeStates: Record<string, {
+        status?: string;
+        outputData?: Record<string, unknown>;
+        contractDeviation?: {
+          kind: string;
+          declaredKeys: string[];
+          missingKeys: string[];
+          recoveredKeys: string[];
+          message: string;
+        };
+      }>;
+      contractViolations?: string[];
+    };
+    expect(run.status).toBe('COMPLETED_WITH_CONTRACT_VIOLATION');
+    expect(state.nodeStates.draft?.status).toBe('COMPLETED');
+    expect(state.nodeStates.draft?.outputData?.text).toBe('Useful digest draft, but not a strict JSON contract.');
+    expect(state.nodeStates.draft?.contractDeviation).toMatchObject({
+      kind: 'missing_declared_output_keys',
+      declaredKeys: ['subject', 'htmlBody', 'topStories', 'sentStoryKeys', 'sentCount'],
+      missingKeys: ['subject', 'htmlBody', 'topStories', 'sentStoryKeys', 'sentCount'],
+      recoveredKeys: [],
+    });
+    expect(state.nodeStates.draft?.contractDeviation?.message).toContain("agent node 'draft'");
+    expect(state.contractViolations?.[0]).toContain("agent node 'draft'");
   });
 
   it('executes custom manifest integrations through the engine path', async () => {

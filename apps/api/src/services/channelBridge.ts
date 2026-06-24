@@ -7,17 +7,15 @@
  *   1. CRUD over `channel_connections` rows (via routes).
  *   2. Inbound: verify webhook signature → parse → idempotency check
  *      against `channel_deliveries.external_id` → ConversationStore.appendMirrored.
- *   3. Outbound: subscribed to `CONVERSATION_MESSAGE_SENT`. When the
- *      message belongs to an agent that has an active channel connection,
- *      forward to the channel via `adapter.send`. Failures are logged and
- *      the connection is flipped to `status='error'` with `lastError`.
+ *   3. Outbound channel replies are delivered explicitly by
+ *      ChannelTurnDispatcher via `deliverToConnection`.
  *
  * Token storage: `tokenEncrypted` is AES-256-GCM ciphertext via
  * CredentialVault. Plaintext NEVER leaves the bridge — neither REST routes
  * nor bus envelopes ever expose it.
  */
 
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -26,7 +24,15 @@ import type { CredentialVault } from './credentialVault.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import type { ChannelAdapter, ChannelKind } from '../adapters/channels/types.js';
+import type {
+  ChannelAdapter,
+  ChannelHealth,
+  ChannelHealthCheck,
+  ChannelHealthCheckName,
+  ChannelKind,
+  ChannelStatus,
+  ParsedInboundMessage,
+} from '../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 
 export interface ChannelBridgeDeps {
@@ -37,6 +43,8 @@ export interface ChannelBridgeDeps {
   logger: Logger;
   /** Optional override (tests). Default: TelegramChannelAdapter + DiscordChannelAdapter. */
   adapters?: Partial<Record<ChannelKind, ChannelAdapter>>;
+  /** Optional runtime probe for the configured agent. */
+  runtimeHealth?: (args: { workspaceId: string; agentId: string }) => Promise<ChannelHealthCheck> | ChannelHealthCheck;
 }
 
 export interface CreateConnectionInput {
@@ -50,8 +58,27 @@ export interface CreateConnectionInput {
   token?: string;
   /** Optional outbound chat id default (e.g. Telegram numeric id). */
   defaultChatId?: string;
+  /** WhatsApp Cloud uses the same address as defaultChatId but labels it for setup. */
+  defaultRecipient?: string;
   /** Persistent transport: Telegram 'polling' or Discord 'gateway' (no public webhook). */
   transport?: 'polling' | 'webhook' | 'gateway';
+  /** WhatsApp mode: QR/Baileys local session or official Cloud API. */
+  mode?: 'qr_local' | 'cloud';
+  /** Slack Events API signing secret. Encrypted in settings. */
+  signingSecret?: string;
+  /** WhatsApp Cloud phone number id. */
+  phoneNumberId?: string;
+  /** WhatsApp Cloud app secret. Encrypted in settings. */
+  appSecret?: string;
+  /** WhatsApp Cloud webhook verify token. Encrypted in settings. */
+  verifyToken?: string;
+  /** Lightweight destination aliases, e.g. { me: "+12345678901", work: "C123" }. */
+  targetAliases?: Record<string, string>;
+}
+
+export interface UpdateConnectionTargetsInput {
+  defaultChatId?: string | null;
+  targetAliases?: Record<string, string | null>;
 }
 
 export interface PublicConnection {
@@ -63,6 +90,11 @@ export interface PublicConnection {
   name: string;
   status: string;
   defaultChatId: string | null;
+  targetAliases: Record<string, string>;
+  transport: string | null;
+  mode: string | null;
+  transportStatus: string | null;
+  health: ChannelHealth;
   lastEventAt: string | null;
   lastError: string | null;
   createdAt: string;
@@ -84,9 +116,11 @@ export interface PersistentChannelTransport {
   /** True when outbound for this connection routes through a live session. */
   handles(conn: PersistentChannelRef): boolean;
   /** True when creating this kind needs no token (QR auth, e.g. WhatsApp). */
-  requiresNoToken(kind: string): boolean;
+  requiresNoToken(kind: string, settings?: unknown): boolean;
   /** Post-create hook — start polling sessions (no-op for QR-login kinds). */
   onCreated?(conn: PersistentChannelRef): void;
+  /** Current live-session state, if this transport owns the connection. */
+  status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
   send(connectionId: string, chatId: string, body: string): Promise<void>;
   /** Show/clear the typing indicator (best-effort). */
   setTyping?(connectionId: string, chatId: string, on: boolean): Promise<void>;
@@ -94,9 +128,28 @@ export interface PersistentChannelTransport {
   stop?(connectionId: string): Promise<void>;
 }
 
+type ChannelConnectionRow = typeof schema.channelConnections.$inferSelect;
+type ChannelSettings = {
+  defaultChatId?: string;
+  targetAliases?: Record<string, string>;
+  transport?: 'polling' | 'webhook' | 'gateway';
+  mode?: 'qr_local' | 'cloud';
+  phoneNumberId?: string;
+  signingSecretEncrypted?: string;
+  appSecretEncrypted?: string;
+  verifyTokenEncrypted?: string;
+  transportStatus?: string;
+  selfId?: string;
+  health?: ChannelHealth;
+};
+
+const GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v20.0';
+const TELEGRAM_API = 'https://api.telegram.org';
+const DEFAULT_HEALTH_CHECK_NAMES: ChannelHealthCheckName[] = ['credential', 'transport', 'outbound', 'inbound', 'runtime'];
+const ME_ALIASES = new Set(['me', 'default']);
+
 export class ChannelBridge {
   readonly #adapters: Map<ChannelKind, ChannelAdapter>;
-  #unsub: (() => void) | null = null;
   #turnDispatcher: ChannelTurnDispatcher | null = null;
   #persistent: PersistentChannelTransport | null = null;
 
@@ -158,13 +211,7 @@ export class ChannelBridge {
       .get();
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
     try {
-      if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings: row.settings })) {
-        await this.#persistent.send(row.id, args.chatId, args.body);
-      } else {
-        const adapter = this.#requireAdapter(row.kind as ChannelKind);
-        const token = this.deps.vault.decrypt(row.tokenEncrypted);
-        await adapter.send({ token, chatId: args.chatId, body: args.body });
-      }
+      await this.#sendRow(row, args.chatId, args.body);
       this.#markActive(row.id);
       this.deps.bus.publish(
         REALTIME_ROOMS.workspace(row.workspaceId),
@@ -182,27 +229,7 @@ export class ChannelBridge {
     return this.#adapters.has(kind);
   }
 
-  /** Subscribe to outbound conversation events for forwarding. Idempotent. */
-  bindOutbound() {
-    if (this.#unsub) return;
-    this.#unsub = this.deps.bus.subscribe((msg) => {
-      if (msg.envelope.event !== REALTIME_EVENTS.CONVERSATION_MESSAGE_SENT) return;
-      const payload = msg.envelope.payload as {
-        message?: { authorType?: string; body?: string };
-        agentId?: string;
-        conversationId?: string;
-      };
-      if (!payload?.agentId || payload.message?.authorType !== 'operator') return;
-      void this.#forwardToChannels(payload.agentId, payload.message.body ?? '');
-    });
-  }
-
-  shutdown() {
-    if (this.#unsub) {
-      this.#unsub();
-      this.#unsub = null;
-    }
-  }
+  shutdown() {}
 
   // ── CRUD ────────────────────────────────────────────────
 
@@ -230,15 +257,24 @@ export class ChannelBridge {
 
   create(input: CreateConnectionInput): { connection: PublicConnection; webhookSecret: string } {
     const id = randomUUID();
-    const settings: Record<string, unknown> = {};
-    if (input.defaultChatId) settings.defaultChatId = input.defaultChatId;
+    const settings: ChannelSettings = {};
+    const defaultTarget = input.defaultChatId ?? input.defaultRecipient;
+    if (defaultTarget) settings.defaultChatId = this.#normalizeTargetForKind(input.kind, defaultTarget);
     if (input.transport) settings.transport = input.transport;
+    if (input.kind === 'telegram' && !settings.transport && !this.#publicWebhookUrl(id)) settings.transport = 'polling';
+    if (input.kind === 'whatsapp') settings.mode = input.mode ?? 'qr_local';
+    if (input.targetAliases) settings.targetAliases = this.#normalizeAliases(input.kind, input.targetAliases);
+    if (input.signingSecret) settings.signingSecretEncrypted = this.deps.vault.encrypt(input.signingSecret);
+    if (input.phoneNumberId) settings.phoneNumberId = input.phoneNumberId;
+    if (input.appSecret) settings.appSecretEncrypted = this.deps.vault.encrypt(input.appSecret);
+    if (input.verifyToken) settings.verifyTokenEncrypted = this.deps.vault.encrypt(input.verifyToken);
+    settings.health = this.#initialHealth(input.kind, settings);
     const ref = { id, kind: input.kind, settings };
-    const noToken = this.#persistent?.requiresNoToken(input.kind) ?? false;
+    const noToken = this.#persistent?.requiresNoToken(input.kind, settings) ?? false;
     const persistent = this.#persistent?.handles(ref) ?? false;
     // A connection must be deliverable: either via a live persistent session, a
     // registered webhook adapter, or QR auth (which needs no token at all).
-    if (!noToken && !persistent && !this.#adapters.has(input.kind)) {
+    if (!noToken && !persistent && !this.#adapters.has(input.kind) && !this.#isWhatsAppCloud(input.kind, settings)) {
       throw new AgentisError(
         'CHANNEL_KIND_UNAVAILABLE',
         `channel adapter for kind '${input.kind}' is not registered`,
@@ -248,6 +284,14 @@ export class ChannelBridge {
     // (including Telegram polling, which uses the bot token) requires one.
     if (!noToken && !input.token) {
       throw new AgentisError('VALIDATION_FAILED', `channel kind '${input.kind}' requires a token`);
+    }
+    if (this.#isWhatsAppCloud(input.kind, settings)) {
+      if (!input.token || !settings.phoneNumberId || !settings.appSecretEncrypted || !settings.verifyTokenEncrypted) {
+        throw new AgentisError(
+          'VALIDATION_FAILED',
+          'WhatsApp Cloud requires access token, phone number ID, app secret, and verify token',
+        );
+      }
     }
     const agent = this.deps.db
       .select()
@@ -260,6 +304,9 @@ export class ChannelBridge {
     const webhookSecret = randomBytes(24).toString('hex');
     // tokenEncrypted is NOT NULL; QR-auth kinds store an encrypted marker.
     const tokenPlain = input.token ?? `persistent:${input.kind}:${id}`;
+    const initialStatus: ChannelStatus = input.kind === 'whatsapp' && settings.mode !== 'cloud'
+      ? 'needs_action'
+      : 'verifying';
     this.deps.db
       .insert(schema.channelConnections)
       .values({
@@ -273,8 +320,7 @@ export class ChannelBridge {
         tokenEncrypted: this.deps.vault.encrypt(tokenPlain),
         webhookSecret,
         settings,
-        // Persistent connections aren't usable until the session is live.
-        status: persistent ? 'connecting' : 'active',
+        status: initialStatus,
         lastEventAt: null,
         lastError: null,
       })
@@ -283,6 +329,33 @@ export class ChannelBridge {
     this.#persistent?.onCreated?.(ref);
     const connection = this.get(input.workspaceId, id);
     return { connection, webhookSecret };
+  }
+
+  updateTargets(workspaceId: string, id: string, input: UpdateConnectionTargetsInput): PublicConnection {
+    const row = this.#row(workspaceId, id);
+    const settings = { ...this.#settings(row) };
+    if ('defaultChatId' in input) {
+      const target = input.defaultChatId?.trim();
+      if (target) settings.defaultChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, target);
+      else delete settings.defaultChatId;
+    }
+    if (input.targetAliases) {
+      const targetAliases = { ...(settings.targetAliases ?? {}) };
+      for (const [rawAlias, rawTarget] of Object.entries(input.targetAliases)) {
+        const alias = this.#normalizeAlias(rawAlias);
+        if (!alias) continue;
+        const target = rawTarget?.trim();
+        if (target) targetAliases[alias] = this.#normalizeTargetForKind(row.kind as ChannelKind, target);
+        else delete targetAliases[alias];
+      }
+      settings.targetAliases = targetAliases;
+    }
+    this.deps.db
+      .update(schema.channelConnections)
+      .set({ settings, updatedAt: new Date().toISOString() })
+      .where(eq(schema.channelConnections.id, row.id))
+      .run();
+    return this.get(workspaceId, id);
   }
 
   delete(workspaceId: string, id: string): void {
@@ -302,23 +375,65 @@ export class ChannelBridge {
   }
 
   /**
-   * Send a one-off ping via the channel adapter to confirm credentials.
-   * Throws on transport failure; caller surfaces the AgentisError.
+   * Run safe provider checks and persist structured health. When a default
+   * destination exists, the outbound check sends one visible test message.
    */
-  async test(args: { workspaceId: string; id: string; chatId?: string; body?: string }) {
+  async test(args: { workspaceId: string; id: string; chatId?: string; body?: string }): Promise<ChannelHealth> {
     const row = this.#row(args.workspaceId, args.id);
-    const adapter = this.#requireAdapter(row.kind as ChannelKind);
-    const settings = (row.settings ?? {}) as { defaultChatId?: string };
-    const chatId = args.chatId ?? settings.defaultChatId;
-    if (!chatId) {
-      throw new AgentisError(
-        'VALIDATION_FAILED',
-        'channel test requires chatId (no defaultChatId on connection)',
-      );
+    const checks = await this.#runHealthChecks(row, {
+      chatId: args.chatId,
+      body: args.body ?? 'Agentis test message',
+    });
+    return this.#saveHealth(row, checks);
+  }
+
+  health(workspaceId: string, id: string): ChannelHealth {
+    const row = this.#row(workspaceId, id);
+    return this.#healthFromRow(row);
+  }
+
+  resolveDestination(args: { connectionId: string; to?: string | null }): { chatId: string | null; source: 'default' | 'alias' | 'explicit' | 'missing' } {
+    const row = this.deps.db
+      .select()
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, args.connectionId))
+      .get();
+    if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
+    const settings = this.#settings(row);
+    const requested = args.to?.trim() ?? '';
+    if (!requested || ME_ALIASES.has(requested.toLowerCase())) {
+      return settings.defaultChatId
+        ? { chatId: settings.defaultChatId, source: 'default' }
+        : { chatId: null, source: 'missing' };
     }
-    const token = this.deps.vault.decrypt(row.tokenEncrypted);
-    await adapter.send({ token, chatId, body: args.body ?? 'Agentis test message' });
-    this.#markActive(row.id);
+    const alias = this.#normalizeAlias(requested);
+    const aliased = alias ? settings.targetAliases?.[alias] : undefined;
+    if (aliased) return { chatId: aliased, source: 'alias' };
+    return { chatId: this.#normalizeTargetForKind(row.kind as ChannelKind, requested), source: 'explicit' };
+  }
+
+  handleWebhookVerification(args: {
+    connectionId: string;
+    query: Record<string, string | undefined>;
+  }): { ok: true; body: string; contentType?: string } {
+    const row = this.deps.db
+      .select()
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, args.connectionId))
+      .get();
+    if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
+    const settings = this.#settings(row);
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      const expected = settings.verifyTokenEncrypted ? this.deps.vault.decrypt(settings.verifyTokenEncrypted) : '';
+      const mode = args.query['hub.mode'];
+      const token = args.query['hub.verify_token'];
+      const challenge = args.query['hub.challenge'];
+      if (mode === 'subscribe' && token && token === expected && challenge) {
+        return { ok: true, body: challenge, contentType: 'text/plain; charset=utf-8' };
+      }
+      throw new AgentisError('CHANNEL_SIGNATURE_INVALID', 'WhatsApp webhook verify token did not match');
+    }
+    throw new AgentisError('VALIDATION_FAILED', `${row.kind} does not use GET webhook verification`);
   }
 
   // ── Inbound webhook ────────────────────────────────────
@@ -331,7 +446,7 @@ export class ChannelBridge {
     connectionId: string;
     headers: Record<string, string | undefined>;
     rawBody: string;
-  }): Promise<{ accepted: boolean; idempotent: boolean; messageId?: string }> {
+  }): Promise<{ accepted: boolean; idempotent: boolean; messageId?: string; responseBody?: unknown; statusCode?: number }> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
@@ -340,16 +455,26 @@ export class ChannelBridge {
     if (!row) {
       throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
     }
-    if (row.status !== 'active') {
+    if (row.status === 'paused') {
       throw new AgentisError('CHANNEL_CONNECTION_INACTIVE', `connection ${row.id} is not active`);
     }
-    const adapter = this.#requireAdapter(row.kind as ChannelKind);
-    const ok = adapter.verify({ headers: args.headers, rawBody: args.rawBody, secret: row.webhookSecret });
+    const adapter = this.#isWhatsAppCloud(row.kind as ChannelKind, this.#settings(row)) ? null : this.#requireAdapter(row.kind as ChannelKind);
+    const secret = this.#webhookVerificationSecret(row);
+    const ok = this.#verifyInbound(row, args.headers, args.rawBody, secret);
     if (!ok) {
       this.#markError(row.id, 'webhook signature verification failed');
       throw new AgentisError('CHANNEL_SIGNATURE_INVALID', 'channel webhook signature verification failed');
     }
-    const parsed = adapter.parseInbound({ rawBody: args.rawBody, headers: args.headers });
+
+    const challenge = this.#maybeProviderChallenge(row, args.rawBody);
+    if (challenge) {
+      this.#markActive(row.id);
+      return { accepted: true, idempotent: false, responseBody: challenge, statusCode: 200 };
+    }
+
+    const parsed = adapter
+      ? adapter.parseInbound({ rawBody: args.rawBody, headers: args.headers })
+      : this.#parseWhatsAppCloudInbound(args.rawBody);
     if (!parsed) {
       this.#markActive(row.id);
       return { accepted: false, idempotent: false };
@@ -373,11 +498,15 @@ export class ChannelBridge {
       return result;
     }
 
-    const conversation = this.deps.conversations.getOrCreateByAgent({
+    this.#rememberDefaultChat(row, parsed.chatId);
+
+    const conversation = this.deps.conversations.getOrCreateByChannel({
       workspaceId: row.workspaceId,
       ambientId: row.ambientId,
       userId: row.userId,
       agentId: row.agentId,
+      channelConnectionId: row.id,
+      channelChatId: parsed.chatId,
     });
     const fromTag = parsed.from ? `[${parsed.from}] ` : '';
     const message = this.deps.conversations.appendMirrored({
@@ -438,45 +567,508 @@ export class ChannelBridge {
 
   // ── Outbound forwarding ─────────────────────────────────
 
-  async #forwardToChannels(agentId: string, body: string) {
-    if (!body) return;
-    const conns = this.deps.db
-      .select()
-      .from(schema.channelConnections)
-      .where(
-        and(
-          eq(schema.channelConnections.agentId, agentId),
-          eq(schema.channelConnections.status, 'active'),
-        ),
-      )
-      .all();
-    for (const conn of conns) {
-      const adapter = this.#adapters.get(conn.kind as ChannelKind);
-      if (!adapter) continue;
-      const settings = (conn.settings ?? {}) as { defaultChatId?: string };
-      if (!settings.defaultChatId) continue; // need a destination
-      try {
-        const token = this.deps.vault.decrypt(conn.tokenEncrypted);
-        await adapter.send({ token, chatId: settings.defaultChatId, body });
-        this.#markActive(conn.id);
-        this.deps.bus.publish(
-          REALTIME_ROOMS.workspace(conn.workspaceId),
-          REALTIME_EVENTS.CHANNEL_MESSAGE_SENT,
-          { connectionId: conn.id, kind: conn.kind, agentId },
-        );
-      } catch (err) {
-        const msg = (err as Error).message ?? 'send failed';
-        this.deps.logger.warn('channel.forward_failed', {
-          connectionId: conn.id,
-          kind: conn.kind,
-          err: msg,
-        });
-        this.#markError(conn.id, msg);
+  // ── helpers ─────────────────────────────────────────────
+
+  async #runHealthChecks(row: ChannelConnectionRow, opts: { chatId?: string; body: string }): Promise<ChannelHealthCheck[]> {
+    const settings = this.#settings(row);
+    const checks: ChannelHealthCheck[] = [];
+    checks.push(await this.#credentialCheck(row, settings));
+    checks.push(await this.#transportCheck(row, settings));
+    checks.push(await this.#outboundCheck(row, settings, opts));
+    checks.push(this.#inboundCheck(row, settings));
+    checks.push(await this.#runtimeCheck(row));
+    return this.#dedupeChecks(checks);
+  }
+
+  async #credentialCheck(row: ChannelConnectionRow, settings: ChannelSettings): Promise<ChannelHealthCheck> {
+    if (row.kind === 'whatsapp' && settings.mode !== 'cloud') {
+      return this.#check('credential', true, 'whatsapp_qr_auth_local', 'WhatsApp QR auth is stored in the local live session.');
+    }
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      if (!settings.phoneNumberId) {
+        return this.#check('credential', false, 'missing_phone_number_id', 'WhatsApp Cloud phone number ID is missing.', 'Add the phone number ID from Meta Business Manager.');
       }
+      return this.#check('credential', true, 'whatsapp_cloud_fields_present', 'WhatsApp Cloud credentials are present.');
+    }
+    const token = this.deps.vault.decrypt(row.tokenEncrypted);
+    const adapter = this.#requireAdapter(row.kind as ChannelKind);
+    if (!adapter.probeCredential) {
+      return this.#check('credential', true, `${row.kind}_credential_probe_unavailable`, `${row.kind} credentials are present.`);
+    }
+    try {
+      return await adapter.probeCredential({ token, settings: settings as Record<string, unknown> });
+    } catch (err) {
+      return this.#check(
+        'credential',
+        false,
+        `${row.kind}_credential_probe_error`,
+        (err as Error).message || `${row.kind} credential probe failed.`,
+        'Check the saved token and retry.',
+      );
     }
   }
 
-  // ── helpers ─────────────────────────────────────────────
+  async #transportCheck(row: ChannelConnectionRow, settings: ChannelSettings): Promise<ChannelHealthCheck> {
+    if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
+      const state = this.#persistent.status?.(row.id) ?? { status: settings.transportStatus ?? 'idle' };
+      if (state.status === 'open') {
+        return this.#check('transport', true, 'persistent_transport_open', `${row.kind} live transport is open.`);
+      }
+      const remediation = row.kind === 'whatsapp'
+        ? 'Open WhatsApp Linked Devices, scan a fresh QR, and keep the local Agentis process running.'
+        : row.kind === 'discord'
+          ? 'Confirm the bot token, gateway intents, and restart the connection.'
+          : 'Retry the connection and make sure polling can start.';
+      return this.#check(
+        'transport',
+        false,
+        'persistent_transport_not_open',
+        `${row.kind} live transport is ${state.status}.`,
+        remediation,
+      );
+    }
+
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      return this.#check('transport', true, 'whatsapp_cloud_api_ready', 'WhatsApp Cloud API transport is configured for outbound REST sends.');
+    }
+
+    if (row.kind === 'discord' && settings.transport !== 'gateway') {
+      return this.#check('transport', true, 'discord_rest_ready', 'Discord REST transport is configured for outbound messages.');
+    }
+
+    const publicUrl = this.#publicWebhookUrl(row.id);
+    if (!publicUrl) {
+      return this.#check(
+        'transport',
+        false,
+        'missing_public_url',
+        `${row.kind} webhook transport needs AGENTIS_PUBLIC_URL.`,
+        row.kind === 'telegram' ? 'Set AGENTIS_PUBLIC_URL or switch Telegram to long polling.' : 'Set AGENTIS_PUBLIC_URL and configure the provider webhook to the displayed URL.',
+      );
+    }
+    const adapter = this.#requireAdapter(row.kind as ChannelKind);
+    if (!adapter.configureTransport) {
+      return this.#check('transport', true, `${row.kind}_webhook_url_available`, `${row.kind} webhook URL is available.`);
+    }
+    try {
+      const token = this.deps.vault.decrypt(row.tokenEncrypted);
+      return await adapter.configureTransport({
+        token,
+        webhookUrl: publicUrl,
+        secret: row.webhookSecret,
+        transport: settings.transport ?? 'webhook',
+      });
+    } catch (err) {
+      return this.#check(
+        'transport',
+        false,
+        `${row.kind}_transport_probe_error`,
+        (err as Error).message || `${row.kind} transport probe failed.`,
+        'Check provider webhook configuration and retry.',
+      );
+    }
+  }
+
+  async #outboundCheck(
+    row: ChannelConnectionRow,
+    settings: ChannelSettings,
+    opts: { chatId?: string; body: string },
+  ): Promise<ChannelHealthCheck> {
+    const chatId = opts.chatId ?? settings.defaultChatId;
+    if (!chatId) {
+      if (row.kind === 'whatsapp' && settings.mode !== 'cloud') {
+        const state = this.#persistent?.status?.(row.id) ?? { status: settings.transportStatus ?? 'idle' };
+        if (state.status === 'open') {
+          return this.#check(
+            'outbound',
+            true,
+            'outbound_ready_for_explicit_recipient',
+            'WhatsApp QR can send to explicit phone numbers or JIDs. No default recipient is saved yet.',
+            'Save a default recipient only if you want requests like "send this to default target" to work without a number.',
+          );
+        }
+      }
+      const remediation = row.kind === 'telegram'
+        ? 'Send /start to the bot, then save the numeric chat ID or wait for Agentis to record the first inbound chat.'
+        : row.kind === 'whatsapp'
+          ? 'Save a default recipient number/JID or send the agent a message so Agentis can record it.'
+          : row.kind === 'slack'
+            ? 'Save a default Slack channel ID, then invite the bot to that channel.'
+            : 'Save a default Discord channel ID the bot can send to.';
+      return this.#check('outbound', false, 'missing_default_target', 'No default destination is configured for outbound tests.', remediation);
+    }
+    try {
+      const normalized = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
+      const selfCheck = await this.#telegramSelfTargetCheck(row, normalized);
+      if (selfCheck) return selfCheck;
+      await this.#sendRow(row, normalized, opts.body);
+      return this.#check('outbound', true, 'outbound_send_ok', `Test message delivered to ${normalized}.`);
+    } catch (err) {
+      return this.#check(
+        'outbound',
+        false,
+        'outbound_send_failed',
+        (err as Error).message || 'Outbound test message failed.',
+        'Fix the provider-specific send error, then run Test again.',
+      );
+    }
+  }
+
+  #inboundCheck(row: ChannelConnectionRow, settings: ChannelSettings): ChannelHealthCheck {
+    if (row.kind === 'discord' && settings.transport !== 'gateway') {
+      return this.#check('inbound', true, 'discord_outbound_only', 'Discord is configured for outbound-only REST mode.');
+    }
+    if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
+      const state = this.#persistent.status?.(row.id) ?? { status: settings.transportStatus ?? 'idle' };
+      if (state.status !== 'open') {
+        return this.#check('inbound', false, 'inbound_transport_not_open', `${row.kind} cannot receive messages until the live transport is open.`, 'Relink or restart the live connection.');
+      }
+      if (!settings.defaultChatId) {
+        return row.kind === 'whatsapp'
+          ? this.#check('inbound', true, 'inbound_live_ready_no_default', 'WhatsApp live inbound is ready. No default recipient is saved yet.')
+          : this.#check('inbound', false, 'needs_first_inbound', `${row.kind} can receive messages, but no default reply target is known yet.`, 'Send a message to this agent from the channel so Agentis can record the first chat as the default target.');
+      }
+      return this.#check('inbound', true, 'inbound_live_ready', `${row.kind} live inbound is ready.`);
+    }
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      if (!this.#publicWebhookUrl(row.id)) {
+        return this.#check('inbound', false, 'missing_public_url', 'WhatsApp Cloud webhooks need a public Agentis URL.', 'Set AGENTIS_PUBLIC_URL and configure the Meta webhook callback URL.');
+      }
+      if (!settings.appSecretEncrypted || !settings.verifyTokenEncrypted) {
+        return this.#check('inbound', false, 'missing_cloud_webhook_secret', 'WhatsApp Cloud webhook secrets are missing.', 'Save the app secret and verify token.');
+      }
+      return this.#check('inbound', true, 'whatsapp_cloud_webhook_ready', 'WhatsApp Cloud webhook verification is configured.');
+    }
+    if (row.kind === 'slack' && !settings.signingSecretEncrypted) {
+      return this.#check('inbound', false, 'missing_signing_secret', 'Slack Events API signing secret is missing.', 'Save the Slack signing secret so Agentis can verify URL verification and event callbacks.');
+    }
+    if (!this.#publicWebhookUrl(row.id)) {
+      return this.#check('inbound', false, 'missing_public_url', `${row.kind} inbound webhooks need a public Agentis URL.`, 'Set AGENTIS_PUBLIC_URL and configure the provider webhook callback URL.');
+    }
+    return this.#check('inbound', true, 'webhook_inbound_ready', `${row.kind} inbound webhook endpoint is ready.`);
+  }
+
+  async #runtimeCheck(row: ChannelConnectionRow): Promise<ChannelHealthCheck> {
+    if (this.deps.runtimeHealth) {
+      try {
+        return await this.deps.runtimeHealth({ workspaceId: row.workspaceId, agentId: row.agentId });
+      } catch (err) {
+        return this.#check(
+          'runtime',
+          false,
+          'runtime_probe_failed',
+          (err as Error).message || 'Agent runtime probe failed.',
+          'Fix the agent runtime, then test the channel again.',
+        );
+      }
+    }
+    const agent = this.deps.db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, row.agentId)).get();
+    return agent
+      ? this.#check('runtime', true, 'agent_runtime_target_exists', 'Channel is attached to an existing agent runtime target.')
+      : this.#check('runtime', false, 'agent_missing', 'The connected agent no longer exists.', 'Reconnect the channel to an existing agent.');
+  }
+
+  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string): Promise<void> {
+    const settings = this.#settings(row);
+    const normalizedChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
+    const selfCheck = await this.#telegramSelfTargetCheck(row, normalizedChatId);
+    if (selfCheck) {
+      throw new AgentisError('CHANNEL_SEND_FAILED', `${selfCheck.message} ${selfCheck.remediation ?? ''}`.trim());
+    }
+    if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
+      await this.#persistent.send(row.id, normalizedChatId, body);
+      return;
+    }
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      await this.#sendWhatsAppCloud(row, settings, normalizedChatId, body);
+      return;
+    }
+    const adapter = this.#requireAdapter(row.kind as ChannelKind);
+    const token = this.deps.vault.decrypt(row.tokenEncrypted);
+    await adapter.send({ token, chatId: normalizedChatId, body, settings: settings as Record<string, unknown> });
+  }
+
+  async #sendWhatsAppCloud(row: ChannelConnectionRow, settings: ChannelSettings, chatId: string, body: string): Promise<void> {
+    const phoneNumberId = settings.phoneNumberId;
+    if (!phoneNumberId) {
+      throw new AgentisError('VALIDATION_FAILED', 'WhatsApp Cloud phone number ID is missing');
+    }
+    const token = this.deps.vault.decrypt(row.tokenEncrypted);
+    const res = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: chatId,
+        type: 'text',
+        text: { preview_url: false, body },
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new AgentisError(
+        'CHANNEL_SEND_FAILED',
+        `whatsapp cloud send failed (${res.status}): ${text.slice(0, 240) || res.statusText}`,
+      );
+    }
+  }
+
+  #saveHealth(row: ChannelConnectionRow, checks: ChannelHealthCheck[]): ChannelHealth {
+    const now = new Date().toISOString();
+    const health: ChannelHealth = {
+      status: this.#statusFromChecks(checks),
+      checks,
+      lastTestAt: now,
+    };
+    const settings = { ...this.#settings(row), health };
+    this.deps.db
+      .update(schema.channelConnections)
+      .set({
+        settings,
+        status: health.status,
+        lastError: checks.find((check) => !check.ok)?.message?.slice(0, 500) ?? null,
+        updatedAt: now,
+        ...(health.status === 'active' ? { lastEventAt: now } : {}),
+      })
+      .where(eq(schema.channelConnections.id, row.id))
+      .run();
+    this.deps.bus.publish(
+      REALTIME_ROOMS.workspace(row.workspaceId),
+      REALTIME_EVENTS.CHANNEL_CONNECTION_STATUS,
+      { connectionId: row.id, kind: row.kind, status: health.status, health },
+    );
+    return health;
+  }
+
+  #healthFromRow(row: ChannelConnectionRow): ChannelHealth {
+    const settings = this.#settings(row);
+    if (settings.health && Array.isArray(settings.health.checks)) return settings.health;
+    return this.#initialHealth(row.kind as ChannelKind, settings, row.status as ChannelStatus);
+  }
+
+  #initialHealth(kind: ChannelKind, settings: ChannelSettings, status?: ChannelStatus): ChannelHealth {
+    const now = new Date().toISOString();
+    const initialStatus = status ?? (kind === 'whatsapp' && settings.mode !== 'cloud' ? 'needs_action' : 'verifying');
+    return {
+      status: initialStatus,
+      checks: DEFAULT_HEALTH_CHECK_NAMES.map((name) => ({
+        name,
+        ok: false,
+        code: 'not_checked',
+        message: `${name} has not been checked yet.`,
+        remediation: name === 'outbound' ? 'Save the channel and run Test.' : undefined,
+        checkedAt: now,
+      })),
+    };
+  }
+
+  #statusFromChecks(checks: ChannelHealthCheck[]): ChannelStatus {
+    if (checks.length === 0) return 'verifying';
+    if (checks.every((check) => check.ok)) return 'active';
+    const failed = checks.filter((check) => !check.ok);
+    if (failed.some((check) => check.code.includes('missing') || check.code.includes('needs') || check.code.includes('not_open'))) {
+      return 'needs_action';
+    }
+    if (failed.some((check) => check.name === 'credential' || check.name === 'transport' || check.name === 'outbound')) {
+      return 'error';
+    }
+    return 'degraded';
+  }
+
+  #dedupeChecks(checks: ChannelHealthCheck[]): ChannelHealthCheck[] {
+    const byName = new Map<ChannelHealthCheckName, ChannelHealthCheck>();
+    for (const check of checks) byName.set(check.name, check);
+    return DEFAULT_HEALTH_CHECK_NAMES.map((name) => byName.get(name) ?? this.#check(name, false, 'not_checked', `${name} has not been checked yet.`));
+  }
+
+  #check(
+    name: ChannelHealthCheckName,
+    ok: boolean,
+    code: string,
+    message: string,
+    remediation?: string,
+  ): ChannelHealthCheck {
+    return {
+      name,
+      ok,
+      code,
+      message,
+      ...(remediation ? { remediation } : {}),
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  #settings(row: Pick<ChannelConnectionRow, 'settings'>): ChannelSettings {
+    const value = row.settings;
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as ChannelSettings
+      : {};
+  }
+
+  #normalizeAliases(kind: ChannelKind, aliases: Record<string, string | null | undefined>): Record<string, string> {
+    const normalized: Record<string, string> = {};
+    for (const [rawAlias, rawTarget] of Object.entries(aliases)) {
+      const alias = this.#normalizeAlias(rawAlias);
+      const target = rawTarget?.trim();
+      if (alias && target) normalized[alias] = this.#normalizeTargetForKind(kind, target);
+    }
+    return normalized;
+  }
+
+  #normalizeAlias(value: string): string | null {
+    const normalized = value.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!normalized || normalized.length > 80) return null;
+    return normalized;
+  }
+
+  #normalizeTargetForKind(kind: ChannelKind, target: string): string {
+    const trimmed = target.trim();
+    if (!trimmed) throw new AgentisError('VALIDATION_FAILED', 'channel destination is required');
+    if (kind !== 'whatsapp') return trimmed;
+    if (/@(s\.whatsapp\.net|g\.us|newsletter)$/i.test(trimmed)) return trimmed;
+    const digits = trimmed.replace(/[^\d]/g, '');
+    if (digits.length < 8 || digits.length > 20) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        'WhatsApp destination must be a phone number with country code, a user JID, a group JID, or a newsletter JID',
+      );
+    }
+    return `${digits}@s.whatsapp.net`;
+  }
+
+  async #telegramSelfTargetCheck(row: ChannelConnectionRow, chatId: string): Promise<ChannelHealthCheck | null> {
+    if (row.kind !== 'telegram') return null;
+    if (!this.#adapters.get('telegram')?.probeCredential) return null;
+    try {
+      const token = this.deps.vault.decrypt(row.tokenEncrypted);
+      const res = await fetch(`${TELEGRAM_API}/bot${encodeURIComponent(token)}/getMe`, { method: 'GET' });
+      if (!res.ok) return null;
+      const json = await res.json().catch(() => ({})) as { ok?: boolean; result?: { id?: number; username?: string } };
+      if (json.ok === false) return null;
+      const botId = json.result?.id ? String(json.result.id) : '';
+      const username = json.result?.username?.replace(/^@/, '').toLowerCase() ?? '';
+      const target = chatId.trim().replace(/^@/, '').toLowerCase();
+      if (target && (target === botId || (username && target === username))) {
+        return this.#check(
+          'outbound',
+          false,
+          'telegram_target_is_bot',
+          "Telegram target points to the bot itself. Bots can't send messages to themselves.",
+          'Open the bot from your personal Telegram account, send /start, then save that human chat ID as the target.',
+        );
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  #isWhatsAppCloud(kind: ChannelKind, settings: ChannelSettings): boolean {
+    return kind === 'whatsapp' && settings.mode === 'cloud';
+  }
+
+  #publicWebhookUrl(connectionId: string): string | null {
+    const base = process.env.AGENTIS_PUBLIC_URL?.replace(/\/+$/, '');
+    return base ? `${base}/v1/webhooks/channel/${connectionId}` : null;
+  }
+
+  #webhookVerificationSecret(row: ChannelConnectionRow): string | null {
+    const settings = this.#settings(row);
+    if (row.kind === 'slack') {
+      return settings.signingSecretEncrypted ? this.deps.vault.decrypt(settings.signingSecretEncrypted) : null;
+    }
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      return settings.appSecretEncrypted ? this.deps.vault.decrypt(settings.appSecretEncrypted) : null;
+    }
+    return row.webhookSecret;
+  }
+
+  #verifyInbound(row: ChannelConnectionRow, headers: Record<string, string | undefined>, rawBody: string, secret: string | null): boolean {
+    const settings = this.#settings(row);
+    if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      return this.#verifyWhatsAppCloudSignature(headers, rawBody, secret);
+    }
+    return this.#requireAdapter(row.kind as ChannelKind).verify({ headers, rawBody, secret });
+  }
+
+  #verifyWhatsAppCloudSignature(headers: Record<string, string | undefined>, rawBody: string, secret: string | null): boolean {
+    if (!secret) return false;
+    const presented = headers['x-hub-signature-256'] ?? '';
+    if (!presented.startsWith('sha256=')) return false;
+    const expected = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+    if (expected.length !== presented.length) return false;
+    try {
+      return timingSafeEqual(Buffer.from(expected), Buffer.from(presented));
+    } catch {
+      return false;
+    }
+  }
+
+  #maybeProviderChallenge(row: ChannelConnectionRow, rawBody: string): unknown | null {
+    if (row.kind !== 'slack') return null;
+    try {
+      const payload = JSON.parse(rawBody) as { type?: string; challenge?: string };
+      if (payload.type === 'url_verification' && typeof payload.challenge === 'string') {
+        return { challenge: payload.challenge };
+      }
+    } catch {
+      /* normal parser will report invalid JSON */
+    }
+    return null;
+  }
+
+  #parseWhatsAppCloudInbound(rawBody: string): ParsedInboundMessage | null {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      throw new AgentisError('VALIDATION_FAILED', 'whatsapp cloud webhook body is not JSON');
+    }
+    const entries = (payload as { entry?: Array<{ changes?: Array<{ value?: { messages?: unknown[] } }> }> }).entry ?? [];
+    for (const entry of entries) {
+      for (const change of entry.changes ?? []) {
+        const messages = change.value?.messages ?? [];
+        for (const item of messages) {
+          const msg = item as {
+            id?: string;
+            from?: string;
+            type?: string;
+            text?: { body?: string };
+            button?: { text?: string };
+            interactive?: { button_reply?: { title?: string }; list_reply?: { title?: string } };
+          };
+          const body = msg.type === 'text'
+            ? msg.text?.body
+            : msg.button?.text ?? msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title;
+          if (!msg.id || !msg.from || !body) continue;
+          return {
+            externalId: `whatsapp:${msg.id}`,
+            chatId: msg.from,
+            body,
+            from: msg.from,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  #rememberDefaultChat(row: ChannelConnectionRow, chatId: string): void {
+    const settings = this.#settings(row);
+    if (settings.defaultChatId) return;
+    const now = new Date().toISOString();
+    this.deps.db
+      .update(schema.channelConnections)
+      .set({
+        settings: { ...settings, defaultChatId: chatId },
+        updatedAt: now,
+      })
+      .where(eq(schema.channelConnections.id, row.id))
+      .run();
+  }
 
   #row(workspaceId: string, id: string) {
     const row = this.deps.db
@@ -532,7 +1124,7 @@ export class ChannelBridge {
   }
 
   #toPublic(row: typeof schema.channelConnections.$inferSelect): PublicConnection {
-    const settings = (row.settings ?? {}) as { defaultChatId?: string };
+    const settings = this.#settings(row);
     return {
       id: row.id,
       workspaceId: row.workspaceId,
@@ -542,6 +1134,11 @@ export class ChannelBridge {
       name: row.name,
       status: row.status,
       defaultChatId: settings.defaultChatId ?? null,
+      targetAliases: settings.targetAliases ?? {},
+      transport: settings.transport ?? null,
+      mode: settings.mode ?? null,
+      transportStatus: settings.transportStatus ?? null,
+      health: this.#healthFromRow(row),
       lastEventAt: row.lastEventAt,
       lastError: row.lastError,
       createdAt: row.createdAt,

@@ -3,8 +3,11 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildTaskRoutes } from '../../src/routes/tasks.js';
+import { AgentSessionService } from '../../src/services/agentSession.js';
+import { PlanService } from '../../src/services/planService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -16,6 +19,12 @@ beforeEach(async () => {
 function app() {
   return ctx.buildApp([
     { path: '/v1/tasks', app: buildTaskRoutes({ db: ctx.db, auth: ctx.auth }) },
+  ]);
+}
+
+function spineApp(plans: PlanService, sessions: AgentSessionService) {
+  return ctx.buildApp([
+    { path: '/v1/tasks', app: buildTaskRoutes({ db: ctx.db, auth: ctx.auth, plans, sessions }) },
   ]);
 }
 
@@ -85,5 +94,57 @@ describe('GET /v1/tasks', () => {
   it('rejects without auth (401)', async () => {
     const res = await app().request('/v1/tasks');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('task spine inspector routes', () => {
+  it('redirects a task spine by recording a decision and injecting session observations', async () => {
+    const plans = new PlanService(ctx.db, ctx.bus);
+    const sessions = new AgentSessionService(ctx.db, ctx.logger);
+    const realtimeEvents: string[] = [];
+    const unsubscribe = ctx.bus.subscribe((msg) => {
+      if (msg.room === REALTIME_ROOMS.workspace(ctx.workspace.id)) realtimeEvents.push(msg.envelope.event);
+    });
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Agent',
+      adapterType: 'http',
+      capabilityTags: [],
+      config: {},
+      status: 'offline',
+    }).run();
+    const session = sessions.create({
+      agentId,
+      workspaceId: ctx.workspace.id,
+      runId: randomUUID(),
+      nodeId: 'S',
+      taskBlock: 'Original task',
+    });
+    const task = plans.createTask({
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      objective: 'Handle a long task',
+    });
+    plans.bindSession(ctx.workspace.id, ctx.user.id, task.id, session.id);
+
+    const res = await spineApp(plans, sessions).request(`/v1/tasks/spines/${task.id}/redirect`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ instruction: 'Use the safer path.', reason: 'Operator correction' }),
+    });
+    unsubscribe();
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { injected: boolean; task: { decisions: Array<{ summary: string }> } };
+    const updatedSession = sessions.get(session.id)!;
+    expect(body.injected).toBe(true);
+    expect(body.task.decisions[0]?.summary).toBe('Operator redirected task');
+    expect(updatedSession.observationsBlock).toContain('Use the safer path.');
+    expect(realtimeEvents).toContain(REALTIME_EVENTS.TASK_SPINE_DECISION_RECORDED);
+    expect(realtimeEvents).toContain(REALTIME_EVENTS.TASK_SPINE_REDIRECTED);
   });
 });

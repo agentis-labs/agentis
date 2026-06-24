@@ -31,7 +31,7 @@
  */
 
 import type { RuntimeEpisodeType } from '@agentis/core';
-import { tokenize } from './brainText.js';
+import { tokenize, looksSensitive } from './brainText.js';
 import type { StructuredCompleter } from './structuredCompleter.js';
 
 // ────────────────────────────────────────────────────────────
@@ -80,6 +80,8 @@ export interface FormationNeighbor {
 }
 
 export interface FormationContext {
+  /** Lets a dynamic completer select this workspace's default harness. */
+  workspaceId?: string;
   taskTitle?: string | null;
   agentScopeId?: string | null;
   /** Existing nearby memories the candidate should reconcile against. */
@@ -272,6 +274,7 @@ export class FormationJudge {
       parsed = await this.completer.completeStructured<{ memories?: unknown }>({
         system,
         user,
+        ...(context.workspaceId ? { workspaceId: context.workspaceId } : {}),
         maxTokens: 900,
         maxAttempts: 2,
       });
@@ -366,12 +369,6 @@ export function stripNonProse(text: string): string {
 
 function stripMarkdownPrefix(line: string): string {
   return line.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s+)/, '');
-}
-
-export function looksSensitive(text: string): boolean {
-  return /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text)
-    || /\b(?:sk|pk|ghp|gho|xoxb|xoxp)_[A-Za-z0-9_-]{16,}\b/.test(text)
-    || /\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b/.test(text);
 }
 
 function pipeCount(text: string): number {

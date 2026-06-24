@@ -41,6 +41,21 @@ function seedCredential(type: string) {
   }).run();
 }
 
+function seedAgent(name: string, adapterType: string, config: Record<string, unknown> = {}) {
+  const now = new Date().toISOString();
+  ctx.db.insert(schema.agents).values({
+    id: randomUUID(),
+    workspaceId: ctx.workspace.id,
+    userId: ctx.user.id,
+    name,
+    adapterType,
+    config,
+    status: 'offline',
+    createdAt: now,
+    updatedAt: now,
+  }).run();
+}
+
 describe('analyzeWorkflowReadiness', () => {
   it('flags an integration with no credential, in plain language', () => {
     const graph = graphWith({ id: 'crm', title: 'Create CRM Lead', config: { kind: 'integration', integrationId: 'acme_crm', operationId: 'create_lead' } });
@@ -85,5 +100,34 @@ describe('analyzeWorkflowReadiness', () => {
     const r = analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph);
     expect(r.ready).toBe(true);
     expect(r.summary).toBe('This workflow is ready to run.');
+  });
+
+  it('flags an agent node requiring native browser when no runtime can provide it, steering to a Browser node', () => {
+    seedAgent('Claude', 'claude_code');
+    const graph = graphWith({ id: 'a', title: 'Qualify Candidate', config: { kind: 'agent_task', prompt: 'x', requires: { browser: true } } });
+    const r = analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph);
+    expect(r.ready).toBe(false);
+    expect(r.requirements[0]).toMatchObject({ nodeId: 'a', kind: 'config' });
+    expect(r.requirements[0]!.message).toContain('Browser node');
+  });
+
+  it('points at the enablable Codex runtime when one exists', () => {
+    seedAgent('Codex', 'codex');
+    const graph = graphWith({ id: 'a', title: 'Qualify Candidate', config: { kind: 'agent_task', prompt: 'x', requires: { browser: true } } });
+    const r = analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph);
+    expect(r.ready).toBe(false);
+    expect(r.requirements[0]!.message).toContain('Codex');
+    expect(r.requirements[0]!.message).toContain('Enable');
+  });
+
+  it('is satisfied when a runtime is already configured for the required affordance', () => {
+    seedAgent('OpenClaw', 'openclaw');
+    const graph = graphWith({ id: 'a', title: 'Qualify Candidate', config: { kind: 'agent_task', prompt: 'x', requires: { browser: true } } });
+    expect(analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph).ready).toBe(true);
+  });
+
+  it('treats a fileSystem-only requirement as satisfiable by the platform loop', () => {
+    const graph = graphWith({ id: 'a', title: 'Summarize', config: { kind: 'agent_task', prompt: 'x', requires: { fileSystem: true } } });
+    expect(analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph).ready).toBe(true);
   });
 });

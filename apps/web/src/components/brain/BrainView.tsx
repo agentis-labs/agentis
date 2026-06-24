@@ -53,7 +53,7 @@ export function BrainView({
         api<IntelligenceConfig>('/v1/workspace/intelligence').catch(() => null),
         // Organizational overlay (sources, entities, claims). Optional: the
         // map stays fully functional when the engine has nothing to show.
-        api<{ graph: BrainGraph }>('/v1/cora/graph').catch(() => null),
+        api<{ graph: BrainGraph }>('/v1/grounding/graph').catch(() => null),
       ]);
       setData(brain);
       setGraph(graphResponse.graph);
@@ -225,14 +225,14 @@ export function BrainView({
             </>
           )}
         </div>
-        {selectedNode && Boolean(selectedNode.metadata?.cora) && (
+        {selectedNode && Boolean(selectedNode.metadata?.grounding) && (
           <OrgDetailRail
             node={selectedNode}
             onClose={() => setSelectedId(null)}
             onChanged={() => reloadBrain(false)}
           />
         )}
-        {selectedNode && !selectedNode.metadata?.cora && (
+        {selectedNode && !selectedNode.metadata?.grounding && (
           <BrainDetailRail
             brain={brain}
             node={selectedNode}

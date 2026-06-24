@@ -2,7 +2,7 @@
  * ChannelBridge — Batch 4 / D35 unit tests.
  *
  * Covers create/list/get/delete, inbound webhook (verify + idempotency),
- * outbound forwarding via bus, and adapter-unavailability errors. Uses a
+ * channel-scoped conversations, and adapter-unavailability errors. Uses a
  * stubbed adapter so no network calls are made.
  */
 
@@ -201,6 +201,54 @@ describe('ChannelBridge', () => {
     expect(messages[0]!.body).toContain('Alice');
   });
 
+  it('handleInbound() isolates channel chats from the desktop agent conversation', async () => {
+    const adapter = new StubTelegramAdapter();
+    const { bridge, conversations } = buildBridge(ctx, adapter);
+    const agentId = seedAgent(ctx);
+    const desktop = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+    });
+    conversations.appendOutbound({
+      workspaceId: ctx.workspace.id,
+      conversationId: desktop.id,
+      operatorId: ctx.user.id,
+      body: 'desktop only',
+    });
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      agentId,
+      kind: 'telegram',
+      name: 'tg',
+      token: 'tok',
+    });
+
+    const first = await bridge.handleInbound({ connectionId: connection.id, headers: {}, rawBody: '{}' });
+    expect(first.accepted).toBe(true);
+
+    adapter.parseResult = {
+      externalId: 'telegram:43',
+      chatId: '1000',
+      body: 'second chat',
+      from: 'Bob',
+    };
+    await bridge.handleInbound({ connectionId: connection.id, headers: {}, rawBody: '{}' });
+
+    const all = conversations.list(ctx.workspace.id);
+    expect(all).toHaveLength(3);
+    expect(conversations.messages(desktop.id, 50)).toHaveLength(1);
+    const channelConversations = all.filter((conversation) => conversation.id !== desktop.id);
+    expect(channelConversations.map((conversation) => conversation.channelConnectionId)).toEqual([
+      connection.id,
+      connection.id,
+    ]);
+    expect(channelConversations.map((conversation) => conversation.channelChatId).sort()).toEqual(['1000', '999']);
+  });
+
   it('handleInbound() ignores parseInbound returning null and stays active', async () => {
     const adapter = new StubTelegramAdapter();
     adapter.parseResult = null;
@@ -220,11 +268,11 @@ describe('ChannelBridge', () => {
     expect(conversations.list(ctx.workspace.id)).toHaveLength(0);
   });
 
-  it('bindOutbound() forwards CONVERSATION_MESSAGE_SENT operator messages via adapter.send', async () => {
+  it('desktop operator messages are not auto-forwarded to channel defaults', async () => {
     const adapter = new StubTelegramAdapter();
     const { bridge, conversations } = buildBridge(ctx, adapter);
     const agentId = seedAgent(ctx);
-    bridge.create({
+    const { connection } = bridge.create({
       workspaceId: ctx.workspace.id,
       ambientId: null,
       userId: ctx.user.id,
@@ -234,7 +282,11 @@ describe('ChannelBridge', () => {
       token: 'tok',
       defaultChatId: '999',
     });
-    bridge.bindOutbound();
+    ctx.db
+      .update(schema.channelConnections)
+      .set({ status: 'active' })
+      .where(eq(schema.channelConnections.id, connection.id))
+      .run();
 
     const conv = conversations.getOrCreateByAgent({
       workspaceId: ctx.workspace.id,
@@ -248,16 +300,14 @@ describe('ChannelBridge', () => {
       operatorId: ctx.user.id,
       body: 'hi from operator',
     });
-    // Drain microtasks for the void-async forward.
     await new Promise((r) => setTimeout(r, 10));
-    expect(adapter.sent).toHaveLength(1);
-    expect(adapter.sent[0]).toMatchObject({ chatId: '999', body: 'hi from operator', token: 'tok' });
+    expect(adapter.sent).toHaveLength(0);
   });
 
-  it('outbound forwarding flips the connection to error on send failure', async () => {
+  it('deliverToConnection flips the connection to error on send failure', async () => {
     const adapter = new StubTelegramAdapter();
     adapter.shouldFailSend = true;
-    const { bridge, conversations } = buildBridge(ctx, adapter);
+    const { bridge } = buildBridge(ctx, adapter);
     const agentId = seedAgent(ctx);
     const { connection } = bridge.create({
       workspaceId: ctx.workspace.id,
@@ -269,21 +319,15 @@ describe('ChannelBridge', () => {
       token: 'tok',
       defaultChatId: '999',
     });
-    bridge.bindOutbound();
+    ctx.db
+      .update(schema.channelConnections)
+      .set({ status: 'active' })
+      .where(eq(schema.channelConnections.id, connection.id))
+      .run();
 
-    const conv = conversations.getOrCreateByAgent({
-      workspaceId: ctx.workspace.id,
-      ambientId: ctx.ambient.id,
-      userId: ctx.user.id,
-      agentId,
-    });
-    conversations.appendOutbound({
-      workspaceId: ctx.workspace.id,
-      conversationId: conv.id,
-      operatorId: ctx.user.id,
-      body: 'fail-me',
-    });
-    await new Promise((r) => setTimeout(r, 10));
+    await expect(
+      bridge.deliverToConnection({ connectionId: connection.id, chatId: '999', body: 'fail-me' }),
+    ).rejects.toThrow(/boom/);
     const row = ctx.db
       .select()
       .from(schema.channelConnections)
@@ -293,7 +337,7 @@ describe('ChannelBridge', () => {
     expect(row.lastError).toContain('boom');
   });
 
-  it('test() requires a chatId either explicitly or via defaultChatId', async () => {
+  it('test() returns diagnostics when no chatId is available and sends when explicit', async () => {
     const adapter = new StubTelegramAdapter();
     const { bridge } = buildBridge(ctx, adapter);
     const agentId = seedAgent(ctx);
@@ -306,9 +350,9 @@ describe('ChannelBridge', () => {
       name: 'tg',
       token: 'tok',
     });
-    await expect(
-      bridge.test({ workspaceId: ctx.workspace.id, id: connection.id }),
-    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    const missingTarget = await bridge.test({ workspaceId: ctx.workspace.id, id: connection.id });
+    expect(missingTarget.status).toBe('needs_action');
+    expect(missingTarget.checks.some((check) => check.code === 'missing_default_target')).toBe(true);
 
     await bridge.test({
       workspaceId: ctx.workspace.id,

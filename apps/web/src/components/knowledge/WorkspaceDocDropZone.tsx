@@ -25,6 +25,7 @@ export function WorkspaceDocDropZone({
   accept = '.pdf,.docx,.html,.htm,.md,.markdown,.txt,.csv,.json,.xlsx,.png,.jpg,.jpeg,.webp,.mp3,.m4a,.wav,.ogg,text/*,image/*,audio/*,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   showDescribeImages = true,
   hideBaseSelector = false,
+  labelForBase = (base) => base.name,
 }: {
   bases: KnowledgeBaseRow[];
   selectedBaseId?: string | null;
@@ -42,6 +43,7 @@ export function WorkspaceDocDropZone({
   accept?: string;
   showDescribeImages?: boolean;
   hideBaseSelector?: boolean;
+  labelForBase?: (base: KnowledgeBaseRow) => string;
 }) {
   const toast = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -174,7 +176,7 @@ export function WorkspaceDocDropZone({
               className="h-9 max-w-64 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
             >
               {bases.length === 0 && <option value="">{emptySelectionLabel}</option>}
-              {bases.map((base) => <option key={base.id} value={base.id}>{base.name}</option>)}
+              {bases.map((base) => <option key={base.id} value={base.id}>{labelForBase(base)}</option>)}
               <option value={NEW_BASE}>+ New collection…</option>
             </select>
             <Button variant="primary" size="md" loading={uploading} onClick={() => inputRef.current?.click()}>

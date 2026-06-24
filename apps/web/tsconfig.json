@@ -14,7 +14,6 @@
     "src/components/AvatarDropdown.tsx",
     "src/components/WorkspaceCard.tsx",
     "src/components/WorkspaceContextBlock.tsx",
-    "src/components/WorkspaceSwitcherDropdown.tsx",
     "src/components/canvas/CanvasNarration.tsx",
     "src/components/canvas/CanvasTabs.tsx",
     "src/components/canvas/XRayPanel.tsx",

@@ -47,6 +47,7 @@
     "prepack": "node scripts/prepack.mjs"
   },
   "dependencies": {
+    "@agentis/sdk": "workspace:*",
     "@hono/node-server": "^1.13.1",
     "@hono/zod-openapi": "^0.16.0",
     "@scalar/hono-api-reference": "^0.5.150",

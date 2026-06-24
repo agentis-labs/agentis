@@ -44,6 +44,19 @@ export class BrainMaintenanceService {
     private readonly logger: Logger,
     private readonly compression: BrainCompressionService,
     private readonly sessionAtoms: SessionMomentService,
+    /**
+     * §B1.4 — incremental re-embed sweep. Fire-and-forget hook (decoupled from
+     * SharedIntelligence to avoid a type cycle): repairs episodes whose stored
+     * vector drifted from the workspace provider, so the store converges and
+     * STAYS converged instead of re-polluting after a one-shot migration.
+     */
+    private readonly reembedPending?: (workspaceId: string) => Promise<unknown>,
+    /**
+     * §C1 — schedule a cross-session memory reflection pass for the workspace
+     * (fire-and-forget enqueue). Off the hot path; the maintenance cadence is the
+     * "dreaming" trigger.
+     */
+    private readonly scheduleReflection?: (workspaceId: string) => void,
   ) {}
 
   start(): void {
@@ -99,6 +112,15 @@ export class BrainMaintenanceService {
     const compression = this.compression.run(workspaceId, settings);
     const linksPruned = this.#pruneLinks(workspaceId);
     const sessionAtomsExpired = this.sessionAtoms.sweepExpired(now);
+
+    // §B1.4 — repair drifted vectors off the hot path (fire-and-forget).
+    if (this.reembedPending) {
+      void this.reembedPending(workspaceId).catch((err) =>
+        this.logger.warn('brain_maintenance.reembed_failed', { workspaceId, message: (err as Error).message }),
+      );
+    }
+    // §C1 — schedule the cross-session reflection ("dreaming") pass.
+    try { this.scheduleReflection?.(workspaceId); } catch { /* never break maintenance */ }
 
     const result: BrainMaintenanceResult = {
       workspaceId,

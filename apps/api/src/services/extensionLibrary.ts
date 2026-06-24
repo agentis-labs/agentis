@@ -8,11 +8,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
+import { AgentisError } from '@agentis/core';
 import type { ExtensionCredentialKey, ExtensionManifest, ExtensionOperation, ExtensionPermission } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkspaceVolumeService } from './workspaceVolume.js';
 import { validateExtensionManifest } from './extensionRuntime.js';
+import { validateExtensionSource } from '../extensions/validateSource.js';
 
 const EXTENSIONS_DIR = 'extensions';
 
@@ -95,6 +97,18 @@ export class ExtensionLibraryService {
       ...(input.allowedDomains ? { allowedDomains: input.allowedDomains } : {}),
     };
     validateExtensionManifest(manifest, { install: true });
+
+    // Source gate — reject CommonJS/ESM module syntax, syntax errors, and a
+    // missing entrypoint BEFORE persisting, so a broken extension can never
+    // reach a live run (where it would crash with `require is not defined` etc.).
+    const sourceCheck = validateExtensionSource(input.source, operations.map((operation) => operation.name));
+    if (!sourceCheck.ok) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `${sourceCheck.issue.message} ${sourceCheck.issue.remediation}`,
+        { details: { code: sourceCheck.issue.code, construct: sourceCheck.issue.construct }, remediation: sourceCheck.issue.remediation },
+      );
+    }
 
     const rel = `${EXTENSIONS_DIR}/${slug}.md`;
     await this.volume.write(scope.workspaceId, rel, serializeNodeWorkerExtension(manifest));

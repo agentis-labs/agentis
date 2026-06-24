@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { KnowledgeBaseService } from '../../src/services/knowledgeBase.js';
@@ -66,6 +67,79 @@ const semanticProvider: EmbeddingProvider = {
 };
 
 describe('/v1/knowledge-bases document uploads', () => {
+  it('presents workflow-scoped knowledge with owner provenance and document counts', async () => {
+    const workflowId = randomUUID();
+    ctx.db.insert(schema.workflows)
+      .values({
+        id: workflowId,
+        workspaceId: ctx.workspace.id,
+        ambientId: ctx.ambient.id,
+        userId: ctx.user.id,
+        title: 'Fashion Store Factory',
+        graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+        settings: {},
+      })
+      .run();
+    const workspaceBase = knowledge.createKnowledgeBase({ workspaceId: ctx.workspace.id, name: 'Workspace runbooks' });
+    const workflowBase = knowledge.createKnowledgeBase({ workspaceId: ctx.workspace.id, scopeId: workflowId, name: 'Workflow knowledge' });
+    await knowledge.addDocument({
+      workspaceId: ctx.workspace.id,
+      knowledgeBaseId: workflowBase.id,
+      name: 'factory.md',
+      content: 'A scoped workflow knowledge document.',
+    });
+
+    const workspaceRes = await app().request('/v1/knowledge-bases', { headers: ctx.authHeaders });
+    expect(workspaceRes.status).toBe(200);
+    const workspaceJson = await workspaceRes.json() as {
+      knowledgeBases: Array<{ id: string; scopeKind: string; ownerWorkflow?: { id: string; title: string } | null; documentCount: number }>;
+    };
+    const scoped = workspaceJson.knowledgeBases.find((base) => base.id === workflowBase.id);
+    const shared = workspaceJson.knowledgeBases.find((base) => base.id === workspaceBase.id);
+    expect(scoped).toMatchObject({
+      scopeKind: 'workflow',
+      ownerWorkflow: { id: workflowId, title: 'Fashion Store Factory' },
+      documentCount: 1,
+    });
+    expect(shared).toMatchObject({ scopeKind: 'workspace', ownerWorkflow: null, documentCount: 0 });
+
+    const scopedRes = await app().request(`/v1/knowledge-bases?scopeId=${workflowId}`, { headers: ctx.authHeaders });
+    const scopedJson = await scopedRes.json() as { knowledgeBases: Array<{ id: string }> };
+    expect(scopedJson.knowledgeBases.map((base) => base.id)).toEqual([workflowBase.id]);
+  });
+
+  it('loads document chunk previews and safely renames document metadata', async () => {
+    const kb = knowledge.createKnowledgeBase({ workspaceId: ctx.workspace.id, name: 'docs' });
+    const document = await knowledge.addDocument({
+      workspaceId: ctx.workspace.id,
+      knowledgeBaseId: kb.id,
+      name: 'original.md',
+      content: 'Knowledge preview content for the inspector drawer.',
+    });
+
+    const detailRes = await app().request(`/v1/knowledge-bases/${kb.id}/documents/${document.id}`, { headers: ctx.authHeaders });
+    expect(detailRes.status).toBe(200);
+    const detail = await detailRes.json() as { document: { name: string }; chunks: Array<{ id: string; content: string }> };
+    expect(detail.document.name).toBe('original.md');
+    expect(detail.chunks[0]!.content).toContain('Knowledge preview content');
+
+    const renameRes = await app().request(`/v1/knowledge-bases/${kb.id}/documents/${document.id}`, {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        name: 'renamed.md',
+        chunks: [{ id: detail.chunks[0]!.id, content: 'Edited chunk content that should feed the Brain map.' }],
+      }),
+    });
+    expect(renameRes.status).toBe(200);
+    const renamed = await renameRes.json() as { document: { name: string }; chunks: Array<{ content: string }> };
+    expect(renamed.document.name).toBe('renamed.md');
+    expect(renamed.chunks[0]!.content).toContain('Edited chunk content');
+    const chunk = ctx.db.select().from(schema.kbChunks).where(eq(schema.kbChunks.documentId, document.id)).get()!;
+    expect(chunk.metadata).toMatchObject({ source: 'renamed.md', editedVia: 'knowledge_inspector' });
+    expect(chunk.embedding).toBeNull();
+  });
+
   it('embeds uploaded chunks natively and tracks hybrid retrieval access', async () => {
     const kb = knowledge.createKnowledgeBase({ workspaceId: ctx.workspace.id, name: 'searchable docs' });
     await knowledge.addDocument({

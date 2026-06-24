@@ -27,6 +27,11 @@ export interface WorkspaceAgent {
   spaceId?: string | null;
   spaceName?: string | null;
   spaceColorHex?: string | null;
+  /** Top-level Domain + Subdomain a specialist is responsible for (manager-owned org). */
+  domainId?: string | null;
+  domainName?: string | null;
+  subdomainId?: string | null;
+  subdomainName?: string | null;
   runtimeModel?: string | null;
   adapterType?: string | null;
   abilities?: WorkspaceAgentAbility[];
@@ -46,11 +51,14 @@ export interface WorkspaceAgent {
 
 export interface WorkspaceApproval {
   id: string;
+  title?: string;
+  source?: string;
   agentName?: string;
   workflowName?: string;
   summary?: string;
   runId?: string;
   createdAt: string;
+  payload?: Record<string, unknown> | null;
 }
 
 export interface WorkspaceActiveRun {
@@ -63,14 +71,38 @@ export interface WorkspaceActiveRun {
   stepIndex?: number;
   startedAt: string;
   agents?: Array<{ id: string; name: string }>;
+  selfHealIncident?: WorkspaceSelfHealIncident | null;
 }
 
 export interface WorkspaceFailedRun {
   id: string;
   workflowId?: string;
   workflowName?: string;
+  failedNodeId?: string;
   failedNode?: string;
   finishedAt?: string;
+  failureReason?: string | null;
+  selfHealIncident?: WorkspaceSelfHealIncident | null;
+}
+
+export interface WorkspaceSelfHealIncident {
+  nodeId: string;
+  nodeTitle?: string;
+  status: 'DIAGNOSING' | 'PLANNING' | 'RETRYING' | 'AWAITING_APPROVAL' | 'APPLYING' | 'APPLIED' | 'BLOCKED' | 'EXHAUSTED' | 'ROLLED_BACK';
+  mode: 'guarded' | 'bypass';
+  attempt: number;
+  maxAttempts: number;
+  tier?: 'deterministic' | 'minimal_patch' | 'rebuild';
+  riskReason?: string;
+  checkpointId?: string;
+  error?: string;
+  diagnosis?: string;
+  reason?: string;
+  approvalId?: string;
+  outcome?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
 }
 
 export interface WorkspaceArtifact {
@@ -87,9 +119,27 @@ export interface WorkspaceArtifact {
 }
 
 export interface WorkspaceFleetOverview {
-  runs: { active: number };
+  runs: { active: number; total?: number; totalTokens?: number };
   gateways: { total: number; connected: number };
   approvals: { pending: number };
+}
+
+export type IssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done' | 'cancelled';
+export type IssuePriority = 'urgent' | 'high' | 'medium' | 'low' | 'none';
+
+export interface WorkspaceIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  description?: string | null;
+  status: IssueStatus;
+  priority: IssuePriority;
+  assigneeAgentId?: string | null;
+  linkedWorkflowId?: string | null;
+  activeRunId?: string | null;
+  labels: string[];
+  updatedAt: string;
+  createdAt: string;
 }
 
 export interface WorkspaceActivityRow {
@@ -107,6 +157,7 @@ export interface WorkspaceNotification {
   workflowId?: string;
   workflowName?: string;
   runId?: string;
+  failedNodeId?: string;
   agentName?: string;
   approvalId?: string;
   actionLabel?: string;
@@ -123,6 +174,7 @@ export interface WorkspaceSnapshot {
   activeRuns: WorkspaceActiveRun[];
   failedRuns: WorkspaceFailedRun[];
   artifacts: WorkspaceArtifact[];
+  issues: WorkspaceIssue[];
   fleet: WorkspaceFleetOverview | null;
   latestActivity: WorkspaceActivityRow | null;
   notifications: WorkspaceNotification[];
@@ -142,6 +194,7 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   activeRuns: [],
   failedRuns: [],
   artifacts: [],
+  issues: [],
   fleet: null,
   latestActivity: null,
   notifications: [],
@@ -152,6 +205,8 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
 export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.RUN_CREATED,
   REALTIME_EVENTS.RUN_RUNNING,
+  REALTIME_EVENTS.RUN_PAUSED,
+  REALTIME_EVENTS.RUN_CANCELLED,
   REALTIME_EVENTS.RUN_COMPLETED,
   REALTIME_EVENTS.RUN_FAILED,
   REALTIME_EVENTS.RUN_RECOVERED,
@@ -168,9 +223,11 @@ export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.ARTIFACT_UPDATED,
   REALTIME_EVENTS.ARTIFACT_DELETED,
   REALTIME_EVENTS.ACTIVITY_CREATED,
+  REALTIME_EVENTS.ISSUE_CREATED,
+  REALTIME_EVENTS.ISSUE_UPDATED,
 ] as const;
 
-const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'WAITING', 'CREATED', 'running', 'waiting', 'paused', 'pending']);
+const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'WAITING', 'PAUSED', 'CREATED', 'running', 'waiting', 'paused', 'pending']);
 const LIVE_AGENT_STATUSES = new Set(['online', 'active', 'running']);
 
 let snapshot = EMPTY_SNAPSHOT;
@@ -226,10 +283,11 @@ function deriveNotifications(
   }
 
   for (const approval of approvals) {
+    const selfHeal = isSelfHealApproval(approval);
     rest.push({
       id: `approval-${approval.id}`,
       type: 'approval',
-      title: 'Approval needed',
+      title: selfHeal ? 'Self-healing needs approval' : 'Approval needed',
       context: approval.summary || `${approval.workflowName ?? 'workflow'} - ${approval.agentName ?? 'agent'}`,
       timestamp: approval.createdAt,
       runId: approval.runId,
@@ -238,7 +296,29 @@ function deriveNotifications(
       approvalId: approval.id,
     });
   }
+  const selfHealApprovalRunIds = new Set(
+    approvals
+      .filter((approval) => isSelfHealApproval(approval) && approval.runId)
+      .map((approval) => approval.runId),
+  );
   for (const run of failedRuns) {
+    if (run.id && selfHealApprovalRunIds.has(run.id)) continue;
+    const incident = run.selfHealIncident;
+    if (incident) {
+      const blocked = incident.status === 'EXHAUSTED' ? 'Self-healing exhausted' : 'Self-healing blocked';
+      rest.push({
+        id: `self-heal-${run.id}-${incident.nodeId}`,
+        type: 'failure',
+        title: blocked,
+        context: selfHealIncidentSummary(incident, run),
+        timestamp: incident.updatedAt ?? run.finishedAt ?? new Date().toISOString(),
+        runId: run.id,
+        workflowId: run.workflowId,
+        failedNodeId: incident.nodeId,
+        workflowName: run.workflowName,
+      });
+      continue;
+    }
     rest.push({
       id: `failed-${run.id}`,
       type: 'failure',
@@ -246,11 +326,23 @@ function deriveNotifications(
       context: `${run.workflowName ?? 'Workflow'}${run.failedNode ? ` - failed at ${run.failedNode}` : ''}`,
       timestamp: run.finishedAt ?? new Date().toISOString(),
       runId: run.id,
+      workflowId: run.workflowId,
+      failedNodeId: run.failedNodeId,
       workflowName: run.workflowName,
     });
   }
   const sorted = rest.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   return [...setup, ...sorted].slice(0, 8);
+}
+
+function isSelfHealApproval(approval: WorkspaceApproval): boolean {
+  return approval.source === 'self_heal';
+}
+
+function selfHealIncidentSummary(incident: WorkspaceSelfHealIncident, run: WorkspaceFailedRun): string {
+  const node = incident.nodeTitle ?? run.failedNode ?? incident.nodeId;
+  const reason = incident.reason ?? incident.diagnosis ?? run.failureReason ?? 'Agentis could not certify a safe repair.';
+  return `${run.workflowName ?? 'Workflow'} - ${node}: ${reason}`;
 }
 
 function deriveCounts(agents: WorkspaceAgent[], activeRuns: WorkspaceActiveRun[]) {
@@ -282,7 +374,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
   setSnapshot({ ...base, workspaceId, loading: firstLoadForWorkspace });
 
   inflight = (async () => {
-    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, artifactsRes, fleetRes, activityRes] =
+    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, artifactsRes, fleetRes, activityRes, issuesRes] =
       await Promise.allSettled([
         api<{ user: WorkspaceUser }>('/v1/auth/me'),
         api<{ agents: WorkspaceAgent[] }>('/v1/agents'),
@@ -292,6 +384,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
         api<{ artifacts: WorkspaceArtifact[] }>('/v1/artifacts?limit=6'),
         api<WorkspaceFleetOverview>('/v1/dashboard/fleet-overview'),
         api<{ events: WorkspaceActivityRow[] }>('/v1/activity?limit=1'),
+        api<{ issues: WorkspaceIssue[] }>('/v1/issues'),
       ]);
 
     const previous = keepPreviousForWorkspace(workspaceId);
@@ -303,6 +396,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
     const artifacts = (fulfilled(artifactsRes, { artifacts: previous.artifacts }).artifacts ?? []).map(normalizeArtifact);
     const fleet = fleetRes.status === 'fulfilled' ? fleetRes.value : previous.fleet;
     const latestActivity = (fulfilled(activityRes, { events: previous.latestActivity ? [previous.latestActivity] : [] }).events ?? [])[0] ?? null;
+    const issues = fulfilled(issuesRes, { issues: previous.issues }).issues ?? [];
 
     setSnapshot({
       workspaceId,
@@ -313,6 +407,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
       activeRuns,
       failedRuns,
       artifacts,
+      issues,
       fleet,
       latestActivity,
       notifications: deriveNotifications(approvals, failedRuns, agents),

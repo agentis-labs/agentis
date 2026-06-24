@@ -8,7 +8,7 @@
  * decision — call a tool, or finish:
  *
  *   { "thought": string, "action": "tool", "tool": "<name>", "args": { ... } }
- *   { "thought": string, "action": "final", "output": "<answer>" }
+ *   { "thought": string, "action": "final", "output": <answer object or string> }
  *
  * The loop executes tool calls through the runtime (which enforces the role's tool
  * manifest + all security boundaries), appends the observation to a running
@@ -16,7 +16,7 @@
  * #12): hard caps on steps and on the transcript size keep reasoning bounded.
  */
 
-import { roleTools, TOOL_DESCRIPTIONS, type AgentRole, type AgentTool } from '@agentis/core';
+import { effectiveSpecialistTools, TOOL_DESCRIPTIONS, type AgentRole, type AgentTool } from '@agentis/core';
 import type { AgentToolRuntime } from './agentToolRuntime.js';
 import type { Logger } from '../logger.js';
 
@@ -71,7 +71,7 @@ export interface AgentToolLoopStep {
 }
 
 export interface AgentToolLoopResult {
-  output: string;
+  output: unknown;
   steps: AgentToolLoopStep[];
   stoppedReason: 'final' | 'max_steps' | 'no_decision' | 'cancelled';
   toolCalls: number;
@@ -83,7 +83,7 @@ interface StepDecision extends Record<string, unknown> {
   action?: string;
   tool?: string;
   args?: Record<string, unknown>;
-  output?: string;
+  output?: unknown;
 }
 
 const OBSERVATION_CLIP = 4_000;
@@ -93,7 +93,9 @@ export class AgentToolLoop {
 
   async run(args: AgentToolLoopArgs): Promise<AgentToolLoopResult> {
     const maxSteps = Math.max(1, Math.min(args.maxSteps ?? 6, 12));
-    const tools = args.tools && args.tools.length > 0 ? args.tools : roleTools(args.role);
+    // §specialist-removal — built-in role manifests are gone; a specialist with
+    // no explicit toolbox gets the universal floor, never an empty set.
+    const tools = args.tools && args.tools.length > 0 ? args.tools : effectiveSpecialistTools({ role: args.role });
     const steps: AgentToolLoopStep[] = [];
     const transcript: string[] = [];
     let toolCalls = 0;
@@ -122,8 +124,8 @@ export class AgentToolLoop {
       const thought = typeof decision.thought === 'string' ? decision.thought : undefined;
       if (thought) args.onStep?.({ index: i, phase: 'thinking', thought });
 
-      if (decision.action === 'final' || (decision.action !== 'tool' && typeof decision.output === 'string')) {
-        const output = typeof decision.output === 'string' ? decision.output : '';
+      if (decision.action === 'final' || (decision.action !== 'tool' && Object.prototype.hasOwnProperty.call(decision, 'output'))) {
+        const output = Object.prototype.hasOwnProperty.call(decision, 'output') ? decision.output : '';
         steps.push({ thought });
         args.onStep?.({ index: i, phase: 'final', thought, observation: output });
         return { output, steps, stoppedReason: 'final', toolCalls };
@@ -167,13 +169,15 @@ export class AgentToolLoop {
       maxTokens: 900,
       ...(args.signal ? { signal: args.signal } : {}),
     });
-    const output = typeof final?.output === 'string' ? final.output : (lastObservationText(steps) ?? '');
+    const output = final && Object.prototype.hasOwnProperty.call(final, 'output')
+      ? final.output
+      : (lastObservationText(steps) ?? '');
     return {
       output,
       steps,
       stoppedReason: 'max_steps',
       toolCalls,
-      ...(output ? {} : { error: this.deps.llm.lastError ?? 'agent exhausted the tool loop without output' }),
+      ...(isPresentOutput(output) ? {} : { error: this.deps.llm.lastError ?? 'agent exhausted the tool loop without output' }),
     };
   }
 
@@ -189,7 +193,7 @@ export class AgentToolLoop {
       '',
       'On every turn respond with ONE JSON object and nothing else:',
       '  to use a tool:  { "thought": string, "action": "tool", "tool": "<name>", "args": { ... } }',
-      '  to finish:      { "thought": string, "action": "final", "output": "<your answer>" }',
+      '  to finish:      { "thought": string, "action": "final", "output": <your final object or string> }',
       'Call a tool only when it materially advances the task. Finish as soon as you can answer.',
     ].filter(Boolean).join('\n');
   }
@@ -207,6 +211,12 @@ function lastObservationText(steps: AgentToolLoopStep[]): string | null {
     if (obs != null) return stringify(obs);
   }
   return null;
+}
+
+function isPresentOutput(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  return true;
 }
 
 function stringify(value: unknown): string {

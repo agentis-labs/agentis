@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 
@@ -45,12 +45,13 @@ export class BrainHealthService {
       ))
       .orderBy(desc(schema.brainQualityEvents.createdAt))
       .all()
-      .filter((event) => !scopeId || !event.scopeId || event.scopeId === scopeId);
+      .filter((event) => !scopeId || event.scopeId === scopeId);
 
     const runRows = this.db.select({ id: schema.workflowRuns.id }).from(schema.workflowRuns)
       .where(and(
         eq(schema.workflowRuns.workspaceId, workspaceId),
         gte(schema.workflowRuns.createdAt, since30),
+        ...(scopeId ? [eq(schema.workflowRuns.workflowId, scopeId)] : []),
       ))
       .all();
     const runCount = Math.max(1, runRows.length);
@@ -63,7 +64,7 @@ export class BrainHealthService {
       .where(and(
         eq(schema.memoryEpisodes.workspaceId, workspaceId),
         isNull(schema.memoryEpisodes.archivedAt),
-        ...(scopeId ? [or(eq(schema.memoryEpisodes.scopeId, scopeId), isNull(schema.memoryEpisodes.scopeId))!] : []),
+        ...(scopeId ? [eq(schema.memoryEpisodes.scopeId, scopeId)] : []),
       ))
       .all()
       .filter((row) => row.status !== 'archived');
@@ -134,8 +135,8 @@ export class BrainHealthService {
         nextTriggerAt: typeof maintenanceMeta.nextTriggerAt === 'string' ? maintenanceMeta.nextTriggerAt : null,
       },
       intelligence: {
-        embeddingProviderType: workspace?.embeddingProviderType ?? 'hashing',
-        degraded: (workspace?.embeddingProviderType ?? 'hashing') === 'hashing',
+        embeddingProviderType: workspace?.embeddingProviderType ?? 'local',
+        degraded: false,
         migration: workspaceSettings.embeddingMigration ?? null,
       },
       recentActivity: events.slice(0, 20).map((event) => ({

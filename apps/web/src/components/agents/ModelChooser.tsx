@@ -8,7 +8,7 @@ export interface RuntimeModelOption {
   id: string;
   label: string;
   provider: string;
-  tier?: 'flagship' | 'balanced' | 'fast' | 'auto';
+  tier?: 'flagship' | 'balanced' | 'fast' | 'auto' | 'custom';
   recommended?: boolean;
   description?: string;
 }
@@ -26,6 +26,7 @@ export function ModelChooser({
   agentId,
   value,
   onChange,
+  onLoadingChange,
   disabled = false,
   variant = 'full',
   align = 'left',
@@ -36,6 +37,7 @@ export function ModelChooser({
   agentId?: string | null;
   value: string;
   onChange: (value: string) => void;
+  onLoadingChange?: (loading: boolean) => void;
   disabled?: boolean;
   variant?: 'full' | 'compact';
   align?: 'left' | 'right';
@@ -51,6 +53,7 @@ export function ModelChooser({
   useEffect(() => {
     let cancelled = false;
     const queryStr = agentId ? `?agentId=${agentId}` : '';
+    onLoadingChange?.(true);
     void api<RuntimeModelCatalog>(`/v1/harness/models/${adapterType}${queryStr}`)
       .then((data) => {
         if (!cancelled) setCatalog(data);
@@ -65,9 +68,15 @@ export function ModelChooser({
             models: [],
           });
         }
+      })
+      .finally(() => {
+        if (!cancelled) onLoadingChange?.(false);
       });
-    return () => { cancelled = true; };
-  }, [adapterType, agentId]);
+    return () => {
+      cancelled = true;
+      onLoadingChange?.(false);
+    };
+  }, [adapterType, agentId, onLoadingChange]);
 
   useEffect(() => {
     if (!open) return;
@@ -279,5 +288,6 @@ function tierLabel(tier: RuntimeModelOption['tier']): string | undefined {
   if (tier === 'balanced') return 'Balanced';
   if (tier === 'fast') return 'Fast';
   if (tier === 'auto') return 'Auto';
+  if (tier === 'custom') return 'Custom';
   return undefined;
 }

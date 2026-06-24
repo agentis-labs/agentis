@@ -24,6 +24,17 @@ export function normalizeTextKey(input: string): string {
   return tokenize(input).slice(0, 16).join(' ');
 }
 
+/**
+ * §B5.3 — single home for the "this text looks sensitive" guard. Detects emails,
+ * common API-key/token shapes, and US SSN-shaped numbers. Was duplicated
+ * verbatim in brainFormation + chatMemoryCapture; both now import this.
+ */
+export function looksSensitive(text: string): boolean {
+  return /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text)
+    || /\b(?:sk|pk|ghp|gho|xoxb|xoxp)_[A-Za-z0-9_-]{16,}\b/.test(text)
+    || /\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b/.test(text);
+}
+
 export function scoreText(queryTokens: Set<string>, text: string): number {
   if (queryTokens.size === 0) return 0;
   const textTokens = new Set(tokenize(text));

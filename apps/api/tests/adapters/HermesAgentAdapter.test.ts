@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ChatDelta, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
 import { HermesAgentAdapter } from '../../src/adapters/HermesAgentAdapter.js';
 import type { Logger } from '../../src/logger.js';
+import type { RuntimeSessionStore } from '../../src/services/runtimeSessionStore.js';
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
 
@@ -36,23 +37,160 @@ describe('HermesAgentAdapter', () => {
     spawnMock.mockReset();
   });
 
-  it('defaults to the stable CLI compatibility transport', () => {
+  it('defaults to the persistent ACP streaming transport', () => {
     const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
     const caps = adapter.capabilities();
     expect(caps.interactiveChat).toBe(true);
     expect(caps.toolCalling).toBe(true);
-    expect(caps.toolForwarding).toBe('marker_protocol');
-    expect(caps.limitations).toContainEqual(expect.stringContaining('ACP builds can stall'));
+    expect(caps.toolForwarding).toBe('mcp_native');
+    expect(caps.limitations).toBeUndefined();
   });
 
-  it('advertises MCP-native chat when ACP is explicitly enabled', () => {
+  it('keeps the one-shot CLI transport as an explicit compatibility mode', () => {
     const adapter = new HermesAgentAdapter({
       agentId: 'agent-1',
       logger,
       binaryPath: 'hermes-test',
-      chatTransport: 'acp',
+      chatTransport: 'cli',
     });
-    expect(adapter.capabilities().toolForwarding).toBe('mcp_native');
+    expect(adapter.capabilities().toolForwarding).toBe('marker_protocol');
+    expect(adapter.capabilities().limitations).toContainEqual(expect.stringContaining('CLI compatibility transport'));
+  });
+
+  it('does not prewarm ACP on connect unless explicitly enabled', async () => {
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
+
+    await adapter.connect();
+
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('prewarms ACP on connect when explicitly enabled and reuses the prepared session for the first chat', async () => {
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const adapter = new HermesAgentAdapter({
+      agentId: 'agent-1',
+      logger,
+      binaryPath: 'hermes-test',
+      env: { AGENTIS_HERMES_PREWARM_ON_CONNECT: '1' },
+    });
+
+    await adapter.connect();
+    await vi.waitFor(() => expect(child.sessionNewCalls).toBe(1));
+
+    child.on('__prompt', () => {
+      child.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Warm reply' } });
+      child.finishPrompt('end_turn');
+    });
+    const deltas = await collectDeltas(adapter.chat(
+      [{ role: 'user', content: 'hi' }],
+      [],
+      { sessionKey: 'conversation-a' },
+    ));
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(child.sessionNewCalls).toBe(1);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'Warm reply' });
+  });
+
+  it('ignores a too-low startup timeout and falls back from stalled ACP session open to CLI in auto mode', async () => {
+    vi.useFakeTimers();
+    const prior = process.env.AGENTIS_HERMES_STARTUP_TIMEOUT_MS;
+    process.env.AGENTIS_HERMES_STARTUP_TIMEOUT_MS = '30000';
+    const acp = fakeAcpChild({ hangSessionNew: true });
+    const cli = fakeChildProcess();
+    spawnMock
+      .mockReturnValueOnce(acp)
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          cli.stdout.write('CLI_FALLBACK\n');
+          cli.emit('exit', 0);
+        });
+        return cli;
+      });
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
+
+    try {
+      const run = collectDeltas(adapter.chat(
+        [{ role: 'user', content: 'hi' }],
+        [],
+        { sessionKey: 'conversation-a' },
+      ));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(90_000);
+      await vi.advanceTimersByTimeAsync(0);
+      const deltas = await run;
+
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      expect(deltas).toContainEqual(expect.objectContaining({
+        type: 'activity',
+        label: 'Switching Hermes transport',
+      }));
+      expect(deltas).toContainEqual({ type: 'text', delta: 'CLI_FALLBACK' });
+      expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+    } finally {
+      if (prior === undefined) delete process.env.AGENTIS_HERMES_STARTUP_TIMEOUT_MS;
+      else process.env.AGENTIS_HERMES_STARTUP_TIMEOUT_MS = prior;
+    }
+  });
+
+  it('caps first model event silence around 90 seconds instead of waiting for the hard ceiling', async () => {
+    vi.useFakeTimers();
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', chatTransport: 'acp' });
+
+    child.on('__prompt', () => {
+      // Simulate a provider that accepted the prompt but never streams a model event.
+    });
+    const run = collectDeltas(adapter.chat(
+      [{ role: 'user', content: 'slow' }],
+      [],
+      { sessionKey: 'conversation-a' },
+    ));
+    await vi.advanceTimersByTimeAsync(89_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const deltas = await run;
+
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      error: expect.stringContaining('first_event_timeout'),
+    }));
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
+  });
+
+  it('does not load a stale Hermes session from an older ACP process', async () => {
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const store = {
+      get: vi.fn(() => ({
+        runtimeSessionId: 'stale-session',
+        processGeneration: 1,
+      })),
+      upsert: vi.fn(),
+      markStatus: vi.fn(),
+    } as unknown as RuntimeSessionStore;
+    const adapter = new HermesAgentAdapter({
+      agentId: 'agent-1',
+      workspaceId: 'workspace-1',
+      sessionStore: store,
+      logger,
+      binaryPath: 'hermes-test',
+    });
+
+    child.on('__prompt', () => child.finishPrompt('end_turn'));
+    await collectDeltas(adapter.chat(
+      [{ role: 'user', content: 'hi' }],
+      [],
+      { sessionKey: 'conversation-a' },
+    ));
+
+    expect(child.sessionLoadCalls).toBe(0);
+    expect(child.sessionNewCalls).toBe(1);
   });
 
   it('chats over ACP: streams thinking + answer and ends with done(stop)', async () => {
@@ -71,7 +209,13 @@ describe('HermesAgentAdapter', () => {
 
     // Spawned in ACP mode, not the old one-shot chat path.
     expect(spawnMock.mock.calls[0]![1]).toEqual(['acp']);
-    expect(deltas).toContainEqual({ type: 'thinking', delta: 'considering' });
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'activity',
+      phase: 'runtime',
+      status: 'running',
+      label: 'Hermes is reasoning',
+    }));
+    expect(deltas.some((delta) => delta.type === 'thinking')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'Hello operator' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
@@ -105,6 +249,26 @@ describe('HermesAgentAdapter', () => {
     ]);
   });
 
+  it('selects a one-turn allow option for ACP permission requests', async () => {
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', chatTransport: 'acp' });
+
+    child.on('__prompt', () => {
+      child.requestPermission([
+        { optionId: 'deny', name: 'Deny', kind: 'deny' },
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+      ]);
+      queueMicrotask(() => child.finishPrompt('end_turn'));
+    });
+    for await (const _ of adapter.chat([{ role: 'user', content: 'use a tool' }], [])) { /* drain */ }
+
+    expect(child.permissionResponses).toContainEqual(expect.objectContaining({
+      result: { outcome: { outcome: 'selected', optionId: 'allow-once' } },
+    }));
+  });
+
   it('surfaces the harness own tool calls as live activity, never executable tool_calls', async () => {
     const child = fakeAcpChild();
     spawnMock.mockReturnValue(child);
@@ -122,6 +286,29 @@ describe('HermesAgentAdapter', () => {
     // The agent ran the tool itself over MCP — Agentis must NOT re-execute it.
     expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('updates Hermes tool activity in place when ACP reports completion', async () => {
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', chatTransport: 'acp' });
+    const deltas: ChatDelta[] = [];
+
+    child.on('__prompt', () => {
+      child.update({ sessionUpdate: 'tool_call', toolCallId: 'tc1', title: 'List workflows', status: 'pending' });
+      child.update({ sessionUpdate: 'tool_call_update', toolCallId: 'tc1', status: 'completed' });
+      child.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Done.' } });
+      child.finishPrompt('end_turn');
+    });
+    for await (const delta of adapter.chat([{ role: 'user', content: 'list workflows' }], [])) deltas.push(delta);
+
+    const toolActivities = deltas.filter((delta): delta is Extract<ChatDelta, { type: 'activity' }> => (
+      delta.type === 'activity' && delta.id === 'hermes-tc1'
+    ));
+    expect(toolActivities).toEqual([
+      expect.objectContaining({ status: 'running', label: 'Using List workflows' }),
+      expect.objectContaining({ status: 'success', label: 'Used List workflows' }),
+    ]);
   });
 
   it('switches the ACP session to the configured model, resolving provider-prefixed ids', async () => {
@@ -246,7 +433,7 @@ describe('HermesAgentAdapter', () => {
     expect(deltas.some((d) => d.type === 'text')).toBe(false);
   });
 
-  it('answers chat through the documented Hermes CLI contract by default', async () => {
+  it('answers chat through the documented Hermes CLI compatibility transport', async () => {
     const child = fakeChildProcess();
     spawnMock.mockImplementation(() => {
       queueMicrotask(() => {
@@ -255,7 +442,12 @@ describe('HermesAgentAdapter', () => {
       });
       return child;
     });
-    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
+    const adapter = new HermesAgentAdapter({
+      agentId: 'agent-1',
+      logger,
+      binaryPath: 'hermes-test',
+      chatTransport: 'cli',
+    });
 
     const deltas = await collectDeltas(adapter.chat(
       [{ role: 'user', content: 'Reply with exactly CLI_OK' }],
@@ -294,7 +486,7 @@ describe('HermesAgentAdapter', () => {
 });
 
 /** A fake `hermes acp` child: auto-answers the ACP handshake over JSON-RPC. */
-function fakeAcpChild(opts?: { models?: unknown }) {
+function fakeAcpChild(opts?: { models?: unknown; hangSessionNew?: boolean }) {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
     stderr: PassThrough;
@@ -303,14 +495,20 @@ function fakeAcpChild(opts?: { models?: unknown }) {
     finishPrompt: (stopReason?: string) => void;
     sessionNewParams?: unknown;
     sessionNewCalls: number;
+    sessionLoadCalls: number;
     promptSessionIds: string[];
     setModelParams?: unknown;
+    permissionResponses: Array<{ id?: number; result?: unknown }>;
+    requestPermission: (options: Array<{ optionId: string; name?: string; kind?: string }>) => void;
   };
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.sessionNewCalls = 0;
+  child.sessionLoadCalls = 0;
   child.promptSessionIds = [];
+  child.permissionResponses = [];
   let promptId: number | undefined;
+  let permissionRequestId = 10_000;
   const write = (obj: unknown) => child.stdout.write(JSON.stringify(obj) + '\n');
   const reply = (id: number, result: unknown) => write({ jsonrpc: '2.0', id, result });
 
@@ -323,10 +521,14 @@ function fakeAcpChild(opts?: { models?: unknown }) {
         else if (msg.method === 'session/new') {
           child.sessionNewCalls += 1;
           child.sessionNewParams = msg.params;
+          if (opts?.hangSessionNew) continue;
           reply(msg.id, {
             sessionId: `sess-${child.sessionNewCalls}`,
             ...(opts?.models ? { models: opts.models } : {}),
           });
+        } else if (msg.method === 'session/load') {
+          child.sessionLoadCalls += 1;
+          reply(msg.id, { sessionId: msg.params.sessionId });
         } else if (msg.method === 'session/set_model') {
           child.setModelParams = msg.params;
           reply(msg.id, {});
@@ -334,6 +536,8 @@ function fakeAcpChild(opts?: { models?: unknown }) {
           promptId = msg.id;
           child.promptSessionIds.push(msg.params.sessionId);
           queueMicrotask(() => child.emit('__prompt', msg.params));
+        } else if (msg.id !== undefined && msg.result !== undefined) {
+          child.permissionResponses.push({ id: msg.id, result: msg.result });
         }
       }
       cb();
@@ -341,6 +545,12 @@ function fakeAcpChild(opts?: { models?: unknown }) {
   });
 
   child.update = (update) => write({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'sess-1', update } });
+  child.requestPermission = (options) => write({
+    jsonrpc: '2.0',
+    id: permissionRequestId++,
+    method: 'session/request_permission',
+    params: { options, toolCall: { title: 'Run tool', kind: 'tool' } },
+  });
   child.finishPrompt = (stopReason = 'end_turn') => {
     if (promptId !== undefined) reply(promptId, { stopReason });
   };

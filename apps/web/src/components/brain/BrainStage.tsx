@@ -473,7 +473,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
         ctx.fill();
       }
 
-      // orphan ring
+      // disconnected-node ring
       if (n.degree === 0 && !n.isCore) {
         ctx.beginPath();
         ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);

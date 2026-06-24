@@ -22,6 +22,7 @@ import {
   Globe,
   HardDrive,
   Key,
+  LayoutGrid,
   MoreHorizontal,
   Plus,
   Puzzle,
@@ -36,7 +37,9 @@ import {
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { AppRecord } from '@agentis/core';
 import { api, apiErrorMessage } from '../lib/api';
+import { appsApi } from '../lib/appsApi';
 import { abilitiesApi, compileStatusLabel, compileStatusTone, type Ability } from '../lib/abilities';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
@@ -47,8 +50,8 @@ import { EmptyState } from '../components/shared/EmptyState';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { ExtensionStudioModal } from '../components/extensions/ExtensionStudioModal';
 
-type LibraryFilter = 'all' | 'agents' | 'abilities' | 'workflows' | 'extensions';
-type LibraryKind = 'agent' | 'ability' | 'workflow' | 'extension';
+type LibraryFilter = 'all' | 'apps' | 'agents' | 'abilities' | 'workflows' | 'extensions';
+type LibraryKind = 'app' | 'agent' | 'ability' | 'workflow' | 'extension';
 type ExtensionPermission =
   | 'network' | 'credentials' | 'workspace.read' | 'workspace.write' | 'filesystem'
   | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write';
@@ -120,7 +123,7 @@ interface LibraryItem {
   version?: string;
   description?: string | null;
   searchText: string;
-  source: WorkflowPackage | Ability | WorkspaceExtension;
+  source: WorkflowPackage | Ability | WorkspaceExtension | AppRecord;
 }
 
 const PERMISSIONS: Array<{
@@ -209,6 +212,7 @@ export function PackagesPage() {
   const [workflows, setWorkflows] = useState<WorkflowPackage[]>([]);
   const [abilities, setAbilities] = useState<Ability[]>([]);
   const [extensions, setExtensions] = useState<WorkspaceExtension[]>([]);
+  const [apps, setApps] = useState<AppRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<LibraryFilter>('all');
@@ -219,10 +223,11 @@ export function PackagesPage() {
   async function refresh() {
     setLoading(true);
     try {
-      const [packageRes, abilityRes, extensionRes] = await Promise.allSettled([
+      const [packageRes, abilityRes, extensionRes, appRes] = await Promise.allSettled([
         api<{ packages: WorkflowPackage[] }>('/v1/packages'),
         abilitiesApi.list(),
         api<{ extensions: WorkspaceExtension[] }>('/v1/extensions'),
+        appsApi.list(),
       ]);
       setWorkflows(
         packageRes.status === 'fulfilled'
@@ -231,10 +236,12 @@ export function PackagesPage() {
       );
       setAbilities(abilityRes.status === 'fulfilled' ? abilityRes.value.abilities ?? [] : []);
       setExtensions(extensionRes.status === 'fulfilled' ? extensionRes.value.extensions ?? [] : []);
+      setApps(appRes.status === 'fulfilled' ? appRes.value ?? [] : []);
     } catch {
       setWorkflows([]);
       setAbilities([]);
       setExtensions([]);
+      setApps([]);
     } finally {
       setLoading(false);
     }
@@ -245,6 +252,16 @@ export function PackagesPage() {
   }, []);
 
   const items = useMemo<LibraryItem[]>(() => {
+    const appItems = apps.map((app): LibraryItem => ({
+      id: `app:${app.id}`,
+      kind: 'app',
+      name: app.name,
+      slug: app.slug,
+      version: app.version,
+      description: app.description,
+      searchText: [app.name, app.slug, app.description, ...(app.manifest?.capabilities ?? [])].filter(Boolean).join(' ').toLowerCase(),
+      source: app,
+    }));
     const packageItems = workflows.map((pkg): LibraryItem => ({
       id: `${pkg.kind}:${pkg.id}`,
       kind: pkg.kind,
@@ -282,16 +299,17 @@ export function PackagesPage() {
       ].filter(Boolean).join(' ').toLowerCase(),
       source: extension,
     }));
-    return [...extensionItems, ...abilityItems, ...packageItems];
-  }, [abilities, extensions, workflows]);
+    return [...appItems, ...extensionItems, ...abilityItems, ...packageItems];
+  }, [abilities, apps, extensions, workflows]);
 
   const counts = useMemo(() => ({
     all: items.length,
+    apps: apps.length,
     agents: items.filter((item) => item.kind === 'agent').length,
     abilities: abilities.length,
     workflows: items.filter((item) => item.kind === 'workflow').length,
     extensions: extensions.length,
-  }), [abilities.length, items, extensions.length]);
+  }), [abilities.length, apps.length, items, extensions.length]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -390,30 +408,35 @@ export function PackagesPage() {
   }
 
   function handleOpenItem(item: LibraryItem) {
+    if (item.kind === 'app') nav(`/apps/${(item.source as AppRecord).id}`);
     if (item.kind === 'workflow' || item.kind === 'agent') setOpenWorkflow(item.source as WorkflowPackage);
     if (item.kind === 'ability') nav(`/abilities/${(item.source as Ability).id}`);
     if (item.kind === 'extension') setOpenExtension(item.source as WorkspaceExtension);
   }
 
-  const emptyTitle = filter === 'extensions'
-    ? 'No extensions installed yet'
-    : filter === 'abilities'
-      ? 'No abilities yet'
-      : filter === 'workflows'
-        ? 'No workflow packages yet'
-        : filter === 'agents'
-          ? 'No agent packages yet'
-          : 'No library items yet';
+  const emptyTitle = filter === 'apps'
+    ? 'No apps yet'
+    : filter === 'extensions'
+      ? 'No extensions installed yet'
+      : filter === 'abilities'
+        ? 'No abilities yet'
+        : filter === 'workflows'
+          ? 'No workflow packages yet'
+          : filter === 'agents'
+            ? 'No agent packages yet'
+            : 'No library items yet';
 
-  const emptyBody = filter === 'extensions'
-    ? 'Create a sandboxed node-worker extension to make deterministic runtime work available to workflows.'
-    : filter === 'abilities'
-      ? 'Abilities you create will appear here alongside workflows and extensions.'
-      : filter === 'workflows'
-        ? 'Workflows are mirrored into packages automatically when you create or update them.'
-        : filter === 'agents'
-          ? 'Agents can be packaged to carry their full configuration (instructions, role, memory configuration).'
-          : 'Create workflows, abilities, or extensions to fill this workspace library.';
+  const emptyBody = filter === 'apps'
+    ? 'Apps you build or install appear here. Create one from the Apps page, or import an .agentisapp package.'
+    : filter === 'extensions'
+      ? 'Create a sandboxed node-worker extension to make deterministic runtime work available to workflows.'
+      : filter === 'abilities'
+        ? 'Abilities you create will appear here alongside apps, workflows, and extensions.'
+        : filter === 'workflows'
+          ? 'Workflows are mirrored into packages automatically when you create or update them.'
+          : filter === 'agents'
+            ? 'Agents can be packaged to carry their full configuration (instructions, role, memory configuration).'
+            : 'Create apps, workflows, abilities, or extensions to fill this workspace library.';
 
   return (
     <div className="flex h-full flex-col">
@@ -421,7 +444,7 @@ export function PackagesPage() {
         <div>
           <h1 className="text-display text-text-primary">Packages</h1>
           <div className="mt-0.5 text-[12px] text-text-muted">
-            One library for runtime extensions, specialist abilities, and reusable workflows.
+            One library for Agentic Apps, agents, runtime extensions, specialist abilities, and reusable workflows.
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -531,6 +554,7 @@ function FilterTabs({
 }) {
   const tabs: Array<{ value: LibraryFilter; label: string; icon: ReactNode }> = [
     { value: 'all', label: 'All', icon: <Boxes size={12} /> },
+    { value: 'apps', label: 'Apps', icon: <LayoutGrid size={12} /> },
     { value: 'agents', label: 'Agents', icon: <Bot size={12} /> },
     { value: 'abilities', label: 'Abilities', icon: <Zap size={12} /> },
     { value: 'workflows', label: 'Workflows', icon: <WorkflowIcon size={12} /> },
@@ -623,6 +647,9 @@ function LibraryCard({
   onDuplicateWorkflow: () => void;
   onDeleteWorkflow: () => void;
 }) {
+  if (item.kind === 'app') {
+    return <AppLibraryCard app={item.source as AppRecord} onOpen={onOpen} />;
+  }
   if (item.kind === 'extension') {
     return <ExtensionCard extension={item.source as WorkspaceExtension} onOpen={onOpen} />;
   }
@@ -648,6 +675,35 @@ function LibraryCard({
       onDuplicate={onDuplicateWorkflow}
       onDelete={onDeleteWorkflow}
     />
+  );
+}
+
+function AppLibraryCard({ app, onOpen }: { app: AppRecord; onOpen: () => void }) {
+  const iconIsImage = Boolean(app.icon && (app.icon.startsWith('http') || app.icon.startsWith('data:image/')));
+  return (
+    <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-card border border-violet-400/20 bg-violet-500/10 text-violet-300">
+          {iconIsImage ? <img src={app.icon ?? ''} alt="" className="h-full w-full object-cover" /> : app.icon ? <span className="text-[17px]">{app.icon}</span> : <LayoutGrid size={17} />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+              {app.name}
+            </button>
+            <span className="rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">{app.status}</span>
+          </div>
+          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{app.slug}{app.version ? `@${app.version}` : ''}</div>
+          {app.description && <div className="mt-2 line-clamp-2 text-[12px] leading-5 text-text-secondary">{app.description}</div>}
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Pill icon={<LayoutGrid size={11} />} label="Agentic App" />
+      </div>
+      <div className="mt-4">
+        <Button variant="secondary" size="sm" iconLeft={<LayoutGrid size={12} />} onClick={onOpen}>Open app</Button>
+      </div>
+    </article>
   );
 }
 
@@ -1219,7 +1275,7 @@ function PackageDetailDrawer({
                         {workflow.id && !workflow.id.startsWith('pkg:') && (
                           <button
                             type="button"
-                            onClick={() => { onClose(); nav(`/workflows/${workflow.id}`); }}
+                            onClick={() => { onClose(); nav(`/apps/workflows/${workflow.id}`); }}
                             className="text-[11px] font-medium text-accent hover:underline"
                           >
                             Open canvas
@@ -1364,6 +1420,7 @@ function schemaType(value: string): string {
 }
 
 function pluralKind(kind: LibraryKind): Exclude<LibraryFilter, 'all'> {
+  if (kind === 'app') return 'apps';
   if (kind === 'agent') return 'agents';
   if (kind === 'ability') return 'abilities';
   if (kind === 'workflow') return 'workflows';

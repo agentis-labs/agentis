@@ -17,6 +17,8 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import {
   REALTIME_EVENTS,
+  REALTIME_ROOMS,
+  type ChatMessage,
   type ChatToolCall,
   type SessionAdapter,
   type SessionStepResult,
@@ -36,17 +38,19 @@ import { EvaluatorRuntime } from '../../src/services/evaluatorRuntime.js';
 import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
 import { AgentSessionService } from '../../src/services/agentSession.js';
 import { AgentSessionRuntime } from '../../src/services/agentSessionRuntime.js';
+import { PlanService, type TaskCompletionJudge } from '../../src/services/planService.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 type ScriptStep = { text?: string; toolCalls?: ChatToolCall[] };
 
 /** A stateless-looking adapter that replays a fixed script of step results. */
-function scriptedAdapter(steps: ScriptStep[]): SessionAdapter {
+function scriptedAdapter(steps: ScriptStep[], seenMessages?: ChatMessage[][]): SessionAdapter {
   let i = 0;
   return {
     id: 'stub-session',
-    async executeStep(): Promise<SessionStepResult> {
+    async executeStep(input): Promise<SessionStepResult> {
+      seenMessages?.push(input.messages);
       const step = steps[Math.min(i, steps.length - 1)] ?? {};
       i += 1;
       const toolCalls = step.toolCalls ?? [];
@@ -62,7 +66,7 @@ function scriptedAdapter(steps: ScriptStep[]): SessionAdapter {
 let ctx: TestContext;
 let dataDir: string;
 
-function buildEngine(adapter: SessionAdapter): WorkflowEngine {
+function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verifyCompletion?: TaskCompletionJudge } = {}): WorkflowEngine {
   const volume = new WorkspaceVolumeService(dataDir);
   const agentTools = new AgentToolRuntime({ volume });
   const scratchpad = new ScratchpadService(ctx.bus, ctx.logger);
@@ -71,9 +75,11 @@ function buildEngine(adapter: SessionAdapter): WorkflowEngine {
     sessions,
     adapter,
     scratchpad,
+    plans: opts.plans,
     bus: ctx.bus,
     logger: ctx.logger,
     agentTools,
+    verifyCompletion: opts.verifyCompletion,
   });
   const evaluatorRuntime = new EvaluatorRuntime({
     baseUrl: 'http://stub/v1',
@@ -100,10 +106,11 @@ function buildEngine(adapter: SessionAdapter): WorkflowEngine {
     adapters: new AdapterManager(ctx.logger),
     sessions,
     sessionRuntime,
+    plans: opts.plans,
   });
 }
 
-function sessionGraph(): WorkflowGraph {
+function sessionGraph(agentId?: string): WorkflowGraph {
   return {
     version: 1,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -116,6 +123,7 @@ function sessionGraph(): WorkflowGraph {
         position: { x: 200, y: 0 },
         config: {
           kind: 'agent_session',
+          ...(agentId ? { agentId } : {}),
           agentRole: 'coder',
           prompt: 'Do the task.',
           inputKeys: [],
@@ -136,8 +144,10 @@ function runSessionGraph(
   engine: WorkflowEngine,
   events: string[],
   onWaiting?: (runId: string, reason: string) => void,
+  planId?: string,
+  graphOverride?: WorkflowGraph,
 ): Promise<string> {
-  const graph = sessionGraph();
+  const graph = graphOverride ?? sessionGraph();
   const wfId = randomUUID();
   ctx.db
     .insert(schema.workflows)
@@ -168,6 +178,7 @@ function runSessionGraph(
       workspaceId: ctx.workspace.id,
       ambientId: ctx.ambient.id,
       workflowId: wfId,
+      planId,
       userId: ctx.user.id,
       triggerId: null,
       inputs: {},
@@ -201,6 +212,55 @@ describe('WorkflowEngine — agent_session', () => {
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     expect(run.status).toBe('COMPLETED');
     expect(nodeOutput(runId)?.result).toBe('all done, here is the answer');
+  });
+
+  it('injects persisted identity into the agent_session run context', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Session Specialist',
+      description: 'Owns persistent session work.',
+      adapterType: 'codex',
+      capabilityTags: ['code'],
+      config: { cwd: 'C:/repo', apiKey: 'sk-secret', nested: { safe: 'visible' } },
+      status: 'online',
+      role: 'worker',
+      runtimeModel: 'gpt-5.5',
+      instructions: 'Session Specialist exact instructions.',
+    }).run();
+    const seenMessages: ChatMessage[][] = [];
+    const engine = buildEngine(scriptedAdapter([{ text: 'session done' }], seenMessages));
+    const events: string[] = [];
+    await runSessionGraph(engine, events, undefined, undefined, sessionGraph(agentId));
+
+    const systemPrompt = seenMessages[0]?.[0]?.content ?? '';
+    expect(systemPrompt.match(/<agentis_identity/g)).toHaveLength(1);
+    expect(systemPrompt).toContain('name: Session Specialist');
+    expect(systemPrompt).toContain('role: worker');
+    expect(systemPrompt).toContain('runtimeModel: gpt-5.5');
+    expect(systemPrompt).toContain('capabilityTags: code');
+    expect(systemPrompt).toContain('Session Specialist exact instructions.');
+    expect(systemPrompt).toContain('"cwd":"C:/repo"');
+    expect(systemPrompt).toContain('"apiKey":"[redacted]"');
+    expect(systemPrompt).toContain('"safe":"visible"');
+    expect(systemPrompt).not.toContain('sk-secret');
+  });
+
+  it('records a first-class deviation verdict, then continues (W5.1)', async () => {
+    const engine = buildEngine(
+      scriptedAdapter([
+        { toolCalls: [{ id: 'd1', name: 'flag_deviation', arguments: { kind: 'reject_input', reason: 'upstream node returned an empty list — cannot qualify nothing' } }] },
+        { toolCalls: [{ id: 'c1', name: 'complete_task', arguments: { output: { handled: 'escalated' } } }] },
+      ]),
+    );
+    const events: string[] = [];
+    const runId = await runSessionGraph(engine, events);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+    expect(nodeOutput(runId)?.handled).toBe('escalated');
   });
 
   it('runs a control tool then completes via complete_task', async () => {
@@ -304,5 +364,77 @@ describe('WorkflowEngine — agent_session', () => {
     expect(run.status).toBe('COMPLETED');
     expect(events).toContain(REALTIME_EVENTS.NODE_WAITING_FOR_INPUT);
     expect(nodeOutput(runId)?.resumed).toBe('yes');
+  });
+
+  it('gates complete_task through the durable task spine verification contract', async () => {
+    const plans = new PlanService(ctx.db, ctx.bus);
+    const realtimeEvents: string[] = [];
+    const unsubscribe = ctx.bus.subscribe((msg) => {
+      if (msg.room === REALTIME_ROOMS.workspace(ctx.workspace.id)) realtimeEvents.push(msg.envelope.event);
+    });
+    const plan = plans.createTask({
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      objective: 'Ship a verified answer',
+      acceptanceCriteria: ['Output must include ok: true'],
+    });
+    const verifyCompletion: TaskCompletionJudge = ({ output }) => {
+      const ok = typeof output === 'object' && output !== null && (output as { ok?: unknown }).ok === true;
+      return {
+        status: ok ? 'passed' : 'failed',
+        verifier: 'judge',
+        criteria: [{
+          criterion: 'Output must include ok: true',
+          passed: ok,
+          reason: ok ? 'Output carried ok: true.' : 'Output did not carry ok: true.',
+        }],
+      };
+    };
+    const engine = buildEngine(
+      scriptedAdapter([
+        { toolCalls: [{ id: 'c1', name: 'complete_task', arguments: { output: { ok: false } } }] },
+        { toolCalls: [{ id: 'c2', name: 'complete_task', arguments: { output: { ok: true } } }] },
+      ]),
+      { plans, verifyCompletion },
+    );
+
+    const runId = await runSessionGraph(engine, [], undefined, plan.id);
+    unsubscribe();
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    const completed = plans.get(ctx.workspace.id, plan.id);
+
+    expect(run.status).toBe('COMPLETED');
+    expect(nodeOutput(runId)?.ok).toBe(true);
+    expect(completed.status).toBe('completed');
+    expect(completed.runIds).toContain(runId);
+    expect(completed.verification?.status).toBe('passed');
+    expect(realtimeEvents).toContain(REALTIME_EVENTS.TASK_SPINE_VERIFYING);
+    expect(realtimeEvents).toContain(REALTIME_EVENTS.TASK_SPINE_VERIFIED);
+  });
+
+  it('records task-spine deviations and decisions from session control tools', async () => {
+    const plans = new PlanService(ctx.db);
+    const plan = plans.createTask({
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      objective: 'Handle changed upstream input',
+      acceptanceCriteria: ['A grounded result is returned.'],
+    });
+    const engine = buildEngine(
+      scriptedAdapter([
+        { toolCalls: [{ id: 'd1', name: 'flag_deviation', arguments: { kind: 'rescope', reason: 'upstream payload lacked optional enrichment fields', proposed: 'continue with core fields' } }] },
+        { toolCalls: [{ id: 'r1', name: 'record_decision', arguments: { summary: 'Continue with core fields', rationale: 'The required identifiers are present.' } }] },
+        { toolCalls: [{ id: 'c1', name: 'complete_task', arguments: { output: { handled: true } } }] },
+      ]),
+      { plans },
+    );
+
+    const runId = await runSessionGraph(engine, [], undefined, plan.id);
+    const updated = plans.get(ctx.workspace.id, plan.id);
+
+    expect(runId).toBeTruthy();
+    expect(updated.deviations?.[0]?.reason).toContain('upstream payload');
+    expect(updated.decisions?.[0]?.summary).toBe('Continue with core fields');
+    expect(updated.status).toBe('completed');
   });
 });

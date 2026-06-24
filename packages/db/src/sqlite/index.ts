@@ -45,6 +45,38 @@ export function openSqlite(options: SqliteOpenOptions): { db: AgentisSqliteDb; s
 }
 
 function runEmbeddedMigrations(sqlite: Database.Database): void {
+  // Older databases can have a pre-task-spine plans table. EMBEDDED_INIT_SQL
+  // creates an index on plans.session_id before the drift patch below runs, so
+  // add that single compatibility column first if the table already exists.
+  {
+    const plansTable = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'plans'")
+      .get() as { name: string } | undefined;
+    if (plansTable) {
+      const planColumns = sqlite.prepare("SELECT name FROM pragma_table_info('plans')").all() as Array<{ name: string }>;
+      if (!planColumns.some((column) => column.name === 'session_id')) {
+        sqlite.exec('ALTER TABLE plans ADD COLUMN session_id TEXT');
+      }
+    }
+  }
+
+  // Existing databases can have the knowledge_bases table without workflow
+  // scoping. EMBEDDED_INIT_SQL now creates idx_knowledge_bases_scope, so add
+  // the compatibility column before the init SQL creates indexes.
+  {
+    const knowledgeBasesTable = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'knowledge_bases'")
+      .get() as { name: string } | undefined;
+    if (knowledgeBasesTable) {
+      const columns = sqlite.prepare("SELECT name FROM pragma_table_info('knowledge_bases')").all() as Array<{
+        name: string;
+      }>;
+      if (!columns.some((column) => column.name === 'scope_id')) {
+        sqlite.exec('ALTER TABLE knowledge_bases ADD COLUMN scope_id TEXT REFERENCES workflows(id) ON DELETE CASCADE');
+      }
+    }
+  }
+
   // Embedded migrations are inlined as a string literal in embedded-sql.ts
   // so distribution stays a single JS bundle with zero file-resolution risk.
   sqlite.exec(EMBEDDED_INIT_SQL);
@@ -73,6 +105,14 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
     }
   };
+  const renameTable = (from: string, to: string): void => {
+    if (!tableExists(from) || tableExists(to)) return;
+    sqlite.exec(`ALTER TABLE ${from} RENAME TO ${to}`);
+  };
+  const renameColumn = (table: string, from: string, to: string): void => {
+    if (!tableExists(table) || !columnExists(table, from) || columnExists(table, to)) return;
+    sqlite.exec(`ALTER TABLE ${table} RENAME COLUMN ${from} TO ${to}`);
+  };
 
   // Workspace issue queue defaults.
   addColumn('workspaces', 'issue_prefix', "TEXT NOT NULL DEFAULT 'AGT'");
@@ -95,10 +135,13 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   addColumn('conversation_messages', 'issue_id', 'TEXT');
   addColumn('conversations', 'title', 'TEXT');
   addColumn('conversations', 'archived_at', 'TEXT');
+  addColumn('conversations', 'channel_connection_id', 'TEXT REFERENCES channel_connections(id) ON DELETE SET NULL');
+  addColumn('conversations', 'channel_chat_id', 'TEXT');
   sqlite.exec(`
 DROP INDEX IF EXISTS uq_conversation_agent;
 DROP INDEX IF EXISTS uq_conversation_agent_active;
 CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_id, agent_id, archived_at, last_message_at);
+CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(workspace_id, agent_id, channel_connection_id, channel_chat_id, archived_at);
 `);
 
   // PackagerService: agent personality fields.
@@ -124,9 +167,31 @@ CREATE INDEX IF NOT EXISTS idx_conversation_history ON conversations(workspace_i
   addColumn('workflows', 'concurrency_overflow', "TEXT NOT NULL DEFAULT 'queue'");
   addColumn('workflows', 'tags', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('workflows', 'description', 'TEXT');
-  addColumn('agents', 'space_id', 'TEXT REFERENCES spaces(id) ON DELETE SET NULL');
-  addColumn('workflows', 'space_id', 'TEXT REFERENCES spaces(id) ON DELETE SET NULL');
-  reconcileSpacesSchema(sqlite, { tableExists, columnExists, addColumn });
+  normalizeDomainSchema(sqlite, { tableExists, columnExists, addColumn });
+  renameColumn('agents', 'space_id', 'domain_id');
+  renameColumn('agents', 'space_tag', 'domain_tag');
+  renameColumn('workflows', 'space_id', 'domain_id');
+  addColumn('agents', 'domain_id', 'TEXT REFERENCES domains(id) ON DELETE SET NULL');
+  addColumn('agents', 'domain_tag', 'TEXT');
+  addColumn('workflows', 'domain_id', 'TEXT REFERENCES domains(id) ON DELETE SET NULL');
+  // Subdomains: a domain row with parent_domain_id set is nested under another
+  // domain; its manager_id is the responsible specialist. owner_agent_id gives a
+  // workflow a direct specialist owner. Mirrored in schema.ts + migration v80.
+  addColumn('domains', 'parent_domain_id', 'TEXT REFERENCES domains(id) ON DELETE SET NULL');
+  addColumn('workflows', 'owner_agent_id', 'TEXT REFERENCES agents(id) ON DELETE SET NULL');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_domains_parent ON domains(workspace_id, parent_domain_id)');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_workflows_owner ON workflows(workspace_id, owner_agent_id)');
+  // Apps as the org primitive: domain placement + specialist owner (workflows
+  // inherit). Mirrored in schema.ts (apps.spaceId, apps.ownerAgentId) + migration v88.
+  // Guarded: the apps table is created by the versioned migrations, which may run
+  // after this drift block on a fresh embedded DB.
+  if (tableExists('apps')) {
+    addColumn('apps', 'domain_id', 'TEXT REFERENCES domains(id) ON DELETE SET NULL');
+    addColumn('apps', 'owner_agent_id', 'TEXT REFERENCES agents(id) ON DELETE SET NULL');
+    sqlite.exec('CREATE INDEX IF NOT EXISTS idx_apps_domain ON apps(workspace_id, domain_id)');
+    sqlite.exec('CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps(workspace_id, owner_agent_id)');
+  }
+  normalizeRoomSchema(sqlite, { tableExists, columnExists });
   // Normalize workflow metadata + concurrency. Older builds had summary and
   // intended_behavior columns, and one drifted build added concurrency_overflow
   // as NOT NULL without a default. Rebuild once into the current shape.
@@ -205,6 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_schedule_due ON schedule_runs(status, scheduled_a
   migrateWorkflowRunsEphemeral(sqlite);
   addColumn('workflow_runs', 'conversation_id', 'TEXT REFERENCES conversations(id) ON DELETE SET NULL');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_runs_conversation ON workflow_runs(conversation_id, created_at DESC)');
+  migratePlansTaskSpine(sqlite, { tableExists, columnExists, addColumn });
 
   migrateChannelDeliveriesUniqueness(sqlite);
 
@@ -426,7 +492,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_workspace_created ON workflow_runs(workspace
 `);
 }
 
-function reconcileSpacesSchema(
+function normalizeDomainSchema(
   sqlite: Database.Database,
   helpers: {
     tableExists: (table: string) => boolean;
@@ -434,26 +500,46 @@ function reconcileSpacesSchema(
     addColumn: (table: string, column: string, ddl: string) => void;
   },
 ): void {
-  if (!helpers.tableExists('spaces')) return;
+  if (helpers.tableExists('spaces') && !helpers.tableExists('domains')) {
+    sqlite.exec('ALTER TABLE spaces RENAME TO domains');
+  }
+  if (!helpers.tableExists('domains')) {
+    sqlite.exec(`
+CREATE TABLE IF NOT EXISTS domains (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  slug         TEXT NOT NULL,
+  description  TEXT,
+  color_hex    TEXT,
+  icon_emoji   TEXT,
+  manager_id   TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+`);
+  }
 
-  const hasLegacyColor = helpers.columnExists('spaces', 'color');
-  const hasLegacyIcon = helpers.columnExists('spaces', 'icon_glyph');
+  const hasLegacyColor = helpers.columnExists('domains', 'color');
+  const hasLegacyIcon = helpers.columnExists('domains', 'icon_glyph');
+  const hasLegacyTeam = helpers.columnExists('domains', 'team_id');
 
-  helpers.addColumn('spaces', 'slug', "TEXT NOT NULL DEFAULT ''");
-  helpers.addColumn('spaces', 'description', 'TEXT');
-  helpers.addColumn('spaces', 'color_hex', 'TEXT');
-  helpers.addColumn('spaces', 'icon_emoji', 'TEXT');
-  helpers.addColumn('spaces', 'manager_id', 'TEXT REFERENCES agents(id) ON DELETE SET NULL');
+  helpers.addColumn('domains', 'slug', "TEXT NOT NULL DEFAULT ''");
+  helpers.addColumn('domains', 'description', 'TEXT');
+  helpers.addColumn('domains', 'color_hex', 'TEXT');
+  helpers.addColumn('domains', 'icon_emoji', 'TEXT');
+  helpers.addColumn('domains', 'manager_id', 'TEXT REFERENCES agents(id) ON DELETE SET NULL');
 
   sqlite.exec(`
-UPDATE spaces
-SET slug = COALESCE(NULLIF(lower(replace(trim(name), ' ', '-')), ''), 'space-' || substr(id, 1, 8))
+UPDATE domains
+SET slug = COALESCE(NULLIF(lower(replace(trim(name), ' ', '-')), ''), 'domain-' || substr(id, 1, 8))
 WHERE slug IS NULL OR trim(slug) = '';
 `);
 
   if (hasLegacyColor) {
     sqlite.exec(`
-UPDATE spaces
+UPDATE domains
 SET color_hex = color
 WHERE (color_hex IS NULL OR color_hex = '') AND color IS NOT NULL;
 `);
@@ -461,11 +547,160 @@ WHERE (color_hex IS NULL OR color_hex = '') AND color IS NOT NULL;
 
   if (hasLegacyIcon) {
     sqlite.exec(`
-UPDATE spaces
+UPDATE domains
 SET icon_emoji = icon_glyph
 WHERE (icon_emoji IS NULL OR icon_emoji = '') AND icon_glyph IS NOT NULL;
 `);
   }
+
+  if (hasLegacyColor || hasLegacyIcon || hasLegacyTeam) {
+    sqlite.exec(`
+PRAGMA foreign_keys = OFF;
+CREATE TABLE domains_next (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  slug         TEXT NOT NULL,
+  description  TEXT,
+  color_hex    TEXT,
+  icon_emoji   TEXT,
+  manager_id   TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO domains_next (
+  id, workspace_id, user_id, name, slug, description, color_hex, icon_emoji, manager_id, created_at, updated_at
+)
+SELECT
+  id, workspace_id, user_id, name, slug, description, color_hex, icon_emoji, manager_id, created_at, updated_at
+FROM domains;
+DROP TABLE domains;
+ALTER TABLE domains_next RENAME TO domains;
+PRAGMA foreign_keys = ON;
+`);
+  }
+}
+
+function migratePlansTaskSpine(
+  sqlite: Database.Database,
+  helpers: {
+    tableExists: (table: string) => boolean;
+    columnExists: (table: string, column: string) => boolean;
+    addColumn: (table: string, column: string, ddl: string) => void;
+  },
+): void {
+  if (!helpers.tableExists('plans')) return;
+  helpers.addColumn('plans', 'run_ids', "TEXT NOT NULL DEFAULT '[]'");
+  helpers.addColumn('plans', 'session_id', 'TEXT');
+  helpers.addColumn('plans', 'decisions', "TEXT NOT NULL DEFAULT '[]'");
+  helpers.addColumn('plans', 'deviations', "TEXT NOT NULL DEFAULT '[]'");
+  helpers.addColumn('plans', 'verification', 'TEXT');
+
+  const columns = sqlite.prepare("PRAGMA table_info('plans')").all() as Array<{
+    name: string;
+    notnull: number;
+  }>;
+  const conversationId = columns.find((column) => column.name === 'conversation_id');
+  const needsRebuild = conversationId?.notnull === 1;
+  if (!needsRebuild) {
+    sqlite.exec(`
+CREATE INDEX IF NOT EXISTS plans_conversation ON plans(workspace_id, conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS plans_session ON plans(workspace_id, session_id);
+`);
+    return;
+  }
+
+  sqlite.exec(`
+PRAGMA foreign_keys = OFF;
+CREATE TABLE plans_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+  run_ids TEXT NOT NULL DEFAULT '[]',
+  session_id TEXT,
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  active_version INTEGER NOT NULL DEFAULT 1,
+  approved_version INTEGER,
+  decisions TEXT NOT NULL DEFAULT '[]',
+  deviations TEXT NOT NULL DEFAULT '[]',
+  verification TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO plans_next (
+  id, workspace_id, conversation_id, message_id, run_ids, session_id, title, objective, status,
+  active_version, approved_version, decisions, deviations, verification, created_at, updated_at
+)
+SELECT
+  id, workspace_id, conversation_id, message_id, run_ids, session_id, title, objective, status,
+  active_version, approved_version, decisions, deviations, verification, created_at, updated_at
+FROM plans;
+DROP TABLE plans;
+ALTER TABLE plans_next RENAME TO plans;
+PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS plans_conversation ON plans(workspace_id, conversation_id, updated_at);
+CREATE INDEX IF NOT EXISTS plans_session ON plans(workspace_id, session_id);
+`);
+}
+
+function normalizeRoomSchema(
+  sqlite: Database.Database,
+  helpers: {
+    tableExists: (table: string) => boolean;
+    columnExists: (table: string, column: string) => boolean;
+  },
+): void {
+  if (!helpers.tableExists('rooms')) return;
+  const hasTeamId = helpers.columnExists('rooms', 'team_id');
+  const hasTeamDefault = helpers.columnExists('rooms', 'is_team_default');
+  if (!hasTeamId && !hasTeamDefault) {
+    sqlite.exec('DROP TABLE IF EXISTS team_context;');
+    sqlite.exec('DROP TABLE IF EXISTS teams;');
+    return;
+  }
+
+  sqlite.exec(`
+PRAGMA foreign_keys = OFF;
+CREATE TABLE rooms_next (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind              TEXT NOT NULL DEFAULT 'custom',
+  name              TEXT NOT NULL,
+  description       TEXT,
+  visibility        TEXT NOT NULL DEFAULT 'workspace',
+  pinned_at         TEXT,
+  last_message_at   TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO rooms_next (
+  id, workspace_id, user_id, kind, name, description, visibility, pinned_at, last_message_at, created_at, updated_at
+)
+SELECT
+  id,
+  workspace_id,
+  user_id,
+  CASE WHEN kind = 'team' THEN 'workspace' ELSE kind END,
+  name,
+  description,
+  CASE WHEN visibility = 'team' THEN 'workspace' ELSE visibility END,
+  pinned_at,
+  last_message_at,
+  created_at,
+  updated_at
+FROM rooms;
+DROP TABLE rooms;
+ALTER TABLE rooms_next RENAME TO rooms;
+PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS idx_rooms_workspace_last ON rooms(workspace_id, last_message_at DESC);
+DROP TABLE IF EXISTS team_context;
+DROP TABLE IF EXISTS teams;
+`);
 }
 
 function migrateWorkflowsConcurrencyOverflow(sqlite: Database.Database): void {
@@ -502,10 +737,10 @@ function migrateWorkflowsConcurrencyOverflow(sqlite: Database.Database): void {
   const optionalDefinitions: string[] = [];
   const optionalInsertColumns: string[] = [];
   const optionalSelectExprs: string[] = [];
-  if (names.has('space_id')) {
-    optionalDefinitions.push('  space_id              TEXT REFERENCES spaces(id) ON DELETE SET NULL,');
-    optionalInsertColumns.push('space_id');
-    optionalSelectExprs.push('space_id');
+  if (names.has('domain_id')) {
+    optionalDefinitions.push('  domain_id             TEXT REFERENCES domains(id) ON DELETE SET NULL,');
+    optionalInsertColumns.push('domain_id');
+    optionalSelectExprs.push('domain_id');
   }
 
   sqlite.exec(`

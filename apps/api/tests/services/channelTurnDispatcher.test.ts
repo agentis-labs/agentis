@@ -9,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
-import type { AgentAdapter, ChatDelta, ChatMessage } from '@agentis/core';
+import { REALTIME_EVENTS, type AgentAdapter, type ChatDelta, type ChatMessage } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { ConversationStore } from '../../src/services/conversationStore.js';
 import { ChannelBridge } from '../../src/services/channelBridge.js';
@@ -82,6 +82,96 @@ describe('ChannelTurnDispatcher', () => {
     const agentMsg = messages.find((m) => m.authorType === 'agent');
     expect(agentMsg?.body).toBe('Hello from the orchestrator.');
     expect((agentMsg?.metadata as { channelReply?: boolean })?.channelReply).toBe(true);
+  });
+
+  it('publishes channel turn progress into the workspace activity feed', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const cap = ctx.captureBus();
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      bus: ctx.bus,
+      deliver: async () => {},
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        yield {
+          type: 'activity',
+          id: 'activity-channel-runtime',
+          phase: 'runtime',
+          status: 'running',
+          label: 'Waiting for model output',
+        } as ChatDelta;
+        yield { type: 'tool_call', id: 'tool-1', name: 'agentis.lookup', args: { q: 'status' } } as ChatDelta;
+        yield { type: 'tool_result', id: 'tool-1', name: 'agentis.lookup', result: { ok: true } } as ChatDelta;
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+      conversationId: conv.id,
+      connectionId: 'conn-1',
+      kind: 'telegram',
+      chatId: '999',
+      text: 'hi',
+    });
+    cap.stop();
+
+    const workSteps = cap.events
+      .filter((event) => event.envelope.event === REALTIME_EVENTS.AGENT_WORK_STEP)
+      .map((event) => event.envelope.payload as { conversationId?: string; description?: string; phase?: string });
+    expect(workSteps.some((event) => event.conversationId === conv.id && /Telegram message received/.test(event.description ?? ''))).toBe(true);
+    expect(workSteps.some((event) => event.conversationId === conv.id && /Waiting for model output/.test(event.description ?? ''))).toBe(true);
+    expect(workSteps.some((event) => event.conversationId === conv.id && /agentis.lookup completed/.test(event.description ?? ''))).toBe(true);
+  });
+
+  it('persists and delivers a credit/quota failure notice instead of going silent', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: string[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      bus: ctx.bus,
+      deliver: async (args) => { delivered.push(args.body); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        throw new Error('insufficient_quota: out of credits');
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    const result = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+      conversationId: conv.id,
+      connectionId: 'conn-1',
+      kind: 'telegram',
+      chatId: '999',
+      text: 'hi',
+    });
+
+    expect(result).toEqual({ replied: true, reason: 'error_notified' });
+    expect(delivered[0]).toMatch(/out of credits|quota/i);
+    const messages = conversations.messages(conv.id, 50);
+    const failure = messages.find((message) => message.authorType === 'agent' && /out of credits|quota/i.test(message.body));
+    expect(failure?.deliveryStatus).toBe('failed');
   });
 
   it('maps prior channel-inbound system messages to user role in history', async () => {

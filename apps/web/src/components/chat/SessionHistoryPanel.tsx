@@ -20,13 +20,16 @@ interface ConversationRow {
   lastMessagePreview: string | null;
   unread?: number;
   createdAt?: string | null;
+  channelConnectionId?: string | null;
+  channelChatId?: string | null;
+  channelKind?: string | null;
+  channelName?: string | null;
 }
 
 interface RoomRow {
   id: string;
   name: string;
-  kind: 'workspace' | 'team' | 'custom' | 'thread';
-  teamId?: string | null;
+  kind: 'workspace' | 'custom' | 'thread';
   lastMessageAt: string | null;
   lastMessagePreview?: string | null;
   unreadCount?: number;
@@ -204,25 +207,36 @@ export function SessionHistoryPanel({
   const recentEntries = useMemo<HistoryEntry[]>(() => {
     const threadEntries = conversations
       .filter((conversation) => !conversation.archivedAt || Boolean(conversation.lastMessageAt))
-      .map<HistoryEntry>((conversation) => ({
-        id: `agent-${conversation.id}`,
-        conversationId: conversation.id,
-        agentId: conversation.agentId,
-        agentStatus: conversation.agentStatus,
-        agentColor: conversation.agentColor,
-        adapterType: agentAdapterMap[conversation.agentId] ?? null,
-        kind: 'agent',
-        title: conversation.title?.trim() || conversation.agentName,
-        subtitle: conversation.archivedAt ? `${conversation.agentName} (Archived)` : conversation.agentName,
-        preview: conversation.lastMessagePreview?.trim() || 'Direct conversation',
-        at: conversation.lastMessageAt ?? conversation.createdAt ?? EMPTY_DATE,
-        unread: conversation.unread ?? 0,
-        archivedAt: conversation.archivedAt,
-        onOpen: () => onOpenAgent(conversation.agentId, conversation.agentName, {
+      .map<HistoryEntry>((conversation) => {
+        const channel = conversation.channelKind ? channelLabel(conversation.channelKind) : null;
+        const title = conversation.title?.trim()
+          || (channel ? `${conversation.agentName} on ${channel}` : conversation.agentName);
+        const channelTarget = conversation.channelChatId ? `Chat ${conversation.channelChatId}` : 'Channel chat';
+        const subtitle = conversation.archivedAt
+          ? `${conversation.agentName} (Archived)`
+          : channel
+            ? `${channel}${conversation.channelName ? ` - ${conversation.channelName}` : ''} - ${channelTarget}`
+            : conversation.agentName;
+        return {
+          id: `agent-${conversation.id}`,
           conversationId: conversation.id,
+          agentId: conversation.agentId,
+          agentStatus: conversation.agentStatus,
+          agentColor: conversation.agentColor,
+          adapterType: agentAdapterMap[conversation.agentId] ?? null,
+          kind: 'agent',
+          title,
+          subtitle,
+          preview: conversation.lastMessagePreview?.trim() || (channel ? `${channel} conversation` : 'Direct conversation'),
+          at: conversation.lastMessageAt ?? conversation.createdAt ?? EMPTY_DATE,
+          unread: conversation.unread ?? 0,
           archivedAt: conversation.archivedAt,
-        }),
-      }));
+          onOpen: () => onOpenAgent(conversation.agentId, conversation.agentName, {
+            conversationId: conversation.id,
+            archivedAt: conversation.archivedAt,
+          }),
+        };
+      });
 
     return threadEntries.sort((left, right) => right.at.localeCompare(left.at));
   }, [conversations, onOpenAgent, agentAdapterMap]);
@@ -234,12 +248,11 @@ export function SessionHistoryPanel({
         id: room.id,
         kind: 'room',
         title: room.name,
-        subtitle: room.lastMessagePreview?.trim() || `${room.kind} room`,
+        subtitle: room.lastMessagePreview?.trim() || roomSubtitle(room.kind),
         unread: room.unreadCount ?? 0,
         onOpen: () => onOpenRoom(room.id, room.name),
       }));
     return next.sort((left, right) => {
-      return left.title.localeCompare(right.title);
       return left.title.localeCompare(right.title);
     });
   }, [onOpenBroadcast, onOpenRoom, rooms]);
@@ -477,6 +490,11 @@ export function SessionHistoryPanel({
       </div>
     </div>
   );
+}
+
+function roomSubtitle(kind: RoomRow['kind']): string {
+  if (kind === 'thread') return 'thread room';
+  return `${kind} room`;
 }
 
 function Section({
@@ -828,4 +846,13 @@ function formatAt(value: string): string {
   } catch {
     return date.toLocaleDateString();
   }
+}
+
+function channelLabel(kind: string): string {
+  const normalized = kind.trim().toLowerCase();
+  if (normalized === 'telegram') return 'Telegram';
+  if (normalized === 'whatsapp') return 'WhatsApp';
+  if (normalized === 'slack') return 'Slack';
+  if (normalized === 'discord') return 'Discord';
+  return normalized ? `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}` : 'Channel';
 }

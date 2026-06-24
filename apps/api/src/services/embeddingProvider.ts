@@ -1,46 +1,18 @@
 /**
- * EmbeddingProvider — pluggable embedding generation for vector retrieval.
+ * EmbeddingProvider — pluggable, real-semantic embedding generation for vector
+ * retrieval. Every memory/knowledge write is embedded with the workspace's
+ * configured provider so writes and queries live in the same vector space.
  *
- * "Vector retrieval is reserved on the schema (`embedding` column). The swap
- *  is a single retriever change."
+ * Providers:
+ *   - `LocalEmbeddingProvider` — bundled, offline, free, multilingual ONNX
+ *     (`multilingual-e5-small`, 384-dim). The zero-config DEFAULT.
+ *   - `OpenAIEmbeddingProvider` — opt-in API embeddings (or any OpenAI-compatible
+ *     endpoint, incl. a self-hosted local embedding server).
  *
- * This module provides:
- *
- *   1. `EmbeddingProvider` interface — inject any embedding model (OpenAI,
- *      Cohere, local ONNX, etc.) by implementing two methods.
- *
- *   2. `HashingEmbeddingProvider` — built-in, dependency-free, 512-dimensional
- *      feature-hashing provider. Uses a polynomial rolling hash to map tokens
- *      into a fixed-size vector, then L2-normalises. Produces valid cosine
- *      similarity scores without any external model calls.
- *
- *      Properties:
- *        - Deterministic: same text → same vector, always.
- *        - Corpus-independent: no IDF table, no global state.
- *        - Zero dependencies: uses only the tokeniser already in KnowledgeStore.
- *        - Swappable: drop-in replacement for any float[] embedding provider.
- *
- *      Limitations:
- *        - No semantic understanding (still lexical at heart).
- *        - Hash collisions introduce mild noise (manageable at 512 dims for
- *          vocabularies < 50k tokens).
- *        - Semantic retrieval requires an external model (OpenAI, Cohere, …).
- *
- * Usage:
- *
- *   // Built-in (zero deps):
- *   const provider = new HashingEmbeddingProvider();
- *
- *   // External (OpenAI-compatible, pseudo-code):
- *   const provider: EmbeddingProvider = {
- *     dimension: 1536,
- *     embed: async (text) => callOpenAIEmbeddings(text),
- *   };
- *
- *   const store = new KnowledgeStore(db, logger, provider);
+ * There is no non-semantic / lexical provider: a misconfigured provider fails
+ * loud rather than silently degrading recall to keyword matching. (Tests inject
+ * a deterministic stub — see `tests/_helpers/stubEmbeddingProvider.ts`.)
  */
-
-import { KnowledgeStore } from './knowledgeStore.js';
 
 // ────────────────────────────────────────────────────────────
 // Interface
@@ -49,6 +21,14 @@ import { KnowledgeStore } from './knowledgeStore.js';
 export interface EmbeddingProvider {
   /** Output dimension (all vectors must have exactly this length). */
   readonly dimension: number;
+  /**
+   * Stable identity of the model that produces these vectors. Stamped onto every
+   * row at write time (Brain 10x §B1.2) so retrieval can compare (model,dims)
+   * instead of length alone — a 512-dim hash vector and a 512-dim truncated
+   * semantic vector must never be treated as comparable.
+   * Examples: `hashing-v1-512`, `openai:text-embedding-3-small`.
+   */
+  readonly modelId: string;
   /**
    * Embed `text` and return a float[] of length `dimension`.
    *
@@ -65,49 +45,6 @@ export interface EmbeddingProvider {
 // Built-in: HashingEmbeddingProvider
 // ────────────────────────────────────────────────────────────
 
-/** Number of dimensions. 512 is a common choice for feature-hashing models. */
-const HASHING_DIMS = 512;
-
-/**
- * Dependency-free 512-dimensional feature-hashing embedding provider.
- *
- * Algorithm:
- *   1. Tokenise text using `KnowledgeStore.tokenize()` (shared with the
- *      lexical retriever so the two paths are comparable).
- *   2. For each token, compute `slot = polynomialHash(token) % DIMS`.
- *      Accumulate frequency counts per slot.
- *   3. L2-normalise the count vector → unit vector.
- *
- * Cosine similarity between two unit vectors is their dot product, which is
- * O(DIMS) regardless of document length — significantly faster than the
- * current TF-IDF path once embeddings are pre-computed at write time.
- */
-export class HashingEmbeddingProvider implements EmbeddingProvider {
-  readonly dimension = HASHING_DIMS;
-
-  embed(text: string): number[] {
-    const tokens = KnowledgeStore.tokenize(text);
-    if (tokens.length === 0) return new Array<number>(HASHING_DIMS).fill(0);
-
-    const vec = new Float64Array(HASHING_DIMS);
-    for (const token of tokens) {
-      const slot = polynomialHash(token, HASHING_DIMS);
-      // Float64Array[i] is always a number (TypedArray guarantees initialisation to 0).
-      vec[slot] = (vec[slot] ?? 0) + 1;
-    }
-
-    // L2-normalise: compute norm then divide each element.
-    let sumSq = 0;
-    for (let i = 0; i < HASHING_DIMS; i++) sumSq += (vec[i] ?? 0) * (vec[i] ?? 0);
-    const norm = Math.sqrt(sumSq);
-    if (norm === 0) return Array.from(vec);
-    // Build result via push to avoid `noUncheckedIndexedAccess` on `result[i]`.
-    const result: number[] = [];
-    for (let i = 0; i < HASHING_DIMS; i++) result.push((vec[i] ?? 0) / norm);
-    return result;
-  }
-}
-
 // ────────────────────────────────────────────────────────────
 // Math helpers (exported for use by KnowledgeStore and tests)
 // ────────────────────────────────────────────────────────────
@@ -123,21 +60,6 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
   for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
   return Math.max(-1, Math.min(1, dot));
-}
-
-/**
- * Polynomial rolling hash: maps a token to a slot in [0, dims).
- *
- * Uses the same base-31 polynomial as Java's String.hashCode(). The
- * `| 0` cast keeps arithmetic in signed 32-bit land to stay fast; Math.abs
- * converts negative hashes to valid indices.
- */
-function polynomialHash(token: string, dims: number): number {
-  let h = 0;
-  for (let i = 0; i < token.length; i++) {
-    h = (Math.imul(31, h) + token.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h) % dims;
 }
 
 /**
@@ -169,7 +91,7 @@ export interface ValidatableEmbeddingProvider extends EmbeddingProvider {
   validate(): Promise<void>;
 }
 
-export type EmbeddingProviderType = 'hashing' | 'openai';
+export type EmbeddingProviderType = 'openai' | 'local';
 
 export interface EmbeddingProviderConfig {
   /** Provider endpoint URL. */
@@ -205,6 +127,7 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
 export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
   readonly type = 'openai';
   readonly dimension: number;
+  readonly modelId: string;
   private readonly endpoint: string;
   private readonly model: string;
   private readonly apiKey: string;
@@ -214,6 +137,7 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
     this.model = config.model ?? 'text-embedding-3-small';
     this.apiKey = config.apiKey ?? '';
     this.dimension = config.dimension ?? 1536;
+    this.modelId = `openai:${this.model}`;
   }
 
   async embed(text: string): Promise<number[]> {
@@ -240,9 +164,63 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
 }
 
 /**
+ * Local, self-hosted semantic embeddings via ONNX (transformers.js). Default
+ * model `multilingual-e5-small` (384-dim, ~100 languages) — a real semantic
+ * brain with no API key and no data egress. The model (~120 MB INT8) is fetched
+ * once and cached by the runtime; inference is CPU-only.
+ *
+ * The runtime is dynamically imported on first use so startup (and deployments
+ * that configure OpenAI instead) never pay the cost of loading onnxruntime.
+ * e5 models expect an instruction prefix; we use `query:` uniformly (a standard
+ * symmetric simplification — asymmetric query/passage prefixes can be threaded
+ * later when call sites distinguish the two).
+ */
+/** One loaded pipeline per model id, shared across all provider instances. */
+const localPipelines = new Map<string, Promise<unknown>>();
+
+export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
+  readonly type = 'local';
+  readonly dimension: number;
+  readonly modelId: string;
+  readonly #model: string;
+
+  constructor(config: EmbeddingProviderConfig = {}) {
+    this.#model = config.model ?? 'Xenova/multilingual-e5-small';
+    this.dimension = config.dimension ?? 384;
+    this.modelId = `local:${this.#model}`;
+  }
+
+  #pipeline(): Promise<unknown> {
+    let pipe = localPipelines.get(this.#model);
+    if (!pipe) {
+      pipe = import('@huggingface/transformers').then(({ pipeline }) =>
+        pipeline('feature-extraction', this.#model));
+      localPipelines.set(this.#model, pipe);
+    }
+    return pipe;
+  }
+
+  async embed(text: string): Promise<number[]> {
+    const extractor = (await this.#pipeline()) as (
+      input: string,
+      options: { pooling: 'mean'; normalize: boolean },
+    ) => Promise<{ data: ArrayLike<number> }>;
+    const output = await extractor(`query: ${text}`.slice(0, 8000), { pooling: 'mean', normalize: true });
+    return Array.from(output.data as ArrayLike<number>, (value) => Number(value));
+  }
+
+  async validate(): Promise<void> {
+    const probe = await this.embed('connection test');
+    if (probe.length === 0) throw new Error('local embedding probe returned no dimensions');
+  }
+}
+
+/**
  * Factory — instantiate a provider from the workspace's configured type.
- * Unknown types fall back to hashing. Validation is the caller's job; a
- * failed `validate()` should degrade to hashing rather than crash.
+ * `local` (bundled semantic ONNX, multilingual-e5-small) is the default. There
+ * is intentionally NO non-semantic / lexical fallback: a misconfigured or
+ * unreachable provider must fail loud, never silently degrade recall to keyword
+ * matching.
  */
 export function selectEmbeddingProvider(
   type: string,
@@ -251,10 +229,41 @@ export function selectEmbeddingProvider(
   switch (type) {
     case 'openai':
       return new OpenAIEmbeddingProvider(config);
-    case 'hashing':
+    case 'local':
     default:
-      return new HashingEmbeddingProvider();
+      return new LocalEmbeddingProvider(config);
   }
+}
+
+/** Embedding provenance stamp — what to record on a row at write time (§B1.2). */
+export interface EmbeddingIdentity {
+  model: string;
+  dims: number;
+}
+
+/** The identity a provider stamps onto rows it embeds. */
+export function providerIdentity(provider: EmbeddingProvider): EmbeddingIdentity {
+  return { model: provider.modelId, dims: provider.dimension };
+}
+
+/**
+ * True when a stored vector (with its recorded identity) is comparable to the
+ * given provider. Length-equality is necessary but NOT sufficient: a 512-dim
+ * hash vector and a 512-dim truncated semantic vector are both length-512 yet
+ * meaningless to compare. We require the model id to match too. Rows written
+ * before §B1.2 (no recorded model) fall back to a length check so the upgrade is
+ * non-breaking — they are flagged for re-embed on first mismatch.
+ */
+export function vectorIsComparable(
+  storedModel: string | null | undefined,
+  storedDims: number | null | undefined,
+  provider: EmbeddingProvider,
+): boolean {
+  if (storedModel == null || storedDims == null) {
+    // Legacy row with no identity — comparable only if the length matches.
+    return storedDims == null ? false : storedDims === provider.dimension;
+  }
+  return storedModel === provider.modelId && storedDims === provider.dimension;
 }
 
 /** Normalise any provider return value (sync or async) to a resolved vector. */

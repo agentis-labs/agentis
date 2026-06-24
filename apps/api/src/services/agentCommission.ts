@@ -204,6 +204,10 @@ export async function registerAdapter(
     const adapter = new OpenClawAdapter({
       agentId,
       gatewayUrl,
+      binaryPath: cliCommandFromConfig(config) ?? undefined,
+      cwd: stringOf(config.cwd) ?? undefined,
+      env: recordStringOf(config.env),
+      model: stringOf(config.model) ?? undefined,
       deviceToken: deviceToken ?? undefined,
       headers: recordStringOf(config.headers),
       password: stringOf(config.password) ?? undefined,
@@ -213,6 +217,7 @@ export async function registerAdapter(
       disableDeviceAuth: booleanOf(config.disableDeviceAuth),
       timeoutSec: numberOf(config.timeoutSec),
       payloadTemplate: recordObjectOf(config.payloadTemplate),
+      defaultSessionId: stringOf(config.defaultSessionId) ?? undefined,
       logger: deps.logger,
     });
     await adapter.connect();
@@ -298,7 +303,7 @@ export async function registerAdapter(
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
-      chatTransport: stringOf(config.chatTransport) === 'acp' ? 'acp' : 'cli',
+      chatTransport: hermesChatTransportOf(config.chatTransport),
       maxTurns: numberOf(config.maxTurns),
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
@@ -343,6 +348,91 @@ async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterTy
 export function runtimeModelFromConfig(adapterType: V1HarnessAdapterType, config: Record<string, unknown>): string | null {
   if (adapterType === 'openclaw' || adapterType === 'http') return null;
   return stringOf(config.model);
+}
+
+export interface SwitchRuntimeInput {
+  adapterType: V1HarnessAdapterType;
+  config?: Record<string, unknown>;
+  runtimeModel?: string | null;
+}
+
+export interface SwitchRuntimeResult {
+  id: string;
+  adapterType: V1HarnessAdapterType;
+  runtimeModel: string | null;
+  status: 'online' | 'paused' | 'error';
+}
+
+/**
+ * Rebind an existing agent to a different runtime — WITHOUT touching its
+ * identity, Brain, abilities, role or hierarchy (AGENT-TRANSITION §2, Track R).
+ *
+ * An Agentis agent is the durable, runtime-agnostic entity; `(adapterType,
+ * config, runtimeModel)` is a swappable *binding*. This tears down the old
+ * adapter registration and stands up the new one, persisting only the binding
+ * columns. The agent's `scopeId = agentId` memory is runtime-independent, so it
+ * carries over untouched.
+ */
+export async function switchRuntime(
+  deps: AgentCommissionDeps,
+  workspaceId: string,
+  agentId: string,
+  input: SwitchRuntimeInput,
+): Promise<SwitchRuntimeResult> {
+  const existing = deps.db
+    .select()
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${agentId} not found`);
+
+  // Carry forward the prior config so a rebind that only changes the runtime
+  // model (or stays on the same adapter) keeps the operator's settings. The
+  // discovered/new config takes precedence per-key.
+  const priorConfig = (existing.config ?? {}) as Record<string, unknown>;
+  const sameAdapter = existing.adapterType === input.adapterType;
+  const mergedConfig = sameAdapter ? { ...priorConfig, ...(input.config ?? {}) } : { ...(input.config ?? {}) };
+  const repaired = await repairCliHarnessConfig(input.adapterType, mergedConfig);
+  const config = repaired.config;
+  const runtimeModel = input.runtimeModel ?? runtimeModelFromConfig(input.adapterType, config) ?? null;
+  const isPaused = Boolean(existing.isPaused);
+
+  let status: SwitchRuntimeResult['status'] = isPaused ? 'paused' : 'online';
+  // Persist the new binding first so a failed register still records the intent.
+  deps.db
+    .update(schema.agents)
+    .set({ adapterType: input.adapterType, config, runtimeModel, updatedAt: new Date().toISOString() })
+    .where(eq(schema.agents.id, agentId))
+    .run();
+
+  if (!isPaused) {
+    try {
+      await registerAdapter(deps, workspaceId, agentId, input.adapterType, config);
+      deps.db
+        .update(schema.agents)
+        .set({ status: 'online', lastHeartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+        .where(eq(schema.agents.id, agentId))
+        .run();
+    } catch (err) {
+      deps.logger.warn('agents.switch_runtime_failed', { id: agentId, adapterType: input.adapterType, err: (err as Error).message });
+      status = 'error';
+      deps.db
+        .update(schema.agents)
+        .set({ status: 'error', updatedAt: new Date().toISOString() })
+        .where(eq(schema.agents.id, agentId))
+        .run();
+    }
+  } else {
+    await deps.adapters.unregister(agentId);
+  }
+
+  deps.bus?.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_UPDATED, {
+    agentId,
+    adapterType: input.adapterType,
+    runtimeModel,
+  });
+
+  return { id: agentId, adapterType: input.adapterType, runtimeModel, status };
 }
 
 function httpUrlFromConfig(config: Record<string, unknown>, pathKey: string, urlKey: string): string | null {
@@ -420,6 +510,11 @@ function httpMethodOf(value: unknown): 'POST' | 'GET' | 'PUT' | 'PATCH' | undefi
 function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined {
   const effort = stringOf(value);
   return effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' ? effort : undefined;
+}
+
+function hermesChatTransportOf(value: unknown): 'cli' | 'acp' | 'auto' {
+  const transport = stringOf(value);
+  return transport === 'cli' || transport === 'acp' || transport === 'auto' ? transport : 'auto';
 }
 
 function sessionKeyStrategyOf(value: unknown): 'issue' | 'fixed' | 'run' | undefined {

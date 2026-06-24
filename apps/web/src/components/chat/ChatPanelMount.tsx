@@ -9,6 +9,7 @@ interface ChatPanelOpenDetail {
   agentId?: string;
   roomId?: string;
   name?: string;
+  mode?: 'docked' | 'fullscreen';
   initialDraft?: string;
   initialViewportOverride?: ViewportContext | null;
   viewportOverride?: ViewportContext | null;
@@ -18,49 +19,55 @@ interface ChatPanelOpenDetail {
 export function ChatPanelMount() {
   const state = useChatPanelStore((store) => store.state);
   const dockedWidth = useChatPanelStore((store) => store.dockedWidth);
-  const setState = useChatPanelStore((store) => store.setState);
-  const selectThread = useChatPanelStore((store) => store.selectThread);
-  const setLaunchContext = useChatPanelStore((store) => store.setLaunchContext);
-  const markOpenRequested = useChatPanelStore((store) => store.markOpenRequested);
+  const openChat = useChatPanelStore((store) => store.openChat);
 
   useEffect(() => {
     function onOpen(event: Event) {
       const detail = (event as CustomEvent<ChatPanelOpenDetail>).detail;
-      setState('docked');
-      markOpenRequested();
-      setLaunchContext(detail?.initialDraft || detail?.viewportOverride || detail?.initialViewportOverride
+      const launchContext = detail?.initialDraft || detail?.viewportOverride || detail?.initialViewportOverride
         ? {
             initialDraft: detail.initialDraft,
             initialViewportOverride: detail.initialViewportOverride ?? detail.viewportOverride ?? null,
             autoSendInitialDraft: detail.autoSendInitialDraft,
           }
-        : null);
+        : null;
       if (detail?.agentId) {
-        selectThread({ kind: 'agent', id: detail.agentId, name: detail.name ?? 'Conversation' });
+        openChat({
+          state: detail.mode ?? 'docked',
+          thread: { kind: 'agent', id: detail.agentId, name: detail.name ?? 'Conversation' },
+          launchContext,
+        });
       } else if (detail?.roomId) {
-        selectThread({ kind: 'room', id: detail.roomId, name: detail.name ?? 'Room' });
+        openChat({
+          state: detail.mode ?? 'docked',
+          thread: { kind: 'room', id: detail.roomId, name: detail.name ?? 'Room' },
+          launchContext,
+        });
       } else {
-        selectThread(null);
+        openChat({ state: detail?.mode ?? 'docked', thread: null, launchContext });
       }
     }
     window.addEventListener('agentis:chat-panel-open', onOpen);
     return () => window.removeEventListener('agentis:chat-panel-open', onOpen);
-  }, [markOpenRequested, selectThread, setLaunchContext, setState]);
-
-  if (state === 'hidden') return <FloatingTaskProgress />;
+  }, [openChat]);
 
   return (
-    <Suspense fallback={<ChatPanelFallback width={dockedWidth} />}>
-      <LazyChatPanel />
-    </Suspense>
+    <>
+      {state === 'hidden' && <FloatingTaskProgress />}
+      <Suspense fallback={<ChatPanelFallback width={dockedWidth} fullscreen={state === 'fullscreen'} />}>
+        <LazyChatPanel />
+      </Suspense>
+    </>
   );
 }
 
-function ChatPanelFallback({ width }: { width: number }) {
+function ChatPanelFallback({ width, fullscreen }: { width: number; fullscreen?: boolean }) {
   return (
     <aside
-      className="relative z-30 flex shrink-0 flex-col border-l border-line bg-surface"
-      style={{ width: `min(${width}px, 100vw)`, maxWidth: '100vw' }}
+      className={fullscreen
+        ? 'fixed inset-3 z-50 flex min-w-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-modal md:inset-5'
+        : 'relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden border-l border-line bg-surface'}
+      style={fullscreen ? undefined : { width: `min(${width}px, 100vw)`, maxWidth: '100vw' }}
       role="complementary"
       aria-label="Chat panel"
     >

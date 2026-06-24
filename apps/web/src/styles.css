@@ -401,71 +401,13 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
   100% { transform: translateX(220%); opacity: 0.35; }
 }
 
-@keyframes chat-thinking-progress {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(320%); }
+/* Workspace boot skeleton — gentle breathing for the loading pyramid nodes. */
+@keyframes home-canvas-skeleton {
+  0%, 100% { opacity: 0.45; transform: translateY(0); }
+  50% { opacity: 0.85; transform: translateY(-1px); }
 }
-
-@keyframes chat-thinking-step {
-  0%, 100% { opacity: 0.72; }
-  50% { opacity: 1; }
-}
-
-.chat-loading-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  width: max-content;
-  min-height: 14px;
-}
-
-.chat-loading-dots > span {
-  width: 3px;
-  height: 3px;
-  border-radius: 999px;
-  background: currentColor;
-  color: var(--color-text-muted);
-  animation: chat-loading-dot 1s cubic-bezier(0.23, 1, 0.32, 1) infinite;
-}
-
-.chat-loading-dots > span:nth-child(2) {
-  animation-delay: 120ms;
-}
-
-.chat-loading-dots > span:nth-child(3) {
-  animation-delay: 240ms;
-}
-
-@keyframes chat-loading-dot {
-  0%, 60%, 100% {
-    opacity: 0.32;
-    transform: translateY(0);
-  }
-  30% {
-    opacity: 1;
-    transform: translateY(-2px);
-  }
-}
-
-.chat-thinking-progress::after {
-  content: '';
-  display: block;
-  width: 32%;
-  height: 100%;
-  background: var(--color-accent);
-  animation: chat-thinking-progress 1.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
-}
-
-.chat-thinking-step {
-  animation: chat-thinking-step 1.6s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat-thinking-progress::after,
-  .chat-thinking-step,
-  .chat-loading-dots > span {
-    animation: none;
-  }
+.home-canvas-skeleton {
+  animation: home-canvas-skeleton 1.6s ease-in-out infinite;
 }
 
 /* Premium highlighted buttons for key features (Abilities & Extensions) */
@@ -579,6 +521,51 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
 
 .composer-focused {
   animation: composer-glow-pulse 2s infinite ease-in-out;
+}
+
+/* ── Self-healing console — a distinct, minimal "the agent is repairing" motif ── */
+@keyframes sh-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.sh-rise { animation: sh-rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Breathing aura behind the healing glyph while the agent is working. */
+@keyframes sh-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.45; }
+  50% { transform: scale(1.55); opacity: 0; }
+}
+.sh-aura { animation: sh-breathe 2.4s ease-in-out infinite; }
+
+/* A thin scan line sweeping across the diagnosis — the "thinking" signal. */
+@keyframes sh-scan {
+  0% { transform: translateX(-100%); opacity: 0; }
+  40% { opacity: 1; }
+  100% { transform: translateX(220%); opacity: 0; }
+}
+.sh-scan { animation: sh-scan 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+
+/* Blinking caret for the live thought typewriter. */
+@keyframes sh-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.sh-caret { animation: sh-caret 1s steps(1) infinite; }
+
+/* Success pop when a fix lands. */
+@keyframes sh-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.sh-pop { animation: sh-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+
+/* Phase-dot pulse for the active step. */
+@keyframes sh-dot {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  50% { box-shadow: 0 0 0 3px transparent; opacity: 0.5; }
+}
+.sh-dot-active { animation: sh-dot 1.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-rise, .sh-aura, .sh-scan, .sh-caret, .sh-pop, .sh-dot-active { animation: none; }
 }
 
 /* Radix ScrollArea styles */

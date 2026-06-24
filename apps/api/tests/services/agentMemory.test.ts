@@ -134,10 +134,12 @@ describe('AgentToolRuntime — Brain memory tools', () => {
 
     const wsWrite = await runtime.execute(ctx.workspace.id, 'memory_append', { section: 'Decisions Made', entry: 'shared note', scope: 'workspace' }, 'researcher', { agentId });
     expect(wsWrite.ok).toBe(true);
-    const rows = ctx.db.select().from(schema.workspaceMemory).all();
+    // §B4 — workspace memory now lives in memory_episodes (plane-tagged); agent → agent_write.
+    const rows = ctx.db.select().from(schema.memoryEpisodes).all()
+      .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.content).toBe('shared note');
-    expect(rows[0]!.source).toBe('agent');
+    expect(rows[0]!.summary).toBe('shared note');
+    expect(rows[0]!.source).toBe('agent_write');
     // The shared write must NOT have landed in the agent's private memory.
     expect(agentMemory.list(agentId, ctx.workspace.id)).toHaveLength(1);
   });

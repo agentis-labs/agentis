@@ -9,14 +9,30 @@ const outputConfigFields = {
   isOutput: z.boolean().optional(),
 };
 
+const scheduleRuleSchema = z.object({
+  expression: z.string().min(1),
+  timezone: z.string().optional(),
+  label: z.string().optional(),
+});
+
 const triggerConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('trigger'),
-  triggerType: z.enum(['manual', 'cron', 'webhook', 'persistent_listener']),
+  triggerType: z.enum([
+    'manual',
+    'cron',
+    'webhook',
+    'persistent_listener',
+    'error_trigger',
+    'email_imap',
+    'rss_feed',
+  ]),
   triggerId: z.string().uuid().optional(),
   /** Authoring form retained in the graph; deployment translates this to triggers.config.expression. */
   schedule: z.string().optional(),
   timezone: z.string().optional(),
+  /** Multiple independent cron rules on one trigger (n8n-inspired). */
+  scheduleRules: z.array(scheduleRuleSchema).optional(),
   /** Authoring form retained in the graph; deployment stores this object directly in triggers.config. */
   listenerConfig: listenerConfigSchema.optional(),
 }).passthrough();
@@ -51,6 +67,7 @@ const agentTaskConfigSchema = z.object({
   modelOverride: z.string().optional(),
   castingReason: z.string().optional(),
   useRoleTools: z.boolean().optional(),
+  useSession: z.boolean().optional(),
   maxToolSteps: z.number().int().min(1).max(12).optional(),
   memoryPolicy: z.enum(['form', 'episodic_only', 'none']).optional(),
 });
@@ -91,6 +108,18 @@ const knowledgeConfigSchema = z.object({
   queryPath: z.string().optional(),
   retrievalMode: z.enum(['contextual', 'strict', 'exploratory']).default('contextual'),
   topK: z.number().int().min(1).max(20).default(5),
+});
+
+const knowledgeIngestConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('knowledge_ingest'),
+  knowledgeBaseId: z.string().optional(),
+  knowledgeBaseName: z.string().optional(),
+  content: z.string().optional(),
+  contentPath: z.string().optional(),
+  documentName: z.string().optional(),
+  documentNamePath: z.string().optional(),
+  mimeType: z.string().optional(),
 });
 
 const routerConfigSchema = z.object({
@@ -198,6 +227,7 @@ export const workflowNodeConfigSchema = z.union([
   agentSessionConfigSchema,
   extensionTaskConfigSchema,
   knowledgeConfigSchema,
+  knowledgeIngestConfigSchema,
   routerConfigSchema,
   mergeConfigSchema,
   checkpointConfigSchema,
@@ -233,12 +263,39 @@ export const workflowEdgeSchema = z.object({
   type: z.enum(['default', 'error', 'condition']).optional(),
 });
 
+export const workflowPhaseSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(1000).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  nodeIds: z.array(z.string().min(1)).min(1),
+  collapsed: z.boolean().optional(),
+  slaDurationMs: z.number().int().positive().optional(),
+  budgetCents: z.number().int().nonnegative().optional(),
+  humanGate: z.object({
+    type: z.enum(['approve', 'provide_input', 'review_output']),
+    message: z.string().max(1000).optional(),
+    approvers: z.array(z.string()).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    onTimeout: z.enum(['escalate', 'auto_approve', 'fail']).optional(),
+    escalateTo: z.string().optional(),
+  }).optional(),
+  successCriteria: z.string().max(4000).optional(),
+  rollbackPlan: z.string().max(4000).optional(),
+});
+
+// Legacy "Studio" surface schemas removed — UI surfaces now live on the Agentic
+// App (app_surfaces + AG-UI ViewNode, AGENTIC-APPS-10X §4). `.passthrough()`
+// keeps any stored graph JSON that still carries an old `surfaces` key valid.
+
 export const workflowGraphSchema = z.object({
   version: z.literal(1),
   nodes: z.array(workflowNodeSchema),
   edges: z.array(workflowEdgeSchema),
   viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }),
+  phases: z.array(workflowPhaseSchema).optional(),
 }).passthrough();
+
 
 // ────────────────────────────────────────────────────────────
 // API request bodies
@@ -248,6 +305,8 @@ export const createWorkflowSchema = z.object({
   workspaceId: z.string().uuid(),
   ambientId: z.string().uuid().nullable().optional(),
   spaceId: z.string().uuid().nullable().optional(),
+  /** Specialist agent that owns this workflow (direct per-workflow responsibility). */
+  ownerAgentId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(255),
   description: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
@@ -257,6 +316,7 @@ export const createWorkflowSchema = z.object({
 export const updateWorkflowSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
   spaceId: z.string().uuid().nullable().optional(),
+  ownerAgentId: z.string().uuid().nullable().optional(),
   description: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
   settings: z.record(z.string(), z.unknown()).optional(),

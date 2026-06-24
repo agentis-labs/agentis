@@ -1,21 +1,37 @@
+import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { AgentAdapter, AdapterHealthStatus, ChatDelta, ChatInvocationOptions, ChatMessage, NormalizedAgentEvent, NormalizedTask, ToolDefinition } from '@agentis/core';
+import { eq } from 'drizzle-orm';
+import type { AdapterCapabilities, AgentAdapter, AdapterHealthStatus, ChatDelta, ChatInvocationOptions, ChatMessage, NormalizedAgentEvent, NormalizedTask, ToolDefinition } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
+import { schema } from '@agentis/db/sqlite';
 import { ChatSessionExecutor } from '../../src/services/chatSessionExecutor.js';
 import { ChatToolExecutor } from '../../src/services/chatToolExecutor.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { createInProcessEventBus } from '../../src/event-bus.js';
 import { createLogger } from '../../src/logger.js';
+import { createTestContext } from '../_helpers/createTestContext.js';
+import { OrchestratorModelRouter } from '../../src/services/orchestratorModelRouter.js';
+import { routeModelForTask, type ModelRoutingDecision } from '../../src/services/modelRoutingPolicy.js';
 
 class FakeChatAdapter implements AgentAdapter {
   readonly adapterType = 'http' as const;
   calls: ChatMessage[][] = [];
   chatOptions: Array<ChatInvocationOptions | undefined> = [];
-  constructor(private readonly impl: (messages: ChatMessage[], tools: ToolDefinition[], callIndex: number) => AsyncIterable<ChatDelta>) {}
+  constructor(
+    private readonly impl: (messages: ChatMessage[], tools: ToolDefinition[], callIndex: number) => AsyncIterable<ChatDelta>,
+    private readonly adapterCapabilities: AdapterCapabilities = {
+      interactiveChat: true,
+      toolCalling: true,
+      toolForwarding: 'native',
+    },
+  ) {}
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
   async healthCheck(): Promise<AdapterHealthStatus> {
     return { isHealthy: true, checkedAt: new Date().toISOString() };
+  }
+  capabilities(): AdapterCapabilities {
+    return this.adapterCapabilities;
   }
   onEvent(_handler: (event: NormalizedAgentEvent) => void): void {}
   async dispatchTask(_task: NormalizedTask): Promise<void> {}
@@ -91,7 +107,13 @@ describe('ChatSessionExecutor', () => {
         description: 'Build a workflow from a description.',
         inputSchema: {
           type: 'object',
-          properties: { description: { type: 'string' }, title: { type: 'string' }, workflowId: { type: 'string' } },
+          properties: {
+            description: { type: 'string' },
+            title: { type: 'string' },
+            workflowId: { type: 'string' },
+            graphDraft: { type: 'object' },
+            patchDraft: { type: 'object' },
+          },
           required: ['description'],
         },
         mutating: true,
@@ -309,9 +331,32 @@ describe('ChatSessionExecutor', () => {
     expect(deltas).toContainEqual({ type: 'text', delta: 'auto write complete' });
   });
 
-  it('directly builds obvious workflow requests without invoking the chat adapter', async () => {
-    const adapter = new FakeChatAdapter(async function* () {
-      throw new Error('chat adapter should not be invoked for direct workflow builds');
+  it('routes obvious workflow requests through the agent tool loop', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield {
+          type: 'tool_call',
+          id: 'build-agent-draft',
+          name: 'agentis.build_workflow',
+          args: {
+            title: 'Email Robson',
+            description: 'build a workflow that sends Hi Robson to my email robsonpradodev@gmail.com',
+            graphDraft: {
+              version: 1,
+              nodes: [
+                { id: 'trigger', type: 'trigger', title: 'Manual Trigger', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+                { id: 'output', type: 'return_output', title: 'Return Output', position: { x: 240, y: 0 }, config: { kind: 'return_output', renderAs: 'text' } },
+              ],
+              edges: [{ id: 'trigger-output', source: 'trigger', target: 'output' }],
+              viewport: { x: 0, y: 0, zoom: 1 },
+            },
+          },
+        };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Built the email workflow.' };
+      yield { type: 'done', finishReason: 'stop' };
     });
 
     const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'build a workflow that sends Hi Robson to my email robsonpradodev@gmail.com', {
@@ -322,15 +367,13 @@ describe('ChatSessionExecutor', () => {
       clientTurnId: 'turn_build_1',
     }));
 
-    expect(adapter.calls).toHaveLength(0);
+    expect(adapter.calls).toHaveLength(2);
     expect(directBuildToolCalls).toBe(1);
     expect(directBuildToolRunIds).toEqual(['build_turn_build_1']);
-    expect(deltas).toContainEqual(expect.objectContaining({
-      type: 'activity',
-      phase: 'workflow',
-      runId: 'build_turn_build_1',
-      label: 'Building workflow',
-    }));
+    expect(directBuildToolArgs[0]).toMatchObject({
+      title: 'Email Robson',
+      graphDraft: expect.objectContaining({ version: 1 }),
+    });
     expect(deltas).toContainEqual(expect.objectContaining({
       type: 'tool_call',
       name: 'agentis.build_workflow',
@@ -343,14 +386,7 @@ describe('ChatSessionExecutor', () => {
         runId: 'build_turn_build_1',
       }),
     }));
-    const text = deltas
-      .filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text')
-      .map((delta) => delta.delta)
-      .join('');
-    expect(text).toContain('5 nodes');
-    expect(text).toContain('robsonpradodev@gmail.com');
-    expect(text).toContain('Approval required before delivery');
-    expect(text).not.toMatch(/Est\.|\/run|Completed in|seconds?/i);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'Built the email workflow.' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
 
@@ -389,6 +425,65 @@ describe('ChatSessionExecutor', () => {
     expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_FAST_RUNTIME' });
     expect(deltas.some((delta) => delta.type === 'text' && delta.delta === 'FROM_SLOW_CLI')).toBe(false);
     expect(runtime.calls).toHaveLength(1);
+  });
+
+  it('uses task-aware model routing before invoking the chat fast path', async () => {
+    const cliAdapter: AgentAdapter = {
+      adapterType: 'claude_code',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: true, checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: true, toolCalling: true, toolForwarding: 'marker_protocol' as const };
+      },
+      async *chat() {
+        yield { type: 'text', delta: 'FROM_SLOW_CLI' };
+        yield { type: 'done', finishReason: 'stop' as const };
+      },
+    };
+    const runtime = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'FROM_ROUTED_RUNTIME' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    class RecordingRouter extends OrchestratorModelRouter {
+      decision: ModelRoutingDecision | null = null;
+      override route(args: Parameters<OrchestratorModelRouter['route']>[0]): ModelRoutingDecision {
+        this.decision = routeModelForTask({
+          task: args.task,
+          purpose: args.purpose,
+          runtime: 'claude_code',
+          currentModel: 'claude-opus-4-8',
+          requiredAffordances: args.requiredAffordances,
+        });
+        return this.decision;
+      }
+      override resolveRouted(args: Parameters<OrchestratorModelRouter['resolveRouted']>[0]): AgentAdapter | undefined {
+        this.route(args);
+        return runtime;
+      }
+      override describeRouting(): string {
+        return 'RUNTIME ROUTING INTELLIGENCE';
+      }
+    }
+    const router = new RecordingRouter();
+    ChatSessionExecutor.configure({ modelRouter: router });
+
+    const deltas = await collect(ChatSessionExecutor.turn(cliAdapter, [], 'Write a short welcome email.', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_routed',
+    }));
+
+    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_ROUTED_RUNTIME' });
+    expect(runtime.calls).toHaveLength(1);
+    expect(router.decision?.selectedModel).toBe('claude-sonnet-4-6');
+    expect(router.decision?.explicitPin).toBe(false);
   });
 
   it('gives a CLI harness a realistic per-round timeout when it answers directly (no runtime)', async () => {
@@ -449,6 +544,123 @@ describe('ChatSessionExecutor', () => {
 
     expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_NATIVE' });
     expect(runtime.calls).toHaveLength(0);
+  });
+
+  it('injects persisted identity for legacy null-role agents without the orchestrator persona', async () => {
+    const dbCtx = await createTestContext();
+    const agentId = randomUUID();
+    try {
+      dbCtx.db.insert(schema.agents).values({
+        id: agentId,
+        workspaceId: dbCtx.workspace.id,
+        ambientId: dbCtx.ambient.id,
+        userId: dbCtx.user.id,
+        name: 'Legacy Specialist',
+        description: 'Handles focused analysis.',
+        adapterType: 'codex',
+        capabilityTags: ['analysis'],
+        config: {
+          cwd: 'C:/repo',
+          token: 'super-secret-token',
+          nested: { password: 'hunter2', safe: 'visible' },
+          specialist: true,
+          specialistSource: 'manual',
+          defaultModel: 'gpt-5.5',
+          tools: ['research'],
+        },
+        status: 'online',
+        role: null,
+        runtimeModel: 'gpt-5.5',
+        instructions: 'Persisted specialist instructions. Never claim to be the orchestrator.',
+      }).run();
+      const adapter = new FakeChatAdapter(async function* () {
+        yield { type: 'text', delta: 'ok' };
+        yield { type: 'done', finishReason: 'stop' };
+      });
+      ChatSessionExecutor.configure({ db: dbCtx.db });
+
+      await collect(ChatSessionExecutor.turn(adapter, [], 'hello', {
+        workspaceId: dbCtx.workspace.id,
+        agentId,
+        userId: dbCtx.user.id,
+        conversationId: 'conv_legacy',
+      }));
+
+      const systemPrompt = adapter.calls[0]![0]!.content;
+      expect(systemPrompt).not.toContain('You are the Agentis platform orchestrator');
+      expect(systemPrompt).toContain('You are Legacy Specialist, an Agentis agent');
+      expect(systemPrompt).toContain('You are NOT the platform orchestrator');
+      expect(systemPrompt.match(/<agentis_identity/g)).toHaveLength(1);
+      expect(systemPrompt).toContain('role: agent');
+      expect(systemPrompt).toContain('runtimeModel: gpt-5.5');
+      expect(systemPrompt).toContain('capabilityTags: analysis');
+      expect(systemPrompt).toContain('"cwd":"C:/repo"');
+      expect(systemPrompt).toContain('"safe":"visible"');
+      expect(systemPrompt).toContain('"token":"[redacted]"');
+      expect(systemPrompt).toContain('"password":"[redacted]"');
+      expect(systemPrompt).not.toContain('super-secret-token');
+      expect(systemPrompt).not.toContain('hunter2');
+      const instructionsIndex = systemPrompt.indexOf('Persisted specialist instructions');
+      expect(instructionsIndex).toBeGreaterThan(-1);
+      expect(systemPrompt.lastIndexOf('Persisted specialist instructions')).toBe(instructionsIndex);
+    } finally {
+      ChatSessionExecutor.configure({});
+      dbCtx.close();
+    }
+  });
+
+  it('versions CLI-backed chat session keys by identity checksum', async () => {
+    const dbCtx = await createTestContext();
+    const agentId = randomUUID();
+    try {
+      dbCtx.db.insert(schema.agents).values({
+        id: agentId,
+        workspaceId: dbCtx.workspace.id,
+        ambientId: dbCtx.ambient.id,
+        userId: dbCtx.user.id,
+        name: 'CLI Specialist',
+        adapterType: 'codex',
+        capabilityTags: ['code'],
+        config: { cwd: 'C:/repo', approvalMode: 'safe' },
+        status: 'online',
+        role: 'worker',
+        runtimeModel: 'gpt-5.5',
+        instructions: 'Initial CLI identity.',
+      }).run();
+      const adapter = new FakeChatAdapter(
+        async function* () {
+          yield { type: 'text', delta: 'ok' };
+          yield { type: 'done', finishReason: 'stop' };
+        },
+        { interactiveChat: true, toolCalling: true, toolForwarding: 'marker_protocol' },
+      );
+      ChatSessionExecutor.configure({ db: dbCtx.db });
+      const turnCtx = {
+        workspaceId: dbCtx.workspace.id,
+        agentId,
+        userId: dbCtx.user.id,
+        conversationId: 'conv_identity',
+      };
+
+      await collect(ChatSessionExecutor.turn(adapter, [], 'first', turnCtx));
+      await collect(ChatSessionExecutor.turn(adapter, [], 'second', turnCtx));
+      const firstKey = adapter.chatOptions[0]?.sessionKey;
+      const secondKey = adapter.chatOptions[1]?.sessionKey;
+      expect(firstKey).toMatch(/^conv_identity:identity:[a-f0-9]{16}$/);
+      expect(secondKey).toBe(firstKey);
+
+      dbCtx.db.update(schema.agents)
+        .set({ instructions: 'Changed CLI identity.' })
+        .where(eq(schema.agents.id, agentId))
+        .run();
+      await collect(ChatSessionExecutor.turn(adapter, [], 'third', turnCtx));
+      const thirdKey = adapter.chatOptions[2]?.sessionKey;
+      expect(thirdKey).toMatch(/^conv_identity:identity:[a-f0-9]{16}$/);
+      expect(thirdKey).not.toBe(firstKey);
+    } finally {
+      ChatSessionExecutor.configure({});
+      dbCtx.close();
+    }
   });
 
   it('injects agent memory, personal brain, workspace context, and agent instructions into the system prompt when wired', async () => {
@@ -615,9 +827,30 @@ describe('ChatSessionExecutor', () => {
     expect(deltas).toContainEqual({ type: 'text', delta: 'Hello.' });
   });
 
-  it('routes active-canvas workflow mutations directly to the durable compiler', async () => {
-    const adapter = new FakeChatAdapter(async function* () {
-      throw new Error('chat adapter should not be invoked for active workflow mutations');
+  it('lets the agent submit a scoped patch for the active workflow', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield {
+          type: 'tool_call',
+          id: 'patch-active-workflow',
+          name: 'agentis.build_workflow',
+          args: {
+            workflowId: 'wf_active',
+            description: 'update this workflow to send html emails',
+            patchDraft: {
+              addNodes: [],
+              updateNodes: [],
+              removeNodeIds: [],
+              addEdges: [],
+              removeEdgeIds: [],
+            },
+          },
+        };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Updated the active workflow.' };
+      yield { type: 'done', finishReason: 'stop' };
     });
 
     const deltas = await collect(ChatSessionExecutor.turn(
@@ -641,18 +874,14 @@ describe('ChatSessionExecutor', () => {
       },
     ));
 
-    expect(adapter.calls).toHaveLength(0);
+    expect(adapter.calls).toHaveLength(2);
     expect(directBuildToolCalls).toBe(1);
     expect(directBuildToolArgs[0]).toMatchObject({
       workflowId: 'wf_active',
       description: 'update this workflow to send html emails',
+      patchDraft: expect.objectContaining({ updateNodes: [] }),
     });
-    expect(deltas).toContainEqual(expect.objectContaining({
-      type: 'activity',
-      phase: 'workflow',
-      label: 'Updating workflow',
-    }));
-    expect(deltas.some((delta) => delta.type === 'text' && delta.delta.startsWith('Updated '))).toBe(true);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'Updated the active workflow.' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
 
@@ -748,7 +977,23 @@ describe('ChatSessionExecutor', () => {
     ChatToolExecutor.configure({ registry });
     ChatSessionExecutor.configure({ bus });
 
-    const adapter = new FakeChatAdapter(async function* () { yield { type: 'done', finishReason: 'stop' }; });
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield {
+          type: 'tool_call',
+          id: 'build-narrated',
+          name: 'agentis.build_workflow',
+          args: {
+            description: 'create a workflow that emails me the AI news',
+            graphDraft: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+          },
+        };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Workflow built.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
     const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'create a workflow that emails me the AI news', {
       workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_narr', clientTurnId: 'turn_narr',
     }));
@@ -759,6 +1004,98 @@ describe('ChatSessionExecutor', () => {
     expect(labels).toContain('Drafting the workflow graph');
     expect(labels.some((l) => l.startsWith('Placed Fetch AI news'))).toBe(true);
     expect(labels).toContain('Workflow ready');
+  });
+
+  it('keeps tool-round narration out of the final answer', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'thinking', delta: 'private reasoning' };
+        yield { type: 'text', delta: 'I will inspect the repository first.' };
+        yield { type: 'tool_call', id: 'inspect-1', name: 'agentis.list_agents', args: {} };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'The repository is ready.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'Inspect it', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_final_only',
+    }));
+
+    const text = deltas
+      .filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text')
+      .map((delta) => delta.delta)
+      .join('');
+    expect(text).toBe('The repository is ready.');
+    expect(deltas.some((delta) => delta.type === 'thinking')).toBe(false);
+    expect(deltas.some((delta) => delta.type === 'tool_call' && delta.id === 'inspect-1')).toBe(true);
+  });
+
+  it('streams runtime activity before the model turn completes', async () => {
+    let releaseRuntime!: () => void;
+    const runtimeGate = new Promise<void>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    const adapter = new FakeChatAdapter(async function* () {
+      yield {
+        type: 'activity',
+        id: 'runtime-live',
+        phase: 'runtime',
+        status: 'running',
+        label: 'Inspecting the failed run',
+        startedAt: new Date().toISOString(),
+      };
+      await runtimeGate;
+      yield { type: 'text', delta: 'The run is fixed.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    const iterator = ChatSessionExecutor.turn(adapter, [], 'Fix the run', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_live_activity',
+    })[Symbol.asyncIterator]();
+
+    const seen: ChatDelta[] = [];
+    let foundLiveActivity = false;
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        const next = await new Promise<IteratorResult<ChatDelta>>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('Runtime activity was buffered')), 500);
+          iterator.next().then(
+            (value) => {
+              clearTimeout(timeout);
+              resolve(value);
+            },
+            (error) => {
+              clearTimeout(timeout);
+              reject(error);
+            },
+          );
+        });
+        if (next.done) break;
+        seen.push(next.value);
+        if (next.value.type === 'activity' && next.value.id === 'runtime-live') {
+          foundLiveActivity = true;
+          break;
+        }
+      }
+    } finally {
+      releaseRuntime();
+    }
+
+    expect(foundLiveActivity).toBe(true);
+    expect(seen.some((delta) => delta.type === 'text')).toBe(false);
+
+    const remaining: ChatDelta[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      remaining.push(next.value);
+    }
+    const finalText = remaining
+      .filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text')
+      .map((delta) => delta.delta)
+      .join('');
+    expect(finalText).toBe('The run is fixed.');
   });
 
   it('recovers a reasoning-only turn instead of returning the empty fallback', async () => {

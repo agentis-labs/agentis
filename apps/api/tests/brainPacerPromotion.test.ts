@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EpisodicMemoryStore } from '../src/services/episodicMemoryStore.js';
-import { HashingEmbeddingProvider } from '../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from './_helpers/stubEmbeddingProvider.js';
 import { SharedIntelligenceService } from '../src/services/sharedIntelligence.js';
 import { createTestContext, type TestContext } from './_helpers/createTestContext.js';
 
@@ -15,7 +15,7 @@ let brain: SharedIntelligenceService;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new HashingEmbeddingProvider());
+  episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
   // No formation completer wired → staging path.
   brain = new SharedIntelligenceService(ctx.db, ctx.bus, episodes, ctx.logger);
 });

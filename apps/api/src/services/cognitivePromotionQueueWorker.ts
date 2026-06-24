@@ -29,6 +29,7 @@ interface AgentAbilityReviewer { review(input: AbilityReviewInput): Promise<unkn
 import type { PeerProfileService } from './peerProfileService.js';
 import type { ReflectionService } from './reflectionService.js';
 import type { FeynmanReflectionService, FeynmanReflectionPayload } from './feynmanReflection.js';
+import type { MemoryReflectionService, MemoryReflectionPayload } from './memoryReflectionService.js';
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_ATTEMPTS = 5;
@@ -66,6 +67,7 @@ export type BrainQueueItemType =
   | 'curator_pass'
   | 'dream_pass'
   | 'feynman_reflection'
+  | 'memory_reflection'
   | 'reembed_workspace';
 
 export type BrainQueuePriority = 'high' | 'normal' | 'low';
@@ -96,6 +98,8 @@ export class CognitivePromotionQueueWorker {
   Reflection?: ReflectionService;
   /** Phase 4 — Feynman repair loop, wired lazily in bootstrap. */
   Feynman?: FeynmanReflectionService;
+  /** §C1 — cross-session memory Reflection Engine ("dreaming"), wired lazily. */
+  MemoryReflection?: MemoryReflectionService;
 
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -356,6 +360,16 @@ export class CognitivePromotionQueueWorker {
         const p = payload as unknown as FeynmanReflectionPayload;
         if (!p.workspaceId || !p.nodeId || !p.error) return;
         await this.Feynman.run(p);
+        return;
+      }
+      case 'memory_reflection': {
+        if (!this.MemoryReflection) {
+          this.logger.info('cognitive_promotion_queue.memory_reflection_skipped', { reason: 'no MemoryReflection service wired' });
+          return;
+        }
+        const p = payload as unknown as MemoryReflectionPayload;
+        if (!p.workspaceId) return;
+        await this.MemoryReflection.run(p);
         return;
       }
       case 'reembed_workspace': {

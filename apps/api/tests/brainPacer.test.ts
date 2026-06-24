@@ -7,10 +7,53 @@
 import { describe, it, expect } from 'vitest';
 import {
   classifyPacer,
+  classifyPacerByPrototype,
+  classifyPacerRefined,
   pacerRouting,
   coercePacerClass,
   type PacerClass,
 } from '../src/services/brainPacer.js';
+import { StubEmbeddingProvider } from './_helpers/stubEmbeddingProvider.js';
+
+describe('§B5.2 — prototype-vector PACER fallback', () => {
+  const provider = new StubEmbeddingProvider();
+  const embed = async (t: string) => provider.embed(t);
+
+  it('classifies by nearest prototype when given a semantic embed fn', async () => {
+    const verdict = await classifyPacerByPrototype(
+      'always retry and ensure the step does not fail again',
+      embed,
+      provider.modelId,
+    );
+    expect(verdict).not.toBeNull();
+    expect(verdict!.pacerClass).toBe('procedural');
+    expect(verdict!.reason).toMatch(/^prototype:/);
+  });
+
+  it('returns null on empty text (caller keeps the deterministic verdict)', async () => {
+    expect(await classifyPacerByPrototype('   ', embed, provider.modelId)).toBeNull();
+  });
+
+  it('refined classification keeps a confident deterministic verdict, no embed needed', async () => {
+    // Strong procedural cues → deterministic is confident → no semantic fallback.
+    const verdict = await classifyPacerRefined(
+      { text: 'Never deploy on Fridays; always run the smoke tests first.' },
+      null,
+      null,
+    );
+    expect(verdict.pacerClass).toBe('procedural');
+  });
+
+  it('prototype classifier picks reference for reference-shaped text', async () => {
+    const verdict = await classifyPacerByPrototype(
+      'the configured endpoint path and api url live in the config key settings file',
+      embed,
+      provider.modelId,
+    );
+    expect(verdict).not.toBeNull();
+    expect(verdict!.pacerClass).toBe('reference');
+  });
+});
 
 describe('classifyPacer — procedural', () => {
   const procedural = [

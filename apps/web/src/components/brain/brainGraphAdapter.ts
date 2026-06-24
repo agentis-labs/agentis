@@ -88,10 +88,10 @@ function nodeTypeForAtom(atomKind: BrainGraphNode['atomKind']): BrainNodeType {
     case 'pattern': return 'memory_pattern';
     case 'warning': return 'warning';
     case 'gap': return 'gap';
-    // Organizational overlay (Workspace Brain / CORA engine).
-    case 'cora_source': return 'dataset';
-    case 'cora_entity': return 'artifact';
-    case 'cora_claim': return 'decision';
+    // Organizational overlay (Workspace Brain / Grounding engine).
+    case 'grounding_source': return 'dataset';
+    case 'grounding_entity': return 'artifact';
+    case 'grounding_claim': return 'decision';
   }
 }
 
@@ -106,9 +106,9 @@ function layerForAtom(atomKind: BrainGraphNode['atomKind']): BrainLayer {
     case 'warning':
     case 'gap': return 'judgment';
     // Sources + entities sit with knowledge; claims are judged truth.
-    case 'cora_source':
-    case 'cora_entity': return 'knowledge';
-    case 'cora_claim': return 'judgment';
+    case 'grounding_source':
+    case 'grounding_entity': return 'knowledge';
+    case 'grounding_claim': return 'judgment';
   }
 }
 

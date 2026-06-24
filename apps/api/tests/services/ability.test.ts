@@ -10,19 +10,19 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { AbilityService } from '../../src/services/abilityService.js';
 import { AbilityCompilerService } from '../../src/services/abilityCompilerService.js';
-import { HashingEmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { schema } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
 
 interface FakeSharedIntelligence {
-  embeddingProvider(workspaceId: string): HashingEmbeddingProvider;
+  embeddingProvider(workspaceId: string): StubEmbeddingProvider;
 }
 
 let ctx: TestContext;
 let abilities: AbilityService;
 let compiler: AbilityCompilerService;
-const provider = new HashingEmbeddingProvider();
+const provider = new StubEmbeddingProvider();
 const fakeIntelligence: FakeSharedIntelligence = {
   embeddingProvider: () => provider,
 };

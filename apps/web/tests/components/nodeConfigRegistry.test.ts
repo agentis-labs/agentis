@@ -41,6 +41,12 @@ describe('node config registry', () => {
       ready: false,
       message: 'Bind a Slack credential.',
     });
+
+    expect(evaluateNodeReadiness({
+      kind: 'integration',
+      integrationId: 'slack',
+      operationId: 'send_message',
+    }, { integrations, credentialTypes: ['integration_slack'] })).toEqual({ ready: true, message: null });
   });
 
   it('blocks incomplete cron and persistent-listener triggers', () => {

@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
-import { HashingEmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -11,7 +11,7 @@ let brain: SharedIntelligenceService;
 
 beforeEach(async () => {
   ctx = await createTestContext();
-  const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new HashingEmbeddingProvider());
+  const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
   brain = new SharedIntelligenceService(ctx.db, ctx.bus, episodes, ctx.logger);
 });
 

@@ -9,12 +9,12 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   Check, ExternalLink, Loader2, MessageSquare, Scale, ShieldAlert, X,
 } from 'lucide-react';
 import type { BrainNode } from '@agentis/core';
 import { api, apiErrorMessage } from '../../lib/api';
+import { useChatPanelStore } from '../chat/ChatPanelStore';
 
 interface ClaimDetail {
   claim: {
@@ -56,8 +56,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
   onClose: () => void;
   onChanged: () => void;
 }) {
-  const nav = useNavigate();
-  const coraKind = String(node.metadata?.cora ?? '');
+  const groundingKind = String(node.metadata?.grounding ?? '');
   const rawId = String(node.metadata?.atomId ?? node.id.split(':').pop() ?? '');
   const [detail, setDetail] = useState<ClaimDetail | null>(null);
   const [busy, setBusy] = useState(false);
@@ -66,27 +65,31 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
   useEffect(() => {
     setDetail(null);
     setError(null);
-    if (coraKind !== 'claim' || !rawId) return;
-    void api<ClaimDetail>(`/v1/cora/claims/${rawId}`)
+    if (groundingKind !== 'claim' || !rawId) return;
+    void api<ClaimDetail>(`/v1/grounding/claims/${rawId}`)
       .then(setDetail)
       .catch((err) => setError(apiErrorMessage(err)));
-  }, [coraKind, rawId]);
+  }, [groundingKind, rawId]);
 
   const discussInChat = useCallback(() => {
     const summary = node.description ? ` — ${node.description}` : '';
-    const draft = coraKind === 'claim'
+    const draft = groundingKind === 'claim'
       ? `About the organizational claim "${node.label}"${summary}: explain what supports it, what contradicts it, and whether it is still current.`
-      : coraKind === 'source'
+      : groundingKind === 'source'
         ? `What has the Brain learned from the ${node.label} source so far, and what is it missing?`
         : `Tell me what the Brain knows about "${node.label}"${summary}, with citations.`;
-    nav(`/chat?draft=${encodeURIComponent(draft)}`);
-  }, [coraKind, node, nav]);
+    useChatPanelStore.getState().openChat({
+      state: 'fullscreen',
+      thread: null,
+      launchContext: { initialDraft: draft },
+    });
+  }, [groundingKind, node]);
 
   const setClaimStatus = useCallback(async (action: 'approve' | 'reject') => {
     setBusy(true);
     setError(null);
     try {
-      await api(`/v1/cora/claims/${rawId}/${action}`, { method: 'POST' });
+      await api(`/v1/grounding/claims/${rawId}/${action}`, { method: 'POST' });
       onChanged();
       if (action === 'reject') onClose();
     } catch (err) {
@@ -101,7 +104,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
       <header className="flex items-start justify-between gap-2 border-b border-line px-4 py-3">
         <div className="min-w-0">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-            {coraKind === 'claim' ? 'Organizational claim' : coraKind === 'source' ? 'Connected source' : 'Organizational entity'}
+            {groundingKind === 'claim' ? 'Organizational claim' : groundingKind === 'source' ? 'Connected source' : 'Organizational entity'}
           </p>
           <h3 className="truncate text-[14px] font-semibold text-text-primary">{node.label}</h3>
         </div>
@@ -113,7 +116,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-[12px]">
         {node.description && <p className="text-text-muted">{node.description}</p>}
 
-        {coraKind === 'claim' && (
+        {groundingKind === 'claim' && (
           <>
             {!detail && !error && (
               <p className="mt-4 inline-flex items-center gap-2 text-text-muted"><Loader2 size={13} className="animate-spin" /> Loading claim…</p>
@@ -186,7 +189,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
           </>
         )}
 
-        {coraKind === 'source' && (
+        {groundingKind === 'source' && (
           <div className="mt-3 grid gap-1 text-[12px] text-text-muted">
             <p>Status: <strong className="text-text-primary">{String(node.metadata?.status ?? 'unknown')}</strong></p>
             <p>Type: {String(node.metadata?.sourceType ?? 'unknown')}</p>
@@ -194,7 +197,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
           </div>
         )}
 
-        {coraKind === 'entity' && (
+        {groundingKind === 'entity' && (
           <p className="mt-3 text-text-muted">Kind: <strong className="text-text-primary">{String(node.metadata?.kind ?? 'entity')}</strong>. Claims about this entity appear as connected judgment nodes.</p>
         )}
 

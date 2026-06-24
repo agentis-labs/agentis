@@ -12,6 +12,26 @@ async function main() {
   // eslint-disable-next-line no-console
   console.log(`\nAgentis is live at ${url}\n`);
 
+  // Last-resort safety net. A workflow engine that orchestrates runs lasting
+  // weeks or months MUST NOT die because one adapter stream handler, timer, or
+  // best-effort DB write threw asynchronously (these escape try/catch because
+  // they fire on a later tick). Previously a single FK error inside an adapter's
+  // stdout handler took down the whole process — killing every live run and SSE
+  // stream ("we can't see anything in realtime"). We log loudly so the bug stays
+  // visible, but we keep serving.
+  process.on('uncaughtException', (err) => {
+    handle.logger.error('process.uncaught_exception', {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+  });
+  process.on('unhandledRejection', (reason) => {
+    handle.logger.error('process.unhandled_rejection', {
+      error: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
+
   const shutdown = async (signal: string) => {
     handle.logger.info('agentis.signal', { signal });
     await handle.stop();

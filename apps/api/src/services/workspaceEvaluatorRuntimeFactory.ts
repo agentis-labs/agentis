@@ -22,6 +22,36 @@ export class WorkspaceEvaluatorRuntimeFactory {
   /** The EvaluatorRuntime for a workspace+role, or undefined when unconfigured. */
   for(workspaceId: string, role: OrchestratorModelRole): EvaluatorRuntime | undefined {
     const profile = this.deps.router.profile(role, workspaceId);
+    return this.#runtimeForProfile(profile);
+  }
+
+  /** Task-aware runtime resolution. Defaults/env/workspace models become candidates. */
+  forTask(
+    workspaceId: string,
+    role: OrchestratorModelRole,
+    task: string,
+    purpose?: string,
+    explicitModel?: string | null,
+  ): EvaluatorRuntime | undefined {
+    const { profile, decision } = this.deps.router.routeProfile({
+      role,
+      workspaceId,
+      task,
+      purpose: purpose ?? role,
+      explicitModel,
+    });
+    this.deps.logger.debug?.('workspace_evaluator_runtime.routed', {
+      workspaceId,
+      role,
+      selectedModel: decision.selectedModel,
+      taskClass: decision.taskClass,
+      explicitPin: decision.explicitPin,
+      reason: decision.reason,
+    });
+    return this.#runtimeForProfile(profile);
+  }
+
+  #runtimeForProfile(profile: ReturnType<OrchestratorModelRouter['profile']>): EvaluatorRuntime | undefined {
     if (!profile) return undefined;
     const key = `${profile.baseUrl}|${profile.model}|${profile.apiKey ?? ''}`;
     const cached = this.#cache.get(key);

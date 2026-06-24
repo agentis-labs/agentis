@@ -8,11 +8,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Network, List as ListIcon, MessageCircle, Settings as SettingsIcon, Search, SearchX, X, Zap, ChevronDown, Check, Sparkles } from 'lucide-react';
+import { Bot, Plus, Network, List as ListIcon, Search, SearchX, X, Zap, Sparkles, Download } from 'lucide-react';
+import { ImportAgentsWizard } from '../components/agents/ImportAgentsWizard';
 import clsx from 'clsx';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { Button } from '../components/shared/Button';
+import { DomainToolbar } from '../components/shared/DomainToolbar';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { Skeleton, SkeletonCard } from '../components/shared/Skeleton';
 import { EmptyState } from '../components/shared/EmptyState';
@@ -21,7 +23,7 @@ import { AgentHierarchyCanvas } from '../components/agents/AgentHierarchyCanvas'
 import type { AgentHierarchyCreatePreset } from '../components/agents/AgentHierarchyCanvas';
 import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
 import { AbilitiesModal } from '../components/abilities/AbilitiesModal';
-import { REALTIME_EVENTS } from '@agentis/core';
+import { REALTIME_EVENTS, isSpecialistRole } from '@agentis/core';
 
 interface AgentRow {
   id: string;
@@ -58,19 +60,8 @@ interface AgentRow {
 
 interface Space extends DomainOption {}
 
-type View = 'fleet' | 'table' | 'specialists';
+type View = 'fleet' | 'table';
 type FilterValue = 'all' | 'active' | 'idle' | 'setup_needed';
-
-/**
- * The specialist class = any agent whose role is not the orchestrator or manager
- * hierarchy tier (custom slugs like `frontend_architect`, legacy `worker`, plain
- * `agent`). These stay OUT of the hierarchy canvas/table so it remains focused on
- * orchestrator + managers, and live in the dedicated Specialists view instead.
- */
-function isSpecialistRole(role: string | null | undefined): boolean {
-  const r = (role ?? '').toLowerCase();
-  return r !== 'orchestrator' && r !== 'manager';
-}
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -118,14 +109,22 @@ export function AgentsPage() {
     try {
       // Legacy value 'canvas' migrates to 'fleet' (AGENTS-PAGE-REDESIGN.md §1.1).
       const stored = localStorage.getItem('agentis.agents.view');
-      return stored === 'table' || stored === 'specialists' ? stored : 'fleet';
+      return stored === 'table' ? stored : 'fleet';
     } catch { return 'fleet'; }
   });
   const [creating, setCreating] = useState(false);
+  const [importingAgents, setImportingAgents] = useState(false);
   const [creatingPreset, setCreatingPreset] = useState<AgentHierarchyCreatePreset | undefined>(undefined);
   const [selectedDomainId, setSelectedDomainId] = useState<'all' | 'unassigned' | string>('all');
   const [editingDomain, setEditingDomain] = useState<Space | null>(null);
   const [domainEditorOpen, setDomainEditorOpen] = useState(false);
+  // Stacked subdomain editor (opened from the domain editor or the toolbar).
+  const [editingSubdomain, setEditingSubdomain] = useState<Space | null>(null);
+  const [addingSubdomainParent, setAddingSubdomainParent] = useState<string | null>(null);
+  const [subdomainEditorOpen, setSubdomainEditorOpen] = useState(false);
+  // When creating a specialist to OWN a subdomain, remember which one to assign.
+  const [pendingOwnerSubdomain, setPendingOwnerSubdomain] = useState<{ subdomainId: string; parentManagerId: string | null } | null>(null);
+  const [creatingReportsTo, setCreatingReportsTo] = useState<string | null>(null);
   const [abilitiesOpen, setAbilitiesOpen] = useState(false);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
@@ -152,7 +151,7 @@ export function AgentsPage() {
     try {
       const [aRes, sRes] = await Promise.allSettled([
         api<{ agents: AgentRow[] }>('/v1/agents'),
-        api<{ data: Space[] }>('/v1/spaces'),
+        api<{ data: Space[] }>('/v1/domains'),
       ]);
       if (aRes.status === 'fulfilled') setAgents(aRes.value.agents ?? []);
       if (sRes.status === 'fulfilled') setSpaces(sRes.value.data ?? []);
@@ -243,6 +242,48 @@ export function AgentsPage() {
   }, [agents, search]);
   const specialistCount = useMemo(() => agents.filter((a) => isSpecialistRole(a.role)).length, [agents]);
 
+  // Manager-owned org: split Domains from Subdomains (a domain row with a parent).
+  const topDomains = useMemo(() => spaces.filter((s) => !s.parentDomainId), [spaces]);
+  const subdomainsByParent = useMemo(() => {
+    const map = new Map<string, Space[]>();
+    for (const s of spaces) {
+      if (!s.parentDomainId) continue;
+      (map.get(s.parentDomainId) ?? map.set(s.parentDomainId, []).get(s.parentDomainId)!).push(s);
+    }
+    return map;
+  }, [spaces]);
+  const specialistOptions = useMemo(
+    () => agents.filter((a) => isSpecialistRole(a.role)).map((a) => ({ id: a.id, name: a.name, role: a.role ?? null })),
+    [agents],
+  );
+  const resolveAgentName = (id: string | null | undefined) => (id ? agents.find((a) => a.id === id)?.name : undefined);
+  const specialistCountFor = (subdomainId: string) =>
+    agents.filter((a) => a.spaceId === subdomainId && isSpecialistRole(a.role)).length;
+
+  function openAddSubdomain(parentDomainId: string) {
+    setEditingSubdomain(null);
+    setAddingSubdomainParent(parentDomainId);
+    setSubdomainEditorOpen(true);
+  }
+  function openEditDomainOrSubdomain(target: Space) {
+    if (target.parentDomainId) { openEditSubdomain(target); return; }
+    setEditingDomain(target);
+    setDomainEditorOpen(true);
+  }
+  function openEditSubdomain(sub: Space) {
+    setEditingSubdomain(sub);
+    setAddingSubdomainParent(null);
+    setSubdomainEditorOpen(true);
+  }
+  function handleCreateSpecialistForSubdomain(ctx: { subdomainId: string; parentManagerId: string | null }) {
+    setSubdomainEditorOpen(false);
+    setDomainEditorOpen(false);
+    setPendingOwnerSubdomain(ctx);
+    setCreatingPreset({ role: 'worker', spaceId: ctx.subdomainId });
+    setCreatingReportsTo(ctx.parentManagerId);
+    setCreating(true);
+  }
+
   function openCreateAgent() {
     const spaceId = selectedDomainId !== 'all' && selectedDomainId !== 'unassigned' ? selectedDomainId : null;
     setCreatingPreset(spaceId ? { role: 'manager', spaceId } : undefined);
@@ -296,20 +337,6 @@ export function AgentsPage() {
             >
               <ListIcon size={12} /> Table
             </button>
-            <button
-              type="button"
-              onClick={() => setView('specialists')}
-              aria-label="Specialists view"
-              className={clsx(
-                'inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors',
-                view === 'specialists' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
-              )}
-            >
-              <Sparkles size={12} /> Specialists
-              {specialistCount > 0 && (
-                <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[9px] text-text-muted">{specialistCount}</span>
-              )}
-            </button>
           </div>
           <button
             type="button"
@@ -319,6 +346,9 @@ export function AgentsPage() {
             <Zap size={14} className="btn-icon-zap mr-2" />
             <span>Abilities</span>
           </button>
+          <Button variant="secondary" size="md" iconLeft={<Download size={14} />} onClick={() => setImportingAgents(true)}>
+            Import agents
+          </Button>
           <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={openCreateAgent}>
             Add agent
           </Button>
@@ -327,12 +357,14 @@ export function AgentsPage() {
         {total > 0 && (
           <div className="flex flex-wrap items-center gap-2">
             <DomainToolbar
-              spaces={spaces}
-              agents={agents}
+              domains={spaces}
               selected={selectedDomainId}
               onSelect={setSelectedDomainId}
+              totalCount={total}
+              countForDomain={(spaceId) => agents.filter((agent) => (spaceId === null ? !agent.spaceId : agent.spaceId === spaceId)).length}
               onCreate={() => { setEditingDomain(null); setDomainEditorOpen(true); }}
-              onEdit={(domain) => { setEditingDomain(domain); setDomainEditorOpen(true); }}
+              onEdit={(domain) => openEditDomainOrSubdomain(domain)}
+              onAddSubdomain={openAddSubdomain}
             />
             {view === 'fleet' && (
               <AgentFleetHeaderControls
@@ -353,30 +385,32 @@ export function AgentsPage() {
           <EmptyState
             icon={<Bot size={48} />}
             title="No agents yet"
-            body="Create your first agent to start automating work."
+            body="Create your first agent — or bring in agents you already run outside Agentis, with their memory."
             primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={openCreateAgent}>Add agent</Button>}
+            secondaryAction={<Button variant="secondary" size="md" iconLeft={<Download size={14} />} onClick={() => setImportingAgents(true)}>Import existing agents</Button>}
             variant="page"
           />
-        ) : view === 'specialists' ? (
-          <SpecialistsView
-            specialists={specialistList}
-            total={specialistCount}
-            search={search}
-            onSearch={setSearch}
-            onCreate={() => { setCreatingPreset({ role: 'worker' }); setCreating(true); }}
-          />
         ) : view === 'fleet' ? (
-          <AgentHierarchyCanvas
-            agents={domainAgentsForCanvas}
-            filter={filter}
-            search={search}
-            onClearFilters={() => { setSearch(''); setFilter('all'); setSelectedDomainId('all'); }}
-            onChanged={() => void refresh()}
-            onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
-            selectedAgent={selectedAgent}
-            onCloseSelection={() => setSelectedAgent(null)}
-            onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="min-h-0 flex-1">
+              <AgentHierarchyCanvas
+                agents={domainAgentsForCanvas}
+                filter={filter}
+                search={search}
+                onClearFilters={() => { setSearch(''); setFilter('all'); setSelectedDomainId('all'); }}
+                onChanged={() => void refresh()}
+                onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
+                selectedAgent={selectedAgent}
+                onCloseSelection={() => setSelectedAgent(null)}
+                onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
+              />
+            </div>
+            <SpecialistBench
+              specialists={specialistList}
+              total={specialistCount}
+              onCreate={() => { setCreatingPreset({ role: 'worker' }); setCreating(true); }}
+            />
+          </div>
         ) : filteredCount === 0 ? (
           <EmptyState
             icon={<SearchX size={48} />}
@@ -405,10 +439,23 @@ export function AgentsPage() {
 
       <AgentCreateWizard
         open={creating}
-        onClose={() => { setCreating(false); setCreatingPreset(undefined); }}
-        onCreated={(agent) => {
+        onClose={() => { setCreating(false); setCreatingPreset(undefined); setCreatingReportsTo(null); setPendingOwnerSubdomain(null); }}
+        onCreated={async (agent) => {
           setCreating(false);
           setCreatingPreset(undefined);
+          setCreatingReportsTo(null);
+          const ownerCtx = pendingOwnerSubdomain;
+          setPendingOwnerSubdomain(null);
+          // Created to OWN a subdomain: assign it as the subdomain's specialist,
+          // then reopen the parent domain editor so the owner shows in its list.
+          if (ownerCtx) {
+            try {
+              await api(`/v1/domains/${ownerCtx.subdomainId}`, { method: 'PATCH', body: JSON.stringify({ managerId: agent.id }) });
+            } catch { /* best-effort owner assignment */ }
+            await refresh();
+            if (editingDomain) setDomainEditorOpen(true);
+            return;
+          }
           // Specialists open straight into their detail subpage — the "complete"
           // surface where mind (memory & knowledge) and abilities are configured.
           const isSpecialist = agent.role && agent.role !== 'orchestrator' && agent.role !== 'manager';
@@ -426,12 +473,20 @@ export function AgentsPage() {
         }}
         initialRole={creatingPreset?.role}
         initialSpaceId={creatingPreset?.spaceId ?? null}
+        initialReportsTo={creatingReportsTo}
         lockInitialRole={Boolean(creatingPreset?.role)}
       />
       <DomainEditorSheet
         open={domainEditorOpen}
         domain={editingDomain}
         managers={managers}
+        parentOptions={topDomains}
+        specialists={specialistOptions}
+        subdomains={editingDomain ? (subdomainsByParent.get(editingDomain.id) ?? []) : []}
+        resolveAgentName={resolveAgentName}
+        specialistCountFor={specialistCountFor}
+        onAddSubdomain={() => { if (editingDomain) openAddSubdomain(editingDomain.id); }}
+        onEditSubdomain={(sub) => openEditSubdomain(sub as Space)}
         onClose={() => { setDomainEditorOpen(false); setEditingDomain(null); }}
         onSaved={(domain) => {
           if (domain) setSelectedDomainId(domain.id);
@@ -439,99 +494,26 @@ export function AgentsPage() {
           void refresh();
         }}
       />
+      <DomainEditorSheet
+        open={subdomainEditorOpen}
+        domain={editingSubdomain}
+        initialParentDomainId={addingSubdomainParent}
+        managers={managers}
+        parentOptions={topDomains}
+        specialists={specialistOptions}
+        onCreateSpecialist={handleCreateSpecialistForSubdomain}
+        onClose={() => { setSubdomainEditorOpen(false); setEditingSubdomain(null); setAddingSubdomainParent(null); }}
+        onSaved={(domain) => {
+          if (domain) setSelectedDomainId(domain.id);
+          void refresh();
+        }}
+      />
       {abilitiesOpen && <AbilitiesModal onClose={() => setAbilitiesOpen(false)} />}
-    </div>
-  );
-}
-
-function DomainToolbar({
-  spaces,
-  agents,
-  selected,
-  onSelect,
-  onCreate,
-  onEdit,
-}: {
-  spaces: Space[];
-  agents: AgentRow[];
-  selected: 'all' | 'unassigned' | string;
-  onSelect: (value: 'all' | 'unassigned' | string) => void;
-  onCreate: () => void;
-  onEdit: (space: Space) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const countFor = (spaceId: string | null) => agents.filter((agent) => !isSpecialistRole(agent.role) && (spaceId === null ? !agent.spaceId : agent.spaceId === spaceId)).length;
-  const total = agents.filter((agent) => !isSpecialistRole(agent.role)).length;
-  const options: Array<{ value: 'all' | 'unassigned' | string; label: string; count: number; colorHex?: string }> = [
-    { value: 'all', label: 'All domains', count: total },
-    { value: 'unassigned', label: 'Unassigned', count: countFor(null) },
-    ...spaces.map((s) => ({ value: s.id, label: s.name, count: countFor(s.id), colorHex: s.colorHex ?? undefined })),
-  ];
-  const current = options.find((o) => o.value === selected) ?? options[0]!;
-  const selectedSpace = spaces.find((s) => s.id === selected);
-  const isActive = selected !== 'all';
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <div className="relative inline-block">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className={clsx(
-            'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12px] font-medium transition-colors select-none',
-            isActive ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary',
-          )}
-        >
-          {current.colorHex && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: current.colorHex }} />}
-          <span className="text-text-muted">Domain:</span>
-          <span className={clsx('font-semibold', isActive ? 'text-accent' : 'text-text-primary')}>{current.label}</span>
-          <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[9px] font-medium text-text-muted">{current.count}</span>
-          <ChevronDown size={11} className={clsx('transition-transform', open && 'rotate-180')} />
-        </button>
-        {open && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-            <div className="absolute left-0 top-full z-50 mt-1.5 w-64 origin-top-left rounded-card border border-line bg-surface shadow-modal animate-in fade-in slide-in-from-top-1 duration-150">
-              <div className="max-h-[280px] overflow-y-auto py-1">
-                {options.map((option) => {
-                  const isSel = option.value === selected;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => { onSelect(option.value); setOpen(false); }}
-                      className={clsx('flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors', isSel ? 'bg-surface-2 text-text-primary font-medium' : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary')}
-                    >
-                      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{isSel && <Check size={12} className="text-accent" />}</span>
-                      {option.colorHex && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: option.colorHex }} />}
-                      <span className="flex-1 truncate">{option.label}</span>
-                      <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[9px] font-medium text-text-muted">{option.count}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                onClick={() => { setOpen(false); onCreate(); }}
-                className="flex w-full items-center gap-2 border-t border-line px-3 py-2.5 text-left text-[12px] text-text-secondary hover:bg-surface-2 hover:text-text-primary"
-              >
-                <Plus size={13} className="text-text-muted" /> New domain
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-      {selectedSpace && (
-        <button
-          type="button"
-          onClick={() => onEdit(selectedSpace)}
-          aria-label={`Edit ${selectedSpace.name}`}
-          title="Edit domain"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-line bg-surface-2 text-text-muted transition-colors hover:border-accent/45 hover:text-text-primary"
-        >
-          <SettingsIcon size={13} />
-        </button>
-      )}
+      <ImportAgentsWizard
+        open={importingAgents}
+        onClose={() => setImportingAgents(false)}
+        onImported={() => void refresh()}
+      />
     </div>
   );
 }
@@ -593,108 +575,64 @@ function AgentFleetHeaderControls({
   );
 }
 
-function AgentGridCard({ a }: { a: AgentRow }) {
-  const nav = useNavigate();
-  const status = a.status ?? 'offline';
-  const adapterMissing = !agentHarnessType(a);
-  return (
-    <div
-      className="cursor-pointer rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2"
-      onClick={() => nav(`/agents/${a.id}`)}
-    >
-      <div className="flex items-start gap-3">
-        <Avatar name={a.name} imageUrl={a.avatarUrl ?? undefined} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-subheading text-text-primary">{a.name}</span>
-            <StatusBadge status={status} size="sm" />
-          </div>
-          <div className="mt-0.5 truncate text-[12px] text-text-muted">
-            {a.spaceName ?? 'No space'} · {agentHarnessLabel(a)}
-          </div>
-          {(a.currentTask || a.description) && (
-            <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">
-              {a.currentTask ?? a.description}
-            </div>
-          )}
-          {!a.currentTask && a.lastActiveAt && (
-            <div className="mt-2 text-[11px] text-text-muted">Last active: {relativeTime(a.lastActiveAt)}</div>
-          )}
-        </div>
-      </div>
-      <div className="mt-3 flex gap-1.5">
-        <Button
-          variant="secondary" size="sm" iconLeft={<MessageCircle size={11} />}
-          onClick={(e) => { e.stopPropagation(); nav(`/chat/agent/${a.id}`); }}
-        >Talk</Button>
-        <Button
-          variant="ghost" size="sm" iconLeft={<SettingsIcon size={11} />}
-          onClick={(e) => { e.stopPropagation(); nav(`/agents/${a.id}`); }}
-        >Configure</Button>
-        {adapterMissing && (
-          <span className="ml-auto inline-flex items-center text-[11px] text-warn">Setup needed</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SpecialistsView({
+function SpecialistBench({
   specialists,
   total,
-  search,
-  onSearch,
   onCreate,
 }: {
   specialists: AgentRow[];
   total: number;
-  search: string;
-  onSearch: (value: string) => void;
   onCreate: () => void;
 }) {
-  if (total === 0) {
-    return (
-      <EmptyState
-        icon={<Sparkles size={48} />}
-        title="No specialists yet"
-        body="Specialists are expert roles you can route to on demand. Commission one — then feed its mind and attach abilities from its detail page."
-        primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={onCreate}>Add specialist</Button>}
-        variant="page"
-      />
-    );
-  }
+  const nav = useNavigate();
+  const visible = specialists.slice(0, 8);
   return (
-    <div className="space-y-4">
+    <section className="shrink-0 border-t border-line bg-surface/95 px-4 py-2.5">
       <div className="flex items-center gap-2">
-        <label className="flex h-9 min-w-[220px] flex-1 items-center gap-2 rounded-xl border border-line bg-surface-2 px-2.5 text-text-muted focus-within:border-line-strong focus-within:text-text-primary xl:max-w-sm">
-          <Search size={13} />
-          <input
-            value={search}
-            onChange={(event) => onSearch(event.target.value)}
-            placeholder="Search specialists..."
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
-            aria-label="Search specialists"
-          />
-          {search.trim() && (
-            <button type="button" onClick={() => onSearch('')} aria-label="Clear search" className="inline-flex h-5 w-5 items-center justify-center rounded-md text-text-muted hover:bg-surface-3 hover:text-text-primary"><X size={12} /></button>
-          )}
-        </label>
-        <Button variant="primary" size="sm" iconLeft={<Plus size={13} />} onClick={onCreate}>Add specialist</Button>
+        <div className="flex min-w-0 items-center gap-2">
+          <Sparkles size={13} className="text-text-muted" />
+          <span className="text-[12px] font-semibold text-text-primary">Specialist bench</span>
+          <span className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">{total}</span>
+        </div>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary"
+        >
+          <Plus size={12} /> Add specialist
+        </button>
       </div>
-      {specialists.length === 0 ? (
-        <EmptyState
-          icon={<SearchX size={48} />}
-          title="No matching specialists"
-          body="Try a different search."
-          primaryAction={<Button variant="secondary" size="sm" onClick={() => onSearch('')}>Clear search</Button>}
-          variant="page"
-        />
+      {total === 0 ? (
+        <div className="mt-2 rounded-md border border-dashed border-line bg-canvas px-3 py-2 text-[11px] text-text-muted">
+          No specialists yet. Add focused expert roles for orchestration and workflow tasks.
+        </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {specialists.map((a) => <AgentGridCard key={a.id} a={a} />)}
+        <div className="mt-2 flex gap-2 overflow-x-auto pb-0.5">
+          {visible.map((agent) => (
+            <button
+              key={agent.id}
+              type="button"
+              onClick={() => nav(`/agents/${agent.id}`)}
+              className="group flex h-14 min-w-[210px] max-w-[240px] items-center gap-2 rounded-md border border-line bg-canvas px-2.5 text-left transition-colors hover:border-line-strong hover:bg-surface-2"
+            >
+              <Avatar name={agent.name} imageUrl={agent.avatarUrl ?? undefined} size={28} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[12px] font-semibold text-text-primary">{agent.name}</span>
+                <span className="mt-0.5 block truncate text-[10px] text-text-muted">
+                  {labelize(agent.role ?? 'specialist')} · {agentHarnessLabel(agent)}
+                </span>
+              </span>
+              <StatusBadge status={agent.status ?? 'offline'} size="sm" />
+            </button>
+          ))}
+          {total > visible.length && (
+            <div className="flex h-14 min-w-[96px] items-center justify-center rounded-md border border-line bg-canvas text-[11px] text-text-muted">
+              +{total - visible.length} more
+            </div>
+          )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -808,3 +746,4 @@ function Avatar({ name, imageUrl, size = 36 }: { name: string; imageUrl?: string
     </div>
   );
 }
+

@@ -11,9 +11,18 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { BusMessage, EventBus } from '../event-bus.js';
+import type { GroundingDiscoveryService } from '../grounding/discovery.js';
+import type { GroundingRuntime } from '../grounding/groundingRuntime.js';
 import { requireAuth, getUser } from '../middleware/auth.js';
+import { getSelfHealConfig, setSelfHealConfig } from '../services/selfHealSettings.js';
 
-export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus }) {
+export function buildWorkspaceRoutes(deps: {
+  db: AgentisSqliteDb;
+  auth: AuthService;
+  bus: EventBus;
+  groundingDiscovery?: GroundingDiscoveryService;
+  groundingRuntime?: GroundingRuntime;
+}) {
   const app = new Hono();
   app.use('*', requireAuth(deps));
 
@@ -35,6 +44,7 @@ export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .insert(schema.workspaces)
       .values({ id, userId: user.id, name: body.name, slug: body.slug })
       .run();
+    await ensureWorkspaceBrainInternal(deps, id, user.id);
     return c.json({ workspace: { id, userId: user.id, name: body.name, slug: body.slug } }, 201);
   });
 
@@ -86,6 +96,37 @@ export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     });
   });
 
+  // Self-healing workflow settings (AGENT-AUTONOMY §W7). Surfaced in the profile
+  // dropdown + Settings → Automation.
+  function ownedWorkspace(c: Parameters<typeof getUser>[0], id: string) {
+    const user = getUser(c);
+    const ws = deps.db.select().from(schema.workspaces)
+      .where(and(eq(schema.workspaces.id, id), eq(schema.workspaces.userId, user.id))).get();
+    if (!ws) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workspace not found');
+    return ws;
+  }
+
+  app.get('/:id/self-heal', (c) => {
+    const id = c.req.param('id');
+    ownedWorkspace(c, id);
+    return c.json(getSelfHealConfig(deps.db, id));
+  });
+
+  app.put('/:id/self-heal', async (c) => {
+    const id = c.req.param('id');
+    ownedWorkspace(c, id);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      enabled?: unknown; mode?: unknown; maxRepairPlans?: unknown; healerAgentId?: unknown;
+    };
+    const next = setSelfHealConfig(deps.db, id, {
+      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+      mode: body.mode === 'guarded' || body.mode === 'bypass' ? body.mode : undefined,
+      maxRepairPlans: typeof body.maxRepairPlans === 'number' ? body.maxRepairPlans : undefined,
+      healerAgentId: body.healerAgentId === null || typeof body.healerAgentId === 'string' ? body.healerAgentId : undefined,
+    });
+    return c.json(next);
+  });
+
   app.get('/:id', (c) => {
     const user = getUser(c);
     const id = c.req.param('id');
@@ -130,7 +171,7 @@ export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
 
   // POST /v1/workspaces/:id/select — record the active workspace and emit
   // the realtime event so other tabs/sessions can react.
-  app.post('/:id/select', (c) => {
+  app.post('/:id/select', async (c) => {
     const user = getUser(c);
     const id = c.req.param('id');
     const ws = deps.db
@@ -139,6 +180,7 @@ export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .where(and(eq(schema.workspaces.id, id), eq(schema.workspaces.userId, user.id)))
       .get();
     if (!ws) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workspace not found');
+    await ensureWorkspaceBrainInternal(deps, ws.id, user.id);
     deps.bus.publish(
       REALTIME_ROOMS.user(user.id),
       REALTIME_EVENTS.WORKSPACE_SELECTED,
@@ -244,6 +286,20 @@ export function buildWorkspaceRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
   return app;
 }
 
+async function ensureWorkspaceBrainInternal(
+  deps: {
+    groundingDiscovery?: GroundingDiscoveryService;
+    groundingRuntime?: GroundingRuntime;
+  },
+  workspaceId: string,
+  ownerUserId: string,
+) {
+  if (!deps.groundingDiscovery || !deps.groundingRuntime) return;
+  const ensured = deps.groundingDiscovery.ensureInternalWorkspace({ workspaceId, ownerUserId });
+  if (!ensured.created && !ensured.needsSync) return;
+  await deps.groundingRuntime.tickWorkspace(workspaceId).catch(() => {});
+}
+
 function buildCanvasSnapshot(db: AgentisSqliteDb, workspaceId: string) {
   const agents = db
     .select({
@@ -323,6 +379,16 @@ function mapCanvasBusMessage(message: BusMessage): Array<{ event: string; data: 
   const payload = asRecord(message.envelope.payload);
   const emittedAt = message.envelope.emittedAt;
   switch (message.envelope.event) {
+    // Preserve build narration and individual canvas mutations for the SSE
+    // fallback.  A websocket outage must not turn a progressive build into a
+    // refresh-only experience.
+    case REALTIME_EVENTS.WORKFLOW_BUILD_PHASE:
+    case REALTIME_EVENTS.CANVAS_NODE_PLACED:
+    case REALTIME_EVENTS.CANVAS_EDGE_CONNECTED:
+      return [{
+        event: message.envelope.event,
+        data: { ...payload, at: emittedAt },
+      }];
     case REALTIME_EVENTS.AGENT_WORK_STEP:
       return mapAgentWorkStep(payload, emittedAt);
     case REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL:
@@ -464,8 +530,100 @@ function mapCanvasBusMessage(message: BusMessage): Array<{ event: string; data: 
           at: emittedAt,
         },
       }];
+    case REALTIME_EVENTS.TASK_SPINE_ACCEPTED:
+    case REALTIME_EVENTS.TASK_SPINE_UPDATED:
+    case REALTIME_EVENTS.TASK_SPINE_BOUND:
+    case REALTIME_EVENTS.TASK_SPINE_VERIFYING:
+    case REALTIME_EVENTS.TASK_SPINE_VERIFIED:
+    case REALTIME_EVENTS.TASK_SPINE_COMPLETED:
+      return [mapTaskSpineProgress(message.envelope.event, payload, emittedAt)];
+    case REALTIME_EVENTS.TASK_SPINE_DECISION_RECORDED:
+      return [
+        mapTaskSpineProgress(message.envelope.event, payload, emittedAt),
+        mapTaskSpineAttention('TASK_DECISION_RECORDED', payload, emittedAt),
+      ];
+    case REALTIME_EVENTS.TASK_SPINE_DEVIATION_RECORDED:
+      return [
+        mapTaskSpineProgress(message.envelope.event, payload, emittedAt),
+        mapTaskSpineAttention('TASK_DEVIATION_RECORDED', payload, emittedAt),
+      ];
+    case REALTIME_EVENTS.TASK_SPINE_BLOCKED:
+      return [
+        mapTaskSpineProgress(message.envelope.event, payload, emittedAt),
+        mapTaskSpineAttention('TASK_BLOCKED', payload, emittedAt),
+      ];
+    case REALTIME_EVENTS.TASK_SPINE_FAILED:
+      return [
+        mapTaskSpineProgress(message.envelope.event, payload, emittedAt),
+        mapTaskSpineAttention('TASK_FAILED', payload, emittedAt),
+      ];
+    case REALTIME_EVENTS.TASK_SPINE_REDIRECTED:
+      return [
+        mapTaskSpineProgress(message.envelope.event, payload, emittedAt),
+        mapTaskSpineAttention('TASK_REDIRECTED', payload, emittedAt),
+      ];
     default:
       return [];
+  }
+}
+
+function mapTaskSpineProgress(event: string, payload: Record<string, unknown>, at: string): { event: string; data: unknown } {
+  return {
+    event: 'workflow_progress',
+    data: {
+      ...payload,
+      type: taskSpineProgressType(event),
+      taskId: stringField(payload, 'taskId') ?? stringField(payload, 'planId'),
+      planId: stringField(payload, 'planId') ?? stringField(payload, 'taskId'),
+      runId: stringField(payload, 'runId'),
+      sessionId: stringField(payload, 'sessionId'),
+      status: stringField(payload, 'status'),
+      at,
+    },
+  };
+}
+
+function mapTaskSpineAttention(type: string, payload: Record<string, unknown>, at: string): { event: string; data: unknown } {
+  return {
+    event: 'attention_event',
+    data: {
+      type,
+      itemId: stringField(payload, 'taskId') ?? stringField(payload, 'planId'),
+      entityId: stringField(payload, 'taskId') ?? stringField(payload, 'planId'),
+      entityType: 'task_spine',
+      message: stringField(payload, 'reason')
+        ?? stringField(payload, 'instruction')
+        ?? stringField(payload, 'title')
+        ?? 'Task spine updated',
+      at,
+    },
+  };
+}
+
+function taskSpineProgressType(event: string): string {
+  switch (event) {
+    case REALTIME_EVENTS.TASK_SPINE_ACCEPTED:
+      return 'TASK_ACCEPTED';
+    case REALTIME_EVENTS.TASK_SPINE_BOUND:
+      return 'TASK_BOUND';
+    case REALTIME_EVENTS.TASK_SPINE_VERIFYING:
+      return 'TASK_VERIFYING';
+    case REALTIME_EVENTS.TASK_SPINE_VERIFIED:
+      return 'TASK_VERIFIED';
+    case REALTIME_EVENTS.TASK_SPINE_COMPLETED:
+      return 'TASK_COMPLETED';
+    case REALTIME_EVENTS.TASK_SPINE_BLOCKED:
+      return 'TASK_BLOCKED';
+    case REALTIME_EVENTS.TASK_SPINE_FAILED:
+      return 'TASK_FAILED';
+    case REALTIME_EVENTS.TASK_SPINE_DECISION_RECORDED:
+      return 'TASK_DECISION_RECORDED';
+    case REALTIME_EVENTS.TASK_SPINE_DEVIATION_RECORDED:
+      return 'TASK_DEVIATION_RECORDED';
+    case REALTIME_EVENTS.TASK_SPINE_REDIRECTED:
+      return 'TASK_REDIRECTED';
+    default:
+      return 'TASK_UPDATED';
   }
 }
 

@@ -13,7 +13,7 @@
  *     `scheduled_for` has passed, marks them `running`, and dispatches them.
  *   - On failure the job is retried with exponential backoff up to
  *     `maxAttempts`, then marked `failed`.
- *   - Orphaned `running` jobs (a crash mid-run) are reclaimed once their lease
+ *   - Expired `running` jobs (a crash mid-run) are reclaimed once their lease
  *     expires.
  *
  * `JobQueueBackend` keeps the interface stable so a future BullMQ + Redis
@@ -51,7 +51,7 @@ interface DurableJobQueueDeps {
   logger: Logger;
   /** Poll cadence in ms (default 5000). */
   pollIntervalMs?: number;
-  /** Lease duration before a `running` job is considered orphaned (default 10 min). */
+  /** Lease duration before a `running` job is considered expired (default 10 min). */
   leaseMs?: number;
 }
 
@@ -71,7 +71,7 @@ export class DurableJobQueue implements JobQueueBackend {
   /** Begin polling. Idempotent. */
   start(): void {
     if (this.#timer) return;
-    this.#reclaimOrphans();
+    this.#reclaimExpiredLeases();
     this.#timer = setInterval(() => {
       void this.#drain().catch((err) => {
         this.deps.logger.error('job_queue.drain.unhandled', { err: (err as Error).message });
@@ -131,21 +131,21 @@ export class DurableJobQueue implements JobQueueBackend {
   // ────────────────────────────────────────────────────────────
 
   /** Reset `running` jobs whose lease expired (server crashed mid-run). */
-  #reclaimOrphans(): void {
+  #reclaimExpiredLeases(): void {
     const cutoff = new Date(Date.now() - this.#leaseMs).toISOString();
-    const orphans = this.deps.db
+    const expiredJobs = this.deps.db
       .select()
       .from(schema.asyncJobs)
       .where(eq(schema.asyncJobs.status, 'running'))
       .all()
       .filter((j) => !j.leasedAt || j.leasedAt < cutoff);
-    for (const job of orphans) {
+    for (const job of expiredJobs) {
       this.deps.db
         .update(schema.asyncJobs)
         .set({ status: 'pending', leasedAt: null, updatedAt: new Date().toISOString() })
         .where(eq(schema.asyncJobs.id, job.id))
         .run();
-      this.deps.logger.warn('job_queue.orphan_reclaimed', { jobId: job.id, attempts: job.attempts });
+      this.deps.logger.warn('job_queue.expired_lease_reclaimed', { jobId: job.id, attempts: job.attempts });
     }
   }
 

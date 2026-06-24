@@ -8,7 +8,14 @@
 import { create } from 'zustand';
 import type { ViewportContext } from '@agentis/core';
 
-export type ChatPanelState = 'hidden' | 'docked';
+export type ChatPanelState = 'hidden' | 'docked' | 'fullscreen';
+export type ChatPanelThread = {
+  kind: 'room' | 'agent';
+  id: string;
+  name: string;
+  conversationId?: string | null;
+  archivedAt?: string | null;
+} | null;
 
 const STORAGE_KEY = 'agentis.chatPanel.state';
 const WIDTH_STORAGE_KEY = 'agentis.chatPanel.dockedWidth';
@@ -20,7 +27,7 @@ function readStored(): ChatPanelState {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === 'docked') return 'docked';
-    if (v === 'floating') return 'docked';
+    if (v === 'fullscreen' || v === 'floating') return 'fullscreen';
     if (v === 'hidden') return 'hidden';
   } catch { /* ignore */ }
   return 'hidden';
@@ -43,17 +50,20 @@ function readDockedWidth(): number {
 interface ChatPanelStore {
   state: ChatPanelState;
   setState: (s: ChatPanelState) => void;
+  openChat: (options?: ChatPanelOpenOptions) => void;
   toggle: () => void;
   dockedWidth: number;
   setDockedWidth: (width: number) => void;
   unreadCount: number;
   setUnreadCount: (n: number) => void;
-  selectedThread: { kind: 'room' | 'agent'; id: string; name: string; conversationId?: string | null; archivedAt?: string | null } | null;
-  selectThread: (t: ChatPanelStore['selectedThread']) => void;
+  selectedThread: ChatPanelThread;
+  selectThread: (t: ChatPanelThread) => void;
   launchContext: ChatPanelLaunchContext | null;
   setLaunchContext: (context: ChatPanelLaunchContext | null) => void;
   openRequestId: number;
   markOpenRequested: () => void;
+  returnPath: string;
+  setReturnPath: (path: string) => void;
   /**
    * The agent task currently executing in chat (multi-step build/run). Drives
    * the pulsing badge on the header button and the FloatingTaskProgress card
@@ -86,15 +96,41 @@ export interface ChatPanelLaunchContext {
   buildSession?: boolean;
 }
 
+export interface ChatPanelOpenOptions {
+  state?: Exclude<ChatPanelState, 'hidden'>;
+  thread?: ChatPanelThread;
+  launchContext?: ChatPanelLaunchContext | null;
+  returnPath?: string;
+}
+
+function persistState(state: ChatPanelState): void {
+  try { localStorage.setItem(STORAGE_KEY, state); } catch { /* ignore */ }
+}
+
 export const useChatPanelStore = create<ChatPanelStore>((set) => ({
   state: readStored(),
   setState: (s) => {
-    try { localStorage.setItem(STORAGE_KEY, s); } catch { /* ignore */ }
+    persistState(s);
     set({ state: s });
   },
+  openChat: (options) => set((state) => {
+    const nextState = options?.state ?? 'docked';
+    persistState(nextState);
+    return {
+      state: nextState,
+      selectedThread: Object.prototype.hasOwnProperty.call(options ?? {}, 'thread')
+        ? options?.thread ?? null
+        : state.selectedThread,
+      launchContext: Object.prototype.hasOwnProperty.call(options ?? {}, 'launchContext')
+        ? options?.launchContext ?? null
+        : state.launchContext,
+      returnPath: options?.returnPath || state.returnPath || '/home',
+      openRequestId: state.openRequestId + 1,
+    };
+  }),
   toggle: () => set((cur) => {
     const next: ChatPanelState = cur.state === 'hidden' ? 'docked' : 'hidden';
-    try { localStorage.setItem(STORAGE_KEY, next); } catch { /* ignore */ }
+    persistState(next);
     return { state: next };
   }),
   dockedWidth: readDockedWidth(),
@@ -111,6 +147,8 @@ export const useChatPanelStore = create<ChatPanelStore>((set) => ({
   setLaunchContext: (context) => set({ launchContext: context }),
   openRequestId: 0,
   markOpenRequested: () => set((state) => ({ openRequestId: state.openRequestId + 1 })),
+  returnPath: '/home',
+  setReturnPath: (path) => set({ returnPath: path || '/home' }),
   activeTask: null,
   setActiveTask: (task) => set({ activeTask: task }),
   updateActiveTask: (patch) => set((state) => (state.activeTask ? { activeTask: { ...state.activeTask, ...patch } } : {})),

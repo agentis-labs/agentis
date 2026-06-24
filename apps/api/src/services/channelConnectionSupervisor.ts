@@ -75,6 +75,10 @@ function discordIsGateway(settings: unknown): boolean {
   return Boolean(settings && typeof settings === 'object' && (settings as { transport?: string }).transport === 'gateway');
 }
 
+function whatsappIsQrLocal(settings: unknown): boolean {
+  return !settings || typeof settings !== 'object' || (settings as { mode?: string }).mode !== 'cloud';
+}
+
 export class ChannelConnectionSupervisor {
   readonly #sessions = new Map<string, LiveSession>();
   #dispatcher: ChannelTurnDispatcher | undefined;
@@ -89,15 +93,15 @@ export class ChannelConnectionSupervisor {
 
   /** Does outbound for this connection route through a live session? */
   handles(conn: PersistentRef): boolean {
-    if (conn.kind === 'whatsapp') return true;
+    if (conn.kind === 'whatsapp') return whatsappIsQrLocal(conn.settings);
     if (conn.kind === 'telegram') return telegramIsPolling(conn.settings);
     if (conn.kind === 'discord') return discordIsGateway(conn.settings);
     return false;
   }
 
   /** Kinds that authenticate without a token (QR). */
-  requiresNoToken(kind: string): boolean {
-    return kind === 'whatsapp';
+  requiresNoToken(kind: string, settings?: unknown): boolean {
+    return kind === 'whatsapp' && whatsappIsQrLocal(settings);
   }
 
   /** Post-create hook: start polling sessions immediately (no-op for QR kinds). */
@@ -149,6 +153,12 @@ export class ChannelConnectionSupervisor {
       };
     }
     return { status: session.status };
+  }
+
+  status(connectionId: string): LoginState | null {
+    const session = this.#sessions.get(connectionId);
+    if (!session) return null;
+    return this.loginState(connectionId);
   }
 
   /** Deliver an outbound message over the live session. */
@@ -248,11 +258,27 @@ export class ChannelConnectionSupervisor {
       .get();
     if (dup) return;
 
-    const conversation = this.deps.conversations.getOrCreateByAgent({
+    const currentSettings = row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+      ? row.settings as Record<string, unknown>
+      : {};
+    if (!currentSettings.defaultChatId) {
+      this.deps.db
+        .update(schema.channelConnections)
+        .set({
+          settings: { ...currentSettings, defaultChatId: msg.chatId },
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.channelConnections.id, connectionId))
+        .run();
+    }
+
+    const conversation = this.deps.conversations.getOrCreateByChannel({
       workspaceId: row.workspaceId,
       ambientId: row.ambientId,
       userId: row.userId,
       agentId: row.agentId,
+      channelConnectionId: row.id,
+      channelChatId: msg.chatId,
     });
     const fromTag = msg.from ? `[${msg.from}] ` : '';
     const message = this.deps.conversations.appendMirrored({
@@ -306,15 +332,15 @@ export class ChannelConnectionSupervisor {
 
   #onStateChange(connectionId: string, state: { status: string; qr?: string; selfId?: string }): void {
     const now = new Date().toISOString();
-    const dbStatus = state.status === 'open' ? 'active'
-      : state.status === 'logged_out' || state.status === 'error' ? 'error'
-      : 'connecting';
     const row = this.deps.db
       .select({ workspaceId: schema.channelConnections.workspaceId, kind: schema.channelConnections.kind, settings: schema.channelConnections.settings })
       .from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, connectionId))
       .get();
     if (!row) return;
+    const dbStatus = state.status === 'open' ? 'active'
+      : state.status === 'logged_out' || state.status === 'error' ? 'error'
+      : row.kind === 'whatsapp' ? 'needs_action' : 'verifying';
     const settings = {
       ...((row.settings ?? {}) as Record<string, unknown>),
       transportStatus: state.status,

@@ -56,7 +56,23 @@ export function buildWebhookRoutes(deps: { runtime: TriggerRuntime; bridge?: Cha
     });
     const rawBody = await c.req.text();
     const result = await deps.bridge.handleInbound({ connectionId, headers, rawBody });
+    if (result.responseBody !== undefined) {
+      return c.json(result.responseBody as Record<string, unknown>, 200);
+    }
     return c.json(result, result.idempotent ? 200 : 202);
+  });
+
+  app.get('/channel/:connectionId', (c) => {
+    if (!deps.bridge) {
+      throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
+    }
+    const query: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(c.req.query())) query[key] = value;
+    const result = deps.bridge.handleWebhookVerification({
+      connectionId: c.req.param('connectionId'),
+      query,
+    });
+    return c.body(result.body, 200, { 'content-type': result.contentType ?? 'text/plain; charset=utf-8' });
   });
 
   return app;

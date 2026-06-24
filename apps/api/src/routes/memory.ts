@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AuthService } from '../services/auth.js';
 import type { MemoryStore } from '../services/memoryStore.js';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
+import type { BrainAskService } from '../services/brainAskService.js';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError } from '@agentis/core';
 import { requireAuth } from '../middleware/auth.js';
@@ -17,14 +18,36 @@ const writeMemorySchema = z.object({
   importance: z.number().min(0).max(10).optional(),
 });
 
+const askSchema = z.object({
+  query: z.string().trim().min(1).max(2_000),
+  scopeId: z.string().trim().min(1).optional(),
+  limit: z.number().int().min(1).max(12).optional(),
+});
+
 export function buildMemoryRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
   memory: MemoryStore;
   episodes: EpisodicMemoryStore;
+  brainAsk?: BrainAskService;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
+
+  // §C4 — interrogate the workspace brain: a cited, grounded answer or an honest
+  // "I don't have that in memory". Never a sourceless guess.
+  app.post('/ask', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.brainAsk) throw new AgentisError('VALIDATION_FAILED', 'Brain ask is not available.');
+    const body = askSchema.parse(await c.req.json());
+    const result = await deps.brainAsk.ask({
+      workspaceId: ws.workspaceId,
+      query: body.query,
+      scopeId: body.scopeId ?? null,
+      limit: body.limit,
+    });
+    return c.json(result);
+  });
 
   app.get('/', (c) => {
     const ws = getWorkspace(c);
@@ -54,10 +77,13 @@ export function buildMemoryRoutes(deps: {
 
   app.get('/episodes', (c) => {
     const ws = getWorkspace(c);
+    // §B4 — typed workspace memory lives in the episode substrate but is listed
+    // under "memory" (above), so exclude the plane-tagged rows from "episodes".
     const episodes = deps.episodes.list({
       workspaceId: ws.workspaceId,
+      ...(c.req.query('scopeId') ? { scopeId: c.req.query('scopeId')! } : {}),
       limit: numberQuery(c.req.query('limit'), 80, 500),
-    });
+    }).filter((ep) => !ep.tags.includes('plane:workspace_memory'));
     return c.json({ episodes });
   });
 

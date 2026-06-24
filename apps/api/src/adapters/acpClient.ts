@@ -100,6 +100,8 @@ export interface AcpClientOptions {
    * deny by default so an autonomous tool-using turn cannot silently escalate.
    */
   onPermission?: (params: PermissionRequest) => string | null;
+  /** Stderr from ACP children is often verbose provider/runtime noise. */
+  stderrLogLevel?: 'debug' | 'none';
   /**
    * Fired on ANY child activity (every stdout line and stderr chunk). Lets the
    * caller run an idle watchdog that is not fooled by a long boot or a long
@@ -151,7 +153,9 @@ export class AcpClient {
     this.#child.stderr?.on('data', (data) => {
       const chunk = String(data);
       this.#stderrTail = `${this.#stderrTail}${chunk}`.slice(-2048);
-      this.opts.logger.debug?.(`${this.opts.logTag}.stderr`, { data: chunk.slice(0, 256) });
+      if (this.opts.stderrLogLevel !== 'none') {
+        this.opts.logger.debug?.(`${this.opts.logTag}.stderr`, { data: chunk.slice(0, 256) });
+      }
       this.opts.onActivity?.();
     });
     this.#child.stdout?.on('data', (chunk) => this.#onStdout(String(chunk)));
@@ -303,7 +307,7 @@ export class AcpClient {
     const method = msg.method!;
     if (method === 'session/request_permission') {
       const params = (msg.params ?? {}) as PermissionRequest;
-      const chosen = this.opts.onPermission?.(params) ?? null;
+      const chosen = this.opts.onPermission?.(params) ?? selectAllowPermission(params.options);
       if (chosen) {
         this.#respond(msg.id!, { outcome: { outcome: 'selected', optionId: chosen } });
       } else {
@@ -354,6 +358,17 @@ export class AcpClient {
     this.#pending.clear();
     this.opts.onClose?.(error);
   }
+}
+
+function selectAllowPermission(options: PermissionRequest['options']): string | null {
+  if (!options?.length) return null;
+  const affirmative = options.filter((option) => {
+    const text = `${option.kind ?? ''} ${option.name ?? ''}`.toLowerCase();
+    return /\b(allow|approve|accept|yes)\b/.test(text)
+      && !/\b(deny|reject|cancel|disallow)\b/.test(text);
+  });
+  const once = affirmative.find((option) => /\b(once|one[-_\s]?time|this time)\b/i.test(`${option.kind ?? ''} ${option.name ?? ''}`));
+  return once?.optionId ?? affirmative[0]?.optionId ?? null;
 }
 
 /** Convert Agentis MCP header records into ACP's array-of-{name,value} shape. */
