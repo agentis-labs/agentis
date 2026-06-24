@@ -76,6 +76,11 @@ const STOP_WORDS = new Set([
 
 const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 50;
+// §0.1 — upper bound on the candidate pool a single lexical search loads into
+// memory. Ordered by recency, so a huge workspace ranks over its most-recent
+// slice instead of scanning every episode each call. (Semantic recall lives in
+// SharedIntelligence; this is the bounded lexical episodic API.)
+const SEARCH_CANDIDATE_CAP = 2000;
 
 export class EpisodicMemoryStore {
   /** Per-workspace embedding resolver (§B1.1). Stores never own provider logic. */
@@ -397,7 +402,8 @@ export class EpisodicMemoryStore {
     if (!args.includeArchived) conds.push(isNull(schema.memoryEpisodes.archivedAt));
     if (!args.includeSuperseded) conds.push(isNull(schema.memoryEpisodes.supersededBy));
 
-    let rows = this.db.select().from(schema.memoryEpisodes).where(and(...conds)).all();
+    let rows = this.db.select().from(schema.memoryEpisodes).where(and(...conds))
+      .orderBy(desc(schema.memoryEpisodes.createdAt)).limit(SEARCH_CANDIDATE_CAP).all();
 
     // In-memory filters (small candidate sets per workspace).
     if (args.types && args.types.length > 0) {

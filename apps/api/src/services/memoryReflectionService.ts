@@ -370,8 +370,13 @@ export class MemoryReflectionService {
         if (superseded.has(sigs[j]!.id)) continue;
         if (jaccard(sigs[i]!.sig, sigs[j]!.sig) >= 0.8) {
           // Keep the newer (i, listed first by createdAt desc); supersede the older.
+          // §0.2 — also ARCHIVE it: superseding alone left supersededBy set but the
+          // row un-archived, so it was still pulled into dispatch recall (loadAtoms
+          // filters archivedAt, not supersededBy) AND never reclaimed. Archiving
+          // removes it from recall and makes it eligible for disk reclamation.
+          const nowIso = new Date().toISOString();
           this.db.update(schema.memoryEpisodes)
-            .set({ supersededBy: sigs[i]!.id, updatedAt: new Date().toISOString() })
+            .set({ supersededBy: sigs[i]!.id, status: 'archived', archivedAt: nowIso, updatedAt: nowIso })
             .where(eq(schema.memoryEpisodes.id, sigs[j]!.id))
             .run();
           superseded.add(sigs[j]!.id);

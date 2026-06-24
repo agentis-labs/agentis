@@ -5,6 +5,7 @@ import type { Logger } from '../logger.js';
 import { cosineSimilarity } from './embeddingProvider.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 import { coercePacerClass, pacerRouting, type PacerClass } from './brainPacer.js';
+import { tokenize } from './brainText.js';
 
 type EpisodeRow = typeof schema.memoryEpisodes.$inferSelect;
 
@@ -85,54 +86,70 @@ export class BrainCompressionService {
 
   #tier2(workspaceId: string, rows: Array<typeof schema.memoryEpisodes.$inferSelect>, settings: BrainCompressionSettings): number {
     const now = new Date().toISOString();
-    const candidates = rows
+    type Cand = { row: typeof schema.memoryEpisodes.$inferSelect; vec: number[] };
+    const candidates: Cand[] = rows
       .filter((row) => row.managed && !row.pinnedAt)
       .map((row) => ({ row, vec: parseEmbedding(row.embedding) }))
-      .filter((entry): entry is { row: typeof schema.memoryEpisodes.$inferSelect; vec: number[] } => Boolean(entry.vec));
+      .filter((entry): entry is Cand => Boolean(entry.vec));
+
+    // §0.2 — the old all-pairs cosine scan was O(n²): at the default 2000-atom
+    // compression threshold that is ~2M vector comparisons every maintenance
+    // pass, scaling quadratically. Near-duplicates share salient vocabulary, so
+    // we bucket candidates by a cheap lexical signature and only run cosine WITHIN
+    // a bucket — O(Σ bucketᵢ²), tiny when distinct memories spread across buckets.
+    const buckets = new Map<string, Cand[]>();
+    for (const cand of candidates) {
+      const key = bucketSignature(`${cand.row.title} ${cand.row.summary}`);
+      const group = buckets.get(key);
+      if (group) group.push(cand); else buckets.set(key, [cand]);
+    }
+
     const archived = new Set<string>();
     let merged = 0;
-    for (let i = 0; i < candidates.length; i += 1) {
-      const keeper = candidates[i];
-      if (!keeper || archived.has(keeper.row.id)) continue;
-      const cluster: Array<typeof schema.memoryEpisodes.$inferSelect> = [];
-      const keeperRouting = pacerOf(keeper.row).routing;
-      for (let j = i + 1; j < candidates.length; j += 1) {
-        const other = candidates[j];
-        if (!other || archived.has(other.row.id)) continue;
-        if (keeper.vec.length !== other.vec.length) continue;
-        // PACER (Phase 5): a procedural rule merges only when NEARLY identical (a
-        // small wording delta can be a different rule), evidence merges freely.
-        // The pair threshold is the stricter of the two classes' requirements.
-        const threshold = Math.max(
-          settings.clusterSimilarityThreshold,
-          keeperRouting.mergeSimilarity,
-          pacerOf(other.row).routing.mergeSimilarity,
-        );
-        if (cosineSimilarity(keeper.vec, other.vec) >= threshold) {
-          cluster.push(other.row);
-          archived.add(other.row.id);
+    for (const group of buckets.values()) {
+      for (let i = 0; i < group.length; i += 1) {
+        const keeper = group[i];
+        if (!keeper || archived.has(keeper.row.id)) continue;
+        const cluster: Array<typeof schema.memoryEpisodes.$inferSelect> = [];
+        const keeperRouting = pacerOf(keeper.row).routing;
+        for (let j = i + 1; j < group.length; j += 1) {
+          const other = group[j];
+          if (!other || archived.has(other.row.id)) continue;
+          if (keeper.vec.length !== other.vec.length) continue;
+          // PACER (Phase 5): a procedural rule merges only when NEARLY identical (a
+          // small wording delta can be a different rule), evidence merges freely.
+          // The pair threshold is the stricter of the two classes' requirements.
+          const threshold = Math.max(
+            settings.clusterSimilarityThreshold,
+            keeperRouting.mergeSimilarity,
+            pacerOf(other.row).routing.mergeSimilarity,
+          );
+          if (cosineSimilarity(keeper.vec, other.vec) >= threshold) {
+            cluster.push(other.row);
+            archived.add(other.row.id);
+          }
         }
-      }
-      if (cluster.length === 0) continue;
-      const compressedFrom = [
-        ...parseJsonArray<string>(keeper.row.compressedFrom),
-        ...cluster.map((row) => row.id),
-      ];
-      this.db.update(schema.memoryEpisodes)
-        .set({
-          compressedFrom,
-          compressionTier: 2,
-          lastAccessedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(schema.memoryEpisodes.id, keeper.row.id))
-        .run();
-      for (const row of cluster) {
+        if (cluster.length === 0) continue;
+        const compressedFrom = [
+          ...parseJsonArray<string>(keeper.row.compressedFrom),
+          ...cluster.map((row) => row.id),
+        ];
         this.db.update(schema.memoryEpisodes)
-          .set({ status: 'archived', archivedAt: now, compressionTier: 2, updatedAt: now })
-          .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, row.id)))
+          .set({
+            compressedFrom,
+            compressionTier: 2,
+            lastAccessedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(schema.memoryEpisodes.id, keeper.row.id))
           .run();
-        merged += 1;
+        for (const row of cluster) {
+          this.db.update(schema.memoryEpisodes)
+            .set({ status: 'archived', archivedAt: now, compressionTier: 2, updatedAt: now })
+            .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, row.id)))
+            .run();
+          merged += 1;
+        }
       }
     }
     return merged;
@@ -190,6 +207,21 @@ export class BrainCompressionService {
       .orderBy(desc(schema.memoryEpisodes.updatedAt))
       .all();
   }
+}
+
+/**
+ * §0.2 — cheap lexical bucket key for the tier-2 near-duplicate pass. The 3 most
+ * salient (longest) significant tokens, sorted, so re-statements of the same
+ * lesson collide into one bucket while distinct memories spread out. Empty
+ * signature (no significant tokens) groups together — fine, those are short and
+ * few. This is a candidate PRE-FILTER; cosine still decides the actual merge.
+ */
+function bucketSignature(text: string): string {
+  const top = [...new Set(tokenize(text))]
+    .sort((a, b) => b.length - a.length || (a < b ? -1 : 1))
+    .slice(0, 3)
+    .sort();
+  return top.join(' ');
 }
 
 function defaultSettings(): BrainCompressionSettings {

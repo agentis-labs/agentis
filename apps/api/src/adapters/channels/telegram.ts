@@ -163,7 +163,7 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     const form = new FormData();
     form.set('chat_id', chatId);
     if (caption) form.set('caption', caption.slice(0, 1024));
-    form.set(field, new Blob([attachment.data], { type: attachment.mimeType }), attachment.filename);
+    form.set(field, new Blob([new Uint8Array(attachment.data)], { type: attachment.mimeType }), attachment.filename);
     const url = `${TELEGRAM_API}/bot${encodeURIComponent(token)}/${method}`;
     const res = await this.fetchImpl(url, { method: 'POST', body: form });
     if (!res.ok) await this.#throwSendError(res, chatId, method);

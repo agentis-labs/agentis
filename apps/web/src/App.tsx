@@ -30,6 +30,7 @@ import {
 import { useAgentisStore } from './store/agentisStore';
 // Initialize theme on app boot
 import './components/shared/ThemeToggle';
+import { SettingsModal } from './components/settings/SettingsModal';
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
 const AppsPage = lazy(() => import('./pages/AppsPage').then((m) => ({ default: m.AppsPage })));
@@ -43,7 +44,6 @@ const PackagesPage = lazy(() => import('./pages/PackagesPage').then((m) => ({ de
 const BrainPage = lazy(() => import('./pages/UnifiedBrainPage').then((m) => ({ default: m.UnifiedBrainPage })));
 const KnowledgeBasePage = lazy(() => import('./pages/KnowledgeBasePage').then((m) => ({ default: m.KnowledgeBasePage })));
 const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ default: m.HistoryPage })));
-const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
@@ -248,7 +248,7 @@ export function App() {
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/chat/agent/:agentId" element={<ChatPage />} />
               <Route path="/workspaces" element={<WorkspacesPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/settings" element={<Navigate to="/home" replace />} />
 
               {/* Backward-compat redirects */}
               <Route path="/fleet" element={<Navigate to="/home" replace />} />
@@ -257,14 +257,15 @@ export function App() {
               <Route path="/approvals" element={<Navigate to="/home" replace />} />
               <Route path="/spaces" element={<Navigate to="/home" replace />} />
               <Route path="/spaces/:id" element={<Navigate to="/home" replace />} />
-              <Route path="/gateways" element={<Navigate to="/settings?tab=connections" replace />} />
+              <Route path="/gateways" element={<Navigate to="/home" replace />} />
               <Route path="/conversations" element={<ChatPage />} />
               <Route path="/conversations/:agentId" element={<ChatPage />} />
-              <Route path="/settings/channels" element={<Navigate to="/settings?tab=connections" replace />} />
+              <Route path="/settings/channels" element={<Navigate to="/home" replace />} />
               <Route path="*" element={<Navigate to="/home" replace />} />
             </Routes>
           </Suspense>
           <CommandPalette />
+          <SettingsModal />
           </Shell>
         </RunModalProvider>
       </ConfirmProvider>

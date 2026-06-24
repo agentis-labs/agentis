@@ -774,7 +774,7 @@ export class ChannelBridge {
       : this.#check('runtime', false, 'agent_missing', 'The connected agent no longer exists.', 'Reconnect the channel to an existing agent.');
   }
 
-  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string): Promise<void> {
+  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<void> {
     const settings = this.#settings(row);
     const normalizedChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
     const selfCheck = await this.#telegramSelfTargetCheck(row, normalizedChatId);
@@ -782,24 +782,59 @@ export class ChannelBridge {
       throw new AgentisError('CHANNEL_SEND_FAILED', `${selfCheck.message} ${selfCheck.remediation ?? ''}`.trim());
     }
     if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
-      await this.#persistent.send(row.id, normalizedChatId, body);
+      await this.#persistent.send(row.id, normalizedChatId, body, attachments.length ? attachments : undefined);
       return;
     }
     if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
-      await this.#sendWhatsAppCloud(row, settings, normalizedChatId, body);
+      await this.#sendWhatsAppCloud(row, settings, normalizedChatId, body, attachments);
       return;
     }
     const adapter = this.#requireAdapter(row.kind as ChannelKind);
     const token = this.deps.vault.decrypt(row.tokenEncrypted);
-    await adapter.send({ token, chatId: normalizedChatId, body, settings: settings as Record<string, unknown> });
+    await adapter.send({
+      token,
+      chatId: normalizedChatId,
+      body,
+      settings: settings as Record<string, unknown>,
+      ...(attachments.length ? { attachments } : {}),
+    });
   }
 
-  async #sendWhatsAppCloud(row: ChannelConnectionRow, settings: ChannelSettings, chatId: string, body: string): Promise<void> {
+  /** Resolve loose attachment references into uploadable bytes (artifact ids, data/http URLs). */
+  async #resolveAttachments(workspaceId: string, refs: OutboundAttachmentRef[] | undefined): Promise<OutboundAttachment[]> {
+    if (!refs || refs.length === 0) return [];
+    if (!this.deps.artifacts) {
+      throw new AgentisError('VALIDATION_FAILED', 'channel attachments require the artifact service (not wired)');
+    }
+    const out: OutboundAttachment[] = [];
+    for (const ref of refs) {
+      const source = ref.artifactId ?? ref.url;
+      if (!source || !source.trim()) {
+        throw new AgentisError('VALIDATION_FAILED', 'each attachment needs an artifactId or url');
+      }
+      const hint: { filename?: string; mimeType?: string } = {};
+      if (ref.filename) hint.filename = ref.filename;
+      if (ref.mimeType) hint.mimeType = ref.mimeType;
+      const resolved = await this.deps.artifacts.resolveBytes(workspaceId, source, hint);
+      const kind = ref.kind ?? (resolved.mimeType.startsWith('image/') ? 'image' : 'file');
+      out.push({ kind, filename: resolved.filename, mimeType: resolved.mimeType, data: resolved.buffer });
+    }
+    return out;
+  }
+
+  async #sendWhatsAppCloud(row: ChannelConnectionRow, settings: ChannelSettings, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<void> {
     const phoneNumberId = settings.phoneNumberId;
     if (!phoneNumberId) {
       throw new AgentisError('VALIDATION_FAILED', 'WhatsApp Cloud phone number ID is missing');
     }
     const token = this.deps.vault.decrypt(row.tokenEncrypted);
+    if (attachments.length > 0) {
+      // First attachment carries the body as its caption; the rest go captionless.
+      for (let i = 0; i < attachments.length; i += 1) {
+        await this.#sendWhatsAppCloudMedia(token, phoneNumberId, chatId, attachments[i]!, i === 0 ? body : '');
+      }
+      return;
+    }
     const res = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/messages`, {
       method: 'POST',
       headers: {
@@ -819,6 +854,38 @@ export class ChannelBridge {
         'CHANNEL_SEND_FAILED',
         `whatsapp cloud send failed (${res.status}): ${text.slice(0, 240) || res.statusText}`,
       );
+    }
+  }
+
+  /** Upload media to the WhatsApp Cloud media endpoint, then send a message referencing it. */
+  async #sendWhatsAppCloudMedia(token: string, phoneNumberId: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<void> {
+    const base = `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}`;
+    const uploadForm = new FormData();
+    uploadForm.set('messaging_product', 'whatsapp');
+    uploadForm.set('file', new Blob([new Uint8Array(attachment.data)], { type: attachment.mimeType }), attachment.filename);
+    uploadForm.set('type', attachment.mimeType);
+    const uploadRes = await fetch(`${base}/media`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: uploadForm,
+    });
+    const uploadJson = await uploadRes.json().catch(() => ({})) as { id?: string; error?: { message?: string } };
+    if (!uploadRes.ok || !uploadJson.id) {
+      throw new AgentisError('CHANNEL_SEND_FAILED', `whatsapp cloud media upload failed (${uploadRes.status}): ${uploadJson.error?.message ?? uploadRes.statusText}`);
+    }
+    const isImage = attachment.kind === 'image';
+    const mediaType = isImage ? 'image' : 'document';
+    const media: Record<string, unknown> = { id: uploadJson.id };
+    if (caption) media.caption = caption;
+    if (!isImage) media.filename = attachment.filename;
+    const res = await fetch(`${base}/messages`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to: chatId, type: mediaType, [mediaType]: media }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new AgentisError('CHANNEL_SEND_FAILED', `whatsapp cloud media send failed (${res.status}): ${text.slice(0, 240) || res.statusText}`);
     }
   }
 

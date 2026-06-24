@@ -17,6 +17,7 @@ import type { AgentMemoryService } from './agentMemory.js';
 import type { MemoryStore } from './memoryStore.js';
 import type { BrowserPool, BrowserRenderOptions } from './browserPool.js';
 import type { ArtifactService } from './artifactService.js';
+import type { McpToolBridge, BridgedToolSpec } from './mcpToolBridge.js';
 import type { Logger } from '../logger.js';
 
 export interface AgentToolResult {
@@ -61,6 +62,8 @@ export interface AgentToolRuntimeDeps {
   browser?: BrowserPool;
   /** Artifact persistence — screenshots become referenceable artifacts for channel send. */
   artifacts?: ArtifactService;
+  /** External MCP tool bridge — backs dynamic `mcp__*` tools (computer-use, browser, …). */
+  mcpBridge?: McpToolBridge;
   /** App Datastore (§5) — backs the `data_*` tools. Scoped by `context.appId`. */
   appData?: AppDatastore;
   /** AG-UI surfaces (§4) — backs the `ui_render` / `ui_patch` / `ui_action_schema` tools. */
@@ -116,6 +119,30 @@ export class AgentToolRuntime {
       this.deps.logger?.warn('agent_tool.failed', { workspaceId, tool, error: message });
       return { ok: false, error: message };
     }
+  }
+
+  /**
+   * The dynamic, workspace-scoped MCP tools available to an agent (computer-use,
+   * browser, any operator-mounted MCP server). These are offered to the loop
+   * ALONGSIDE the static role manifest — they carry namespaced `mcp__*` ids so
+   * they never collide with the `AgentTool` enum. Empty when no bridge/servers.
+   */
+  async listBridgedTools(workspaceId: string): Promise<BridgedToolSpec[]> {
+    if (!this.deps.mcpBridge) return [];
+    try {
+      return await this.deps.mcpBridge.listTools(workspaceId);
+    } catch (err) {
+      this.deps.logger?.warn('agent_tool.bridge_list_failed', { workspaceId, error: (err as Error).message });
+      return [];
+    }
+  }
+
+  /** Execute a bridged (`mcp__*`) tool. The loop gates which ids it offers. */
+  async executeBridged(workspaceId: string, toolId: string, args: Record<string, unknown>): Promise<AgentToolResult> {
+    if (!this.deps.mcpBridge) return { ok: false, error: 'MCP tool bridge is not wired in this runtime' };
+    const res = await this.deps.mcpBridge.call(workspaceId, toolId, args);
+    if (res.ok) return { ok: true, result: res.result };
+    return { ok: false, error: res.error ?? `bridged tool '${toolId}' failed` };
   }
 
   async #run(workspaceId: string, tool: AgentTool, args: Record<string, unknown>, context: AgentToolContext): Promise<unknown> {

@@ -29,6 +29,25 @@ import { z } from 'zod';
 type CollectionRow = typeof schema.appCollections.$inferSelect;
 type RecordRow = typeof schema.appRecords.$inferSelect;
 
+/** Server-side aggregation request (masterplan 4.1) — drives Chart/DataBoard at scale. */
+export interface AggregateInput {
+  filter?: DataQuery['filter'];
+  /** Field to group by (json field). Omitted = one total over all matching rows. */
+  groupBy?: string;
+  /** Aggregate operation. `count` needs no field; the others require `field`. */
+  op: 'count' | 'sum' | 'avg' | 'min' | 'max';
+  /** Numeric field for sum/avg/min/max. */
+  field?: string;
+  /** Max groups returned (default 100, cap 1000). */
+  limit?: number;
+}
+
+export interface AggregateBucket {
+  /** The group value (null when not grouped). */
+  group: string | number | null;
+  value: number;
+}
+
 const FILTER_OPS = new Set(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in']);
 
 export type DataChangeOp = 'insert' | 'update' | 'delete';
@@ -164,6 +183,53 @@ export class AppDatastore {
       rows: page.map((r) => this.toRecord(r, col.name)),
       ...(hasMore ? { nextCursor: this.encodeCursor(offset + query.limit) } : {}),
     };
+  }
+
+  /**
+   * Server-side aggregation (count/sum/avg/min/max, optional group-by) over a
+   * collection. Replaces client-side grouping of a capped fetch — Charts and
+   * DataBoards are now correct over the full collection, not just the first page.
+   */
+  aggregate(workspaceId: string, appId: string, collection: string, input: AggregateInput): AggregateBucket[] {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    if (input.op !== 'count' && !input.field) {
+      throw new AgentisError('VALIDATION_FAILED', `aggregate op '${input.op}' requires a field`);
+    }
+    const conditions: SQL[] = [eq(schema.appRecords.collectionId, col.id)];
+    const indexedCondition = this.indexedCondition(col, input.filter ?? {});
+    if (indexedCondition) conditions.push(indexedCondition);
+    for (const [key, raw] of Object.entries(input.filter ?? {})) {
+      conditions.push(this.filterCondition(key, raw));
+    }
+
+    const num = input.field ? sql`CAST(${this.jsonPath(input.field)} AS REAL)` : sql`0`;
+    const valueSql: SQL<number> =
+      input.op === 'count' ? sql<number>`COUNT(*)`
+        : input.op === 'sum' ? sql<number>`COALESCE(SUM(${num}), 0)`
+          : input.op === 'avg' ? sql<number>`AVG(${num})`
+            : input.op === 'min' ? sql<number>`MIN(${num})`
+              : sql<number>`MAX(${num})`;
+
+    if (input.groupBy) {
+      const grpExpr = this.jsonPath(input.groupBy);
+      const limit = Math.min(Math.max(input.limit ?? 100, 1), 1000);
+      const rows = this.db
+        .select({ grp: grpExpr, value: valueSql })
+        .from(schema.appRecords)
+        .where(and(...conditions))
+        .groupBy(grpExpr)
+        .orderBy(desc(valueSql))
+        .limit(limit)
+        .all();
+      return rows.map((r) => ({ group: normalizeGroup(r.grp), value: Number(r.value ?? 0) }));
+    }
+
+    const row = this.db
+      .select({ value: valueSql })
+      .from(schema.appRecords)
+      .where(and(...conditions))
+      .get();
+    return [{ group: null, value: Number(row?.value ?? 0) }];
   }
 
   // ── Internals ───────────────────────────────────────────────
@@ -356,6 +422,12 @@ export class AppDatastore {
         .run();
     }
   }
+}
+
+function normalizeGroup(raw: unknown): string | number | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'number' || typeof raw === 'string') return raw;
+  return String(raw);
 }
 
 function indexedLookupValues(raw: unknown): unknown[] | null {

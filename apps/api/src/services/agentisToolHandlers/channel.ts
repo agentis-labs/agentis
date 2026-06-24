@@ -1,5 +1,5 @@
 import { AgentisError } from '@agentis/core';
-import type { ChannelKind } from '../../adapters/channels/types.js';
+import type { ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 
@@ -49,16 +49,29 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.channel.send',
         family: 'run',
-        description: 'Send a message through a native Agentis channel connection. WhatsApp accepts explicit phone numbers with country code (for example +12345678901) or WhatsApp JIDs; "default" uses the saved default target.',
+        description: 'Send a message — optionally with image/file attachments — through a native Agentis channel connection. WhatsApp accepts explicit phone numbers with country code (for example +12345678901) or WhatsApp JIDs; "default" uses the saved default target. To send a screenshot, first call agentis.browser.screenshot and pass its `ref` (e.g. "artifact:<id>") as an attachment url.',
         inputSchema: {
           type: 'object',
           properties: {
             connectionId: { type: 'string', description: 'Specific channel connection id. Optional when kind resolves to one active channel.' },
             kind: { type: 'string', enum: [...CHANNEL_KINDS], description: 'Channel kind to use when connectionId is omitted.' },
             to: { type: 'string', description: 'Channel destination. Use "default" or omit for the saved default target. WhatsApp may be a phone number, JID, or saved alias.' },
-            body: { type: 'string', description: 'Message body to send.' },
+            body: { type: 'string', description: 'Message body / caption. May be empty when sending attachments only.' },
+            attachments: {
+              type: 'array',
+              description: 'Images or files to deliver. Each item points at one source: an artifact ("artifact:<id>" or artifactId), a data: URL, or an http(s) URL.',
+              items: {
+                type: 'object',
+                properties: {
+                  url: { type: 'string', description: 'artifact:<id>, data: URL, or http(s) URL.' },
+                  artifactId: { type: 'string', description: 'Artifact id (alternative to url).' },
+                  filename: { type: 'string' },
+                  mimeType: { type: 'string' },
+                  kind: { type: 'string', enum: ['image', 'file'], description: 'Delivery hint; inferred from MIME type when omitted.' },
+                },
+              },
+            },
           },
-          required: ['body'],
         },
         mutating: true,
         mcpExposed: true,
@@ -66,7 +79,8 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       handler: async (args, ctx) => {
         if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
         const body = typeof args.body === 'string' ? args.body.trim() : '';
-        if (!body) throw new AgentisError('VALIDATION_FAILED', 'body is required');
+        const attachments = parseAttachments(args.attachments);
+        if (!body && attachments.length === 0) throw new AgentisError('VALIDATION_FAILED', 'provide a body or at least one attachment');
         const kind = parseKind(args.kind);
         const connectionId = typeof args.connectionId === 'string' && args.connectionId.trim()
           ? args.connectionId.trim()
@@ -118,7 +132,12 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
           };
         }
 
-        await deps.channels.deliverToConnection({ connectionId: candidate.id, chatId, body });
+        await deps.channels.deliverToConnection({
+          connectionId: candidate.id,
+          chatId,
+          body,
+          ...(attachments.length ? { attachments } : {}),
+        });
         return {
           sent: true,
           connectionId: candidate.id,
@@ -126,10 +145,33 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
           to: chatId,
           targetSource: resolved.source,
           status: candidate.status,
+          attachments: attachments.length,
         };
       },
     },
   ]);
+}
+
+/** Normalize loosely-typed attachment args into typed references. */
+function parseAttachments(value: unknown): OutboundAttachmentRef[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new AgentisError('VALIDATION_FAILED', 'attachments must be an array');
+  return value.map((raw, i) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new AgentisError('VALIDATION_FAILED', `attachment[${i}] must be an object`);
+    }
+    const obj = raw as Record<string, unknown>;
+    const url = typeof obj.url === 'string' ? obj.url.trim() : '';
+    const artifactId = typeof obj.artifactId === 'string' ? obj.artifactId.trim() : '';
+    if (!url && !artifactId) throw new AgentisError('VALIDATION_FAILED', `attachment[${i}] needs a url or artifactId`);
+    const ref: OutboundAttachmentRef = {};
+    if (url) ref.url = url;
+    if (artifactId) ref.artifactId = artifactId;
+    if (typeof obj.filename === 'string' && obj.filename.trim()) ref.filename = obj.filename.trim();
+    if (typeof obj.mimeType === 'string' && obj.mimeType.trim()) ref.mimeType = obj.mimeType.trim();
+    if (obj.kind === 'image' || obj.kind === 'file') ref.kind = obj.kind;
+    return ref;
+  });
 }
 
 function parseKind(value: unknown): ChannelKind | null {

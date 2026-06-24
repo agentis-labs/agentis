@@ -8,9 +8,11 @@
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { useWorkspaceData } from '../lib/workspaceData';
+import { useAgentisStore } from '../store/agentisStore';
 
 export function LiveStrip() {
   const { approvals, counts, fleet: snap, latestActivity: latest, loading } = useWorkspaceData();
+  const { setSettingsOpen } = useAgentisStore();
 
   if (!snap) {
     if (loading) {
@@ -37,10 +39,10 @@ export function LiveStrip() {
             {approvals.length} pending {approvals.length === 1 ? 'approval' : 'approvals'}
           </Link>
         )}
-        <Link to="/settings?tab=connections" className="flex items-center gap-1 hover:text-text-primary">
+        <button onClick={() => setSettingsOpen(true, 'connections')} className="flex items-center gap-1 hover:text-text-primary">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-text-muted/40" />
           Connections 0/0
-        </Link>
+        </button>
         <span className="ml-auto opacity-60">Idle</span>
       </div>
     );
@@ -65,10 +67,10 @@ export function LiveStrip() {
           {snap.approvals.pending} pending {snap.approvals.pending === 1 ? 'approval' : 'approvals'}
         </Link>
       )}
-      <Link to="/settings?tab=connections" className="flex items-center gap-1 hover:text-text-primary">
+      <button onClick={() => setSettingsOpen(true, 'connections')} className="flex items-center gap-1 hover:text-text-primary">
         <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', gwDot)} />
         Connections {snap.gateways.connected}/{snap.gateways.total}
-      </Link>
+      </button>
       <span className="ml-auto truncate" title={latest?.summary ?? ''}>
         {latest ? (
           <Link to="/history" className="hover:text-text-primary">

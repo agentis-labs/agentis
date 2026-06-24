@@ -78,7 +78,7 @@ export class DiscordChannelAdapter implements ChannelAdapter {
     const descriptors = attachments.map((a, i) => ({ id: i, filename: a.filename }));
     form.set('payload_json', JSON.stringify({ content: body, attachments: descriptors }));
     attachments.forEach((a, i) => {
-      form.set(`files[${i}]`, new Blob([a.data], { type: a.mimeType }), a.filename);
+      form.set(`files[${i}]`, new Blob([new Uint8Array(a.data)], { type: a.mimeType }), a.filename);
     });
     return form;
   }

@@ -81,6 +81,8 @@ import {
   describeAgentRequirements,
   hasAgentRequirements,
   requiredAffordanceKeys,
+  affordanceLabel,
+  type AgentAffordance,
   specialistForRole,
   genericSpecialist,
   roleTools,
@@ -3666,6 +3668,19 @@ export class WorkflowEngine {
     const preamble = preambleResult.prompt;
     const inputBlock = Object.keys(inputData).length > 0 ? `\n\nINPUT:\n${safeJson(inputData)}` : '';
 
+    // Phase 2/3A/4 — dynamic capability surface. Bridged MCP tools (computer-use,
+    // browser, any operator-mounted server) are offered alongside the static
+    // manifest, and the bound runtime's native affordances are surfaced so the
+    // agent knows its real powers instead of describing what it would do.
+    const extraTools = (await this.deps.agentTools.listBridgedTools(ctx.workspaceId)).map((spec) => ({
+      id: spec.id,
+      description: spec.provides ? `${spec.description} [grants ${spec.provides}]` : spec.description,
+    }));
+    const liveAffordances = agentId ? this.deps.adapters.capabilities(agentId)?.affordances ?? {} : {};
+    const runtimeAffordances = (Object.keys(liveAffordances) as AgentAffordance[])
+      .filter((key) => liveAffordances[key] === true)
+      .map(affordanceLabel);
+
     const loop = new AgentToolLoop({
       runtime: this.deps.agentTools,
       llm: toolLoopLlm,
@@ -3677,6 +3692,8 @@ export class WorkflowEngine {
       task: `${config.prompt}${agentOutputContractPrompt(config.outputKeys)}${inputBlock}`,
       systemPreamble: preamble,
       tools,
+      ...(extraTools.length > 0 ? { extraTools } : {}),
+      ...(runtimeAffordances.length > 0 ? { runtimeAffordances } : {}),
       maxSteps: config.maxToolSteps,
       workflowId: ctx.workflowId,
       agentId,
@@ -6756,6 +6773,30 @@ export class WorkflowEngine {
     const results: unknown[] = new Array(items.length);
     const errors: Array<{ index: number; message: string }> = [];
 
+    // Durable / idempotent resume (masterplan 1.4): crash recovery re-dispatches
+    // an interrupted loop node, so we persist each iteration's result and SKIP it
+    // on re-run — side effects fire at most once per iteration instead of the
+    // whole loop replaying. `_loopState` is the persisted completed/failed map.
+    const priorState = (ctx.state.nodeStates[node.id]?.outputData?._loopState ?? {}) as {
+      completed?: Record<string, unknown>;
+      failed?: Record<string, string>;
+    };
+    const completedMap: Record<string, unknown> = { ...(priorState.completed ?? {}) };
+    const failedMap: Record<string, string> = { ...(priorState.failed ?? {}) };
+    for (const [idx, value] of Object.entries(completedMap)) results[Number(idx)] = value;
+    for (const [idx, message] of Object.entries(failedMap)) errors.push({ index: Number(idx), message });
+
+    const persistLoopState = async (chunkEnd: number): Promise<void> => {
+      const loopNs = ctx.state.nodeStates[node.id];
+      if (!loopNs) return;
+      loopNs.outputData = {
+        ...(loopNs.outputData ?? {}),
+        _loopState: { completed: completedMap, failed: failedMap },
+        _loopProgress: { completed: chunkEnd, total: items.length, errors: errors.length },
+      };
+      await this.#persistRun(ctx);
+    };
+
     for (let chunkStart = 0; chunkStart < items.length; chunkStart += chunkSize) {
       const chunkEnd = Math.min(chunkStart + chunkSize, items.length);
       const chunkIndexes: number[] = [];
@@ -6766,12 +6807,18 @@ export class WorkflowEngine {
       const next = (async () => {
         let cursor = 0;
         const runOne = async (i: number): Promise<void> => {
+          // Already settled on a prior attempt — reuse the persisted outcome.
+          if (Object.prototype.hasOwnProperty.call(completedMap, String(i)) || Object.prototype.hasOwnProperty.call(failedMap, String(i))) {
+            return;
+          }
           try {
             const itemOutput = await this.#runLoopIteration(ctx, node, config, items[i], i);
             results[i] = itemOutput;
+            completedMap[String(i)] = itemOutput;
           } catch (err) {
             const message = (err as Error).message;
             errors.push({ index: i, message });
+            failedMap[String(i)] = message;
             if (errorPolicy === 'stop_all') throw err;
           }
         };
@@ -6792,8 +6839,9 @@ export class WorkflowEngine {
       try {
         await Promise.all(pool);
       } catch (err) {
-        // stop_all: bubble up.
+        // stop_all: bubble up (persist what completed so a resume skips it).
         delete ctx.state.activeExecutions[node.id];
+        await persistLoopState(chunkEnd);
         await this.#failNode(ctx, node.id, `loop aborted on item ${errors.at(-1)?.index ?? '?'}: ${(err as Error).message}`);
         void this.#tick(ctx);
         return;
@@ -6807,22 +6855,9 @@ export class WorkflowEngine {
         errors: errors.length,
       });
 
-      // Persist per-chunk progress onto the loop node's state. This survives a
-      // page refresh (the canvas reads it back) and gives a future
-      // idempotent-resume the cursor it needs. NOTE: we deliberately do NOT
-      // auto-resume a half-finished loop after a restart â€” re-running
-      // iterations would double-fire their side effects (agent/http/integration
-      // calls). Safe loop resume requires per-iteration idempotency keys, which
-      // is a separate design. Until then a loop interrupted by a restart fails
-      // loud and the operator replays it.
-      const loopNs = ctx.state.nodeStates[node.id];
-      if (loopNs) {
-        loopNs.outputData = {
-          ...(loopNs.outputData ?? {}),
-          _loopProgress: { completed: chunkEnd, total: items.length, errors: errors.length },
-        };
-        await this.#persistRun(ctx);
-      }
+      // Persist per-chunk so a crash-recovery re-dispatch resumes from here
+      // (skipping completed iterations) instead of replaying the whole loop.
+      await persistLoopState(chunkEnd);
     }
 
     delete ctx.state.activeExecutions[node.id];

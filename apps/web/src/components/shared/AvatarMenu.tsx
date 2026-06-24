@@ -11,6 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import { Settings as SettingsIcon, LogOut } from 'lucide-react';
 import clsx from 'clsx';
 import { ThemeToggle } from './ThemeToggle';
+import { useAgentisStore } from '../../store/agentisStore';
 
 interface AvatarMenuProps {
   name: string;
@@ -35,7 +36,7 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const nav = useNavigate();
+  const { setSettingsOpen } = useAgentisStore();
 
   useEffect(() => {
     if (!open) return;
@@ -124,7 +125,7 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
             <button
               type="button"
               role="menuitem"
-              onClick={() => { setOpen(false); nav('/settings?tab=workspace'); }}
+              onClick={() => { setOpen(false); setSettingsOpen(true, 'workspace'); }}
               className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
             >
               <SettingsIcon size={14} />

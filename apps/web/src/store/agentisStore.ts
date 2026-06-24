@@ -41,6 +41,8 @@ export interface ActiveRunSummary {
   startedAt: string;
 }
 
+export type SettingsTab = 'profile' | 'workspace' | 'connections' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
+
 export interface AgentisStore {
   // Workspace + ambient context
   workspaceId: string | null;
@@ -56,6 +58,11 @@ export interface AgentisStore {
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
   togglePalette: () => void;
+
+  settingsOpen: boolean;
+  settingsTab: SettingsTab;
+  setSettingsOpen: (open: boolean, tab?: SettingsTab) => void;
+  closeSettings: () => void;
 
   // Realtime-derived state — keyed by agentId / runId so selectors can
   // subscribe to a single key without watching the whole map.
@@ -82,6 +89,14 @@ export const useAgentisStore = create<AgentisStore>((set) => ({
   paletteOpen: false,
   setPaletteOpen: (open) => set({ paletteOpen: open }),
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
+
+  settingsOpen: false,
+  settingsTab: 'profile',
+  setSettingsOpen: (open, tab) => set((s) => ({ 
+    settingsOpen: open, 
+    settingsTab: tab ?? s.settingsTab 
+  })),
+  closeSettings: () => set({ settingsOpen: false }),
 
   presenceByAgent: {},
   upsertPresence: (p) =>

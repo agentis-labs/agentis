@@ -311,6 +311,40 @@ describe('/v1/apps package install', () => {
     expect(leakBody.error.code).toBe('RESOURCE_NOT_FOUND');
   });
 
+  it('gates an imported bundle that executes code behind explicit acknowledgement', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Coder' }).id;
+    store.update(ctx.workspace.id, appId, { version: '1.0.0' });
+    ctx.db.insert(schema.workflows).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      appId,
+      title: 'Runs code',
+      graph: {
+        version: 1,
+        nodes: [{ id: 'C', type: 'code', title: 'c', position: { x: 0, y: 0 }, config: { kind: 'code', language: 'python', code: 'print(1)', inputKeys: [] } }],
+        edges: [],
+      },
+    }).run();
+
+    const exported = await app().request(`/v1/apps/${appId}/export`, { headers: ctx.authHeaders });
+    const { data: envelope } = (await exported.json()) as { data: unknown };
+    const preview = await app().request('/v1/apps/import/preview', { method: 'POST', headers: ctx.authHeaders, body: JSON.stringify(envelope) });
+    const previewBody = (await preview.json()) as { data: { permissions: string[] } };
+    // The python code node is surfaced as a permission the installer must ack.
+    expect(previewBody.data.permissions).toContain('executes-code:python');
+
+    // Acknowledging everything EXCEPT the code permission is rejected.
+    const partial = previewBody.data.permissions.filter((p) => p !== 'executes-code:python');
+    const denied = await app().request('/v1/apps/import', { method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ envelope, permissionsAcknowledged: partial }) });
+    expect(denied.status).toBe(403);
+
+    // Full acknowledgement installs.
+    const ok = await app().request('/v1/apps/import', { method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ envelope, permissionsAcknowledged: previewBody.data.permissions }) });
+    expect(ok.status).toBe(201);
+  });
+
   it('rejects tampered previews before creating an app', async () => {
     const sourceId = seedApp();
     const before = appCount();

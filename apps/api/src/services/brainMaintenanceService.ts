@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, isNull, like, lt, or, sql } from 'drizzle-orm';
+import { and, eq, isNull, like, lt, notInArray, or, sql } from 'drizzle-orm';
 import { REALTIME_EVENTS, REALTIME_ROOMS, type RuntimeEpisodeType } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -22,6 +22,8 @@ export interface BrainMaintenanceResult {
   stagedGraduated: number;
   /** Unconsolidated episodic traces past their TTL that were archived (§P2). */
   stagedExpired: number;
+  /** §0.2 — disk reclamation: rows/links/queue/events hard-deleted this pass. */
+  reclaimed: { episodesDeleted: number; linksDeleted: number; queuePruned: number; eventsPruned: number };
   compression: ReturnType<BrainCompressionService['run']>;
 }
 
@@ -111,6 +113,9 @@ export class BrainMaintenanceService {
     const stagedExpired = this.#expireStagedTraces(workspaceId, now);
     const compression = this.compression.run(workspaceId, settings);
     const linksPruned = this.#pruneLinks(workspaceId);
+    // §0.2 — reclaim disk LAST, after archival/compression have marked everything
+    // this pass; only rows archived beyond the long grace window are deleted.
+    const reclaimed = this.#reclaimDisk(workspaceId, settings.hardDeleteAfterDays, settings.qualityEventRetentionDays);
     const sessionAtomsExpired = this.sessionAtoms.sweepExpired(now);
 
     // §B1.4 — repair drifted vectors off the hot path (fire-and-forget).
@@ -130,6 +135,7 @@ export class BrainMaintenanceService {
       sessionAtomsExpired,
       stagedGraduated,
       stagedExpired,
+      reclaimed,
       compression,
     };
     this.#record(workspaceId, result);
@@ -243,6 +249,67 @@ export class BrainMaintenanceService {
     return expired;
   }
 
+  /**
+   * §0.2 — disk reclamation, the one missing lifecycle primitive. Everything else
+   * only ARCHIVES (recoverable); without this the DB grows forever. Hard-DELETEs:
+   *   - MANAGED, unpinned episodes archived beyond `hardDeleteAfterDays` (never
+   *     operator/seed/system writes — those are managed=false),
+   *   - knowledge_links left dangling once their episode endpoint is gone,
+   *   - terminal (done/failed) promotion-queue rows past a short window,
+   *   - brain_quality_events past their retention window.
+   * Conservative by default (a year of archival grace); operator-tunable.
+   */
+  #reclaimDisk(
+    workspaceId: string,
+    hardDeleteAfterDays: number,
+    qualityEventRetentionDays: number,
+  ): { episodesDeleted: number; linksDeleted: number; queuePruned: number; eventsPruned: number } {
+    const deleteCutoff = new Date(Date.now() - hardDeleteAfterDays * 24 * 60 * 60 * 1000).toISOString();
+    const episodesDeleted = this.db.delete(schema.memoryEpisodes)
+      .where(and(
+        eq(schema.memoryEpisodes.workspaceId, workspaceId),
+        eq(schema.memoryEpisodes.managed, true),
+        isNull(schema.memoryEpisodes.pinnedAt),
+        eq(schema.memoryEpisodes.status, 'archived'),
+        lt(schema.memoryEpisodes.archivedAt, deleteCutoff),
+      ))
+      .run().changes;
+
+    // Drop links whose episode endpoint no longer exists (cleans this pass's
+    // deletions + any earlier dangle). kb/knowledge chunks are untouched here.
+    const liveEpisodeIds = () => this.db.select({ id: schema.memoryEpisodes.id })
+      .from(schema.memoryEpisodes)
+      .where(eq(schema.memoryEpisodes.workspaceId, workspaceId));
+    const linksDeleted = this.db.delete(schema.knowledgeLinks)
+      .where(and(
+        eq(schema.knowledgeLinks.workspaceId, workspaceId),
+        or(
+          and(eq(schema.knowledgeLinks.sourceKind, 'episode'), notInArray(schema.knowledgeLinks.sourceId, liveEpisodeIds())),
+          and(eq(schema.knowledgeLinks.targetKind, 'episode'), notInArray(schema.knowledgeLinks.targetId, liveEpisodeIds())),
+        )!,
+      ))
+      .run().changes;
+
+    const queueCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const queuePruned = this.db.delete(schema.cognitivePromotionQueue)
+      .where(and(
+        eq(schema.cognitivePromotionQueue.workspaceId, workspaceId),
+        or(eq(schema.cognitivePromotionQueue.status, 'done'), eq(schema.cognitivePromotionQueue.status, 'failed'))!,
+        lt(schema.cognitivePromotionQueue.updatedAt, queueCutoff),
+      ))
+      .run().changes;
+
+    const eventsCutoff = new Date(Date.now() - qualityEventRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+    const eventsPruned = this.db.delete(schema.brainQualityEvents)
+      .where(and(
+        eq(schema.brainQualityEvents.workspaceId, workspaceId),
+        lt(schema.brainQualityEvents.createdAt, eventsCutoff),
+      ))
+      .run().changes;
+
+    return { episodesDeleted, linksDeleted, queuePruned, eventsPruned };
+  }
+
   #pruneLinks(workspaceId: string): number {
     const links = this.db.select().from(schema.knowledgeLinks)
       .where(eq(schema.knowledgeLinks.workspaceId, workspaceId))
@@ -266,7 +333,7 @@ export class BrainMaintenanceService {
     return Boolean(row && (row.status === 'archived' || row.archivedAt));
   }
 
-  #settings(workspaceId: string): BrainCompressionSettings & { staleAfterDays: number; archiveAfterDays: number } {
+  #settings(workspaceId: string): BrainCompressionSettings & { staleAfterDays: number; archiveAfterDays: number; hardDeleteAfterDays: number; qualityEventRetentionDays: number } {
     const row = this.db.select({ brainSettings: schema.workspaces.brainSettings })
       .from(schema.workspaces)
       .where(eq(schema.workspaces.id, workspaceId))
@@ -275,6 +342,11 @@ export class BrainMaintenanceService {
     return {
       staleAfterDays: intSetting(parsed.staleAfterDays, 90, 7, 365),
       archiveAfterDays: intSetting(parsed.archiveAfterDays, 180, 14, 730),
+      // §0.2 — how long a row stays archived (recoverable) before disk reclamation
+      // hard-deletes it. Long + conservative; only MANAGED (auto-formed) rows are
+      // ever reclaimed, never operator/seed/system writes.
+      hardDeleteAfterDays: intSetting(parsed.hardDeleteAfterDays, 365, 30, 3650),
+      qualityEventRetentionDays: intSetting(parsed.qualityEventRetentionDays, 120, 14, 730),
       compressionThreshold: intSetting(parsed.compressionThreshold, 2000, 50, 50000),
       hardCompressionThreshold: intSetting(parsed.hardCompressionThreshold, 5000, 100, 100000),
       compressionMinConfidence: numSetting(parsed.compressionMinConfidence, 0.15, 0, 1),
@@ -301,6 +373,7 @@ export class BrainMaintenanceService {
         sessionAtomsExpired: result.sessionAtomsExpired,
         stagedGraduated: result.stagedGraduated,
         stagedExpired: result.stagedExpired,
+        reclaimed: result.reclaimed,
         compression: result.compression,
         nextTriggerAt: new Date(Date.now() + WEEK_MS).toISOString(),
       },

@@ -36,6 +36,7 @@ import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { ScratchpadService } from './scratchpad.js';
 import type { AgentToolRuntime } from './agentToolRuntime.js';
+import type { BridgedToolSpec } from './mcpToolBridge.js';
 import {
   AgentSessionService,
   estimateTokens,
@@ -275,7 +276,11 @@ export class AgentSessionRuntime {
    */
   async advance(sessionId: string, runCtx: SessionRunContext): Promise<SessionOutcome> {
     const maxSteps = Math.max(1, Math.min(runCtx.maxSteps ?? CONSTANTS.SESSION_MAX_STEPS, CONSTANTS.SESSION_MAX_STEPS));
-    const tools = this.#toolCatalog(runCtx.role);
+    // Phase 2/3A — a persistent session gets the same external MCP reach as the
+    // in-process loop: operator-mounted servers + the built-in computer-use
+    // server are offered as `mcp__*` tools alongside the role manifest.
+    const bridgedTools = await this.#bridgedTools(runCtx.workspaceId);
+    const tools = this.#toolCatalog(runCtx.role, bridgedTools);
     const adapter = this.#adapterFor(runCtx.workspaceId);
     if (!adapter) {
       return { kind: 'failed', error: 'no session model is configured for this workspace — connect an agent runtime or set an evaluation model in Settings' };
@@ -603,8 +608,23 @@ export class AgentSessionRuntime {
         return { ok: true, recorded: true };
       }
       default:
+        if (name.startsWith('mcp__')) return this.#execBridgedTool(name, args, runCtx);
         return this.#execRoleTool(name, args, runCtx);
     }
+  }
+
+  /**
+   * Execute a bridged MCP tool (`mcp__*`). The delegation-scope gate already ran
+   * in `#runToolCalls`, so a scoped delegate only reaches here for a tool its
+   * grant allows; bridged tools sit outside the static role manifest.
+   */
+  async #execBridgedTool(name: string, args: Record<string, unknown>, runCtx: SessionRunContext): Promise<unknown> {
+    if (!this.deps.agentTools) return { ok: false, error: `unknown tool '${name}'` };
+    const toolArgs = args.args && typeof args.args === 'object' && !Array.isArray(args.args)
+      ? args.args as Record<string, unknown>
+      : args;
+    const res = await this.deps.agentTools.executeBridged(runCtx.workspaceId, name, toolArgs);
+    return res.ok ? { ok: true, result: res.result } : { ok: false, error: res.error };
   }
 
   async #completeWithVerification(
@@ -698,7 +718,7 @@ export class AgentSessionRuntime {
   // Tool catalog + realtime
   // ────────────────────────────────────────────────────────────
 
-  #toolCatalog(role?: AgentRole): ToolDefinition[] {
+  #toolCatalog(role?: AgentRole, bridged: BridgedToolSpec[] = []): ToolDefinition[] {
     const tools: ToolDefinition[] = [...CONTROL_TOOLS];
     if (role) {
       // §specialist-removal — offer the role's effective toolbox (the universal
@@ -711,7 +731,21 @@ export class AgentSessionRuntime {
         });
       }
     }
+    // Bridged MCP tools (computer-use, browser, operator-mounted servers).
+    for (const spec of bridged) {
+      tools.push({
+        name: spec.id,
+        description: spec.provides ? `${spec.description} [grants ${spec.provides}]` : spec.description,
+        parameters: (spec.inputSchema as ToolDefinition['parameters']) ?? { type: 'object', properties: {} },
+      });
+    }
     return tools;
+  }
+
+  /** External MCP tools available to this workspace, or [] when no bridge/servers. */
+  async #bridgedTools(workspaceId: string): Promise<BridgedToolSpec[]> {
+    if (!this.deps.agentTools) return [];
+    return this.deps.agentTools.listBridgedTools(workspaceId);
   }
 
   #emitStep(runCtx: SessionRunContext, sessionId: string, text: string, calls: ChatToolCall[]): void {

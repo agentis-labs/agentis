@@ -68,7 +68,28 @@ function permissionSummary(manifest: AppManifest): string[] {
       if (action.kind === 'capability') permissions.add(`capability:${action.target}`);
     }
   }
+  // Provenance gate (masterplan 0.4): an imported bundle whose workflows carry
+  // executable payloads runs that code on the INSTALLER's host on first run. The
+  // installer must explicitly acknowledge it — the operator's own apps never go
+  // through install, so this only gates third-party bundles.
+  for (const permission of executablePayloadPermissions(manifest)) permissions.add(permission);
   return [...permissions].sort((a, b) => a.localeCompare(b));
+}
+
+/** Permissions for workflow nodes that execute code / drive a browser on the host. */
+function executablePayloadPermissions(manifest: AppManifest): string[] {
+  const out = new Set<string>();
+  for (const workflow of manifest.workflows) {
+    const graph = workflow.graph as { nodes?: unknown } | null | undefined;
+    const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+    for (const node of nodes) {
+      const config = (node as { config?: { kind?: string; language?: string } } | null)?.config;
+      if (!config) continue;
+      if (config.kind === 'code') out.add(`executes-code:${config.language ?? 'javascript'}`);
+      else if (config.kind === 'browser') out.add('controls-browser');
+    }
+  }
+  return [...out];
 }
 
 function hasCustomView(node: ViewNode | null): boolean {

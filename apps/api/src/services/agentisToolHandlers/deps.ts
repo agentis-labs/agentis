@@ -32,6 +32,7 @@ import type { PlanService } from '../planService.js';
 import type { ChannelBridge } from '../channelBridge.js';
 import type { BrowserPool } from '../browserPool.js';
 import type { ArtifactService } from '../artifactService.js';
+import type { McpToolBridge } from '../mcpToolBridge.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -92,4 +93,6 @@ export interface ToolHandlerDeps {
   browserPool?: BrowserPool;
   /** Artifact persistence + resolution — screenshots become referenceable, channel attachments resolve to bytes. */
   artifacts?: ArtifactService;
+  /** External MCP tool bridge — backs agentis.mcp.list / agentis.mcp.call. */
+  mcpBridge?: McpToolBridge;
 }

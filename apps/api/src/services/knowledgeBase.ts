@@ -355,7 +355,18 @@ export class KnowledgeBaseService {
       const contextPrefix = generated?.contextPrefix ?? contextualPrefix(args.name, index, chunks.length, args.mimeType ?? 'text/plain');
       const embeddingText = `${contextPrefix}\n\n${chunk}`;
       const provider = this.embeddingProvider(args.workspaceId);
-      const initialEmbedding = provider.embed(embeddingText);
+      // Resolve the embedding BEFORE the chunk is considered indexed. The default
+      // provider is now async (local e5 / OpenAI); the previous fire-and-forget
+      // update raced retrieval, leaving freshly-uploaded chunks vectorless (so
+      // search silently degraded to lexical). Await it here — ingestion is not a
+      // hot path — and degrade to lexical only if embedding genuinely fails.
+      let embedding: number[] | null = null;
+      try {
+        const raw = provider.embed(embeddingText);
+        embedding = raw instanceof Promise ? await raw : raw;
+      } catch {
+        embedding = null;
+      }
       this.db.insert(schema.kbChunks).values({
         id: chunkId,
         documentId,
@@ -375,15 +386,10 @@ export class KnowledgeBaseService {
             enrichment: { generated: true, model: generated.model ?? 'configured-model' },
           } : { enrichment: { generated: false, strategy: 'deterministic_context' } }),
         } as unknown as object,
-        ...(Array.isArray(initialEmbedding) ? { embedding: initialEmbedding } : {}),
+        ...(Array.isArray(embedding) ? { embedding } : {}),
         tokenCount: tokenize(chunk).length,
         createdAt: now,
       }).run();
-      if (!Array.isArray(initialEmbedding)) {
-        void initialEmbedding
-          .then((embedding) => this.db.update(schema.kbChunks).set({ embedding }).where(eq(schema.kbChunks.id, chunkId)).run())
-          .catch(() => {});
-      }
       enrichments.push(generated ?? null);
     }
 

@@ -2085,4 +2085,17 @@ CREATE INDEX IF NOT EXISTS idx_apps_domain ON apps(workspace_id, domain_id);
 CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps(workspace_id, owner_agent_id);
 `,
   },
+  {
+    version: 89,
+    name: 'memory_episodes_scope_recency_index',
+    sql: `
+-- §0.1 — the dispatch read path (loadAtoms) filters memory_episodes by
+-- (workspace_id, scope_id) + archived_at IS NULL and orders by updated_at DESC.
+-- Without this it is a per-workspace table scan on every recall; the prior v78
+-- comment claiming the index existed was wrong (only the needs_reembed index
+-- was ever created). Covering index for the scope + recency access pattern.
+CREATE INDEX IF NOT EXISTS idx_memory_episodes_scope_recency
+  ON memory_episodes(workspace_id, scope_id, updated_at);
+`,
+  },
 ];

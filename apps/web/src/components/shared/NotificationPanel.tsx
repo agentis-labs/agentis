@@ -56,22 +56,28 @@ export function NotificationPanel() {
   const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
+    const saved = readAcknowledgedNotificationIds(workspaceId);
+    if (loading) {
+      setAcknowledgedIds(saved);
+      return;
+    }
     const currentIds = new Set(items.map((item) => item.id));
-    const next = new Set(
-      [...readAcknowledgedNotificationIds(workspaceId)].filter((id) => currentIds.has(id)),
-    );
+    const next = new Set([...saved].filter((id) => currentIds.has(id)));
     setAcknowledgedIds(next);
     writeAcknowledgedNotificationIds(workspaceId, next);
-  }, [items, workspaceId]);
+  }, [items, workspaceId, loading]);
 
   useEffect(() => {
+    const saved = readSeenNotificationIds(workspaceId);
+    if (loading) {
+      setSeenIds(saved);
+      return;
+    }
     const currentIds = new Set(items.map((item) => item.id));
-    const next = new Set(
-      [...readSeenNotificationIds(workspaceId)].filter((id) => currentIds.has(id)),
-    );
+    const next = new Set([...saved].filter((id) => currentIds.has(id)));
     setSeenIds(next);
     writeSeenNotificationIds(workspaceId, next);
-  }, [items, workspaceId]);
+  }, [items, workspaceId, loading]);
 
   const panelItems = useMemo(
     () => items.filter((item) => !acknowledgedIds.has(item.id)),

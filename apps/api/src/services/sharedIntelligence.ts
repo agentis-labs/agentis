@@ -129,6 +129,12 @@ interface AtomCandidate {
   kind: KnowledgeAtomKind;
   text: string;
   node: BrainGraphNode;
+  // §0.1/§3.4 — the stored vector + its provenance, carried straight off the row
+  // `loadAtoms` already read. Lets `searchAtoms` score EVERY kind from the atoms
+  // it loaded (bounded), instead of a second full-workspace embedding scan.
+  embedding?: number[] | null;
+  embeddingModel?: string | null;
+  embeddingDims?: number | null;
 }
 
 interface SimilarAtom {
@@ -1268,27 +1274,35 @@ export class SharedIntelligenceService {
       queryVec = null;
     }
 
-    // §B1.2/§B1.3 — only use a stored vector when it is COMPARABLE to the query
-    // provider (same model + dims). On a semantic provider, any episode whose
-    // vector is stale-embedded is flagged for re-embed and counted — never
-    // silently degraded to lexical without it being observable.
-    const episodeVecs = new Map<string, number[]>();
+    // §0.1/§3.4/§B1.2 — score EVERY loaded atom from the vector it already carries
+    // (bounded to the ≤MAX_GRAPH_LIMIT atoms `loadAtoms` returned — no second
+    // full-workspace embedding scan). A stored vector is only used when COMPARABLE
+    // to the query provider: episodes carry model+dims provenance, so a
+    // stale-embedded one is detected + flagged for re-embed; chunks (no provenance
+    // columns) are written by the single workspace provider, so an equal dimension
+    // is sufficient comparability. We never fall back to lexical scoring — recall
+    // is purely semantic; un-embedded atoms are picked up after the re-embed sweep.
     const staleIds: string[] = [];
-    if (queryVec) {
-      for (const row of this.db.select({
-        id: schema.memoryEpisodes.id,
-        embedding: schema.memoryEpisodes.embedding,
-        embeddingModel: schema.memoryEpisodes.embeddingModel,
-        embeddingDims: schema.memoryEpisodes.embeddingDims,
-      }).from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, args.workspaceId)).all()) {
-        if (vectorIsComparable(row.embeddingModel, row.embeddingDims, provider)) {
-          const vec = parseEmbedding(row.embedding);
-          if (vec) episodeVecs.set(row.id, vec);
-        } else if (semantic) {
-          staleIds.push(row.id);
+    const scored = atoms
+      .map((atom) => {
+        let vec: number[] | null = null;
+        const stored = atom.embedding ?? null;
+        if (queryVec && stored && stored.length === queryVec.length) {
+          const hasProvenance = atom.embeddingModel != null || atom.embeddingDims != null;
+          if (!hasProvenance || vectorIsComparable(atom.embeddingModel ?? null, atom.embeddingDims ?? null, provider)) {
+            vec = stored;
+          } else if (semantic && atom.kind === 'episode') {
+            staleIds.push(atom.id);
+          }
+        } else if (queryVec && semantic && atom.kind === 'episode' && !stored) {
+          // Episode never embedded (deferred async write) → nudge a re-embed.
+          staleIds.push(atom.id);
         }
-      }
-    }
+        const score = vec ? cosineSimilarity(queryVec!, vec) : 0;
+        return { atom, score, text: atom.text, vec };
+      })
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score);
     if (staleIds.length > 0) {
       this.#flagNeedsReembed(args.workspaceId, staleIds);
       this.recordQualityEvent({
@@ -1298,20 +1312,6 @@ export class SharedIntelligenceService {
         metadata: { reason: 'mixed_dims', staleCount: staleIds.length, provider: provider.modelId },
       });
     }
-
-    const scored = atoms
-      .map((atom) => {
-        const vec = atom.kind === 'episode' ? episodeVecs.get(atom.id) ?? null : null;
-        const score = queryVec && vec && vec.length === queryVec.length
-          ? cosineSimilarity(queryVec, vec)
-          // No comparable vector (e.g. not yet re-embedded) → not semantically
-          // relevant. We do NOT fall back to lexical scoring — recall is purely
-          // semantic now; un-embedded atoms are picked up after the re-embed sweep.
-          : 0;
-        return { atom, score, text: atom.text };
-      })
-      .filter((r) => r.score > 0)
-      .sort((a, b) => b.score - a.score);
     // §B2.2 — diversify the top-K so near-duplicate atoms don't eat the budget.
     let ranked = mmrSelect(scored, limit, MMR_LAMBDA);
     // §B2.2 — optional model rerank (off unless an operator wired a completer).
@@ -1710,10 +1710,16 @@ export class SharedIntelligenceService {
       .get();
     const parsed = parseJsonRecord(settings?.brainSettings);
     const threshold = typeof parsed.compressionThreshold === 'number' ? parsed.compressionThreshold : 2000;
-    const count = this.db.select().from(schema.memoryEpisodes)
-      .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), isNull(schema.memoryEpisodes.archivedAt)))
-      .all()
-      .filter((row) => row.status !== 'archived').length;
+    // §0.1 — COUNT(*) in SQL, not load-all-then-count-in-JS (this runs on every
+    // dispatch via the header). Active = not archived row + not archived status.
+    const counted = this.db.select({ c: sql<number>`count(*)` }).from(schema.memoryEpisodes)
+      .where(and(
+        eq(schema.memoryEpisodes.workspaceId, workspaceId),
+        isNull(schema.memoryEpisodes.archivedAt),
+        sql`${schema.memoryEpisodes.status} != 'archived'`,
+      ))
+      .get();
+    const count = counted?.c ?? 0;
     const percent = Math.max(0, Math.round((count / Math.max(1, threshold)) * 100));
     return { percent, recommended: percent >= 80 };
   }
@@ -2371,7 +2377,7 @@ export class SharedIntelligenceService {
         .all();
       for (const row of rows) {
         const node = episodeRowToGraphNode(row, 1);
-        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: 'episode', text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node });
+        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: 'episode', text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node, embedding: row.embedding as number[] | null, embeddingModel: row.embeddingModel, embeddingDims: row.embeddingDims });
       }
     }
 
@@ -2408,7 +2414,7 @@ export class SharedIntelligenceService {
         .all();
       for (const row of rows) {
         const node = knowledgeChunkRowToGraphNode(row);
-        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: 'knowledge_chunk', text: `${row.title}\n${row.content}`, node });
+        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: 'knowledge_chunk', text: `${row.title}\n${row.content}`, node, embedding: row.embedding as number[] | null });
       }
     }
 
@@ -2430,7 +2436,7 @@ export class SharedIntelligenceService {
       for (const { chunk, scopeId: knowledgeBaseScopeId } of rows) {
         if (!this.isKbDocumentActive(workspaceId, chunk.documentId)) continue;
         const node = kbChunkRowToGraphNode({ ...chunk, scopeId: knowledgeBaseScopeId });
-        if (node.confidence >= minConfidence) out.push({ id: chunk.id, kind: 'kb_chunk', text: chunk.content, node });
+        if (node.confidence >= minConfidence) out.push({ id: chunk.id, kind: 'kb_chunk', text: chunk.content, node, embedding: chunk.embedding as number[] | null });
       }
     }
 
@@ -2883,11 +2889,18 @@ function parseEmbedding(raw: unknown): number[] | null {
  * model-free: uses the lexical `similarity` over atom text. Falls through to the
  * plain top-K when there is nothing to diversify.
  */
-function mmrSelect<T extends { score: number; text: string }>(candidates: T[], limit: number, lambda: number): T[] {
+function mmrSelect<T extends { score: number; text: string; vec?: number[] | null }>(candidates: T[], limit: number, lambda: number): T[] {
   if (candidates.length <= limit) return candidates;
   const pool = candidates.slice(0, Math.max(limit * 3, limit));
   const maxScore = Math.max(...pool.map((c) => c.score), 1e-9);
   const selected: T[] = [];
+  // §0.3a — diversity is measured by COSINE between candidate vectors, not lexical
+  // text overlap. Every candidate here cleared the semantic score gate, so it
+  // carries a comparable vector; the text path is a defensive fallback only.
+  const diversity = (a: T, b: T): number => {
+    if (a.vec && b.vec && a.vec.length === b.vec.length) return cosineSimilarity(a.vec, b.vec);
+    return similarity(a.text, b.text);
+  };
   while (selected.length < limit && pool.length > 0) {
     let bestIdx = 0;
     let bestVal = -Infinity;
@@ -2895,7 +2908,7 @@ function mmrSelect<T extends { score: number; text: string }>(candidates: T[], l
       const rel = pool[i]!.score / maxScore;
       let maxSim = 0;
       for (const s of selected) {
-        const sim = similarity(pool[i]!.text, s.text);
+        const sim = diversity(pool[i]!, s);
         if (sim > maxSim) maxSim = sim;
       }
       const mmr = lambda * rel - (1 - lambda) * maxSim;

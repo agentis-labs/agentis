@@ -203,8 +203,11 @@ export class SubflowExecutor {
   findParentByChildRunId(childRunId: string): { parentRunId: string; parentNodeId: string } | undefined {
     for (const [key, v] of this.#pending) {
       if (v.childRunId === childRunId) {
-        const [parentRunId, parentNodeId] = key.split(':');
-        return { parentRunId: parentRunId!, parentNodeId: parentNodeId! };
+        // Split on the FIRST colon only: a parentNodeId can itself contain colons
+        // (e.g. a loop iteration's `L:item:2`). A naive split would drop the tail
+        // and the rebuilt key would never match, hanging the parent forever.
+        const sep = key.indexOf(':');
+        return { parentRunId: key.slice(0, sep), parentNodeId: key.slice(sep + 1) };
       }
     }
     return undefined;

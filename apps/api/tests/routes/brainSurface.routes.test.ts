@@ -48,13 +48,13 @@ describe('Brain redesigned surface support routes', () => {
   it('reports embedding state and verifies the built-in provider', async () => {
     const status = await app().request('/v1/workspace/intelligence', { headers: ctx.authHeaders });
     const statusBody = await status.json() as { embeddingProviderType: string; degraded: boolean };
-    expect(statusBody.embeddingProviderType).toBe('hashing');
-    expect(statusBody.degraded).toBe(true);
+    expect(statusBody.embeddingProviderType).toBe('local');
+    expect(statusBody.degraded).toBe(false);
 
     const verify = await app().request('/v1/workspace/intelligence/embedding/verify', {
       method: 'POST',
       headers: ctx.authHeaders,
-      body: JSON.stringify({ embeddingProviderType: 'hashing', embeddingProviderConfig: {} }),
+      body: JSON.stringify({ embeddingProviderType: 'local', embeddingProviderConfig: {} }),
     });
     const verifyBody = await verify.json() as { ok: boolean; dimension: number };
     expect(verifyBody.ok).toBe(true);
@@ -66,7 +66,7 @@ describe('Brain redesigned surface support routes', () => {
       method: 'PATCH',
       headers: ctx.authHeaders,
       body: JSON.stringify({
-        embeddingProviderType: 'hashing',
+        embeddingProviderType: 'local',
         embeddingProviderConfig: {},
         enrichmentConfig: {
           enabled: true,

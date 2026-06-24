@@ -32,6 +32,7 @@ import {
   nodeConfigMeta,
   type IntegrationManifestLite,
 } from './nodeConfigRegistry';
+import { useAgentisStore } from '../../store/agentisStore';
 
 /** A brand logo for a connector slug, falling back to a colored initial chip. */
 function ConnectorLogo({ slug, name, size = 22 }: { slug: string; name: string; size?: number }) {
@@ -1302,6 +1303,7 @@ function RawMappingEditor({ mapping, onChange }: { mapping: Record<string, strin
 }
 
 function IntegrationForm({ data, update, upstream: _upstream, credentials, oauthProviders, integrations, refreshCredentials, refreshIntegrations }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[]; credentials: CredentialRow[]; oauthProviders: OAuthProvider[]; integrations: IntegrationManifestLite[]; refreshCredentials: () => void; refreshIntegrations: () => void }) {
+  const { setSettingsOpen } = useAgentisStore();
   const slug = asStr(data.integrationId);
   const credentialId = asStr(data.credentialId);
   const manifest = integrations.find((item) => item.service === slug || item.id === slug);
@@ -1459,12 +1461,12 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
             </p>
           )}
           {!isOAuth && (
-            <a
-              href="/settings?tab=integrations"
+            <button
+              onClick={() => setSettingsOpen(true, 'integrations')}
               className="mt-2 inline-flex h-8 w-full items-center justify-center rounded-btn border border-line bg-surface px-2 text-[11px] font-semibold text-text-secondary hover:border-accent/50 hover:text-text-primary"
             >
               Open integration settings
-            </a>
+            </button>
           )}
           {matching.length > 0 && (
             <div className="mt-2 space-y-1">

@@ -6,78 +6,124 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Link } from 'react-router-dom';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale } from 'lucide-react';
 import clsx from 'clsx';
-import { api, apiErrorMessage } from '../lib/api';
-import { useToast } from '../components/shared/Toast';
-import { useConfirm } from '../components/shared/ConfirmDialog';
-import { Tabs } from '../components/shared/Tabs';
-import { Button } from '../components/shared/Button';
-import { Skeleton } from '../components/shared/Skeleton';
-import { ThemeToggle } from '../components/shared/ThemeToggle';
-import { StatusBadge } from '../components/shared/StatusBadge';
-import { GovernancePanel } from '../components/settings/GovernancePanel';
-import { McpConnectionsPanel } from '../components/settings/McpConnectionsPanel';
-import { ChannelIdentitiesPanel } from '../components/settings/ChannelIdentitiesPanel';
-import { OrchestratorModelsPanel } from '../components/settings/OrchestratorModelsPanel';
-import { SelfHealingPanel } from '../components/settings/SelfHealingPanel';
-import { IntegrationsPanel } from '../components/settings/IntegrationsPanel';
+import { api, apiErrorMessage } from '../../lib/api';
+import { useToast } from '../shared/Toast';
+import { useConfirm } from '../shared/ConfirmDialog';
+import { Button } from '../shared/Button';
+import { Skeleton } from '../shared/Skeleton';
+import { ThemeToggle } from '../shared/ThemeToggle';
+import { StatusBadge } from '../shared/StatusBadge';
+import { GovernancePanel } from './GovernancePanel';
+import { McpConnectionsPanel } from './McpConnectionsPanel';
+import { ChannelIdentitiesPanel } from './ChannelIdentitiesPanel';
+import { OrchestratorModelsPanel } from './OrchestratorModelsPanel';
+import { SelfHealingPanel } from './SelfHealingPanel';
+import { IntegrationsPanel } from './IntegrationsPanel';
+import { useAgentisStore, SettingsTab } from '../../store/agentisStore';
 
-type Tab = 'profile' | 'workspace' | 'connections' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
+const TABS: { value: SettingsTab; label: string; icon: React.ReactNode }[] = [
+  { value: 'profile', label: 'Profile', icon: <User size={16} /> },
+  { value: 'workspace', label: 'Workspace', icon: <Briefcase size={16} /> },
+  { value: 'connections', label: 'Connections', icon: <Plug size={16} /> },
+  { value: 'integrations', label: 'Integrations', icon: <LinkIcon size={16} /> },
+  { value: 'governance', label: 'Governance', icon: <Scale size={16} /> },
+  { value: 'security', label: 'Security', icon: <Shield size={16} /> },
+  { value: 'budget', label: 'Budget', icon: <DollarSign size={16} /> },
+  { value: 'runtimes', label: 'Runtimes', icon: <Cpu size={16} /> },
+];
 
-export function SettingsPage() {
-  const [searchParams] = useSearchParams();
-  const initialTab = (searchParams.get('tab') as Tab) || 'profile';
-  const [tab, setTab] = useState<Tab>(initialTab);
+export function SettingsModal() {
+  const { settingsOpen, settingsTab, setSettingsOpen, closeSettings } = useAgentisStore();
 
-  return (
-    <div className="flex h-full flex-col">
-      <div className="border-b border-line px-6 py-4">
-        <h1 className="text-display text-text-primary">Settings</h1>
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && settingsOpen) {
+        closeSettings();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [settingsOpen, closeSettings]);
+
+  if (!settingsOpen) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm animate-fade-in">
+      <div className="flex h-full max-h-[800px] w-full max-w-[1000px] flex-col overflow-hidden rounded-[16px] border border-line bg-surface shadow-2xl animate-slide-up">
+        <div className="flex flex-1 overflow-hidden">
+          {/* Sidebar */}
+          <div className="w-64 shrink-0 border-r border-line bg-surface-2 flex flex-col">
+            <div className="px-6 py-6 pb-4">
+              <h2 className="text-[16px] font-semibold text-text-primary">Settings</h2>
+            </div>
+            <nav className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
+              {TABS.map((t) => {
+                const isActive = settingsTab === t.value;
+                return (
+                  <button
+                    key={t.value}
+                    onClick={() => setSettingsOpen(true, t.value)}
+                    className={clsx(
+                      'flex w-full items-center gap-3 rounded-btn px-3 py-2 text-[14px] transition-colors',
+                      isActive ? 'bg-surface-3 text-text-primary font-medium shadow-sm border border-line/50' : 'text-text-secondary hover:bg-surface-3/50 hover:text-text-primary border border-transparent'
+                    )}
+                  >
+                    <span className={isActive ? 'text-text-primary' : 'text-text-muted'}>{t.icon}</span>
+                    {t.label}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+
+          {/* Content Area */}
+          <div className="relative flex flex-1 flex-col bg-surface overflow-hidden">
+            <div className="absolute right-6 top-6 z-10">
+              <button
+                onClick={closeSettings}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-text-muted hover:bg-surface-3 hover:text-text-primary transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-10 py-8">
+              <h1 className="mb-6 text-[24px] font-semibold tracking-tight text-text-primary">
+                {TABS.find(t => t.value === settingsTab)?.label}
+              </h1>
+              {settingsTab === 'profile' && <ProfileTab />}
+              {settingsTab === 'workspace' && (
+                <div className="space-y-10">
+                  <WorkspaceTab />
+                  <SelfHealingPanel />
+                </div>
+              )}
+              {settingsTab === 'connections' && (
+                <div className="space-y-10">
+                  <ConnectionsTab />
+                  <ChannelIdentitiesPanel />
+                  <McpConnectionsPanel />
+                </div>
+              )}
+              {settingsTab === 'integrations' && <IntegrationsPanel />}
+              {settingsTab === 'governance' && <GovernancePanel />}
+              {settingsTab === 'security' && <SecurityTab />}
+              {settingsTab === 'budget' && <BudgetTab />}
+              {settingsTab === 'runtimes' && (
+                <div className="space-y-10">
+                  <OrchestratorModelsPanel />
+                  <RuntimesTab />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
-      <Tabs
-        value={tab}
-        onChange={(v) => setTab(v as Tab)}
-        tabs={[
-          { value: 'profile',     label: 'Profile' },
-          { value: 'workspace',   label: 'Workspace' },
-          { value: 'connections', label: 'Connections' },
-          { value: 'integrations', label: 'Integrations' },
-          { value: 'governance',  label: 'Governance' },
-          { value: 'security',    label: 'Security' },
-          { value: 'budget',      label: 'Budget' },
-          { value: 'runtimes',    label: 'Runtimes' },
-        ]}
-        className="px-6"
-      />
-      <div className="flex-1 overflow-y-auto px-6 py-5">
-        {tab === 'profile' && <ProfileTab />}
-        {tab === 'workspace' && (
-          <div className="space-y-8">
-            <WorkspaceTab />
-            <SelfHealingPanel />
-          </div>
-        )}
-        {tab === 'connections' && (
-          <div className="space-y-8">
-            <ConnectionsTab />
-            <ChannelIdentitiesPanel />
-            <McpConnectionsPanel />
-          </div>
-        )}
-        {tab === 'integrations' && <IntegrationsPanel />}
-        {tab === 'governance' && <GovernancePanel />}
-        {tab === 'security' && <SecurityTab />}
-        {tab === 'budget' && <BudgetTab />}
-        {tab === 'runtimes' && (
-          <div className="space-y-8">
-            <OrchestratorModelsPanel />
-            <RuntimesTab />
-          </div>
-        )}
-      </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

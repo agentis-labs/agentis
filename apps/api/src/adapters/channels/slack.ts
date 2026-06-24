@@ -74,7 +74,7 @@ export class SlackChannelAdapter implements ChannelAdapter {
         throw new AgentisError('CHANNEL_SEND_FAILED', `slack getUploadURLExternal failed: ${this.#explain(urlJson.error ?? urlRes.statusText)}`);
       }
       const putForm = new FormData();
-      putForm.set('file', new Blob([attachment.data], { type: attachment.mimeType }), attachment.filename);
+      putForm.set('file', new Blob([new Uint8Array(attachment.data)], { type: attachment.mimeType }), attachment.filename);
       const putRes = await this.fetchImpl(urlJson.upload_url, { method: 'POST', body: putForm });
       if (!putRes.ok) {
         throw new AgentisError('CHANNEL_SEND_FAILED', `slack file upload failed (${putRes.status})`);

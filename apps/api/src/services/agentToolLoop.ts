@@ -56,15 +56,34 @@ export interface AgentToolLoopArgs {
    * set for custom roles) to make any specialist tool-capable.
    */
   tools?: AgentTool[];
+  /**
+   * Dynamic, non-enum tools offered alongside the static manifest — bridged MCP
+   * tools (computer-use, browser, operator-mounted servers). Their ids are
+   * namespaced (`mcp__*`); the loop routes them to `runtime.executeBridged`.
+   */
+  extraTools?: DynamicToolSpec[];
+  /**
+   * Native affordances the bound runtime advertises (browser/terminal/computer-
+   * use). Surfaced in the system prompt so the agent knows its real powers
+   * (harness passthrough). Display-only — does not itself grant tools.
+   */
+  runtimeAffordances?: string[];
   /** Per-step observer — streams the agent's live reasoning/tool-use to the run. */
   onStep?: (step: AgentToolLoopStep & { index: number; phase: 'thinking' | 'tool_call' | 'tool_result' | 'final' }) => void;
   /** Run-scoped cancellation signal; stops billable model calls when the run is stopped. */
   signal?: AbortSignal;
 }
 
+/** A dynamic tool offered to the loop beyond the static `AgentTool` enum. */
+export interface DynamicToolSpec {
+  /** Namespaced id the model calls (e.g. `mcp__computer_use__screenshot`). */
+  id: string;
+  description: string;
+}
+
 export interface AgentToolLoopStep {
   thought?: string;
-  tool?: AgentTool;
+  tool?: AgentTool | string;
   args?: Record<string, unknown>;
   observation?: unknown;
   error?: string;
@@ -96,11 +115,13 @@ export class AgentToolLoop {
     // §specialist-removal — built-in role manifests are gone; a specialist with
     // no explicit toolbox gets the universal floor, never an empty set.
     const tools = args.tools && args.tools.length > 0 ? args.tools : effectiveSpecialistTools({ role: args.role });
+    const extraTools = args.extraTools ?? [];
+    const extraIds = new Set(extraTools.map((t) => t.id));
     const steps: AgentToolLoopStep[] = [];
     const transcript: string[] = [];
     let toolCalls = 0;
 
-    const system = this.#systemPrompt(args.role, tools, args.systemPreamble);
+    const system = this.#systemPrompt(args.role, tools, extraTools, args.runtimeAffordances ?? [], args.systemPreamble);
 
     for (let i = 0; i < maxSteps; i += 1) {
       if (args.signal?.aborted) {
@@ -131,22 +152,27 @@ export class AgentToolLoop {
         return { output, steps, stoppedReason: 'final', toolCalls };
       }
 
-      const tool = decision.tool as AgentTool | undefined;
-      if (!tool || !tools.includes(tool)) {
+      const tool = typeof decision.tool === 'string' ? decision.tool : undefined;
+      const isStatic = Boolean(tool && tools.includes(tool as AgentTool));
+      const isBridged = Boolean(tool && extraIds.has(tool));
+      if (!tool || (!isStatic && !isBridged)) {
+        const available = [...tools, ...extraTools.map((t) => t.id)].join(', ');
         const error = `requested tool '${String(tool)}' is not available to role '${args.role}'`;
         steps.push({ thought, error });
-        transcript.push(`STEP ${i + 1}: requested invalid tool '${String(tool)}'. Available: ${tools.join(', ')}.`);
+        transcript.push(`STEP ${i + 1}: requested invalid tool '${String(tool)}'. Available: ${available}.`);
         continue;
       }
 
       const toolArgs = (decision.args && typeof decision.args === 'object') ? decision.args : {};
       toolCalls += 1;
       args.onStep?.({ index: i, phase: 'tool_call', thought, tool, args: toolArgs });
-      const res = await this.deps.runtime.execute(args.workspaceId, tool, toolArgs, args.role, {
-        workflowId: args.workflowId,
-        agentId: args.agentId,
-        grantedTools: tools,
-      });
+      const res = isBridged
+        ? await this.deps.runtime.executeBridged(args.workspaceId, tool, toolArgs)
+        : await this.deps.runtime.execute(args.workspaceId, tool as AgentTool, toolArgs, args.role, {
+            workflowId: args.workflowId,
+            agentId: args.agentId,
+            grantedTools: tools,
+          });
       const observation = res.ok ? res.result : undefined;
       const error = res.ok ? undefined : res.error;
       steps.push({ thought, tool, args: toolArgs, observation, error });
@@ -181,13 +207,20 @@ export class AgentToolLoop {
     };
   }
 
-  #systemPrompt(role: AgentRole, tools: AgentTool[], preamble?: string): string {
-    const toolList = tools.length > 0
-      ? tools.map((t) => `- ${t}: ${TOOL_DESCRIPTIONS[t]}`).join('\n')
+  #systemPrompt(role: AgentRole, tools: AgentTool[], extraTools: DynamicToolSpec[], affordances: string[], preamble?: string): string {
+    const staticList = tools.map((t) => `- ${t}: ${TOOL_DESCRIPTIONS[t]}`);
+    const bridgedList = extraTools.map((t) => `- ${t.id}: ${t.description}`);
+    const allLines = [...staticList, ...bridgedList];
+    const toolList = allLines.length > 0
+      ? allLines.join('\n')
       : '(no tools available — answer from reasoning alone)';
+    const affordanceLine = affordances.length > 0
+      ? `Your bound runtime natively supports: ${affordances.join(', ')}. Prefer the matching tools above (e.g. computer-use / browser tools) to act directly instead of describing what you would do.`
+      : undefined;
     return [
       preamble?.trim(),
       'You operate as an autonomous agent in a bounded tool-use loop.',
+      affordanceLine,
       'AVAILABLE TOOLS:',
       toolList,
       '',

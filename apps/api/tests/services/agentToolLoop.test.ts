@@ -12,6 +12,7 @@ import path from 'node:path';
 import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
 import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
 import { AgentToolLoop, type StructuredLlm } from '../../src/services/agentToolLoop.js';
+import type { McpToolBridge } from '../../src/services/mcpToolBridge.js';
 
 let dataDir: string;
 let volume: WorkspaceVolumeService;
@@ -71,6 +72,49 @@ describe('AgentToolLoop', () => {
     expect(res.steps[0]?.error).toMatch(/not available/);
     expect(await volume.read(WS, 'x.txt')).toBeNull();
     expect(res.output).toBe('finished anyway');
+  });
+
+  it('offers a bridged MCP tool and routes its call to executeBridged', async () => {
+    // A runtime with a stubbed MCP bridge — the loop should accept the namespaced
+    // tool id (not in the AgentTool enum) and route it to executeBridged.
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const bridgedRuntime = new AgentToolRuntime({
+      volume,
+      mcpBridge: {
+        async call(_ws: string, tool: string, args: Record<string, unknown>) {
+          calls.push({ tool, args });
+          return { ok: true, result: { shot: 'data:image/png;base64,AAAA' } };
+        },
+      } as unknown as McpToolBridge,
+    });
+    const llm = scriptedLlm([
+      { thought: 'screenshot the desktop', action: 'tool', tool: 'mcp__computer_use__screenshot', args: { display: 0 } },
+      { thought: 'done', action: 'final', output: 'captured' },
+    ]);
+    const loop = new AgentToolLoop({ runtime: bridgedRuntime, llm });
+    const res = await loop.run({
+      workspaceId: WS,
+      role: 'specialist',
+      task: 'take a screenshot',
+      extraTools: [{ id: 'mcp__computer_use__screenshot', description: 'Capture the screen' }],
+      runtimeAffordances: ['Computer use'],
+    });
+
+    expect(res.stoppedReason).toBe('final');
+    expect(res.toolCalls).toBe(1);
+    expect(calls).toEqual([{ tool: 'mcp__computer_use__screenshot', args: { display: 0 } }]);
+    expect(res.steps.some((s) => s.tool === 'mcp__computer_use__screenshot')).toBe(true);
+  });
+
+  it('rejects a bridged tool id that was not offered', async () => {
+    const llm = scriptedLlm([
+      { action: 'tool', tool: 'mcp__computer_use__screenshot', args: {} },
+      { action: 'final', output: 'finished' },
+    ]);
+    const loop = new AgentToolLoop({ runtime, llm });
+    const res = await loop.run({ workspaceId: WS, role: 'specialist', task: 'x' });
+    expect(res.toolCalls).toBe(0);
+    expect(res.steps[0]?.error).toMatch(/not available/);
   });
 
   it('caps at maxSteps and still produces a final answer', async () => {

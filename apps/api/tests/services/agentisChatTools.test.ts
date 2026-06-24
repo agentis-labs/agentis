@@ -419,10 +419,10 @@ describe('agent-facing native channel tools', () => {
     expect(result.output).toEqual(expect.objectContaining({
       sent: true,
       connectionId: connection.id,
-      to: '12345678901@s.whatsapp.net',
+      to: '5511999999999@s.whatsapp.net',
       targetSource: 'explicit',
     }));
-    expect(sent).toEqual([{ connectionId: connection.id, chatId: '12345678901@s.whatsapp.net', body: 'hello wa' }]);
+    expect(sent).toEqual([{ connectionId: connection.id, chatId: '5511999999999@s.whatsapp.net', body: 'hello wa' }]);
   });
 });
 

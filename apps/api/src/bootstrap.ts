@@ -183,6 +183,8 @@ import { EmbeddingBackfillService } from './services/embeddingBackfill.js';
 import { ConfiguredBrainEnrichmentProvider, EnrichedKnowledgeGraphWriter } from './services/brainEnrichment.js';
 import { ChatMemoryCaptureService } from './services/chatMemoryCapture.js';
 import { BrowserPool } from './services/browserPool.js';
+import { ArtifactService } from './services/artifactService.js';
+import { McpToolBridge, computerUseServerFromEnv } from './services/mcpToolBridge.js';
 import { SpecialistAgentService } from './services/specialistAgents.js';
 import { McpHarnessSessionService } from './services/mcpHarnessSession.js';
 import { AuditTrailService } from './services/auditTrail.js';
@@ -483,6 +485,27 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Agentic App stores (AGENTIC-APPS-10X §4/§5) — datastore + surfaces with
   // realtime emit wired to the bus; shared by the agent tool runtime and routes.
   const appStores = buildAppStores({ db: sqlite, bus });
+  // Native Playwright runtime for `browser` nodes AND the `browser_*` agent
+  // tools (lazy: Chromium installs on first use if absent). Headless Chromium,
+  // capped by AGENTIS_BROWSER_CONCURRENCY.
+  const browserPool = new BrowserPool(logger);
+  // Shared artifact persistence/resolution — screenshots become referenceable
+  // artifacts and channel attachments resolve back to bytes.
+  const artifactService = new ArtifactService(sqlite, logger, bus);
+  // External MCP tool bridge (Phase 2/3A) — makes operator-mounted MCP servers
+  // (incl. an env-configured computer-use server) callable as agent tools. Same
+  // outbound network policy as the /v1/mcp-servers REST routes.
+  const mcpAllowPrivate = String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true';
+  const computerUseServer = computerUseServerFromEnv(process.env);
+  const mcpToolBridge = new McpToolBridge({
+    db: sqlite,
+    logger,
+    allowPrivateNetwork: mcpAllowPrivate,
+    ...(computerUseServer ? { computerUse: computerUseServer } : {}),
+  });
+  if (computerUseServer) {
+    logger.info('mcp_bridge.computer_use_enabled', { url: computerUseServer.url });
+  }
   const agentToolRuntimeDeps: AgentToolRuntimeDeps = {
     volume: workspaceVolume,
     knowledgeBases: knowledgeBaseService,
@@ -490,6 +513,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     agentMemory: agentMemoryService,
     memory: memoryStore,
     logger,
+    browser: browserPool,
+    artifacts: artifactService,
+    mcpBridge: mcpToolBridge,
     appData: appStores.data,
     appSurfaces: appStores.surfaces,
     resolveAppIdForWorkflow: (workspaceId, workflowId) => {
@@ -502,9 +528,6 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     },
   };
   const agentToolRuntime = new AgentToolRuntime(agentToolRuntimeDeps);
-  // Native Playwright runtime for `browser` nodes (lazy: Chromium installs on
-  // first use if absent). Headless Chromium, capped by AGENTIS_BROWSER_CONCURRENCY.
-  const browserPool = new BrowserPool(logger);
   let instinctEngine: InstinctEngine | undefined;
   // Layer 2 — specialist agent library: resolves agent_task.agentRole → a
   // workspace agent (seeding the built-in specialists on first use).
@@ -590,6 +613,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       discord: new DiscordChannelAdapter(),
       slack: new SlackChannelAdapter(),
     },
+    artifacts: artifactService,
   });
   const seed = await seedIfEmpty({ db: sqlite, env, auth, logger });
 
@@ -884,7 +908,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     },
   };
 
-  void rollingBaselineStore; void brainDiscourse; void brainMaintenance; void brainQueue; void abilityCompiler;
+  void rollingBaselineStore; void brainDiscourse; void brainQueue; void abilityCompiler;
   const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations });
 
   // Durable job queue (polling-based, survives restarts). Started after the
@@ -962,6 +986,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     specialistRouter,
     plans: planService,
     channels: channelBridge,
+    browserPool,
+    artifacts: artifactService,
+    mcpBridge: mcpToolBridge,
     // Assigned once the model router is constructed below. Build handlers close
     // over this object by reference, so the late assignment is visible to them.
     modelRouter: undefined as OrchestratorModelRouter | undefined,
@@ -1437,6 +1464,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       groundingRuntime.start();
       runCompaction.start();
       brainQueue.start(); // ability compile pipeline + brain promotions
+      brainMaintenance.start(); // §0.2 — weekly lifecycle: stale/archive, compression, graduate/expire, reembed, reflection, disk reclamation
       harnessImportSync.start(); // P4: notify when imported agents accrue new memory
 
       // Brain — fill deferred embeddings. The default local (ONNX) embedder is
