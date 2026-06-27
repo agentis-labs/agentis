@@ -103,6 +103,10 @@ import { buildDomainRoutes } from './routes/domains.js';
 import { buildAppRoutes } from './routes/apps.js';
 import { buildCapabilityRoutes } from './routes/capabilities.js';
 import { buildAppStores } from '@agentis/app';
+import { AppStaffingService } from './services/appStaffing.js';
+import { AppContactService } from './services/appContacts.js';
+import { AppLearningService } from './services/appLearning.js';
+import { ConversationParticipantService } from './services/conversationParticipants.js';
 import { buildScratchpadRoutes } from './routes/scratchpad.js';
 import { buildTaskRoutes } from './routes/tasks.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
@@ -207,6 +211,7 @@ import { buildWebhookRoutes } from './routes/webhooks.js';
 import { buildSchedulerRoutes } from './routes/scheduler.js';
 import { buildConversationRoutes } from './routes/conversations.js';
 import { buildRoomRoutes } from './routes/rooms.js';
+import { BroadcastDispatcher } from './services/broadcastDispatcher.js';
 import { buildHistoryRoutes } from './routes/history.js';
 import { buildExtensionRegistryRoutes } from './routes/extensionRegistry.js';
 import { buildChannelRoutes } from './routes/channels.js';
@@ -405,7 +410,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   });
   const auth = new AuthService(secrets);
   const ledger = new LedgerService(sqlite, bus);
-  const scratchpad = new ScratchpadService(bus, logger);
+  const scratchpad = new ScratchpadService(bus, logger, sqlite);
   const activity = new ActivityFeedService(sqlite, bus);
   const observability = new ObservabilityService(sqlite, bus, logger);
   observability.startLegacyBridge();
@@ -683,6 +688,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     bus,
     logger,
     agentTools: agentToolRuntime,
+    // Cross-runtime identity for blackboard entries — resolved from the live
+    // adapter registry (in-memory, no DB). (AGENT-COOPERATION-10X §Pillar 2.)
+    resolveRuntimeLabel: (agentId: string) => {
+      const adapter = adapters.get(agentId)?.adapter;
+      return adapter ? { runtime: adapter.adapterType, label: agentId } : undefined;
+    },
   });
 
   // LAYER 0: mints/caches a real model-backed runtime per agent (bound to its id)
@@ -703,6 +714,48 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     knowledgeBases: knowledgeBaseService,
     conversations,
     connectors: defaultConnectorRegistry,
+    mcpBridge: mcpToolBridge,
+    appData: appStores.data,
+    resolveAppIdForWorkflow: (workspaceId, workflowId) => {
+      const row = sqlite
+        .select({ appId: schema.workflows.appId })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, workflowId)))
+        .get();
+      return row?.appId ?? undefined;
+    },
+    // Real accumulated spend for a run + its descendant cohort runs — drives the
+    // `converge` budget breaker (cost from the audit trail, tokens from sessions).
+    resolveRunSpend: (rootRunId: string) => {
+      const runIds = new Set<string>([rootRunId]);
+      let frontier = [rootRunId];
+      // Walk the subflow run tree (bounded depth — a converge body nests shallowly).
+      for (let depth = 0; depth < 12 && frontier.length > 0; depth += 1) {
+        const children = sqlite
+          .select({ id: schema.workflowRuns.id })
+          .from(schema.workflowRuns)
+          .where(inArray(schema.workflowRuns.parentRunId, frontier))
+          .all()
+          .map((r) => r.id)
+          .filter((id) => !runIds.has(id));
+        for (const id of children) runIds.add(id);
+        frontier = children;
+      }
+      const ids = [...runIds];
+      let costCents = 0;
+      let tokens = 0;
+      try {
+        for (const row of sqlite.select({ c: schema.auditEntries.costCents }).from(schema.auditEntries).where(inArray(schema.auditEntries.runId, ids)).all()) {
+          costCents += Number(row.c ?? 0);
+        }
+        for (const row of sqlite.select({ i: schema.agentSessions.totalTokensIn, o: schema.agentSessions.totalTokensOut }).from(schema.agentSessions).where(inArray(schema.agentSessions.runId, ids)).all()) {
+          tokens += Number(row.i ?? 0) + Number(row.o ?? 0);
+        }
+      } catch (err) {
+        logger.warn('converge.spend.resolve_failed', { rootRunId, err: (err as Error).message });
+      }
+      return { costCents, tokens };
+    },
     workflowStore: workflowStoreService,
     workspaceStore: workspaceStoreService,
     // Per-workspace evaluation model overrides (§4.4); late-bound factory.
@@ -774,6 +827,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // connected orchestrator harness. This keeps brain features available on a
   // zero-config Codex/Claude workspace as well as HTTP model deployments.
   SharedIntelligence.setFormationCompleter(defaultCognitiveCompleter);
+  // §P2 — activate the already-built model reranker (was dormant): re-rank the
+  // top semantic hits with the cognitive completer before they enter a dispatch
+  // context, so the most decision-relevant atoms win the budget.
+  SharedIntelligence.setRerankCompleter(defaultCognitiveCompleter);
   harnessMemoryIngestion.setFormationPromoter(SharedIntelligence);
   logger.info('brain.formation_judge.enabled', {
     source: evaluatorRuntime ? 'configured_model' : 'workspace_orchestrator_harness',
@@ -885,7 +942,19 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // reflection engine derives is proposed as a draft Ability ('run' origin),
   // which still passes self-eval/review before activation. Fire-and-forget.
   memoryReflection.setSkillProposer((args) => {
-    void abilityCreation.draft({ workspaceId: args.workspaceId, from: 'run', intent: args.intent, name: args.title })
+    void abilityCreation.draft({
+      workspaceId: args.workspaceId,
+      // The proposer hands us the generalized rule as an intent sentence — the
+      // 'intent' on-ramp (NOT 'run', which draft rejects with VALIDATION_FAILED:
+      // run/fork have dedicated endpoints). Fixing this makes the §C6 memory→skill
+      // flywheel actually materialize a draft (it silently no-op'd before).
+      from: 'intent',
+      intent: args.intent,
+      name: args.title,
+      // Carry the proposing scope so a graduated ability is attributable to the
+      // role/agent (LIVING-APPS-10X M2 — AppLearningService.recentLearnings reads it).
+      originMetadata: args.scopeId ? { scopeId: args.scopeId } : undefined,
+    })
       .catch((err) => logger.warn('brain.skill_proposal_failed', { workspaceId: args.workspaceId, message: (err as Error).message }));
   });
   abilityService.attachCompileHook((abilityId, workspaceId) => {
@@ -909,7 +978,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   };
 
   void rollingBaselineStore; void brainDiscourse; void brainQueue; void abilityCompiler;
-  const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations });
+  const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations, adapters, logger });
 
   // Durable job queue (polling-based, survives restarts). Started after the
   // engine is constructed; stopped on shutdown.
@@ -945,7 +1014,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   });
   triggerRuntimeRef = triggerRuntime;
 
-  const scheduler = new SchedulerService({ db: sqlite, bus, engine, logger });
+  const scheduler = new SchedulerService({ db: sqlite, bus, engine, logger, issues });
   const eventChain = new EventChainService({ db: sqlite, bus, engine, logger });
   const runCompaction = new RunCompactionService({
     db: sqlite,
@@ -1087,11 +1156,21 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     brainDiscourse,
     awareness: workspaceAwareness,
     abilityService,
+    abilityEmbeddings,
+    abilityComposer: new AbilityComposer(),
   });
   const mcpHarness = McpHarnessSessionService.fromEnv(env as unknown as NodeJS.ProcessEnv, sqlite, logger);
 
   // Cross-surface peer identity — recognizes the same human across channels.
   const channelIdentity = new ChannelIdentityService({ db: sqlite, logger });
+  const appContacts = new AppContactService(sqlite);
+  // Multi-party threads (G1): customer + resident agent + escalation specialist +
+  // human operator in one thread, with warm handoff via active 'specialist' routing.
+  const conversationParticipants = new ConversationParticipantService(sqlite, logger);
+  // Phase M2 (G10) — the conversational learning loop: outcome → graded lesson
+  // (via brain formation, scoped to the owner agent) → graduation (a scoped
+  // reflection pass fires the existing SkillProposer → ability draft).
+  const appLearning = new AppLearningService({ db: sqlite, shared: SharedIntelligence, logger, reflection: memoryReflection });
 
   // Close the channel loop: inbound channel messages now run a real orchestrator
   // turn and the reply is delivered back to the origin chat.
@@ -1104,6 +1183,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     deliver: (args) => channelBridge.deliverToConnection(args),
     setTyping: (connectionId, chatId, on) => channelBridge.setTyping(connectionId, chatId, on),
     identity: channelIdentity,
+    contacts: appContacts,
+    participants: conversationParticipants,
     // Coalesce rapid-fire messages from the same chat into one turn.
     debounceMs: 900,
   });
@@ -1351,7 +1432,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations, harnessMemoryIngestion, mcpHarness, episodes: episodicMemoryStore }));
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
   app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter }));
+  const appStaffing = new AppStaffingService({ store: appStores.store, specialists: specialistAgents, loadouts: specialistLoadouts, logger });
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }));
   const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }, bus, logger);
@@ -1370,7 +1452,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/oauth', buildOAuthRoutes({ db: sqlite, auth, vault: credentialVault, oauth: oauthService, allowedOrigins }));
   app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
   app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, memoryCapture: chatMemoryCapture }));
-  app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus }));
+  const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
+  app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));
   app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge, supervisor: channelSupervisor, identity: channelIdentity }));
   app.route('/v1/orchestrator/models', buildOrchestratorModelRoutes({
@@ -1466,6 +1549,19 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       brainQueue.start(); // ability compile pipeline + brain promotions
       brainMaintenance.start(); // §0.2 — weekly lifecycle: stale/archive, compression, graduate/expire, reembed, reflection, disk reclamation
       harnessImportSync.start(); // P4: notify when imported agents accrue new memory
+
+      // Warm the bundled on-device embedding model in the BACKGROUND (after the
+      // server is already serving) so the first knowledge upload / brain write
+      // doesn't pay the cold start — model download (~110MB, once) + load (tens
+      // of seconds) — INSIDE the request, which previously stalled the whole API
+      // (uploads appeared to hang for minutes). Fire-and-forget; never blocks boot.
+      void embeddingProvider.embed('warmup').then(
+        () => logger.info('brain.embedding.warmed', { model: embeddingProvider.modelId }),
+        (err) => logger.warn('brain.embedding.warm_failed', { message: (err as Error).message }),
+      );
+      // Resume any knowledge document left mid-index by a previous restart, so it
+      // never stays stuck at `indexing` without embeddings (§perf background ingest).
+      try { knowledgeBaseService.resumeStalledIndexing(); } catch (err) { logger.warn('knowledge.resume_indexing_failed', { message: (err as Error).message }); }
 
       // Brain — fill deferred embeddings. The default local (ONNX) embedder is
       // async, so a memory write stores a null vector + needs_reembed=1; this

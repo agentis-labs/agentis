@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, Code2, LayoutTemplate, Search } from 'lucide-react';
+import { Check, Code2, LayoutTemplate, Search, Settings2 } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { ExtensionCombobox } from './ExtensionCombobox';
@@ -14,6 +14,8 @@ import { ListenerInspector } from './ListenerInspector';
 import { connectorLogoUrl, connectorAccent } from './connectorLogo';
 import { CustomIntegrationDialog } from '../integrations/CustomIntegrationDialog';
 import { TemplatedTextField } from './TemplatedTextField';
+import { FieldPicker } from './FieldPicker';
+import { CanvasBuildComposer } from './CanvasBuildComposer';
 import type { UpstreamNode } from './VariablePicker';
 import type { AdapterType } from '../agents/RuntimePicker';
 import {
@@ -157,6 +159,9 @@ export function ContextInspector({
   className?: string;
 }) {
   const [pane, setPane] = useState<'form' | 'json' | 'test'>('form');
+  // The raw-JSON editor is an advanced escape hatch, not a co-equal view
+  // (masterplan 5.3): hidden behind an "Advanced" toggle so the form is primary.
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [titleDraft, setTitleDraft] = useState(selection.title ?? '');
   useEffect(() => { setTitleDraft(selection.title ?? ''); }, [selection.nodeId, selection.title]);
   const [editData, setEditData] = useState<Record<string, unknown>>(selection.data ?? {});
@@ -278,13 +283,23 @@ export function ContextInspector({
           >
             <LayoutTemplate size={12} />
           </button>
+          {(showAdvanced || pane === 'json') && (
+            <button
+              type="button"
+              onClick={() => { setPane('json'); }}
+              title="Advanced — edit raw JSON config"
+              className={clsx('rounded p-1 transition-colors', pane === 'json' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
+            >
+              <Code2 size={12} />
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => { setPane('json'); }}
-            title="JSON view"
-            className={clsx('rounded p-1 transition-colors', pane === 'json' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
+            onClick={() => { setShowAdvanced((v) => !v); if (showAdvanced && pane === 'json') setPane('form'); }}
+            title="Advanced options"
+            className={clsx('rounded p-1 transition-colors', showAdvanced ? 'text-accent' : 'text-text-muted/70 hover:text-text-primary')}
           >
-            <Code2 size={12} />
+            <Settings2 size={12} />
           </button>
           {selection.kind === 'node' && workflowId && selection.nodeId && (
             <button
@@ -315,6 +330,16 @@ export function ContextInspector({
             activeRunId={activeRunId}
             onOpenRun={onOpenRun}
           />
+        )}
+        {pane === 'form' && selection.kind === 'node' && workflowId && selection.nodeId && (
+          <Field label="Edit in plain English" hint="Describe a change; the orchestrator patches this step on the canvas.">
+            <CanvasBuildComposer
+              workflowId={workflowId}
+              variant="node"
+              nodeId={selection.nodeId}
+              nodeLabel={selection.title ?? headingLabel}
+            />
+          </Field>
         )}
         {pane === 'form' && selection.kind === 'node' && onTitleChange && (
           <Field label="Node name" hint="Shown as the node's label on the canvas.">
@@ -767,6 +792,16 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
           onChange={(next) => update({ prompt: next })}
           upstream={upstream}
         />
+        <div className="mt-1.5">
+          <FieldPicker
+            upstream={upstream ?? []}
+            dialect="template"
+            onInsert={(expr) => {
+              const cur = asStr(data.prompt);
+              update({ prompt: cur.trim() ? `${cur} ${expr}` : expr });
+            }}
+          />
+        </div>
       </Field>
     </>
   );
@@ -803,7 +838,7 @@ function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data
   }
 
   return (
-    <Accordion title="HAL runtime requirements" defaultOpen>
+    <Accordion title="What this agent can do" defaultOpen>
       <p className="mb-2 text-[10px] leading-relaxed text-text-muted">
         Hard routing: only runtimes that advertise these native powers can take this task. For ordinary web
         automation (open a page, log in, scrape, screenshot) prefer a <strong>Browser node</strong> instead.
@@ -1193,6 +1228,16 @@ function TransformForm({ data, update, upstream }: { data: Record<string, unknow
           onChange={(next) => update({ expression: next })}
           upstream={upstream}
         />
+        <div className="mt-1.5">
+          <FieldPicker
+            upstream={upstream ?? []}
+            dialect="js"
+            onInsert={(expr) => {
+              const cur = asStr(data.expression);
+              update({ expression: cur.trim() ? `${cur} ${expr}` : expr });
+            }}
+          />
+        </div>
       </Field>
       <Field label="Output key (optional)" hint="Wraps the expression result under this key. Leave blank to use the result directly.">
         <input
@@ -1231,6 +1276,16 @@ function FilterForm({ data, update, upstream }: { data: Record<string, unknown>;
           onChange={(next) => update({ condition: next })}
           upstream={upstream}
         />
+        <div className="mt-1.5">
+          <FieldPicker
+            upstream={upstream ?? []}
+            dialect="js"
+            onInsert={(expr) => {
+              const cur = asStr(data.condition);
+              update({ condition: cur.trim() ? `${cur} ${expr}` : expr });
+            }}
+          />
+        </div>
       </Field>
       <Field label="Timeout (ms, optional)" hint="Leave blank for the engine's workload-aware deadline. Maximum 30000 ms.">
         <input
@@ -1582,6 +1637,16 @@ function HttpRequestForm({ data, update, upstream }: { data: Record<string, unkn
           onChange={(next) => update({ url: next })}
           upstream={upstream}
         />
+        <div className="mt-1.5">
+          <FieldPicker
+            upstream={upstream ?? []}
+            dialect="template"
+            onInsert={(expr) => {
+              const cur = asStr(data.url);
+              update({ url: cur.trim() ? `${cur}${expr}` : expr });
+            }}
+          />
+        </div>
       </Field>
       <Field label="Headers (JSON)" hint="Object of header strings. Values support templates.">
         <textarea
@@ -1606,6 +1671,16 @@ function HttpRequestForm({ data, update, upstream }: { data: Record<string, unkn
             onChange={(next) => update({ body: next })}
             upstream={upstream}
           />
+          <div className="mt-1.5">
+            <FieldPicker
+              upstream={upstream ?? []}
+              dialect="template"
+              onInsert={(expr) => {
+                const cur = asStr(data.body);
+                update({ body: cur.trim() ? `${cur}${expr}` : expr });
+              }}
+            />
+          </div>
         </Field>
       )}
       <Accordion title="Advanced Settings">
@@ -1981,7 +2056,7 @@ function AgentSwarmForm({ data, update }: { data: Record<string, unknown>; updat
 function DynamicSwarmForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   return (
     <>
-      <Field label="Goal" hint="Describe the outcome. The planner decomposes this into bounded worker tasks.">
+      <Field label="Goal" hint="Describe the outcome. The planner decomposes this into bounded specialist tasks.">
         <textarea className={textareaCls} rows={5} value={asStr(data.goal)} onChange={(event) => update({ goal: event.target.value })} placeholder="Research the market and produce a concise opportunity brief." />
       </Field>
       <div className="grid grid-cols-2 gap-2">
@@ -2152,6 +2227,16 @@ function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>
       {usesUrl && (
         <Field label="URL" hint="Type `{{` to insert a variable.">
           <TemplatedTextField placeholder="https://example.com" value={asStr(data.url)} onChange={(next) => update({ url: next })} upstream={upstream} />
+          <div className="mt-1.5">
+            <FieldPicker
+              upstream={upstream ?? []}
+              dialect="template"
+              onInsert={(expr) => {
+                const cur = asStr(data.url);
+                update({ url: cur.trim() ? `${cur}${expr}` : expr });
+              }}
+            />
+          </div>
         </Field>
       )}
       {usesHtml && (
@@ -2222,7 +2307,7 @@ function GenericForm({ data, update }: { data: Record<string, unknown>; update: 
   if (entries.length === 0) {
     return (
       <p className="text-[12px] text-text-muted">
-        This node has no form-configurable fields yet. Use the JSON view (toggle in the header) to edit raw config.
+        This node has no form-configurable fields yet. Open Advanced (the gear in the header) to edit raw config.
       </p>
     );
   }

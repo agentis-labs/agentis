@@ -36,6 +36,7 @@ export const REALTIME_EVENTS = {
   GOAL_UPDATED: 'goal.updated',
   ISSUE_CREATED: 'issue.created',
   ISSUE_UPDATED: 'issue.updated',
+  ISSUE_DELETED: 'issue.deleted',
   ROUTINE_CREATED: 'routine.created',
   ROUTINE_UPDATED: 'routine.updated',
   BUDGET_EVENT_CREATED: 'budget.event.created',
@@ -152,6 +153,18 @@ export const REALTIME_EVENTS = {
   SCRATCHPAD_WRITTEN: 'scratchpad.written',
   LEDGER_EVENT: 'ledger.event',
   COMMAND_INDEX_UPDATED: 'command.index.updated',
+
+  // Blackboard — durable, identity-tagged inter-agent shared state
+  // (AGENT-COOPERATION-10X). One event per entry so the operator Blackboard
+  // panel streams facts, channel messages, and claims live.
+  // Payload: { runId, entry: BlackboardEntry }.
+  BLACKBOARD_ENTRY: 'blackboard.entry',
+
+  // Convergence loop (`converge` node) — one event per iteration so the
+  // operator iteration timeline updates live. Payload:
+  // { runId, nodeId, iteration, verdict, continue, spend, stalled }.
+  CONVERGE_ITERATION: 'converge.iteration',
+  CONVERGE_SETTLED: 'converge.settled',
 
   // Skill registry
   SKILL_REGISTRY_INSTALLED: 'skill_registry.installed',

@@ -59,6 +59,8 @@ export interface DraftInput {
   /** Optional caller overrides. */
   name?: string;
   domainTag?: string;
+  /** Optional provenance merged into the ability's origin (e.g. graduation scope/app). */
+  originMetadata?: Record<string, unknown>;
 }
 
 const PASS_THRESHOLD = 0.7;
@@ -393,7 +395,7 @@ export class AbilityCreationService {
   // ── Helpers ───────────────────────────────────────────────
 
   #materialize(
-    input: { workspaceId: string; authorId?: string | null; from: AbilityOriginKind; intent?: string; material?: string },
+    input: { workspaceId: string; authorId?: string | null; from: AbilityOriginKind; intent?: string; material?: string; originMetadata?: Record<string, unknown> },
     bp: AbilityDraftBlueprint,
     originOverride?: AbilityDraftResult['ability']['origin'],
   ) {
@@ -415,6 +417,7 @@ export class AbilityCreationService {
         kind: input.from,
         seed: (input.intent ?? input.material ?? '').slice(0, 280) || undefined,
         createdAt: new Date().toISOString(),
+        ...(input.originMetadata ?? {}),
       },
     });
 

@@ -80,6 +80,10 @@ export interface HomeSpace {
   color?: string | null;
   colorHex?: string | null;
   icon?: string | null;
+  /** Set when this is a Subdomain nested under the referenced top-level Domain. */
+  parentDomainId?: string | null;
+  /** The specialist/manager responsible for this domain. */
+  managerId?: string | null;
 }
 
 export interface EcosystemData {

@@ -1,4 +1,5 @@
 export * from './adapter.js';
+export * from './artifact.js';
 export * from './workflow.js';
 export * from './app.js';
 export * from './appEnvironment.js';

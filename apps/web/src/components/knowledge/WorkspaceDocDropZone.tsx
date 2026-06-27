@@ -1,12 +1,59 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Check, UploadCloud, X } from 'lucide-react';
+import { Check, FileText, Scissors, Sparkles, Network, BookOpenCheck, Loader2, UploadCloud, X } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { Button } from '../shared/Button';
 import type { KnowledgeBaseRow } from './types';
 
 const NEW_BASE = '__new__';
+
+/**
+ * The real ingestion pipeline a dropped file flows through, narrated so a long
+ * embed (the on-device multilingual model is the slow step, especially on its
+ * first cold load) reads as honest progress rather than a frozen skeleton.
+ */
+const INGEST_STEPS: Array<{ icon: LucideIcon; label: string; detail: string }> = [
+  { icon: FileText, label: 'Reading the document', detail: 'Extracting clean text from the file.' },
+  { icon: Scissors, label: 'Splitting into passages', detail: 'Chunking into semantically coherent pieces.' },
+  { icon: Sparkles, label: 'Generating embeddings', detail: 'Encoding each passage with the on-device multilingual model — the first upload also warms the model, which can take a moment.' },
+  { icon: Network, label: 'Grounding & linking', detail: 'Summarizing passages and wiring them into the Brain graph.' },
+  { icon: BookOpenCheck, label: 'Indexing', detail: 'Making the knowledge retrievable for this Brain.' },
+];
+
+function IngestProgress() {
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    // Advance through the pipeline, then dwell on the embedding step (the slow
+    // one) so the narration tracks where the time actually goes.
+    const id = setInterval(() => setStep((s) => (s >= INGEST_STEPS.length - 1 ? 2 : s + 1)), 2600);
+    return () => clearInterval(id);
+  }, []);
+  const Active = INGEST_STEPS[step]!.icon;
+  return (
+    <div className="mt-4 rounded-card border border-accent/30 bg-accent-soft/40 px-4 py-3 text-left">
+      <div className="flex items-center gap-2">
+        <Loader2 size={14} className="animate-spin text-accent" />
+        <span className="text-[13px] font-semibold text-text-primary">Indexing into the Brain</span>
+        <span className="ml-auto text-[11px] text-text-muted">step {step + 1} of {INGEST_STEPS.length}</span>
+      </div>
+      <div className="mt-2 flex items-start gap-2">
+        <Active size={15} className="mt-0.5 shrink-0 text-accent" />
+        <div>
+          <p className="text-[13px] font-medium text-text-primary">{INGEST_STEPS[step]!.label}</p>
+          <p className="mt-0.5 text-[12px] leading-5 text-text-secondary">{INGEST_STEPS[step]!.detail}</p>
+        </div>
+      </div>
+      <div className="mt-3 flex gap-1">
+        {INGEST_STEPS.map((_, i) => (
+          <span key={i} className={clsx('h-1 flex-1 rounded-full transition-colors', i <= step ? 'bg-accent' : 'bg-line')} />
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] text-text-muted">You can keep working — this finishes in the background.</p>
+    </div>
+  );
+}
 
 export function WorkspaceDocDropZone({
   bases,
@@ -136,6 +183,7 @@ export function WorkspaceDocDropZone({
           />
           Add compact AI descriptions for uploaded images
         </label>
+        {uploading && !compact && <IngestProgress />}
       </div>
 
       <div className={clsx('flex flex-wrap items-center gap-2', compact ? 'ml-auto justify-end' : 'mt-4 justify-center')}>

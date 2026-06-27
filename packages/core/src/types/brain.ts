@@ -29,7 +29,8 @@ export type BrainNodeType =
   | 'artifact'
   | 'decision'
   | 'warning'
-  | 'gap';
+  | 'gap'
+  | 'scope_owner';
 
 export type BrainLayer = 'core' | 'knowledge' | 'memory' | 'judgment';
 
@@ -74,7 +75,8 @@ export type BrainEdgeKind =
   | 'contradicts'
   | 'refines'
   | 'co_observed'
-  | 'measures';
+  | 'measures'
+  | 'owned_by';
 
 export interface BrainEdge {
   id: string;
@@ -129,7 +131,10 @@ export interface BrainResponse {
 
 export type KnowledgeAtomKind = 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern';
 
-export type KnowledgeLinkRelation = 'supports' | 'contradicts' | 'refines' | 'derived_from' | 'co_observed';
+export type KnowledgeLinkRelation = 'supports' | 'contradicts' | 'refines' | 'derived_from' | 'co_observed' | 'owned_by';
+
+/** Which kind of scope owns a scoped atom (for Workspace Brain provenance). */
+export type BrainScopeKind = 'app' | 'agent' | 'workflow';
 
 export type BrainGraphScope = 'workspace' | 'scoped';
 
@@ -137,9 +142,12 @@ export interface BrainGraphNode {
   id: string;
   atomId: string;
   /** `grounding_*` kinds are the Workspace Brain's organizational overlay (sources, entities, claims). */
-  atomKind: KnowledgeAtomKind | 'core' | 'warning' | 'gap' | 'grounding_source' | 'grounding_entity' | 'grounding_claim';
+  atomKind: KnowledgeAtomKind | 'core' | 'warning' | 'gap' | 'grounding_source' | 'grounding_entity' | 'grounding_claim' | 'scope_owner';
   label: string;
   summary?: string;
+  /** Provenance for a scoped atom: which App/Agent/Workflow owns it + its name. */
+  scopeKind?: BrainScopeKind | null;
+  scopeLabel?: string | null;
   confidence: number;
   trust?: number | null;
   reinforceCount: number;
@@ -169,9 +177,9 @@ export interface BrainGraphLink {
   source: string;
   target: string;
   sourceAtomId: string;
-  sourceKind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim';
+  sourceKind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim' | 'scope_owner';
   targetAtomId: string;
-  targetKind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim';
+  targetKind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim' | 'scope_owner';
   relation: KnowledgeLinkRelation;
   confidence: number;
   reinforceCount: number;

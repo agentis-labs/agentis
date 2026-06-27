@@ -1,4 +1,7 @@
-export type ArtifactType = 'html' | 'image' | 'document' | 'code' | 'data';
+import type { ArtifactType } from '@agentis/core';
+
+export type { ArtifactType };
+export type ArtifactOrigin = 'agent' | 'app' | 'workflow' | 'channel' | 'manual';
 
 export interface Artifact {
   id: string;
@@ -7,8 +10,10 @@ export interface Artifact {
   runId: string | null;
   workflowId: string | null;
   agentId: string | null;
+  appId: string | null;
   conversationId: string | null;
   nodeId: string | null;
+  origin: ArtifactOrigin;
   type: ArtifactType;
   title: string;
   content: string;

@@ -150,6 +150,61 @@ export interface ChatPlan {
   updatedAt: string;
 }
 
+/**
+ * Linear, surface-agnostic progress projection. One `WorkStep[]` is produced
+ * from a ChatPlan's build-stage nodes (first-class) or derived from runtime
+ * signals (fallback), and rendered identically in chat, the Live Workspace, and
+ * channels via the shared StepTrack component.
+ */
+export type WorkStepStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export interface WorkStep {
+  id: string;
+  label: string;
+  status: WorkStepStatus;
+  detail?: string;
+}
+
+export interface WorkStepTrack {
+  steps: WorkStep[];
+  /** 1-based index of the active (or last-completed) step; 0 when none started. */
+  current: number;
+  total: number;
+}
+
+function planNodeStatusToWorkStep(status: PlanNodeStatus): WorkStepStatus {
+  if (status === 'running') return 'running';
+  if (status === 'completed') return 'done';
+  if (status === 'failed') return 'failed';
+  return 'pending';
+}
+
+/** Roll an ordered step list into `{ current, total }` for the collapsed view. */
+export function summarizeWorkSteps(steps: WorkStep[]): WorkStepTrack {
+  const total = steps.length;
+  const runningIndex = steps.findIndex((step) => step.status === 'running');
+  const settled = steps.filter((step) => step.status === 'done' || step.status === 'failed').length;
+  const current = runningIndex >= 0 ? runningIndex + 1 : settled;
+  return { steps, current: Math.min(current, total), total };
+}
+
+/**
+ * Canonical projection of a ChatPlan's build-stage nodes into the linear
+ * `WorkStepTrack`. Shared by the API (channel progress text) and the web
+ * StepTrack so the two never drift.
+ */
+export function projectPlanSteps(plan: Pick<ChatPlan, 'nodes'>): WorkStepTrack {
+  const steps: WorkStep[] = plan.nodes
+    .filter((node) => node.stage === 'build')
+    .map((node) => ({
+      id: node.id,
+      label: node.title,
+      status: planNodeStatusToWorkStep(node.status),
+      ...(node.summary ? { detail: node.summary } : {}),
+    }));
+  return summarizeWorkSteps(steps);
+}
+
 export type PlanLifecycleEvent =
   | 'goal'
   | 'research'

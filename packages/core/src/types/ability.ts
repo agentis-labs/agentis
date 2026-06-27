@@ -75,6 +75,10 @@ export interface AbilityOrigin {
   sourceAbilityId?: string;
   /** Run id when kind === 'run'. */
   runId?: string;
+  /** Provenance for a graduated ability (LIVING-APPS-10X M2): scopeId / appId / outcome. */
+  scopeId?: string | null;
+  appId?: string | null;
+  metadata?: Record<string, unknown>;
   createdAt: string;
 }
 

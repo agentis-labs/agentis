@@ -202,6 +202,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         const parentDomain = isSubdomain && space?.parentDomainId ? spacesById.get(space.parentDomainId) : null;
         return {
           ...presentAgent(agent, deps.adapters),
+          // Provenance for imported agents (harness logo + sync surfaces) — the
+          // non-secret origin only; the config itself is never returned.
+          importOrigin: extractImportOrigin(agent.config),
           managerId: agent.reportsTo ?? null,
           domainColor: agent.colorHex ?? null,
           spaceName: space?.name ?? agent.spaceTag ?? null,
@@ -644,6 +647,15 @@ function groupAgentAbilities(
 
 const LIVE_AGENT_STATUSES = new Set(['online', 'busy', 'active', 'running']);
 const HEARTBEAT_STALE_MS = CONSTANTS.AGENT_HEARTBEAT_INTERVAL_MS * 4;
+
+/** Non-secret import provenance from `agents.config.importOrigin` (set by harness import). */
+function extractImportOrigin(config: unknown): { adapterType: string; externalId: string } | null {
+  if (!config || typeof config !== 'object') return null;
+  const origin = (config as Record<string, unknown>).importOrigin;
+  if (!origin || typeof origin !== 'object') return null;
+  const { adapterType, externalId } = origin as Record<string, unknown>;
+  return typeof adapterType === 'string' && typeof externalId === 'string' ? { adapterType, externalId } : null;
+}
 
 function presentAgent<T extends { id: string; status: string; lastHeartbeatAt?: string | null; isPaused?: boolean | null }>(
   agent: T,

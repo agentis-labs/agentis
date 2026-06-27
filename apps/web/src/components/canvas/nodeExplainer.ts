@@ -77,6 +77,8 @@ export function explainNode(kind: string, config: Record<string, unknown>): stri
       return 'Pauses for a human to approve before continuing.';
     case 'loop':
       return 'Repeats the downstream steps once for each item.';
+    case 'converge':
+      return 'Re-runs a cohort of agents until a goal is met, stalls, or hits its budget.';
     case 'wait': {
       const d = str(config.duration) || str(config.delay);
       return d ? `Pauses for ${d} before continuing.` : 'Pauses for a set duration before continuing.';

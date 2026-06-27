@@ -643,30 +643,63 @@ describe('CodexAdapter', () => {
     expect((spawnMock.mock.calls[2]![1] as string[]).slice(0, 2)).toEqual(['exec', '--json']);
   });
 
-  it('on a stall, preserves the partial answer and pauses (max_turns) instead of discarding it as FAILED', async () => {
+  it('on a stall (total silence past the ceiling), preserves the partial answer and pauses (max_turns), not FAILED', async () => {
+    // A quiet stretch no longer kills — only TOTAL silence past the ceiling does.
+    // Shrink that ceiling via env so the genuinely-stuck case fires fast in-test.
+    const prevCeiling = process.env.AGENTIS_CODEX_CHAT_HARD_CEILING_MS;
+    process.env.AGENTIS_CODEX_CHAT_HARD_CEILING_MS = '1000';
+    try {
+      const child = fakeChildProcess();
+      spawnMock.mockReturnValue(child);
+      const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test', model: 'gpt-5.5', env: { OPENAI_API_KEY: 'test-key' } });
+      const deltas: ChatDelta[] = [];
+      const consume = (async () => {
+        for await (const delta of adapter.chat([{ role: 'user', content: 'explore the repo' }], [], { latencyClass: 'interactive', timeoutMs: 50 })) deltas.push(delta);
+      })();
+
+      // The harness streams a partial answer, then goes SILENT (no completion).
+      child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"Found 3 services so far."}}\n');
+      await new Promise((r) => setTimeout(r, 1300)); // > silence ceiling → controller.abort()
+      child.emit('error', new Error('aborted')); // real spawn emits this on abort
+      await consume;
+
+      const text = deltas.filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text').map((d) => d.delta).join('');
+      expect(text).toContain('Found 3 services so far.');
+      expect(text.toLowerCase()).toContain('paused');
+      // Not a hard error: the work is preserved and the turn ends as a guardrail stop.
+      expect(deltas.some((d) => d.type === 'tool_result' && d.error)).toBe(false);
+      expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'max_turns' });
+    } finally {
+      if (prevCeiling === undefined) delete process.env.AGENTIS_CODEX_CHAT_HARD_CEILING_MS;
+      else process.env.AGENTIS_CODEX_CHAT_HARD_CEILING_MS = prevCeiling;
+    }
+  });
+
+  it('keeps a quiet-but-alive turn going with a heartbeat instead of killing it', async () => {
+    // No env ceiling override → the default 30-min silence ceiling is far away.
+    // A turn that streams a partial then stays quiet must NOT be reaped; it should
+    // emit a "still working" heartbeat and remain open (no terminal delta yet).
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test', model: 'gpt-5.5', env: { OPENAI_API_KEY: 'test-key' } });
     const deltas: ChatDelta[] = [];
     const consume = (async () => {
-      // Tiny idle budget so the watchdog fires quickly under real timers.
-      for await (const delta of adapter.chat([{ role: 'user', content: 'explore the repo' }], [], { latencyClass: 'interactive', timeoutMs: 50 })) deltas.push(delta);
+      for await (const delta of adapter.chat([{ role: 'user', content: 'do a big task' }], [], { latencyClass: 'interactive', timeoutMs: 50 })) deltas.push(delta);
     })();
 
-    // The harness streams a partial answer, then goes silent (no completion).
-    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"Found 3 services so far."}}\n');
-    // The idle budget is floored at 1000ms by clampChatTimeout, so wait past it.
-    await new Promise((r) => setTimeout(r, 1300)); // idle watchdog fires → controller.abort()
-    child.emit('error', new Error('aborted')); // real spawn emits this on abort
-    await consume;
+    child.stdout.write('{"type":"item.reasoning","text":"thinking hard"}\n');
+    await new Promise((r) => setTimeout(r, 5200)); // past the 5s heartbeat cadence
 
-    const text = deltas.filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text').map((d) => d.delta).join('');
-    expect(text).toContain('Found 3 services so far.');
-    expect(text.toLowerCase()).toContain('paused');
-    // Not a hard error: the work is preserved and the turn ends as a guardrail stop.
-    expect(deltas.some((d) => d.type === 'tool_result' && d.error)).toBe(false);
-    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'max_turns' });
-  });
+    // Still alive: a heartbeat activity was emitted, and the turn has NOT terminated.
+    expect(deltas.some((d) => d.type === 'activity' && /elapsed/i.test(d.label))).toBe(true);
+    expect(deltas.some((d) => d.type === 'done')).toBe(false);
+
+    // Clean completion afterwards still works.
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n');
+    child.emit('exit', 0);
+    await consume;
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  }, 10_000);
 
   it('opts into the native browser: loads the user config, keeps its MCP backend, declares the affordance', async () => {
     const child = fakeChildProcess();

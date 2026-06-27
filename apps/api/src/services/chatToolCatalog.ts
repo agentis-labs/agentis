@@ -136,6 +136,35 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.task.set_steps',
+    description:
+      'Publish the ordered checklist the operator watches live (the StepTrack shown in chat, the Live Workspace, and channels). Call this as soon as you begin multi-step work, before doing the steps. Creates the task spine automatically if needed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        steps: { type: 'array', items: { type: 'string' }, description: 'Ordered, short imperative step labels.' },
+        taskId: { type: 'string', description: 'Existing task spine id; omit to use this conversation.' },
+        title: { type: 'string', description: 'Short operator-facing task title.' },
+        objective: { type: 'string', description: 'Task objective if the spine must be created.' },
+      },
+      required: ['steps'],
+    },
+  },
+  {
+    name: 'agentis.task.advance_step',
+    description:
+      'Advance the live checklist. Call it each time you finish a step (defaults to marking the active step done and starting the next). Pass status:"failed" when a step fails.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Existing task spine id; omit to use this conversation.' },
+        index: { type: 'number', description: '0-based step to update; omit to advance the active step.' },
+        label: { type: 'string', description: 'Step label to update (alternative to index).' },
+        status: { type: 'string', enum: ['running', 'done', 'failed'], description: 'Defaults to "done".' },
+      },
+    },
+  },
+  {
     name: 'agentis.task.inspect',
     description: 'Inspect the durable task spine row, including status, run/session bindings, decisions, deviations, and verification.',
     parameters: {
@@ -741,7 +770,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
       'Validate, enrich, save, and stream an agent-authored workflow graph or patch. ' +
       'For a new workflow, inspect the request and relevant Agentis state, design a complete WorkflowGraph, and pass it as graphDraft. ' +
       'For an edit, inspect the current workflow and pass workflowId plus patchDraft. A configured fast synthesis runtime may accept description-only calls, but runtime-native agents should author the draft themselves. ' +
-      'The tool returns workflowId/runId and emits live canvas build events.',
+      'Every build yields an Agentic App (Agentis ships Apps, not bare workflows): the tool returns workflowId AND appId plus runId, and emits live canvas build events. Use the returned appId with the data_*/ui_* tools to add the App a UI and data.',
     examples: [
       {
         description: 'Build the minimal Hello World workflow from an agent-authored graph draft.',
@@ -809,6 +838,36 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.workflow.patterns',
+    description:
+      'Retrieve robust workflow design patterns — proven control-flow shapes for the gates, fallbacks, loops, and rollback the happy path omits: ' +
+      'qualify-or-reject-loop, fetch-with-fallback, approval-before-irreversible, validate-before-transition, bounded-parallel-batch, stateful-cursor-dedup. ' +
+      'Call without id to list them with when-to-use; call with id to get the spliceable node+edge fragment to adapt into graphDraft. ' +
+      'Use before building anything that qualifies candidates, takes an irreversible action, processes a batch, or runs on a schedule.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Pattern id to expand into a full fragment. Omit to list all patterns.' },
+      },
+    },
+  },
+  {
+    name: 'agentis.workflow.learn',
+    description:
+      'Record a durable workflow lesson into the workspace playbook after diagnosing and fixing a novel run failure ' +
+      '(a flaky source, a missing gate, an encoding gotcha, a rollback you had to add). Future builds recall these and design around them. ' +
+      'Pass failureMode (what went wrong) and fix (what to do next time), plus an optional patternId.',
+    parameters: {
+      type: 'object',
+      properties: {
+        failureMode: { type: 'string', description: 'The situation or failure that occurred.' },
+        fix: { type: 'string', description: 'What to do next time to avoid or handle it.' },
+        patternId: { type: 'string', description: 'Optional robust pattern id that addresses it.' },
+      },
+      required: ['failureMode', 'fix'],
+    },
+  },
+  {
     name: 'agentis.ability.create',
     description:
       'Create a reusable Agentis ability from a natural-language intent and queue it for compilation. Use when the operator asks the agent to learn, package, or create a reusable specialist capability.',
@@ -871,15 +930,34 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.app.create',
     description:
-      'Create a new Agentic App — a full-stack product (UI + logic + memory + data) the agent operates for a human. ' +
-      'Returns the appId to thread through the data and ui tools below.',
+      'Create — or RESOLVE — an Agentic App, a full-stack product (UI + logic + memory + data) the agent operates for a human. ' +
+      'Idempotent: if an App with this name already exists (or adoptWorkflowId is already owned by an App), it reuses that App instead of creating a duplicate — so to refine an existing App, edit it, do not make a renamed twin. ' +
+      'Note build_workflow already creates the owning App, so a fresh build needs no app.create. Returns the appId (and reused:true when an existing App was resolved) to thread through the data and ui tools below.',
     parameters: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Human-facing app name.' },
         description: { type: 'string', description: 'One-line app description.' },
+        adoptWorkflowId: { type: 'string', description: 'Existing workflow id to adopt as the App\'s logic. If it already has an owning App, that App is reused.' },
       },
       required: ['name'],
+    },
+  },
+  {
+    name: 'agentis.app.scaffold',
+    description:
+      'Give an App its DATA + INTERFACE in one call — the fast path to a real product. Defines the datastore collections (the data format) AND authors a real, data-bound operator surface (AgentConsole + ActivityStream + a board/table/form bound to those collections, create actions wired). ' +
+      'Use this whenever the operator asks for an app with an interface — a CRM, dashboard, tracker, pipeline, board, portal, or console. An App with logic but no UI or data is incomplete. ' +
+      'Pass collections to define the data model and prompt to describe the interface. More reliable than hand-authoring a ViewNode tree with ui_render.',
+    parameters: {
+      type: 'object',
+      properties: {
+        appId: { type: 'string', description: 'Target App id. Omit to use the App currently open.' },
+        prompt: { type: 'string', description: 'What the interface should be, in plain language (e.g. "Lead CRM: pipeline board grouped by stage, an add-lead form, a total-pipeline-value metric").' },
+        surface: { type: 'string', description: 'Surface name to author. Defaults to "home".' },
+        collections: { type: 'array', description: 'Data format to define first: [{ name, schema: { fields: [{ key, type, required?, indexed? }] } }]. Omit to bind to the App\'s existing collections.' },
+      },
+      required: ['prompt'],
     },
   },
   {

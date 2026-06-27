@@ -37,6 +37,7 @@ const AppsPage = lazy(() => import('./pages/AppsPage').then((m) => ({ default: m
 const AppEditorPage = lazy(() => import('./pages/AppEditorPage').then((m) => ({ default: m.AppEditorPage })));
 const WorkflowCanvasPage = lazy(() => import('./pages/WorkflowCanvasPage').then((m) => ({ default: m.WorkflowCanvasPage })));
 const PublicAppSurfacePage = lazy(() => import('./pages/PublicAppSurfacePage').then((m) => ({ default: m.PublicAppSurfacePage })));
+const GenUIShowcasePage = lazy(() => import('./pages/GenUIShowcasePage').then((m) => ({ default: m.GenUIShowcasePage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })));
 const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })));
 
@@ -180,6 +181,16 @@ export function App() {
     );
   }
 
+  // DEV-only GenUI gallery — renders the real ViewRenderer with an in-memory
+  // client (no API/auth) so the surface vocabulary can be previewed in isolation.
+  if (import.meta.env.DEV && location.pathname.startsWith('/genui-showcase')) {
+    return (
+      <Suspense fallback={<RouteFallback />}>
+        <GenUIShowcasePage />
+      </Suspense>
+    );
+  }
+
   if (initializing) {
     return (
       <div className="flex h-screen items-center justify-center bg-canvas text-[13px] text-text-muted">
@@ -229,7 +240,7 @@ export function App() {
               <Route path="/agents/:id" element={<AgentDetailPage />} />
 
               <Route path="/apps" element={<AppsPage />} />
-              <Route path="/apps/workflows/:id" element={<WorkflowCanvasPage />} />
+              <Route path="/apps/workflows/:id" element={<WorkflowCanvasRoute />} />
               <Route path="/apps/:id" element={<AppEditorPage />} />
               <Route path="/apps/:id/build" element={<Navigate to="../" replace />} />
               <Route path="/workflows" element={<Navigate to="/apps" replace />} />
@@ -238,6 +249,8 @@ export function App() {
               <Route path="/brain/*" element={<BrainPage />} />
               <Route path="/knowledge" element={<BrainPage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
+              <Route path="/assets" element={<ArtifactsPage />} />
+              {/* Legacy alias — chat/share links still point at /artifacts. */}
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/abilities" element={<Navigate to="/agents" replace />} />
               <Route path="/abilities/:id" element={<AbilityDetailPage />} />
@@ -297,6 +310,40 @@ function WorkflowLegacyRedirect() {
   return <Navigate to={`/apps/workflows/${id ?? ''}${location.search}`} replace />;
 }
 
+/**
+ * A workflow is the logic layer of an Agentic App, never a standalone destination.
+ * Resolve the workflow's owning App and forward to it; only a legacy ownerless
+ * workflow falls back to the raw canvas. This makes every `/apps/workflows/:id`
+ * link (chat "Logic", run modal, packages, knowledge) land on the App.
+ */
+function WorkflowCanvasRoute() {
+  const { id } = useParams<{ id: string }>();
+  const [resolved, setResolved] = useState<{ loading: boolean; appId: string | null }>({ loading: true, appId: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!id) {
+      setResolved({ loading: false, appId: null });
+      return;
+    }
+    setResolved({ loading: true, appId: null });
+    api<{ workflow?: { appId?: string | null } }>(`/v1/workflows/${id}`)
+      .then((res) => {
+        if (!cancelled) setResolved({ loading: false, appId: res.workflow?.appId ?? null });
+      })
+      .catch(() => {
+        if (!cancelled) setResolved({ loading: false, appId: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  if (resolved.loading) return <RouteFallback />;
+  if (resolved.appId) return <Navigate to={`/apps/${resolved.appId}`} replace />;
+  return <WorkflowCanvasPage />;
+}
+
 function Shell({
   children,
   workspaceName,
@@ -318,7 +365,13 @@ function Shell({
 
   useEffect(() => {
     function onOpenCanvas(event: Event) {
-      const detail = (event as CustomEvent<{ workflowId?: string }>).detail;
+      const detail = (event as CustomEvent<{ workflowId?: string; appId?: string | null }>).detail;
+      // The App is the destination; the bare workflow canvas is only a fallback
+      // for legacy ownerless workflows.
+      if (detail?.appId) {
+        nav(`/apps/${detail.appId}`);
+        return;
+      }
       if (!detail?.workflowId) return;
       nav(`/apps/workflows/${detail.workflowId}`);
     }

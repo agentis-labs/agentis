@@ -9,6 +9,7 @@ import {
 import { api, apiErrorMessage } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { useToast } from '../shared/Toast';
+import { useConfirm } from '../shared/ConfirmDialog';
 import { ScopedBrainMap } from './ScopedBrainMap';
 import { WorkspaceDocDropZone } from '../knowledge/WorkspaceDocDropZone';
 import { NoteMarkdownPreview, findBacklinks } from './NoteMarkdownPreview';
@@ -156,6 +157,7 @@ function buildFolderTree(
 
 export function PersonalBrainPanel() {
   const toast = useToast();
+  const confirm = useConfirm();
   const [notes, setNotes] = useState<PersonalNote[]>([]);
   const [agents, setAgents] = useState<AgentRow[]>([]);
   const [grants, setGrants] = useState<Grant[]>([]);
@@ -275,6 +277,13 @@ export function PersonalBrainPanel() {
   }, [load]);
 
   async function deleteFile(doc: KnowledgeDocumentRow) {
+    const ok = await confirm({
+      title: `Delete "${doc.name}"?`,
+      body: 'This file will be permanently removed from your Personal Brain.',
+      tone: 'danger',
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
     try {
       await api(`/v1/knowledge-bases/${doc.knowledgeBaseId}/documents/${doc.id}`, { method: 'DELETE' });
       toast.success('File removed', doc.name);
@@ -655,6 +664,14 @@ export function PersonalBrainPanel() {
   }
 
   async function remove(id: string) {
+    const note = notes.find((n) => n.id === id);
+    const ok = await confirm({
+      title: `Delete "${note?.title?.trim() || 'Untitled note'}"?`,
+      body: 'This note will be permanently deleted.',
+      tone: 'danger',
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
     try {
       await api(`/v1/personal-brain/notes/${id}`, { method: 'DELETE' });
       toast.success('Note deleted');

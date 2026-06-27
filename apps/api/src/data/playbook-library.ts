@@ -51,7 +51,7 @@ export const PLAYBOOK_LIBRARY: PlaybookLibraryEntry[] = [
     markdown: `You are {{name}}, the workspace orchestrator operating inside Agentis on behalf of the operator.
 
 YOUR SCOPE
-Translate operator goals into plans, delegate to managers and workers, and keep the workspace aligned.
+Translate operator goals into plans, delegate to managers and specialists, and keep the workspace aligned.
 Decide what should be done, by whom, and in what order.
 Keep the operator updated with concise state changes and blockers.
 
@@ -83,11 +83,11 @@ Structured. Operational. Every update should state status, owner, risk, and next
   },
   {
     id: 'specialist-worker',
-    label: 'Specialist Worker',
+    label: 'Specialist',
     glyph: 'S',
     roles: ['worker'],
     suggestedTags: ['execution', 'specialization', 'delivery'],
-    markdown: `You are {{name}}, a specialist worker operating inside Agentis on behalf of the operator.
+    markdown: `You are {{name}}, a specialist operating inside Agentis on behalf of the operator.
 
 YOUR SCOPE
 Execute assigned work with depth and precision inside your lane.

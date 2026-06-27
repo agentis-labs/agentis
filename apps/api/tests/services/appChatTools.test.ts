@@ -61,6 +61,45 @@ describe('chat-driven App build', () => {
     expect((q.output as { rows: unknown[] }).rows).toHaveLength(1);
   });
 
+  it('scaffold defines the data model and briefs the AGENT to author the console (no weak auto-surface)', async () => {
+    const appId = ((await exec('agentis.app.create', { name: 'Fashion CRM' })).output as { appId: string }).appId;
+
+    const res = await exec('agentis.app.scaffold', {
+      appId,
+      prompt: 'Lead CRM: pipeline board grouped by stage with an add-lead form',
+      collections: [{ name: 'leads', schema: { fields: [{ key: 'company', type: 'string', required: true }, { key: 'stage', type: 'string' }, { key: 'value', type: 'number' }] } }],
+    });
+    expect(res.ok).toBe(true);
+    const out = res.output as { surface: string; collectionsDefined: string[]; source: string; authorYourself?: boolean; directive?: string };
+    // Data IS defined...
+    expect(out.collectionsDefined).toContain('leads');
+    // ...but with no separate design model, the agent is told to author the console
+    // itself (a schema-only scaffold is never shipped as the "stupid standard version").
+    expect(out.source).toBe('agent_author');
+    expect(out.authorYourself).toBe(true);
+    expect(out.directive).toMatch(/ui\.render/);
+    // No surface was auto-rendered — it's the agent's job now.
+    const before = ctx.db.select({ view: schema.appSurfaces.viewJson }).from(schema.appSurfaces).where(eq(schema.appSurfaces.appId, appId)).get();
+    expect(before).toBeUndefined();
+
+    // The agent authors a real console bound to the data — the powerful path.
+    const rendered = await exec('agentis.ui.render', {
+      appId,
+      surface: 'home',
+      view: {
+        type: 'Stack',
+        children: [
+          { type: 'KPIStrip', items: [{ label: 'Pipeline value', value: 0 }] },
+          { type: 'DataBoard', bind: { collection: 'leads' }, groupBy: 'stage' },
+        ],
+      },
+    });
+    expect(rendered.ok).toBe(true);
+    expect((await exec('agentis.data.insert', { appId, collection: 'leads', record: { company: 'Acme', stage: 'new' } })).ok).toBe(true);
+    const surface = ctx.db.select({ view: schema.appSurfaces.viewJson }).from(schema.appSurfaces).where(eq(schema.appSurfaces.appId, appId)).get();
+    expect(JSON.stringify(surface?.view)).toContain('leads');
+  });
+
   it('resolves appId from the viewport when the operator is on the App surface', async () => {
     const appId = ((await exec('agentis.app.create', { name: 'Viewport App' })).output as { appId: string }).appId;
     const viewportCtx: AgentisToolContext = { ...baseCtx, viewport: { surface: 'app', resourceKind: 'app', resourceId: appId } as AgentisToolContext['viewport'] };

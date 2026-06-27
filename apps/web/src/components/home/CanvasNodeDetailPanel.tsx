@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronRight, ExternalLink, MessageCircle, Wrench, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronRight, ExternalLink, MessageCircle, Settings, Wrench, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
@@ -173,6 +173,18 @@ export function CanvasNodeDetailPanel({
             >
               <ExternalLink size={14} />
               Open
+            </button>
+          )}
+          {/* App nodes: jump straight to the engine/settings (Domain · Owner)
+              without drilling through the editor first. */}
+          {node.workflow?.app && (
+            <button
+              type="button"
+              onClick={() => onNavigate(`/apps/${node.workflow!.app!.id}?engine=1`)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+            >
+              <Settings size={14} />
+              Settings
             </button>
           )}
           {node.ghost && (
@@ -543,21 +555,44 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
         </div>
       )}
 
-      {/* Recent-run history strip */}
-      <div className="flex items-center gap-1.5 border-t border-line/60 px-3 py-2">
-        <span className="mr-0.5 text-[10px] uppercase tracking-wide text-text-muted">History</span>
-        {runs.map((r) => {
-          const meta = runStatusMeta(r.status);
-          return (
-            <button
-              key={r.id}
-              type="button"
-              onClick={() => setSelectedRunId(r.id)}
-              title={`${meta.label} · ${relTime(r.finishedAt ?? r.startedAt)}`}
-              className={clsx('h-3.5 w-3.5 shrink-0 rounded-full border transition-transform hover:scale-110', meta.color, r.id === selectedRunId ? 'border-text-primary' : 'border-transparent', meta.live && 'animate-pulse')}
-            />
-          );
-        })}
+      {/* Recent-run history — each run is a readable row (status · when · how
+          long), selectable to load its steps above. Far more legible than a
+          row of anonymous dots. */}
+      <div className="border-t border-line/60">
+        <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-text-muted">
+          History <span className="text-text-muted/70">· {runs.length}</span>
+        </div>
+        <div className="max-h-40 overflow-y-auto pb-1.5">
+          {runs.map((r) => {
+            const meta = runStatusMeta(r.status);
+            const when = r.finishedAt ?? r.startedAt;
+            const dur = r.startedAt && r.finishedAt
+              ? new Date(r.finishedAt).getTime() - new Date(r.startedAt).getTime()
+              : undefined;
+            const selected = r.id === selectedRunId;
+            return (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => setSelectedRunId(r.id)}
+                className={clsx(
+                  'group flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors',
+                  selected ? 'bg-surface-2' : 'hover:bg-surface-2/50',
+                )}
+              >
+                <span className={clsx('h-2 w-2 shrink-0 rounded-full', meta.color, meta.live && 'animate-pulse')} />
+                <span className={clsx('w-[64px] shrink-0 text-[11px] font-medium', selected ? 'text-text-primary' : 'text-text-secondary')}>{meta.label}</span>
+                <span className="min-w-0 flex-1 truncate text-[10px] text-text-muted">{relTime(when) || '—'}</span>
+                {dur != null && <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">{fmtDuration(dur)}</span>}
+                <ExternalLink
+                  size={11}
+                  className="shrink-0 text-text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-accent"
+                  onClick={(e) => { e.stopPropagation(); openRunModal({ runId: r.id, workflowId, source: 'home-node-history' }); }}
+                />
+              </button>
+            );
+          })}
+        </div>
       </div>
     </section>
   );

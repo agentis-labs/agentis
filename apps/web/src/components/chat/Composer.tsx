@@ -570,8 +570,8 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
         />
         <div className="flex min-h-10 min-w-0 items-center justify-between gap-2 px-2 py-1.5">
           <div className="min-w-0 flex-1 flex items-center gap-1">
-            {footer}
             {agentId && <ComposerStatusBar agentId={agentId} />}
+            {footer}
             {text.length > 500 && (
               <span className="text-[10px] text-text-muted font-mono bg-surface-3 px-1.5 py-0.5 rounded border border-line">
                 {text.length.toLocaleString()}

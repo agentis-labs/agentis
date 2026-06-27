@@ -8,7 +8,7 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { defaultConnectorRegistry } from '@agentis/integrations';
+import { defaultConnectorRegistry, connectorReadiness } from '@agentis/integrations';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -37,7 +37,14 @@ export function buildIntegrationRoutes(deps: { db: AgentisSqliteDb; auth: AuthSe
 
   app.get('/', (c) => {
     const ws = getWorkspace(c);
-    return c.json({ integrations: listIntegrationManifests(deps.db, ws.workspaceId) });
+    // Tag each connector runnable vs needs-setup so the UI never shows a built-in
+    // connector as ready when it would throw on first use. Workspace-authored
+    // (custom) integrations carry their own URLs/specs, so they're runnable.
+    const integrations = listIntegrationManifests(deps.db, ws.workspaceId).map((manifest) => {
+      const isCustom = Boolean((manifest as { packageId?: string | null }).packageId);
+      return { ...manifest, readiness: isCustom ? 'runnable' as const : connectorReadiness(manifest.service) };
+    });
+    return c.json({ integrations });
   });
 
   app.post('/', async (c) => {

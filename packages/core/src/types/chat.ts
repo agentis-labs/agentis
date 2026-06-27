@@ -9,6 +9,15 @@ import type { ChatPlan, PlanLifecycleEvent } from './plan.js';
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
+/**
+ * Per-conversation permission mode (Claude-Code style), sticky per thread.
+ * - `ask`  — confirm before any mutating tool runs (default).
+ * - `plan` — propose a plan and block mutations this turn (maps to
+ *            executionMode 'plan', enforced at the tool registry).
+ * - `auto` — run everything without confirmation (bypass).
+ */
+export type ChatPermissionMode = 'ask' | 'plan' | 'auto';
+
 export interface ChatMessage {
   role: ChatRole;
   content: string | ChatContentBlock[];
@@ -132,12 +141,24 @@ export interface ChatTurnContext {
   agentId: string;
   userId: string;
   conversationId: string;
+  /**
+   * When set, the turn runs in an Agentic App's context (Living Apps Phase 0):
+   * datastore tools (`agentis.appData.*` / `data_insert`) resolve to this App, so
+   * the agent persists what it learns where the App's surfaces read it.
+   */
+  appId?: string | null;
   clientTurnId?: string;
   executionMode?: 'chat' | 'plan';
   /** Optional operation/run correlation id for direct tool turns. */
   runId?: string;
   ambientId?: string | null;
   maxTurns?: number;
+  /**
+   * Per-conversation permission mode. Governs whether mutating tools confirm
+   * (`ask`), are blocked behind a plan (`plan`), or run freely (`auto`).
+   * Defaults to `ask` when unset.
+   */
+  permissionMode?: ChatPermissionMode;
   viewport?: ViewportContext | null;
   /**
    * Cancellation signal for the whole turn, wired from the HTTP request. When the
@@ -241,6 +262,12 @@ export interface AgentisToolContext {
   conversationId?: string;
   executionMode?: 'chat' | 'plan';
   viewport?: ViewportContext | null;
+  /**
+   * Ambient Agentic App for this turn (Living Apps Phase 0). When set, App-scoped
+   * tools (`agentis.appData.*` / `data_insert`) resolve to it without an explicit
+   * `appId` — so a resident channel agent persists to its App's datastore.
+   */
+  appId?: string | null;
   caller: 'chat' | 'workflow' | 'mcp' | 'system';
   /**
    * Cancellation signal propagated from the calling turn. A long, model-backed

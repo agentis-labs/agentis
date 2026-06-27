@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { parse } from 'yaml';
-import type { WorkflowGraph } from '@agentis/core';
+import { WORKFLOW_FILE_API_VERSION, type WorkflowFile, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildWorkflowIoRoutes } from '../../src/routes/workflowIo.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -41,9 +41,11 @@ describe('/v1/workflows export+import', () => {
     const exp = await a.request(`/v1/workflows/${id}/export`, { headers: ctx.authHeaders });
     expect(exp.status).toBe(200);
     const yaml = await exp.text();
-    const doc = parse(yaml) as { name: string; graph: WorkflowGraph };
-    expect(doc.name).toBe('Round Trip');
-    expect(doc.graph.nodes).toHaveLength(2);
+    const doc = parse(yaml) as WorkflowFile;
+    expect(doc.apiVersion).toBe(WORKFLOW_FILE_API_VERSION);
+    expect(doc.kind).toBe('Workflow');
+    expect(doc.metadata.name).toBe('Round Trip');
+    expect(doc.spec.graph.nodes).toHaveLength(2);
 
     const imp = await a.request('/v1/workflows/import', { method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ yaml }) });
     expect(imp.status).toBe(201);
@@ -51,6 +53,21 @@ describe('/v1/workflows export+import', () => {
     expect(out.nodeCount).toBe(2);
     const created = ctx.db.select().from(schema.workflows).all().find((w) => w.id === out.workflowId)!;
     expect((created.graph as WorkflowGraph).edges).toHaveLength(1);
+  });
+
+  it('continues to import the original unversioned YAML files', async () => {
+    const a = app();
+    const yaml = [
+      'name: Legacy workflow',
+      'graph:',
+      '  nodes: []',
+      '  edges: []',
+    ].join('\n');
+    const res = await a.request('/v1/workflows/import', {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ yaml }),
+    });
+    expect(res.status).toBe(201);
+    expect((await res.json() as { title: string }).title).toBe('Legacy workflow');
   });
 
   it('plans a request into phase cards (Builder Session §9)', async () => {

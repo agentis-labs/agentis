@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext } from '@agentis/core';
-import { REALTIME_EVENTS } from '@agentis/core';
+import type { AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext, AbilityRecord } from '@agentis/core';
+import { REALTIME_EVENTS, CONSTANTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { and, desc, eq, like, or, sql } from 'drizzle-orm';
 import { CHAT_TOOL_CATALOG, buildWorkspaceToolCatalog } from './chatToolCatalog.js';
 import { composeOperatingManual, getWorkspaceManual } from './agentOperatingManual.js';
 import { ChatToolExecutor } from './chatToolExecutor.js';
+import { ChatProgressMonitor, hashValue, stopReasonMessage, type RoundObservation } from './chatProgressMonitor.js';
 import { buildOrchestratorSystemPrompt, responseProfileForChannel } from './orchestratorPrompt.js';
 import { agentIdentityChecksum, chatSessionKeyWithIdentity, loadAgentIdentitySnapshot, renderAgentIdentityBlock } from './agentIdentity.js';
 import type { WorkspaceAwarenessService } from './workspaceAwarenessService.js';
@@ -23,6 +24,9 @@ import type { KnowledgeBaseService } from './knowledgeBase.js';
 import type { BrainDiscourseService } from './brainDiscourseService.js';
 import type { SharedIntelligenceService } from './sharedIntelligence.js';
 import type { AbilityService } from './abilityService.js';
+import type { AbilityComposer, ComposerEntry, AbilityTier } from './abilityComposer.js';
+import type { EmbeddingProvider } from './embeddingProvider.js';
+import { embedText } from './embeddingProvider.js';
 import type { WorkspaceHarnessRuntimeResolver } from './workspaceHarnessRuntime.js';
 
 export interface ChatSessionExecutorDeps {
@@ -61,6 +65,16 @@ export interface ChatSessionExecutorDeps {
   brainDiscourse?: BrainDiscourseService;
   awareness?: WorkspaceAwarenessService;
   abilityService?: AbilityService;
+  /**
+   * §M1/M2 (Living Apps) — abilities as identity. When set, an agent's PINNED
+   * abilities are composed into EVERY chat turn's system context (not only when
+   * a `/slash` command resolves one). The embedding provider + composer are
+   * optional: with them, the Ability Composer additionally auto-selects RELEVANT
+   * unpinned abilities by semantic score (§M1 step 2); without them, pinned-only
+   * composition still applies. Slash remains a manual override.
+   */
+  abilityEmbeddings?: (workspaceId: string) => EmbeddingProvider;
+  abilityComposer?: AbilityComposer;
 }
 
 export interface ChannelTurnContext {
@@ -242,6 +256,122 @@ export class ChatSessionExecutor {
     return decision;
   }
 
+  /**
+   * §M1 (Living Apps) — compose an agent's abilities into the turn's system
+   * context, like its persona, on EVERY turn (no `/slash` required).
+   *
+   *   • Step 1 — the agent's PINNED, enabled, compiled abilities are always-on
+   *     identity. This is the highest-value un-gate: a pinned ability now shapes
+   *     behavior even when the user never types a slash command.
+   *   • Step 2 — the Ability Composer auto-selects RELEVANT unpinned abilities by
+   *     semantic score against the message (when an embedding provider is wired),
+   *     bounded by ABILITY_MAX_INJECTED. Degrades to pinned-only when no embedder
+   *     is available.
+   *
+   * Additive + non-throwing: any failure returns `null` and the turn proceeds
+   * with today's behavior. Returns a system-context block, not a user prompt.
+   */
+  static async #composeAbilityInjection(
+    workspaceId: string | undefined,
+    agentId: string | undefined,
+    userMessage: string,
+  ): Promise<string | null> {
+    const svc = this.#deps.abilityService;
+    if (!svc || !workspaceId || !agentId) return null;
+    try {
+      // Step 1 — pinned, enabled, ready abilities (always-on identity).
+      const pinnedIds = new Set(
+        svc.listPinsForAgent(agentId).filter((p) => p.enabled).map((p) => p.abilityId),
+      );
+      const pinnedRecords = [...pinnedIds]
+        .map((id) => svc.tryGet(id))
+        .filter((a): a is AbilityRecord => Boolean(a && a.compileStatus === 'ready'));
+
+      // Step 2 — Ability Composer: auto-select relevant UNPINNED abilities by
+      // semantic relevance (bundled local ONNX embeddings by default).
+      const semanticRecords: AbilityRecord[] = [];
+      const providerFn = this.#deps.abilityEmbeddings;
+      const query = userMessage.trim();
+      if (providerFn && query.length > 0) {
+        try {
+          const provider = providerFn(workspaceId);
+          const taskEmbedding = await embedText(provider, query.slice(0, 4000));
+          const scored = svc.scoreAbilitiesForTask(workspaceId, taskEmbedding);
+          for (const s of scored) {
+            if (pinnedIds.has(s.ability.id)) continue;
+            const threshold = s.ability.minRelevanceScore ?? CONSTANTS.ABILITY_MIN_RELEVANCE_SCORE;
+            if (s.score < threshold) continue;
+            semanticRecords.push(s.ability);
+          }
+        } catch (err) {
+          this.#deps.logger?.warn?.('chat.ability.semantic_failed', { agentId, err: (err as Error).message });
+        }
+      }
+
+      if (pinnedRecords.length === 0 && semanticRecords.length === 0) return null;
+
+      // Bound the total injected count (pins take precedence, then relevance).
+      const seen = new Set<string>();
+      const ordered: Array<{ ability: AbilityRecord; tier: AbilityTier; score: number }> = [];
+      for (const a of pinnedRecords) {
+        if (seen.has(a.id)) continue;
+        seen.add(a.id);
+        ordered.push({ ability: a, tier: 'pinned', score: 1 });
+      }
+      for (const a of semanticRecords) {
+        if (seen.has(a.id)) continue;
+        seen.add(a.id);
+        ordered.push({ ability: a, tier: 'semantic', score: 0.5 });
+      }
+
+      // Resolve precedence + rule conflicts deterministically when a composer is
+      // wired (same machinery as workflow dispatch); else keep pin-first order.
+      let final = ordered;
+      if (this.#deps.abilityComposer) {
+        const entries: ComposerEntry[] = ordered.map((e) => ({
+          id: e.ability.id,
+          name: e.ability.name,
+          contentHash: e.ability.contentHash ?? null,
+          depth: e.ability.depth,
+          tier: e.tier,
+          score: e.score,
+          rulesAlways: e.ability.rulesAlways ?? [],
+          rulesNever: e.ability.rulesNever ?? [],
+          toolHints: e.ability.toolHints ?? [],
+        }));
+        const composed = this.#deps.abilityComposer.compose(entries);
+        const rank = new Map(composed.ordered.map((e, i) => [e.id, i]));
+        final = [...ordered].sort(
+          (a, b) => (rank.get(a.ability.id) ?? 0) - (rank.get(b.ability.id) ?? 0),
+        );
+      }
+
+      final = final.slice(0, CONSTANTS.ABILITY_MAX_INJECTED);
+      if (final.length === 0) return null;
+
+      const blocks = final.map(({ ability }) => {
+        const body = (ability.compiledPrompt || ability.description || '').trim();
+        const rules: string[] = [];
+        for (const r of ability.rulesAlways ?? []) rules.push(`ALWAYS ${r}`);
+        for (const r of ability.rulesNever ?? []) rules.push(`NEVER ${r}`);
+        const ruleBlock = rules.length > 0 ? `\nRules:\n${rules.map((r) => `- ${r}`).join('\n')}` : '';
+        return `<ability name="${ability.name}">\n${body}${ruleBlock}\n</ability>`;
+      });
+
+      this.#deps.logger?.debug?.('chat.ability.composed', {
+        agentId,
+        pinned: pinnedRecords.length,
+        semantic: semanticRecords.length,
+        injected: final.length,
+      });
+
+      return `These are your abilities — specialized skills that are part of who you are. Apply them whenever relevant, unbidden:\n\n${blocks.join('\n\n')}\n`;
+    } catch (err) {
+      this.#deps.logger?.warn?.('chat.ability.compose_failed', { agentId, err: (err as Error).message });
+      return null;
+    }
+  }
+
   static async *turn(
     adapter: AgentAdapter,
     history: ChatMessage[],
@@ -251,7 +381,8 @@ export class ChatSessionExecutor {
   ): AsyncIterable<ChatDelta> {
     const startedAt = Date.now();
     const maxTurns = Math.max(1, Math.min(options.maxTurns ?? ctx.maxTurns ?? 5, 8));
-    const maxToolCalls = Math.max(1, Math.min(options.maxToolCalls ?? 12, 24));
+    // High count backstop — the real governor is ChatProgressMonitor, not a cap.
+    const maxToolCalls = Math.max(1, options.maxToolCalls ?? defaultMaxToolCalls());
     const viewport = options.viewport ?? ctx.viewport ?? null;
     const expandedUserMessage = expandUserMessage(userMessage);
     // Social turns cannot need platform actions. Leaving the catalog empty also
@@ -261,6 +392,17 @@ export class ChatSessionExecutor {
     let effectiveUserMessage = expandedUserMessage;
     let brainSystemInjection: string | null = null;
     let abilitySystemInjection: string | null = null;
+    // §M1 — composed pinned (+ relevant) abilities, injected on EVERY substantive
+    // turn as part of the agent's identity. Slash (below) stays a manual override
+    // that coexists with this. Skipped for trivial social chatter to keep it cheap.
+    let composedAbilityInjection: string | null = null;
+    if (!lightweightConversation) {
+      composedAbilityInjection = await this.#composeAbilityInjection(
+        ctx.workspaceId,
+        ctx.agentId,
+        userMessage,
+      );
+    }
 
     if (userMessage.startsWith('/') && this.#deps.abilityService) {
       const match = userMessage.match(/^\/(\w+)\s*(.*)$/);
@@ -482,7 +624,7 @@ export class ChatSessionExecutor {
         operatingManualBlock = composeOperatingManual({ role, workspaceManual: getWorkspaceManual(db, ctx.workspaceId) });
       }
     } catch { /* best-effort — never block a chat turn on the manual */ }
-    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), abilitySystemInjection, options.systemAddendum]
+    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), clampBlock(composedAbilityInjection, CONTEXT_BUDGET.abilityInjection), abilitySystemInjection, options.systemAddendum]
       .map((value) => value?.trim())
       .filter((value): value is string => Boolean(value));
     const systemPrompt = systemAddendum.length > 0
@@ -649,9 +791,17 @@ export class ChatSessionExecutor {
     const forwarding = adapter.capabilities?.().toolForwarding;
     const isCliHarness = forwarding === 'marker_protocol' || forwarding === 'mcp_native';
     const modelRoundTimeoutMs = isCliHarness ? harnessRoundTimeoutMs() : INTERACTIVE_MODEL_ROUND_TIMEOUT_MS;
-    const deadlineMs = isCliHarness ? harnessTurnDeadlineMs() : resolveTurnDeadlineMs();
     const adapterMcpNative = forwarding === 'mcp_native';
-    for (let turn = 0; turn < options.maxTurns; turn += 1) {
+    // Per-conversation permission mode (default ask). `auto` runs mutating tools
+    // freely; `ask` confirms them; `plan` blocks them upstream (executionMode).
+    const permissionMode = ctx.permissionMode ?? 'ask';
+    // Intelligent, time-free stop. The turn runs until the model is done, the
+    // operator cancels, or the monitor detects a loop / oscillation / error storm
+    // / no-progress — NOT on a wall clock. `absoluteMaxRounds()` is only a
+    // defensive ceiling the monitor should always beat to the punch.
+    const monitor = new ChatProgressMonitor();
+    const maxRounds = absoluteMaxRounds();
+    for (let turn = 0; turn < maxRounds; turn += 1) {
       // Operator disconnected (or the turn was otherwise canceled): stop before
       // starting another model round so we don't keep spending on a turn nobody
       // is listening to. Checked every round, including round 0 (abort during
@@ -659,13 +809,6 @@ export class ChatSessionExecutor {
       if (ctx.signal?.aborted) {
         this.#logTurn(ctx, options.startedAt, toolCallCount, 'aborted', timings);
         yield { type: 'done', finishReason: 'error' };
-        return;
-      }
-      // Checked between rounds so an in-flight round is never cut mid-stream.
-      if (turn > 0 && Date.now() - options.startedAt > deadlineMs) {
-        this.#logTurn(ctx, options.startedAt, toolCallCount, 'deadline', timings);
-        if (!producedText) yield { type: 'text', delta: TURN_DEADLINE_MESSAGE };
-        yield { type: 'done', finishReason: 'max_turns' };
         return;
       }
       const toolCalls: ChatToolCall[] = [];
@@ -784,7 +927,7 @@ export class ChatSessionExecutor {
         return;
       }
 
-      const confirmationCall = batch.find((call) => ChatToolExecutor.requiresConfirmation(call.name));
+      const confirmationCall = batch.find((call) => ChatToolExecutor.requiresConfirmation(call.name, permissionMode));
       if (confirmationCall) {
         const turnId = randomUUID();
         const now = Date.now();
@@ -856,9 +999,33 @@ export class ChatSessionExecutor {
             : JSON.stringify(summarized),
         });
       }
+
+      // Intelligent stop: feed this round to the progress monitor. A round counts
+      // as progress when it issues a never-before-seen call or yields a new
+      // result; the monitor stops the turn the moment it detects a pathology
+      // (identical repetition, oscillation, error storm, or a no-progress streak).
+      // Pre-tool model prose is dropped from a tool round (see above), so it is not
+      // counted as operator-visible text here.
+      const observation: RoundObservation = {
+        toolCalls: batch.map((call) => ({ name: call.name, argsHash: hashValue(call.arguments) })),
+        resultHashes: settled.map(({ result, summarized }) =>
+          hashValue(result.error ? { error: result.error } : (summarized ?? null)),
+        ),
+        allToolsErrored: settled.length > 0 && settled.every(({ result }) => Boolean(result.error)),
+        producedText: false,
+      };
+      const stop = monitor.record(observation);
+      if (stop) {
+        this.#logTurn(ctx, options.startedAt, toolCallCount, `stalled:${stop.kind}`, timings);
+        yield { type: 'text', delta: stopReasonMessage(stop) };
+        yield { type: 'done', finishReason: 'stop' };
+        return;
+      }
     }
 
-    this.#logTurn(ctx, options.startedAt, toolCallCount, 'max_turns', timings);
+    // Absolute defensive ceiling reached (maxRounds) — the monitor should always
+    // have stopped a real loop long before this. Honest terminal message.
+    this.#logTurn(ctx, options.startedAt, toolCallCount, 'max_rounds', timings);
     if (!producedText) yield { type: 'text', delta: TURN_LIMIT_MESSAGE };
     yield { type: 'done', finishReason: 'max_turns' };
   }
@@ -1182,32 +1349,38 @@ interface TurnTimings {
   adapterType: string;
 }
 
-/**
- * Wall-clock budget (ms) for a whole chat turn before the loop stops and returns
- * a graceful terminal message. Overridable via `AGENTIS_CHAT_TURN_DEADLINE_MS`;
- * non-positive/garbage values fall back to the default so it can't be disabled.
- */
-const DEFAULT_TURN_DEADLINE_MS = 45_000;
+// Per-MODEL-ROUND liveness timeout (ms). This is NOT a task time limit — it
+// bounds a single network/stdio call so a dead socket can't hang the turn
+// forever. The turn itself has no wall clock: it runs until done, until the
+// operator cancels, or until ChatProgressMonitor detects a pathology. A harness
+// re-spawns the binary per round, so its single round is inherently slower than a
+// streaming runtime's — measured: a slow/free harness model takes ~60–115s to
+// first token even for "Hi" and is silent on stdio while the remote model runs.
 const INTERACTIVE_MODEL_ROUND_TIMEOUT_MS = 15_000;
-// CLI-harness budgets. A harness re-spawns the binary per round, so its rounds
-// and whole turns are inherently slower than a streaming runtime's; these are the
-// realistic ceilings before a round/turn is fairly called a failure. Generous on
-// purpose — and measured: a slow/free harness model (e.g. step-3.7-flash:free)
-// takes ~60–115s to FIRST token even for "Hi", and is SILENT on stdio while the
-// remote model runs, so any tighter budget guillotines turns that were about to
-// answer. A build that streams progress for two minutes beats one that dies at
-// 90s. Overridable via env; non-positive/garbage falls back to the default.
 const HARNESS_MODEL_ROUND_TIMEOUT_MS = 240_000;
-const HARNESS_TURN_DEADLINE_MS = 600_000;
 function harnessRoundTimeoutMs(): number {
   const fromEnv = Number(process.env.AGENTIS_HARNESS_ROUND_TIMEOUT_MS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   return HARNESS_MODEL_ROUND_TIMEOUT_MS;
 }
-function harnessTurnDeadlineMs(): number {
-  const fromEnv = Number(process.env.AGENTIS_HARNESS_TURN_DEADLINE_MS);
-  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
-  return HARNESS_TURN_DEADLINE_MS;
+
+/**
+ * Absolute defensive ceiling on tool rounds in a single turn. This is NOT the
+ * governor — ChatProgressMonitor stops real loops far sooner. It exists only so a
+ * pathological case the monitor somehow never catches can't spin forever. Set high
+ * so it never clips legitimate long work; env-overridable.
+ */
+function absoluteMaxRounds(): number {
+  const fromEnv = Number(process.env.AGENTIS_CHAT_MAX_ROUNDS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return 150;
+}
+
+/** Default per-turn tool-call ceiling — a high count backstop, not a time limit. */
+function defaultMaxToolCalls(): number {
+  const fromEnv = Number(process.env.AGENTIS_CHAT_MAX_TOOL_CALLS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return 80;
 }
 
 /**
@@ -1216,11 +1389,6 @@ function harnessTurnDeadlineMs(): number {
  * reasoning model every turn. The viewport's active workflow is always included.
  */
 const WORKFLOW_TOOL_CAP = 12;
-function resolveTurnDeadlineMs(): number {
-  const fromEnv = Number(process.env.AGENTIS_CHAT_TURN_DEADLINE_MS);
-  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
-  return DEFAULT_TURN_DEADLINE_MS;
-}
 
 /** Human labels for the build's WORKFLOW_BUILD_PHASE stages. */
 const BUILD_PHASE_LABEL: Record<string, string> = {
@@ -1356,8 +1524,6 @@ function isLightweightConversation(message: string): boolean {
 }
 
 /** Honest terminal messages for turns that hit a guardrail instead of a clean stop. */
-const TURN_DEADLINE_MESSAGE =
-  'I ran out of time on this turn before I could finish, so I stopped here rather than leave you waiting. Tell me to continue and I’ll pick it back up — or narrow the request and I’ll be faster.';
 const TURN_LIMIT_MESSAGE =
   'I worked through several steps but reached the per-turn action limit before finishing. Tell me to continue and I’ll keep going from where I left off.';
 const EMPTY_TURN_MESSAGE =
@@ -1385,6 +1551,7 @@ const CONTEXT_BUDGET = {
   workspaceContext: 3500,
   situationalModel: 2500,
   brainInjection: 2000,
+  abilityInjection: 4000,
 } as const;
 
 /** Truncate an injected context block to a fixed budget so prompt size stays constant. */

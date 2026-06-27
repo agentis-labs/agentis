@@ -134,6 +134,33 @@ export class SubflowExecutor {
     return childRunId;
   }
 
+  /**
+   * Durability (masterplan 1.4): re-register a parent's resume/fail binding
+   * after a process restart, WITHOUT starting a new child run. The child run
+   * survives in the DB (it has its own row keyed by `parentRunId`); the only
+   * thing lost on restart is this in-memory callback, so the engine's recovery
+   * pass rebuilds it with fresh closures over the rehydrated parent context.
+   */
+  rebind(args: {
+    parentRunId: string;
+    parentNodeId: string;
+    childRunId: string;
+    resumeParent: (output: Record<string, unknown>) => Promise<void>;
+    failParent: (error: string) => Promise<void>;
+  }): void {
+    const key = `${args.parentRunId}:${args.parentNodeId}`;
+    this.#pending.set(key, {
+      resume: args.resumeParent,
+      fail: args.failParent,
+      childRunId: args.childRunId,
+    });
+  }
+
+  /** Whether a parent node already has a live resume binding (avoids double-rebind). */
+  hasPending(parentRunId: string, parentNodeId: string): boolean {
+    return this.#pending.has(`${parentRunId}:${parentNodeId}`);
+  }
+
   #assertNoSubflowCycle(parentRunId: string, childWorkflowId: string): void {
     let cursor: string | null = parentRunId;
     for (let depth = 0; cursor && depth < 32; depth += 1) {

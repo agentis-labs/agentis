@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { BookOpen, ExternalLink, Info, Plus, Save, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
+import { useConfirm } from '../shared/ConfirmDialog';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
 import { Drawer } from '../shared/Drawer';
@@ -40,6 +41,7 @@ const GENERIC_WORKFLOW_KNOWLEDGE = 'workflow knowledge';
 export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeName?: string }) {
   const toast = useToast();
   const nav = useNavigate();
+  const confirm = useConfirm();
   const [bases, setBases] = useState<KnowledgeBaseView[]>([]);
   const [documents, setDocuments] = useState<KnowledgeDocumentView[]>([]);
   const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
@@ -90,6 +92,17 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
 
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scopeId, scopeName]);
 
+  // A freshly uploaded document indexes in the background (embedding + grounding)
+  // and reports `indexing` until ready. Poll quietly while that's true so it
+  // flips to `ready` on its own — no manual refresh, no frozen screen.
+  const anyIndexing = useMemo(() => documents.some((document) => document.status === 'indexing'), [documents]);
+  useEffect(() => {
+    if (!anyIndexing) return;
+    const id = setInterval(() => { void refresh(selectedBaseId); }, 3000);
+    return () => clearInterval(id);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [anyIndexing, selectedBaseId]);
+
   const documentCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const document of documents) counts.set(document.knowledgeBaseId, (counts.get(document.knowledgeBaseId) ?? 0) + 1);
@@ -130,9 +143,17 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
   }
 
   async function deleteBase(base: KnowledgeBaseView) {
+    const title = baseTitle(base, isScoped, fallbackWorkflowName);
+    const ok = await confirm({
+      title: `Delete collection "${title}"?`,
+      body: 'All documents in this collection will be permanently removed. This action cannot be undone.',
+      tone: 'danger',
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
     try {
       await api(`/v1/knowledge-bases/${base.id}`, { method: 'DELETE' });
-      toast.success('Collection deleted', baseTitle(base, isScoped, fallbackWorkflowName));
+      toast.success('Collection deleted', title);
       if (inspectedBase?.id === base.id) setInspectedBase(null);
       await refresh(base.id === selectedBaseId ? null : selectedBaseId);
     } catch (error) {
@@ -164,6 +185,13 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
   }
 
   async function deleteDocument(document: KnowledgeDocumentView) {
+    const ok = await confirm({
+      title: `Delete "${document.name}"?`,
+      body: 'This document and all its indexed chunks will be permanently removed.',
+      tone: 'danger',
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
     await api(`/v1/knowledge-bases/${document.knowledgeBaseId}/documents/${document.id}`, { method: 'DELETE' });
     toast.success('Document removed', document.name);
     if (inspectedDocument?.id === document.id) setInspectedDocument(null);

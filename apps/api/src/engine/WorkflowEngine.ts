@@ -49,12 +49,17 @@ import {
   type TransformNodeConfig,
   type FilterNodeConfig,
   type IntegrationNodeConfig,
+  type McpNodeConfig,
+  type DataQueryNodeConfig,
+  type DataMutateNodeConfig,
+  type AggregateWindowNodeConfig,
   type HttpRequestNodeConfig,
   type WorkflowStoreNodeConfig,
   type WorkspaceStoreNodeConfig,
   type EvaluatorNodeConfig,
   type GuardrailsNodeConfig,
   type LoopNodeConfig,
+  type ConvergeNodeConfig,
   type ParallelNodeConfig,
   type ReturnOutputNodeConfig,
   type ArtifactSaveNodeConfig,
@@ -177,6 +182,12 @@ export interface EngineDeps {
   conversations?: ConversationStore;
   /** Integration connector registry â€” required for `integration` and `http_request` nodes. */
   connectors?: ConnectorRegistry;
+  /** Registered MCP servers' tools, callable from an `mcp` node (masterplan 2.3). */
+  mcpBridge?: McpBridgePort;
+  /** Agentic App datastore access for the `data_query` / `data_mutate` nodes. */
+  appData?: AppDataPort;
+  /** Resolve the owning App id from the running workflow when a data node omits `appId`. */
+  resolveAppIdForWorkflow?: (workspaceId: string, workflowId: string) => string | undefined;
   /** Workflow-scoped KV â€” required for `workflow_store` nodes. */
   workflowStore?: WorkflowStoreService;
   /** Workspace-scoped KV (Tier 3) â€” required for `workspace_store` nodes + `{{workspace.kv.*}}`. */
@@ -238,6 +249,12 @@ export interface EngineDeps {
   abilityComposer?: AbilityComposer;
   /** Canonical shared brain graph retrieval and evaluator feedback. */
   sharedIntelligence?: SharedIntelligenceService;
+  /**
+   * Real accumulated spend for a run AND its descendant subflow runs — recorded
+   * cost (cents) + model tokens. Drives the `converge` node's budget breaker
+   * (AGENT-COOPERATION-10X §Pillar 1). Absent → only ms + the ceiling enforce.
+   */
+  resolveRunSpend?: (rootRunId: string) => { costCents: number; tokens: number };
   /** Autonomous, intent-preserving workflow self-healing (AGENT-AUTONOMY §W7/W5.0). */
   selfHeal?: WorkflowSelfHealService;
   /**
@@ -279,6 +296,21 @@ export interface EngineDeps {
  * Narrow structural port over `SpecialistDemandRouter.request` so the engine can
  * consult it for scored role selection without importing the concrete service.
  */
+/** Narrow port over McpToolBridge.call so the engine stays decoupled from it. */
+export interface McpBridgePort {
+  call(workspaceId: string, toolId: string, args: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+}
+
+/** Narrow port over AppDatastore for the `data_query` / `data_mutate` nodes. */
+export interface AppDataPort {
+  query(workspaceId: string, appId: string, collection: string, q: { filter?: Record<string, unknown>; sort?: Array<{ field: string; dir: 'asc' | 'desc' }>; limit?: number; cursor?: string }): { rows: unknown[]; nextCursor?: string };
+  aggregate(workspaceId: string, appId: string, collection: string, input: { op: 'count' | 'sum' | 'avg' | 'min' | 'max'; field?: string; groupBy?: string; filter?: Record<string, unknown>; limit?: number }): Array<{ group: string | number | null; value: number }>;
+  insert(workspaceId: string, appId: string, collection: string, record: Record<string, unknown>): { id: string };
+  update(workspaceId: string, appId: string, collection: string, id: string, patch: Record<string, unknown>): { id: string };
+  upsert(workspaceId: string, appId: string, collection: string, match: Record<string, unknown>, record: Record<string, unknown>): { id: string };
+  delete(workspaceId: string, appId: string, collection: string, id: string): void;
+}
+
 export interface SpecialistRouterPort {
   request(
     workspaceId: string,
@@ -623,6 +655,12 @@ export class WorkflowEngine {
               const timer = setTimeout(fire, remaining);
               timer.unref?.();
             }
+          } else if (exec.executorType === 'subflow' && this.deps.subflows) {
+            // Durable delegation (1.4): a subflow parent must NOT be re-dispatched
+            // (that would spawn a *second* child run and orphan the first). Instead
+            // re-bind to the child run that survived in the DB; if that child already
+            // finished during downtime, resume the parent immediately.
+            this.#recoverSubflowParent(ctx, exec);
           } else {
             const idempotencyKey = nodeIdempotencyKey(ctx.runId, exec.nodeId, 0);
             delete ctx.state.activeExecutions[exec.nodeId];
@@ -744,6 +782,87 @@ export class WorkflowEngine {
     return { recovered };
   }
 
+  /**
+   * Durable delegation (masterplan 1.4): re-attach a subflow parent node to the
+   * child run that outlived a restart. The child persists its own run row keyed
+   * by `parentRunId`; the parent node's id is recovered from its own persisted
+   * `activeExecutions` entry. We rebind the resume/fail callbacks over the
+   * rehydrated parent context, then:
+   *   - child already terminal (finished during downtime) → resume/fail now;
+   *   - child still in-flight → leave the parent RUNNING; its eventual terminal
+   *     transition finds the freshly-rebound pending and resumes the parent.
+   * If no child row exists at all (the start never persisted), we fall back to a
+   * plain re-dispatch so the run can't hang.
+   */
+  #recoverSubflowParent(ctx: RunningContext, exec: { nodeId: string; executorRef?: string }): void {
+    const subflows = this.deps.subflows;
+    if (!subflows) return;
+    const parentNodeId = exec.nodeId;
+    const childWorkflowId = exec.executorRef;
+    // Find the child run this parent node spawned. (parentRunId + child workflow
+    // id is the durable link; pick the most recent if a workflow is reused.)
+    const candidates = this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.parentRunId, ctx.runId))
+      .all()
+      .filter((row) => !childWorkflowId || row.workflowId === childWorkflowId)
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
+    const child = candidates[0];
+    if (!child) {
+      // The child was never persisted — re-dispatch the node so the run survives.
+      delete ctx.state.activeExecutions[parentNodeId];
+      const ns = ctx.state.nodeStates[parentNodeId];
+      if (ns) ns.status = 'PENDING';
+      ctx.state.readyQueue.push({
+        nodeId: parentNodeId,
+        priority: 0,
+        insertedAt: new Date().toISOString(),
+        inputData: ns?.inputData ?? {},
+        idempotencyKey: nodeIdempotencyKey(ctx.runId, parentNodeId, 0),
+      });
+      queueMicrotask(() => void this.#tick(ctx));
+      return;
+    }
+
+    if (!subflows.hasPending(ctx.runId, parentNodeId)) {
+      subflows.rebind({
+        parentRunId: ctx.runId,
+        parentNodeId,
+        childRunId: child.id,
+        resumeParent: async (output) => {
+          await this.#completeNode(ctx, parentNodeId, output);
+          void this.#tick(ctx);
+        },
+        failParent: async (msg) => {
+          await this.#failNode(ctx, parentNodeId, msg);
+          void this.#tick(ctx);
+        },
+      });
+    }
+
+    const terminal = child.status === 'COMPLETED' || child.status === 'FAILED' || child.status === 'CANCELLED';
+    if (terminal) {
+      // The child finished while we were down — drive the parent resume now,
+      // since the child's terminal transition already fired (and found no binding).
+      const childState = child.runState as unknown as WorkflowRunState | null;
+      const finalNodeId = childState?.completedNodeIds?.at(-1);
+      const finalOutput = (finalNodeId && childState?.nodeStates?.[finalNodeId]?.outputData) || {};
+      void subflows.onChildRunFinished({
+        childRunId: child.id,
+        parentRunId: ctx.runId,
+        parentNodeId,
+        status: child.status as 'COMPLETED' | 'FAILED' | 'CANCELLED',
+        finalOutput: finalOutput as Record<string, unknown>,
+        workspaceId: child.workspaceId,
+        ambientId: child.ambientId,
+        ...(child.status !== 'COMPLETED' ? { error: `child run ${child.id} ${child.status}` } : {}),
+      });
+    }
+    // else: parent stays RUNNING; the in-flight child (recovered as its own run)
+    // will notify on its terminal transition via the rebound pending.
+  }
+
   /** Get a live run ctx, rehydrating it from DB when not already in memory. */
   #ensureRecoveredCtx(runId: string): RunningContext | null {
     const existing = this.#runs.get(runId);
@@ -838,7 +957,7 @@ export class WorkflowEngine {
     // be dry-run synchronously through #dispatchNode without setting up the
     // full callback machinery. Reject them explicitly so the UI can surface
     // a friendly message instead of hanging.
-    const asyncKinds: ReadonlyArray<string> = ['agent_task', 'agent_swarm', 'subflow', 'checkpoint', 'loop', 'agent_session', 'dynamic_swarm', 'planner'];
+    const asyncKinds: ReadonlyArray<string> = ['agent_task', 'agent_swarm', 'subflow', 'checkpoint', 'loop', 'converge', 'agent_session', 'dynamic_swarm', 'planner'];
     if (asyncKinds.includes(node.config.kind)) {
       return {
         ok: false,
@@ -3081,6 +3200,28 @@ export class WorkflowEngine {
     node: WorkflowNode,
     item: ReadyQueueItem,
   ): Promise<void> {
+    // Infinite-cycle backstop (masterplan 1.4): cap how many times any single
+    // node may be dispatched in one run. An author-wired retry cycle, a runaway
+    // self-heal/retry, or a planner-spliced loop could otherwise re-dispatch a
+    // node without bound, burning unlimited LLM/IO cost. The ceiling is generous;
+    // legit retries cap far lower. Hitting it fails the RUN (not a retryable node
+    // failure) so it cannot itself re-enter the cycle.
+    const dispatchCounts = this.#nodeDispatchCounts(ctx);
+    const dispatchCount = (dispatchCounts.get(node.id) ?? 0) + 1;
+    dispatchCounts.set(node.id, dispatchCount);
+    const ceiling = nodeDispatchCeiling();
+    if (dispatchCount > ceiling) {
+      const ns = ctx.state.nodeStates[node.id];
+      if (ns) {
+        ns.status = 'FAILED';
+        ns.error = `node dispatch ceiling exceeded (${ceiling}) — likely an infinite cycle`;
+      }
+      delete ctx.state.activeExecutions[node.id];
+      this.deps.logger.warn('engine.node_dispatch_ceiling', { runId: ctx.runId, nodeId: node.id, count: dispatchCount, ceiling });
+      await this.#transitionRunStatus(ctx, 'FAILED');
+      return;
+    }
+
     // Layer 5 human gate: hold the node before it starts if its phase requires
     // approval and the gate hasn't been granted yet. The downstream nodes stay in
     // waitingInputs, so the run settles to WAITING (not COMPLETED) until approved.
@@ -3236,6 +3377,26 @@ export class WorkflowEngine {
         await this.#completeNode(ctx, node.id, result);
         return;
       }
+      case 'mcp': {
+        const result = await this.#executeMcp(ctx, node, resolvedConfig as McpNodeConfig);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'data_query': {
+        const result = this.#executeDataQuery(ctx, resolvedConfig as DataQueryNodeConfig);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'data_mutate': {
+        const result = this.#executeDataMutate(ctx, resolvedConfig as DataMutateNodeConfig);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'aggregate_window': {
+        const result = this.#executeAggregateWindow(ctx, node, resolvedConfig as AggregateWindowNodeConfig, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
       case 'http_request': {
         const result = await this.#executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig, item.idempotencyKey);
         await this.#completeNode(ctx, node.id, result);
@@ -3294,6 +3455,10 @@ export class WorkflowEngine {
       case 'loop': {
         await this.#dispatchLoop(ctx, node, resolvedConfig as LoopNodeConfig, item.inputData, tctx);
         return;
+      }
+      case 'converge': {
+        await this.#dispatchConverge(ctx, node, resolvedConfig as ConvergeNodeConfig, item.inputData, tctx);
+        return; // iterations resolve the node async
       }
       case 'parallel': {
         // Parallel is a pure passthrough at dispatch time — fan-out happens via
@@ -5334,6 +5499,7 @@ export class WorkflowEngine {
             runId: ctx.runId,
             workflowId: ctx.state.workflowId,
             agentId: null,
+            origin: 'workflow',
             conversationId: null,
             nodeId: node.id,
             metadata: {
@@ -5906,6 +6072,7 @@ export class WorkflowEngine {
           runId,
           workflowId: ctx.workflowId,
           agentId: null,
+          origin: 'workflow',
           conversationId: null,
           nodeId: node.id,
           metadata: { name: args.name, savedBy: args.savedBy },
@@ -6046,6 +6213,153 @@ export class WorkflowEngine {
     } finally {
       delete ctx.state.activeExecutions[node.id];
     }
+  }
+
+  /** `mcp` node — call a registered MCP server's tool via the bridge. */
+  async #executeMcp(ctx: RunningContext, node: WorkflowNode, config: McpNodeConfig): Promise<Record<string, unknown>> {
+    if (!this.deps.mcpBridge) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'mcp node present but MCP bridge not wired');
+    }
+    if (!config.toolId) {
+      throw new AgentisError('VALIDATION_FAILED', 'mcp node missing toolId');
+    }
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `mcp:${node.id}`,
+      nodeId: node.id,
+      executorType: 'integration',
+      executorRef: config.toolId,
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      const result = await this.deps.mcpBridge.call(ctx.workspaceId, config.toolId, config.arguments ?? {});
+      if (!result.ok) {
+        throw new AgentisError('INTEGRATION_OPERATION_FAILED', `MCP tool ${config.toolId} failed: ${result.error ?? 'unknown error'}`);
+      }
+      return config.outputKey ? { [config.outputKey]: result.result ?? null } : { result: result.result ?? null };
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
+  }
+
+  /**
+   * Resolve the App id for a data node: the node's explicit `appId`, else the
+   * App that owns the running workflow (so deterministic persist works without a
+   * build-time appId — the App is created after the workflow).
+   */
+  #resolveDataAppId(ctx: RunningContext, configAppId: string | undefined): string {
+    const appId = configAppId ?? this.deps.resolveAppIdForWorkflow?.(ctx.workspaceId, ctx.workflowId);
+    if (!appId) {
+      throw new AgentisError('VALIDATION_FAILED', 'data node requires an appId (none on the node and no owning App resolvable from the running workflow)');
+    }
+    return appId;
+  }
+
+  /** `data_query` node — read or aggregate an Agentic App datastore collection. */
+  #executeDataQuery(ctx: RunningContext, config: DataQueryNodeConfig): Record<string, unknown> {
+    if (!this.deps.appData) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'data_query node present but app datastore not wired');
+    }
+    if (!config.collection) {
+      throw new AgentisError('VALIDATION_FAILED', 'data_query node requires a collection');
+    }
+    const appId = this.#resolveDataAppId(ctx, config.appId);
+    if (config.mode === 'aggregate') {
+      if (!config.op) throw new AgentisError('VALIDATION_FAILED', 'data_query aggregate requires an op');
+      const buckets = this.deps.appData.aggregate(ctx.workspaceId, appId, config.collection, {
+        op: config.op,
+        ...(config.field ? { field: config.field } : {}),
+        ...(config.groupBy ? { groupBy: config.groupBy } : {}),
+        ...(config.filter ? { filter: config.filter } : {}),
+      });
+      return { [config.outputKey ?? 'buckets']: buckets };
+    }
+    if (config.paginate) {
+      // Follow the keyset cursor internally and return every matching row.
+      const maxRows = Math.min(Math.max(config.maxRows ?? 1000, 1), 10_000);
+      const pageSize = Math.min(config.limit && config.limit > 0 ? config.limit : 200, maxRows);
+      const all: unknown[] = [];
+      let cursor: string | undefined;
+      // Bound the page loop too (defensive against a non-advancing cursor).
+      for (let page = 0; page < 1000 && all.length < maxRows; page += 1) {
+        const res = this.deps.appData.query(ctx.workspaceId, appId, config.collection, {
+          ...(config.filter ? { filter: config.filter } : {}),
+          ...(config.sort ? { sort: config.sort } : {}),
+          limit: pageSize,
+          ...(cursor ? { cursor } : {}),
+        });
+        for (const row of res.rows) {
+          if (all.length >= maxRows) break;
+          all.push(row);
+        }
+        if (!res.nextCursor || res.rows.length === 0) break;
+        cursor = res.nextCursor;
+      }
+      return { [config.outputKey ?? 'rows']: all, count: all.length };
+    }
+    const res = this.deps.appData.query(ctx.workspaceId, appId, config.collection, {
+      ...(config.filter ? { filter: config.filter } : {}),
+      ...(config.sort ? { sort: config.sort } : {}),
+      ...(config.limit ? { limit: config.limit } : {}),
+      ...(config.cursor ? { cursor: config.cursor } : {}),
+    });
+    return { [config.outputKey ?? 'rows']: res.rows, ...(res.nextCursor ? { nextCursor: res.nextCursor } : {}) };
+  }
+
+  /** `data_mutate` node — write to an Agentic App datastore collection. */
+  #executeDataMutate(ctx: RunningContext, config: DataMutateNodeConfig): Record<string, unknown> {
+    if (!this.deps.appData) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'data_mutate node present but app datastore not wired');
+    }
+    if (!config.collection) {
+      throw new AgentisError('VALIDATION_FAILED', 'data_mutate node requires a collection');
+    }
+    const { workspaceId } = ctx;
+    const appId = this.#resolveDataAppId(ctx, config.appId);
+    switch (config.operation) {
+      case 'insert':
+        return { [config.outputKey ?? 'record']: this.deps.appData.insert(workspaceId, appId, config.collection, config.record ?? {}) };
+      case 'update': {
+        if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate update requires recordId');
+        return { [config.outputKey ?? 'record']: this.deps.appData.update(workspaceId, appId, config.collection, config.recordId, config.record ?? {}) };
+      }
+      case 'upsert':
+        return { [config.outputKey ?? 'record']: this.deps.appData.upsert(workspaceId, appId, config.collection, config.match ?? {}, config.record ?? {}) };
+      case 'delete': {
+        if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate delete requires recordId');
+        this.deps.appData.delete(workspaceId, appId, config.collection, config.recordId);
+        return { [config.outputKey ?? 'deleted']: config.recordId };
+      }
+      default:
+        throw new AgentisError('VALIDATION_FAILED', `data_mutate: unknown operation ${String(config.operation)}`);
+    }
+  }
+
+  /** `aggregate_window` node — buffer events across runs; emit a batch when the window closes. */
+  #executeAggregateWindow(ctx: RunningContext, node: WorkflowNode, config: AggregateWindowNodeConfig, inputData: Record<string, unknown>): Record<string, unknown> {
+    if (!this.deps.workflowStore) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'aggregate_window node present but workflow store not wired');
+    }
+    const { workspaceId, workflowId } = ctx;
+    const itemsKey = `__aggwin:${node.id}:${config.key ?? 'default'}`;
+    const firstAtKey = `${itemsKey}:firstAt`;
+    this.deps.workflowStore.append(workspaceId, workflowId, itemsKey, inputData);
+    const buffered = this.deps.workflowStore.get(workspaceId, workflowId, itemsKey);
+    const items = Array.isArray(buffered) ? buffered : [];
+    let firstAt = Number(this.deps.workflowStore.get(workspaceId, workflowId, firstAtKey) ?? 0);
+    if (!firstAt) {
+      firstAt = Date.now();
+      this.deps.workflowStore.set(workspaceId, workflowId, firstAtKey, firstAt);
+    }
+    const countReady = config.maxCount ? items.length >= config.maxCount : false;
+    const timeReady = config.windowMs ? Date.now() - firstAt >= config.windowMs : false;
+    if (countReady || timeReady) {
+      // Flush: reset the buffer and emit the batch downstream.
+      this.deps.workflowStore.set(workspaceId, workflowId, itemsKey, []);
+      this.deps.workflowStore.set(workspaceId, workflowId, firstAtKey, 0);
+      return { [config.outputKey ?? 'items']: items, count: items.length, ready: true };
+    }
+    // Window still open — hold: complete the node but fire NO downstream this run.
+    return { __hold: true, ready: false, buffered: items.length };
   }
 
   #customIntegrationManifest(workspaceId: string, service: string): ReturnType<typeof getCustomIntegrationManifest> | null {
@@ -6902,6 +7216,411 @@ export class WorkflowEngine {
     });
   }
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Convergence loop (`converge`) — AGENT-COOPERATION-10X §Pillar 1.
+  // Iterate a cohort sub-graph until a continuation policy says stop. Stateful
+  // across iterations via the blackboard, owns one isolated worktree for the
+  // whole cohort (§Pillar 3), and stops on goal / stall / budget / ceiling with
+  // an honest terminal verdict. No graph cycle — the body subflow is re-invoked.
+  // ───────────────────────────────────────────────────────────────────────
+
+  async #dispatchConverge(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ConvergeNodeConfig,
+    inputData: Record<string, unknown>,
+    _tctx: TemplateContext,
+  ): Promise<void> {
+    if (!this.deps.subflows) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'converge node present but SubflowExecutor not wired');
+    }
+    if (!config.bodyWorkflowId) {
+      throw new AgentisError('VALIDATION_FAILED', 'converge node missing bodyWorkflowId');
+    }
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `converge:${node.id}`,
+      nodeId: node.id,
+      executorType: 'converge',
+      executorRef: config.bodyWorkflowId,
+      startedAt: new Date().toISOString(),
+    };
+    void this.#runConverge(ctx, node, config, inputData).catch((err) => {
+      delete ctx.state.activeExecutions[node.id];
+      void this.#failNode(ctx, node.id, (err as Error).message);
+      void this.#tick(ctx);
+    });
+  }
+
+  async #runConverge(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ConvergeNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<void> {
+    const stateKey = config.stateKey?.trim() || node.id;
+    const maxIterations = Math.max(1, Math.min(config.maxIterations ?? 8, 100));
+    const stallWindow = Math.max(1, config.stallPolicy?.window ?? 2);
+    const carry = config.carryStrategy ?? 'accumulate';
+    const startedAt = Date.now();
+
+    // Durable resume — pick up persisted iteration state after a crash recovery.
+    const priorState = (ctx.state.nodeStates[node.id]?.outputData?.['_convergeState'] ?? {}) as ConvergeRunState;
+    const history: ConvergeIterationRecord[] = [...(priorState.history ?? [])];
+    let iteration = priorState.history?.length ?? 0;
+    const accumulated: Record<string, unknown> = { ...(priorState.accumulated ?? {}) };
+    let lastSignature: string | undefined = priorState.lastSignature;
+    this.deps.scratchpad.hydrate(ctx.runId);
+
+    // §Pillar 3: one worktree the whole cohort shares for the loop lifetime.
+    const worktree = await this.#acquireConvergeWorktree(ctx, node, config);
+    if (worktree?.path) {
+      this.deps.scratchpad.write(
+        ctx.runId,
+        `${stateKey}.workspace`,
+        { path: worktree.path, mode: worktree.mode },
+        { namespace: stateKey, identity: CONVERGE_IDENTITY },
+      );
+    }
+
+    let verdictKind: ConvergeVerdict = 'max_iterations';
+    let lastOutput: Record<string, unknown> = priorState.lastOutput ?? {};
+    let stallStreak = priorState.stallStreak ?? 0;
+
+    try {
+      while (iteration < maxIterations) {
+        // Budget breaker — wall clock (always) + real recorded cost / tokens
+        // across this run and its descendant cohort runs (when a spend resolver
+        // is wired). Any crossed limit stops the loop with an honest verdict.
+        if (this.#convergeBudgetExceeded(ctx, config.budget, startedAt)) {
+          verdictKind = 'budget_exhausted';
+          break;
+        }
+
+        const iterStart = Date.now();
+        const iterInput: Record<string, unknown> = {
+          ...inputData,
+          converge: {
+            iteration,
+            stateKey,
+            state: carry === 'replace' ? lastOutput : accumulated,
+            workspace: worktree?.path ? { path: worktree.path, mode: worktree.mode } : undefined,
+          },
+        };
+
+        const rawOutput = await this.#runConvergeIteration(ctx, node, config, iterInput, iteration);
+        // The body must not feed our control envelope back into shared state — a
+        // body that echoes its inputs would otherwise create a self-referential
+        // cycle (state → converge → state) that breaks run-state serialization.
+        const output = stripConvergeEnvelope(rawOutput);
+        lastOutput = output;
+
+        if (carry === 'accumulate') {
+          Object.assign(accumulated, output);
+        } else {
+          for (const k of Object.keys(accumulated)) delete accumulated[k];
+          Object.assign(accumulated, output);
+        }
+
+        // Record this iteration's output so the operator + next pass can read it.
+        this.deps.scratchpad.write(ctx.runId, `${stateKey}.iteration.${iteration}`, output, {
+          namespace: stateKey,
+          iteration,
+          identity: CONVERGE_IDENTITY,
+        });
+
+        const decision = await this.#evaluateConvergeContinuation(ctx, node, config, output, iteration);
+
+        // Stall detection — the efficiency guard. Two consecutive no-change
+        // iterations (default) means we're spinning; stop with an honest verdict.
+        const signature = convergeStableSignature(output);
+        if (lastSignature !== undefined && signature === lastSignature) stallStreak += 1;
+        else stallStreak = 0;
+        lastSignature = signature;
+
+        const record: ConvergeIterationRecord = {
+          iteration,
+          durationMs: Date.now() - iterStart,
+          continue: decision.continue,
+          verdict: decision.verdict,
+          score: decision.score,
+          critique: decision.critique,
+          stallStreak,
+        };
+        history.push(record);
+        iteration += 1;
+
+        await this.#persistConvergeState(ctx, node, { history, accumulated, lastSignature, lastOutput, stallStreak });
+        this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONVERGE_ITERATION, {
+          runId: ctx.runId,
+          nodeId: node.id,
+          ...record,
+          spendMs: Date.now() - startedAt,
+          maxIterations,
+        });
+
+        if (!decision.continue) {
+          verdictKind = 'goal_met';
+          break;
+        }
+        if (config.stallPolicy && stallStreak + 1 >= stallWindow) {
+          verdictKind = 'stalled';
+          break;
+        }
+      }
+
+      const preserveResult = worktree ? await worktree.release() : { preserved: false };
+      delete ctx.state.activeExecutions[node.id];
+
+      // Graduate the converged knowledge from the run-scoped blackboard to durable
+      // workspace memory — but only when the goal was actually met, and only the
+      // surviving (non-superseded) claims, gated by the Brain's formation judge.
+      if (verdictKind === 'goal_met') {
+        await this.#promoteConvergedKnowledge(ctx, node, stateKey, lastOutput);
+      }
+
+      const result: Record<string, unknown> = {
+        converged: verdictKind === 'goal_met',
+        verdict: verdictKind,
+        iterations: iteration,
+        history,
+        output: lastOutput,
+        state: accumulated,
+      };
+      if (preserveResult.preserved) {
+        result['branch'] = preserveResult.branch;
+        if (preserveResult.prUrl) result['prUrl'] = preserveResult.prUrl;
+        result['changedFiles'] = preserveResult.changedFiles;
+      }
+
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONVERGE_SETTLED, {
+        runId: ctx.runId,
+        nodeId: node.id,
+        verdict: verdictKind,
+        iterations: iteration,
+        preserved: preserveResult,
+      });
+      await this.#completeNode(ctx, node.id, result);
+      void this.#tick(ctx);
+    } catch (err) {
+      if (worktree) await worktree.release().catch(() => {});
+      throw err;
+    }
+  }
+
+  /** Run one convergence iteration by delegating the body cohort to SubflowExecutor. */
+  async #runConvergeIteration(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ConvergeNodeConfig,
+    inputs: Record<string, unknown>,
+    iteration: number,
+  ): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      void this.deps.subflows!.start({
+        parentRunId: ctx.runId,
+        parentNodeId: `${node.id}:iter:${iteration}`,
+        workspaceId: ctx.workspaceId,
+        ambientId: ctx.ambientId,
+        userId: ctx.userId,
+        childWorkflowId: config.bodyWorkflowId,
+        inputs,
+        resumeParent: async (output) => resolve(output ?? {}),
+        failParent: async (msg) => reject(new Error(msg)),
+        startChildRun: async (childArgs) => {
+          const handle = await this.startRun(childArgs);
+          return { runId: handle.runId };
+        },
+      });
+    });
+  }
+
+  /**
+   * Decide whether the loop should run another iteration. Three pluggable
+   * sources, one interface (deterministic | judge | signal). `continue: true`
+   * means keep iterating; `false` means the goal is met.
+   */
+  async #evaluateConvergeContinuation(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ConvergeNodeConfig,
+    output: Record<string, unknown>,
+    iteration: number,
+  ): Promise<{ continue: boolean; verdict: string; score?: number; critique?: string }> {
+    const cont = config.continuation;
+
+    if (cont.type === 'deterministic') {
+      const expr = cont.expr.replace(/^\{\{\s*|\s*\}\}$/g, '');
+      let keepGoing = false;
+      try {
+        keepGoing = evalCondition(expr, {
+          body: output,
+          output,
+          iteration,
+          scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId),
+        });
+      } catch (err) {
+        // A broken predicate stops the loop (fail-safe) rather than spin forever.
+        this.deps.logger.warn('converge.continuation.expr_failed', { nodeId: node.id, err: (err as Error).message });
+        keepGoing = false;
+      }
+      return { continue: keepGoing, verdict: keepGoing ? 'open' : 'converged' };
+    }
+
+    if (cont.type === 'signal') {
+      const channel = cont.channel?.trim() || 'converge';
+      const msgs = this.deps.scratchpad.readChannel(ctx.runId, channel, 10);
+      const done = msgs.some((m) => /^done\b|__converge_done__/i.test(m.message));
+      return { continue: !done, verdict: done ? 'signalled_done' : 'open' };
+    }
+
+    // judge
+    const evaluator = this.#resolveEvaluationRuntime(ctx, node, cont.targetPath);
+    if (!evaluator) {
+      this.deps.logger.warn('converge.continuation.no_evaluator', { nodeId: node.id });
+      // Without a judge we cannot assess convergence — stop to avoid an unbounded loop.
+      return { continue: false, verdict: 'no_evaluator' };
+    }
+    const target = readDotPath(output, cont.targetPath) ?? output;
+    const verdict = await evaluator.evaluate({
+      workspaceId: ctx.workspaceId,
+      target,
+      criteria: cont.criteria,
+      rubric: cont.rubric,
+      passThreshold: cont.passThreshold,
+    });
+    try {
+      this.deps.sharedIntelligence?.applyEvaluatorVerdict({
+        workspaceId: ctx.workspaceId,
+        runId: ctx.runId,
+        scopeId: null,
+        agentId: null,
+        verdict: verdict.passed ? 'pass' : 'fail',
+        evaluatorConfidence: verdict.score,
+      });
+    } catch {
+      /* best-effort brain feedback */
+    }
+    return {
+      continue: !verdict.passed,
+      verdict: verdict.passed ? 'pass' : 'fail',
+      score: verdict.score,
+      critique: verdict.critique,
+    };
+  }
+
+  /** Acquire the cohort's shared isolated worktree (or none for `isolation: 'shared'`). */
+  async #acquireConvergeWorktree(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ConvergeNodeConfig,
+  ): Promise<WorktreeHandle | undefined> {
+    if (config.isolation === 'shared') return undefined;
+    if (!this.deps.worktrees) return undefined;
+    const baseCwd = this.#resolveConvergeBaseCwd();
+    if (!baseCwd) return undefined;
+    const preserve = config.preserve ?? 'discard';
+    try {
+      const handle = await this.deps.worktrees.acquire({
+        baseCwd,
+        taskId: `run-${ctx.runId.slice(0, 8)}-${node.id}`,
+        preserve,
+        branchName: preserve !== 'discard' ? `agentis/run-${ctx.runId.slice(0, 8)}` : undefined,
+        commitMessage: `Agentis cooperative loop — ${node.title ?? node.id}`,
+      });
+      if (!handle.path) {
+        await handle.release().catch(() => {});
+        return undefined;
+      }
+      this.deps.logger.info('converge.worktree.acquired', {
+        runId: ctx.runId,
+        nodeId: node.id,
+        mode: handle.mode,
+      });
+      return handle;
+    } catch (err) {
+      this.deps.logger.warn('converge.worktree.acquire_failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
+      return undefined;
+    }
+  }
+
+  /** Pick a base repo cwd from any registered local adapter (single-operator OSS). */
+  #resolveConvergeBaseCwd(): string | undefined {
+    for (const reg of this.deps.adapters.list()) {
+      const wd = this.deps.adapters.workdirOf(reg.agentId);
+      if (wd) return wd;
+    }
+    return undefined;
+  }
+
+  /** Persist iteration state so a crash-recovery re-dispatch resumes mid-loop. */
+  async #persistConvergeState(ctx: RunningContext, node: WorkflowNode, state: ConvergeRunState): Promise<void> {
+    const ns = ctx.state.nodeStates[node.id];
+    if (!ns) return;
+    ns.outputData = {
+      ...(ns.outputData ?? {}),
+      _convergeState: state,
+      _convergeProgress: {
+        iterations: state.history?.length ?? 0,
+        lastVerdict: state.history?.at(-1)?.verdict,
+      },
+    };
+    await this.#persistRun(ctx);
+  }
+
+  /**
+   * Whether the loop has crossed any budget limit. Wall-clock is always enforced;
+   * cost (cents) and tokens are enforced against REAL recorded spend across this
+   * run and its descendant cohort runs when a spend resolver is wired.
+   */
+  #convergeBudgetExceeded(
+    ctx: RunningContext,
+    budget: ConvergeNodeConfig['budget'],
+    startedAt: number,
+  ): boolean {
+    if (!budget) return false;
+    if (budget.ms !== undefined && Date.now() - startedAt > budget.ms) return true;
+    if (budget.usd === undefined && budget.tokens === undefined) return false;
+    const spend = this.deps.resolveRunSpend?.(ctx.runId);
+    if (!spend) return false; // No real signal → don't fabricate enforcement.
+    if (budget.usd !== undefined && spend.costCents / 100 > budget.usd) return true;
+    if (budget.tokens !== undefined && spend.tokens > budget.tokens) return true;
+    return false;
+  }
+
+  /**
+   * Promote a converged loop's surviving claims (and final result) from the
+   * run-scoped blackboard into durable workspace memory, via the Brain's
+   * formation gate (which rejects garbage). Best-effort: never blocks the run.
+   */
+  async #promoteConvergedKnowledge(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    stateKey: string,
+    lastOutput: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.deps.sharedIntelligence) return;
+    try {
+      const entries = this.deps.scratchpad.listEntries(ctx.runId, { namespace: stateKey });
+      const claimEntries = entries.filter((e) => e.kind === 'claim');
+      // Drop disputed/revised claims — keep only the surviving truth.
+      const superseded = new Set(claimEntries.map((e) => e.supersedes).filter((id): id is string => Boolean(id)));
+      const survivingClaims = claimEntries
+        .filter((e) => !superseded.has(e.id))
+        .map((e) => String(e.value ?? ''))
+        .filter((s) => s.trim());
+      if (survivingClaims.length === 0 && Object.keys(lastOutput).length === 0) return;
+      await this.deps.sharedIntelligence.promote({
+        workspaceId: ctx.workspaceId,
+        runId: ctx.runId,
+        nodeId: node.id,
+        taskTitle: `Converged: ${node.title ?? node.id}`,
+        taskOutput: { convergedClaims: survivingClaims, result: lastOutput },
+      });
+    } catch (err) {
+      this.deps.logger.warn('converge.promote.failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
+    }
+  }
+
   async #executeCheckpoint(
     ctx: RunningContext,
     node: WorkflowNode,
@@ -7071,6 +7790,11 @@ export class WorkflowEngine {
   #nodeRetryAttempts(ctx: RunningContext): Map<string, number> {
     if (!ctx.nodeRetryAttempts) ctx.nodeRetryAttempts = new Map();
     return ctx.nodeRetryAttempts;
+  }
+
+  #nodeDispatchCounts(ctx: RunningContext): Map<string, number> {
+    if (!ctx.nodeDispatchCounts) ctx.nodeDispatchCounts = new Map();
+    return ctx.nodeDispatchCounts;
   }
 
   /** Whether a failed node qualifies for generic `retryPolicy` re-dispatch. */
@@ -7550,9 +8274,20 @@ export class WorkflowEngine {
     // and must NOT be traversed on a successful completion â€” but their
     // downstream target IS still waiting on this source's id. Drop it from
     // the required list so the target doesn't block the run from settling.
+    // `__hold`: a node (e.g. aggregate_window with an open window) completed but
+    // explicitly defers its downstream — fire NO outgoing edges this run; drop
+    // this node from each target's required inputs so the run still settles.
+    const held = (normalizedOutput as { __hold?: unknown } | null)?.__hold === true;
+
     for (const edge of ctx.downstreamEdges.get(nodeId) ?? []) {
       const buf = ctx.state.waitingInputs[edge.target];
       if (!buf) continue;
+
+      if (held) {
+        buf.requiredInputs = buf.requiredInputs.filter((id) => id !== nodeId);
+        this.#promoteOrSkipTarget(ctx, edge.target, 'Skipped: upstream is buffering (window still open)');
+        continue;
+      }
 
       if (edge.type === 'error') {
         // Catch branch â€” source completed successfully, so this edge never
@@ -8405,6 +9140,8 @@ interface RunningContext {
   selfHealAttempts: Map<string, number>;
   /** Generic `retryPolicy` attempt counters keyed by node id (non-agent nodes). */
   nodeRetryAttempts?: Map<string, number>;
+  /** Per-node dispatch counts for the infinite-cycle ceiling. */
+  nodeDispatchCounts?: Map<string, number>;
   /**
    * Run-scoped cancellation (NATIVE-ADVANCEMENT Proposal 7, Agentis-native form).
    * `cancelRun` aborts this so in-flight work that honors the signal (HTTP
@@ -8507,6 +9244,12 @@ const GENERIC_RETRY_EXCLUDED_KINDS = new Set<string>([
   'dynamic_swarm',
   'planner',
 ]);
+
+/** Max times one node may be dispatched per run before the run is failed as a cycle. */
+function nodeDispatchCeiling(): number {
+  const raw = Number(process.env.AGENTIS_NODE_DISPATCH_CEILING);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 200;
+}
 
 export function resolveParallelism(): number {
   const raw = process.env.AGENTIS_WORKFLOW_PARALLELISM ?? CONSTANTS.WORKFLOW_PARALLELISM_DEFAULT;
@@ -9709,5 +10452,73 @@ function checkGuardrail(
       }
     default:
       return true;
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Convergence loop (`converge`) — module-scope helpers (AGENT-COOPERATION-10X).
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Honest terminal verdicts — never a fake green. */
+type ConvergeVerdict = 'goal_met' | 'stalled' | 'budget_exhausted' | 'max_iterations';
+
+/** The system identity stamped on controller-authored blackboard entries. */
+const CONVERGE_IDENTITY = { runtime: 'system', label: 'Converge controller' } as const;
+
+interface ConvergeIterationRecord {
+  iteration: number;
+  durationMs: number;
+  /** Whether the controller decided to run another pass after this one. */
+  continue: boolean;
+  /** Continuation verdict: open | converged | pass | fail | signalled_done | … */
+  verdict: string;
+  score?: number;
+  critique?: string;
+  /** Consecutive no-change iterations leading up to (and including) this one. */
+  stallStreak: number;
+}
+
+/** Persisted controller state — enough to resume a loop mid-flight after a crash. */
+interface ConvergeRunState {
+  history?: ConvergeIterationRecord[];
+  accumulated?: Record<string, unknown>;
+  lastSignature?: string;
+  lastOutput?: Record<string, unknown>;
+  stallStreak?: number;
+}
+
+/**
+ * Remove the reserved `converge` control envelope from a body's output so it
+ * never re-enters accumulated state (a body that echoes its inputs would create
+ * a `state → converge → state` cycle).
+ */
+function stripConvergeEnvelope(output: Record<string, unknown>): Record<string, unknown> {
+  if (!output || typeof output !== 'object' || !('converge' in output)) return output;
+  const { converge: _omit, ...rest } = output;
+  return rest;
+}
+
+/**
+ * Order-independent structural signature of an iteration's output, used for
+ * stall detection. Two iterations with the same signature made no material
+ * progress.
+ */
+function convergeStableSignature(value: unknown): string {
+  const seen = new WeakSet<object>();
+  const norm = (v: unknown): unknown => {
+    if (v === null || typeof v !== 'object') return v;
+    if (seen.has(v as object)) return '[circular]';
+    seen.add(v as object);
+    if (Array.isArray(v)) return v.map(norm);
+    return Object.fromEntries(
+      Object.keys(v as Record<string, unknown>)
+        .sort()
+        .map((k) => [k, norm((v as Record<string, unknown>)[k])]),
+    );
+  };
+  try {
+    return JSON.stringify(norm(value));
+  } catch {
+    return String(value);
   }
 }

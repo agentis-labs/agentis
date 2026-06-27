@@ -8,7 +8,7 @@
  */
 
 import { useState } from 'react';
-import { Download, Trash2 } from 'lucide-react';
+import { Download, Upload, Trash2 } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
@@ -141,7 +141,7 @@ export function WorkflowRecordBrowser({
             disabled={total === 0}
             className="inline-flex h-7 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
           >
-            <Download size={11} /> Export
+            <Upload size={11} /> Export
           </button>
           <button
             type="button"

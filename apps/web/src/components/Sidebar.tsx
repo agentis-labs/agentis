@@ -1,7 +1,8 @@
 /**
  * Sidebar — primary navigation rail.
  *
- * Home / Apps / Agents / Brain / Packages.
+ * Home / Apps / Agents / Brain / Assets.
+ * (Packages lives in the header profile menu.)
  * Live badges on Agents (live count).
  * Auto-collapse when ChatPanel is docked.
  */
@@ -13,8 +14,8 @@ import {
   Home as HomeIcon,
   Bot,
   Brain as BrainIcon,
-  Package as PackageIcon,
   LayoutGrid as AppsIcon,
+  Library as AssetsIcon,
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react';
@@ -34,7 +35,7 @@ const NAV: NavItem[] = [
   { to: '/apps', label: 'Apps', icon: AppsIcon },
   { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
   { to: '/brain', label: 'Brain', icon: BrainIcon },
-  { to: '/packages', label: 'Packages', icon: PackageIcon },
+  { to: '/assets', label: 'Assets', icon: AssetsIcon },
 ];
 
 const STORAGE_KEY = 'agentis.sidebar.collapsed';
@@ -64,52 +65,9 @@ export function Sidebar() {
     >
       <nav className="flex-1 overflow-y-auto py-3">
         <ul className="flex flex-col gap-0.5 px-2">
-          {NAV.map((item) => {
-            const Icon = item.icon;
-            const badge = item.badge ? counts[item.badge] : 0;
-            return (
-              <li key={item.to}>
-                <NavLink
-                  to={item.to}
-                  title={item.label}
-                  className={({ isActive }) =>
-                    clsx(
-                      'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',
-                      collapsed && 'justify-center',
-                      isActive
-                        ? 'bg-surface-2 text-text-primary'
-                        : 'text-text-muted hover:bg-surface-2 hover:text-text-primary',
-                    )
-                  }
-                >
-                  {({ isActive }) => (
-                    <>
-                      {isActive && (
-                        <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-accent" />
-                      )}
-                      <Icon size={16} className={clsx('shrink-0', isActive && 'text-accent')} />
-                      {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
-                      {badge > 0 && !collapsed && (
-                        <span
-                          className={clsx(
-                            'inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold',
-                            'bg-accent-soft text-accent',
-                          )}
-                        >
-                          {badge > 99 ? '99+' : badge}
-                        </span>
-                      )}
-                      {badge > 0 && collapsed && (
-                        <span className="absolute -right-0.5 -top-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[9px] font-bold text-canvas">
-                          {badge > 9 ? '9+' : badge}
-                        </span>
-                      )}
-                    </>
-                  )}
-                </NavLink>
-              </li>
-            );
-          })}
+          {NAV.map((item) => (
+            <SidebarLink key={item.to} item={item} collapsed={collapsed} counts={counts} />
+          ))}
         </ul>
       </nav>
 
@@ -123,5 +81,60 @@ export function Sidebar() {
         {!collapsed && <span>Collapse</span>}
       </button>
     </aside>
+  );
+}
+
+function SidebarLink({
+  item,
+  collapsed,
+  counts,
+}: {
+  item: NavItem;
+  collapsed: boolean;
+  counts: ReturnType<typeof useWorkspaceData>['counts'];
+}) {
+  const Icon = item.icon;
+  const badge = item.badge ? counts[item.badge] : 0;
+  return (
+    <li>
+      <NavLink
+        to={item.to}
+        title={item.label}
+        className={({ isActive }) =>
+          clsx(
+            'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',
+            collapsed && 'justify-center',
+            isActive
+              ? 'bg-surface-2 text-text-primary'
+              : 'text-text-muted hover:bg-surface-2 hover:text-text-primary',
+          )
+        }
+      >
+        {({ isActive }) => (
+          <>
+            {isActive && (
+              <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-accent" />
+            )}
+            <Icon size={16} className={clsx('shrink-0', isActive && 'text-accent')} />
+            {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
+            {badge > 0 && !collapsed && (
+              <span
+                className={clsx(
+                  'inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold',
+                  'bg-accent-soft text-accent',
+                )}
+              >
+                {badge > 99 ? '99+' : badge}
+              </span>
+            )}
+            {badge > 0 && collapsed && (
+              <span className="absolute -right-0.5 -top-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[9px] font-bold text-canvas">
+                {badge > 9 ? '9+' : badge}
+              </span>
+            )}
+          </>
+        )}
+      </NavLink>
+    </li>
   );
 }

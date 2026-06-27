@@ -27,6 +27,8 @@ interface SchedulerDeps {
   bus: EventBus;
   engine: WorkflowEngine;
   logger: Logger;
+  /** Optional — scheduled-issue due sweep (Live Workspace backlog). */
+  issues?: { sweepDue(now: Date): Promise<number> };
 }
 
 interface QueueWorkflowArgs {
@@ -70,13 +72,28 @@ export class SchedulerService {
     this.#timer = undefined;
   }
 
-  async tick(now = new Date()): Promise<{ schedules: number; queues: number }> {
-    if (this.#running) return { schedules: 0, queues: 0 };
+  async tick(now = new Date()): Promise<{ schedules: number; queues: number; issues: number }> {
+    if (this.#running) return { schedules: 0, queues: 0, issues: 0 };
     this.#running = true;
     try {
-      const schedules = await this.processDueSchedules(now);
-      const queues = await this.processDueQueue(now);
-      return { schedules, queues };
+      // Each sub-sweep is isolated: a failure in workflow scheduling must not
+      // starve the issue sweep (and vice versa), or scheduled tasks silently
+      // never fire.
+      let schedules = 0;
+      let queues = 0;
+      let issues = 0;
+      try { schedules = await this.processDueSchedules(now); } catch (err) {
+        this.deps.logger.warn('scheduler.schedules_failed', { err: (err as Error).message });
+      }
+      try { queues = await this.processDueQueue(now); } catch (err) {
+        this.deps.logger.warn('scheduler.queue_failed', { err: (err as Error).message });
+      }
+      if (this.deps.issues) {
+        try { issues = await this.deps.issues.sweepDue(now); } catch (err) {
+          this.deps.logger.warn('scheduler.issue_sweep_failed', { err: (err as Error).message });
+        }
+      }
+      return { schedules, queues, issues };
     } finally {
       this.#running = false;
     }

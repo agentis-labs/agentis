@@ -166,15 +166,30 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
   return app;
 }
 
-/** Validate that a requested scoped Knowledge surface belongs to this workspace. */
+/**
+ * Validate that a requested scoped Knowledge surface belongs to this workspace.
+ * A scope is a Workflow OR an Agentic App (the App Brain → Knowledge facet binds
+ * knowledge to `app.id`); either is a valid owner of a scoped Knowledge brain.
+ */
 function workflowScope(db: AgentisSqliteDb, workspaceId: string, scopeId: string | undefined): string | undefined {
   if (!scopeId) return undefined;
   const workflow = db.select({ id: schema.workflows.id })
     .from(schema.workflows)
     .where(and(eq(schema.workflows.id, scopeId), eq(schema.workflows.workspaceId, workspaceId)))
     .get();
-  if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow not found');
-  return workflow.id;
+  if (workflow) return workflow.id;
+  const app = db.select({ id: schema.apps.id })
+    .from(schema.apps)
+    .where(and(eq(schema.apps.id, scopeId), eq(schema.apps.workspaceId, workspaceId)))
+    .get();
+  if (app) return app.id;
+  // An Agent can also own a scoped Knowledge brain (Agent Brain → Knowledge).
+  const agent = db.select({ id: schema.agents.id })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, scopeId), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (agent) return agent.id;
+  throw new AgentisError('RESOURCE_NOT_FOUND', 'Knowledge scope not found');
 }
 
 function presentKnowledgeBase(
@@ -183,10 +198,21 @@ function presentKnowledgeBase(
   base: typeof schema.knowledgeBases.$inferSelect,
 ) {
   const ownerWorkflow = base.scopeId
-    ? db.select({ id: schema.workflows.id, title: schema.workflows.title })
-      .from(schema.workflows)
-      .where(and(eq(schema.workflows.id, base.scopeId), eq(schema.workflows.workspaceId, workspaceId)))
-      .get() ?? null
+    ? (db.select({ id: schema.workflows.id, title: schema.workflows.title })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.id, base.scopeId), eq(schema.workflows.workspaceId, workspaceId)))
+        .get()
+      // App-scoped brains own the knowledge via app.id — surface the App's name.
+      ?? db.select({ id: schema.apps.id, title: schema.apps.name })
+        .from(schema.apps)
+        .where(and(eq(schema.apps.id, base.scopeId), eq(schema.apps.workspaceId, workspaceId)))
+        .get()
+      // Agent-scoped brains own knowledge via agent.id — surface the Agent's name.
+      ?? db.select({ id: schema.agents.id, title: schema.agents.name })
+        .from(schema.agents)
+        .where(and(eq(schema.agents.id, base.scopeId), eq(schema.agents.workspaceId, workspaceId)))
+        .get()
+      ?? null)
     : null;
   const documentCountRow = db.select({ count: sql<number>`count(*)` })
     .from(schema.kbDocuments)

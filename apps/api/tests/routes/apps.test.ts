@@ -9,6 +9,13 @@ import type { AppManifestEnvelope } from '@agentis/core';
 import { buildAppRoutes } from '../../src/routes/apps.js';
 import { AppDatastore, AppPackager, AppStore, AppSurfaceStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
+import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationParticipantService } from '../../src/services/conversationParticipants.js';
+import { AppContactService } from '../../src/services/appContacts.js';
+import { AppLearningService } from '../../src/services/appLearning.js';
+import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
+import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
+import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 
 let ctx: TestContext;
 
@@ -52,6 +59,218 @@ function appCount(): number {
   return ctx.db.select({ id: schema.apps.id }).from(schema.apps).all().length;
 }
 
+function seedAgentRow(): string {
+  const id = randomUUID();
+  ctx.db.insert(schema.agents).values({ id, workspaceId: ctx.workspace.id, userId: ctx.user.id, name: 'Resident', adapterType: 'http' }).run();
+  return id;
+}
+
+describe('/v1/apps live conversations (Phase 1)', () => {
+  function seedAgent(): string {
+    const id = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id, workspaceId: ctx.workspace.id, userId: ctx.user.id, name: 'Resident', adapterType: 'http',
+    }).run();
+    return id;
+  }
+
+  it('lists an App\'s real conversations and a thread\'s messages, scoped to the App', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' }).id;
+    const otherAppId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Other' }).id;
+    const agentId = seedAgent();
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+
+    // A thread that belongs to the App + one belonging to another App.
+    const now = new Date().toISOString();
+    const convId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: convId, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId, appId,
+      channelChatId: '42', title: 'Maria', lastMessageAt: now, createdAt: now, updatedAt: now,
+    }).run();
+    ctx.db.insert(schema.conversations).values({
+      id: randomUUID(), workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId, appId: otherAppId,
+      channelChatId: '99', title: 'Elsewhere', createdAt: now, updatedAt: now,
+    }).run();
+
+    conversations.appendMirrored({
+      workspaceId: ctx.workspace.id, conversationId: convId, sessionMessageId: 'in-1',
+      authorType: 'system', body: 'is it available?', metadata: { channelInbound: true },
+    });
+    conversations.appendMirrored({
+      workspaceId: ctx.workspace.id, conversationId: convId, sessionMessageId: 'out-1',
+      authorType: 'agent', body: 'yes — want me to reserve it?',
+    });
+
+    const listRes = await app().request(`/v1/apps/${appId}/conversations`, { headers: ctx.authHeaders });
+    expect(listRes.status).toBe(200);
+    const list = (await listRes.json()) as { data: Array<{ id: string; title: string }> };
+    expect(list.data).toHaveLength(1);
+    expect(list.data[0]).toMatchObject({ id: convId, title: 'Maria' });
+
+    const msgRes = await app().request(`/v1/apps/${appId}/conversations/${convId}/messages`, { headers: ctx.authHeaders });
+    expect(msgRes.status).toBe(200);
+    const msgs = (await msgRes.json()) as { data: Array<{ role: string; content: string }> };
+    expect(msgs.data.map((m) => m.role)).toEqual(['user', 'agent']);
+    expect(msgs.data[0]?.content).toBe('is it available?');
+  });
+
+  it('operator takeover parks/unparks the resident agent; send delivers + records the reply', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' }).id;
+    const agentId = seedAgent();
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const now = new Date().toISOString();
+
+    // A live channel connection + a thread bound to it + the App.
+    const connId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connId, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId, appId, kind: 'telegram', name: 'line', tokenEncrypted: 'x',
+    }).run();
+    const convId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: convId, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId, appId,
+      channelConnectionId: connId, channelChatId: '42', title: 'Maria', createdAt: now, updatedAt: now,
+    }).run();
+
+    const delivered: Array<{ connectionId: string; chatId: string; body: string }> = [];
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({
+      db: ctx.db, auth: ctx.auth, conversations,
+      channels: { deliverToConnection: async (a) => { delivered.push(a); } },
+    }) }]);
+
+    // Take over.
+    const takeRes = await routed.request(`/v1/apps/${appId}/conversations/${convId}/takeover`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ active: true }),
+    });
+    expect(takeRes.status).toBe(200);
+    expect((await takeRes.json() as { data: { handoffState: string | null } }).data.handoffState).toBe('human');
+    expect(ctx.db.select({ h: schema.conversations.handoffState }).from(schema.conversations).where(eq(schema.conversations.id, convId)).get()?.h).toBe('human');
+
+    // Operator sends — delivered to the channel + recorded as an operator message.
+    const sendRes = await routed.request(`/v1/apps/${appId}/conversations/${convId}/send`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ body: 'Hi Maria, this is a human — happy to help!' }),
+    });
+    expect(sendRes.status).toBe(200);
+    expect((await sendRes.json() as { data: { delivered: boolean } }).data.delivered).toBe(true);
+    expect(delivered).toEqual([{ connectionId: connId, chatId: '42', body: 'Hi Maria, this is a human — happy to help!' }]);
+    const opMsg = conversations.messages(convId, 50).find((m) => m.authorType === 'operator');
+    expect(opMsg?.body).toMatch(/happy to help/);
+
+    // Hand back.
+    const backRes = await routed.request(`/v1/apps/${appId}/conversations/${convId}/takeover`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ active: false }),
+    });
+    expect((await backRes.json() as { data: { handoffState: string | null } }).data.handoffState).toBeNull();
+  });
+
+  it('lists/adds/removes conversation participants (multi-party · G1)', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' }).id;
+    const primaryAgent = seedAgent();
+    const specialistAgent = seedAgent();
+    const participants = new ConversationParticipantService(ctx.db);
+    const now = new Date().toISOString();
+    const convId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: convId, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId: primaryAgent, appId,
+      channelChatId: '42', title: 'Maria', createdAt: now, updatedAt: now,
+    }).run();
+
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, participants }) }]);
+
+    // GET seeds + returns the primary.
+    const listRes = await routed.request(`/v1/apps/${appId}/conversations/${convId}/participants`, { headers: ctx.authHeaders });
+    expect(listRes.status).toBe(200);
+    const seeded = (await listRes.json() as { data: Array<{ role: string; participantId: string | null }> }).data;
+    expect(seeded).toHaveLength(1);
+    expect(seeded[0]?.role).toBe('primary');
+    expect(seeded[0]?.participantId).toBe(primaryAgent);
+
+    // POST adds a specialist.
+    const addRes = await routed.request(`/v1/apps/${appId}/conversations/${convId}/participants`, {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({ participantType: 'agent', participantId: specialistAgent, role: 'specialist' }),
+    });
+    expect(addRes.status).toBe(200);
+    const added = await addRes.json() as { data: { id: string; participants: Array<{ role: string }> } };
+    expect(added.data.participants.map((p) => p.role).sort()).toEqual(['primary', 'specialist']);
+
+    // DELETE deactivates the specialist (hands back to the primary).
+    const delRes = await routed.request(`/v1/apps/${appId}/conversations/${convId}/participants/${added.data.id}`, {
+      method: 'DELETE', headers: ctx.authHeaders,
+    });
+    expect(delRes.status).toBe(200);
+    expect(participants.list(convId, { activeOnly: true }).map((p) => p.role)).toEqual(['primary']);
+  });
+
+  it('refuses to read a conversation that belongs to a different App', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'A' }).id;
+    const otherAppId = store.create(ctx.workspace.id, ctx.user.id, { name: 'B' }).id;
+    const agentId = seedAgent();
+    const now = new Date().toISOString();
+    const convId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: convId, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId, appId: otherAppId,
+      channelChatId: '7', createdAt: now, updatedAt: now,
+    }).run();
+
+    const res = await app().request(`/v1/apps/${appId}/conversations/${convId}/messages`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('/v1/apps learning loop (Phase M2)', () => {
+  it('records an outcome → deposits a graded lesson → surfaces it via /learnings', async () => {
+    const store = new AppStore(ctx.db);
+    const agentId = seedAgentRow();
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales', ownerAgentId: agentId }).id;
+    const contacts = new AppContactService(ctx.db);
+    const contactId = contacts.touch({ workspaceId: ctx.workspace.id, appId, channelKind: 'whatsapp', handle: '42', displayName: 'Maria' });
+    contacts.update(ctx.workspace.id, contactId, { stage: 'won', goal: 'reserve the unit' });
+
+    const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
+    const shared = new SharedIntelligenceService(ctx.db, ctx.bus, episodes, ctx.logger);
+    const learning = new AppLearningService({ db: ctx.db, shared, logger: ctx.logger });
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, contacts, learning }) }]);
+
+    const outcomeRes = await routed.request(`/v1/apps/${appId}/contacts/${contactId}/outcome`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ outcome: 'won', note: 'A same-day call closed it.' }),
+    });
+    expect(outcomeRes.status).toBe(200);
+    const outcomeBody = (await outcomeRes.json()) as { data: { recorded: boolean; lessonDeposited: boolean } };
+    expect(outcomeBody.data.recorded).toBe(true);
+    expect(outcomeBody.data.lessonDeposited).toBe(true);
+
+    const learnRes = await routed.request(`/v1/apps/${appId}/learnings`, { headers: ctx.authHeaders });
+    expect(learnRes.status).toBe(200);
+    const learnBody = (await learnRes.json()) as { data: { ownerAgentId: string | null; lessons: unknown[] } };
+    expect(learnBody.data.ownerAgentId).toBe(agentId);
+    expect(learnBody.data.lessons.length).toBeGreaterThanOrEqual(1);
+
+    // The contact is stamped with the terminal outcome.
+    expect(contacts.get(ctx.workspace.id, contactId)?.outcome).toBe('won');
+  });
+
+  it('rejects an invalid outcome value', async () => {
+    const store = new AppStore(ctx.db);
+    const agentId = seedAgentRow();
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme', ownerAgentId: agentId }).id;
+    const contacts = new AppContactService(ctx.db);
+    const contactId = contacts.touch({ workspaceId: ctx.workspace.id, appId, channelKind: 'whatsapp', handle: '7' });
+    const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
+    const shared = new SharedIntelligenceService(ctx.db, ctx.bus, episodes, ctx.logger);
+    const learning = new AppLearningService({ db: ctx.db, shared, logger: ctx.logger });
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, contacts, learning }) }]);
+
+    const res = await routed.request(`/v1/apps/${appId}/contacts/${contactId}/outcome`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ outcome: 'maybe' }),
+    });
+    expect(res.status).toBe(422);
+  });
+});
+
 describe('/v1/apps package install', () => {
   it('creates an App and its entry workflow in one transaction', async () => {
     const response = await app().request('/v1/apps', {
@@ -69,6 +288,27 @@ describe('/v1/apps package install', () => {
       .where(eq(schema.workflows.appId, body.data.id))
       .all();
     expect(workflows).toEqual([{ title: 'Store outreach workflow', appId: body.data.id }]);
+  });
+
+  it('instantiates the entry workflow from a starter template graph', async () => {
+    const graph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Webhook', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'webhook' } },
+        { id: 'output', type: 'return_output', title: 'Result', position: { x: 280, y: 0 }, config: { kind: 'return_output', renderAs: 'json' } },
+      ],
+      edges: [{ id: 'e1', source: 'trigger', target: 'output' }],
+    };
+    const response = await app().request('/v1/apps', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'Templated', createEntryWorkflow: true, entryWorkflowGraph: graph }),
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { data: { id: string } };
+    const wf = ctx.db.select({ graph: schema.workflows.graph }).from(schema.workflows).where(eq(schema.workflows.appId, body.data.id)).get();
+    expect((wf?.graph as { nodes: unknown[] }).nodes).toHaveLength(2);
   });
 
   it('promotes a bare workflow to one stable App-of-one', async () => {

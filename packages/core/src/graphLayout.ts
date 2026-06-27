@@ -32,8 +32,8 @@ export function computeLayeredLayout(
   edges: ReadonlyArray<{ source: string; target: string }>,
   opts: LayoutOptions = {},
 ): LayoutPositions {
-  const colGap = opts.colGap ?? 320;
-  const rowGap = opts.rowGap ?? 140;
+  const colGap = opts.colGap ?? 372;
+  const rowGap = opts.rowGap ?? 150;
   const originX = opts.originX ?? 0;
   const originY = opts.originY ?? 0;
 

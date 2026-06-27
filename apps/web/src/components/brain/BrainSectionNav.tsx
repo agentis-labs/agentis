@@ -1,4 +1,4 @@
-import { BookOpen, Network, Sparkles } from 'lucide-react';
+import { BookOpen, Brain, Network, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
 import type { ReactNode } from 'react';
 
@@ -7,7 +7,7 @@ export type BrainSection = 'map' | 'knowledge' | 'insights';
 const SECTIONS: Array<{ value: BrainSection; label: string; icon: ReactNode }> = [
   { value: 'map', label: 'Map', icon: <Network size={12} /> },
   { value: 'knowledge', label: 'Knowledge', icon: <BookOpen size={12} /> },
-  { value: 'insights', label: 'Insights', icon: <Sparkles size={12} /> },
+  { value: 'insights', label: 'Learning', icon: <Brain size={12} /> },
 ];
 
 export function BrainSectionNav({

@@ -35,6 +35,41 @@ export interface AppOperator {
   canCommand: boolean;
 }
 
+/** One seat in an App's cast (the Team strip — Phase R birth-staff). */
+export interface AppTeamMember {
+  agentId: string;
+  memberRole: 'operator' | 'worker' | string;
+  name: string;
+  functionalRole: string | null;
+  colorHex: string | null;
+  avatarGlyph: string | null;
+  status: string;
+  isOwner: boolean;
+}
+
+export interface AppTeam {
+  ownerAgentId: string | null;
+  members: AppTeamMember[];
+}
+
+/** A live App conversation (Phase 1 — the real channel thread, not a datastore row). */
+export interface AppConversation {
+  id: string;
+  title: string;
+  channel: string | null;
+  lastMessageAt: string | null;
+  unread: number;
+  /** 'human' when an operator has taken over the thread (Phase 2). */
+  handoffState: 'human' | null;
+}
+
+export interface AppConversationMessage {
+  id: string;
+  role: 'user' | 'agent' | 'system';
+  content: string;
+  at: string;
+}
+
 interface Wrapped<T> {
   data: T;
 }
@@ -65,6 +100,7 @@ export const appsApi = {
     entryWorkflowId?: string;
     createEntryWorkflow?: boolean;
     entryWorkflowTitle?: string;
+    entryWorkflowGraph?: Record<string, unknown>;
   }) =>
     api<Wrapped<AppRecord>>('/v1/apps', { method: 'POST', body: JSON.stringify(body) }).then((r) => r.data),
   promoteWorkflow: (workflowId: string) =>
@@ -88,9 +124,26 @@ export const appsApi = {
     api<Wrapped<AppSurface>>(`/v1/apps/${id}/surfaces`, { method: 'PUT', body: JSON.stringify(body) }).then((r) => r.data),
   generateSurface: (id: string, body: { prompt: string; surface?: string }) =>
     api<Wrapped<GeneratedSurface>>(`/v1/apps/${id}/surfaces/generate`, { method: 'POST', body: JSON.stringify(body) }).then((r) => r.data),
+  // Phase M3 — operator pin/dismiss of a performed AgentRegion.
+  performRegion: (id: string, surface: string, body: { region: string; pin?: boolean; clear?: boolean; reason?: string }) =>
+    api<Wrapped<AppSurface>>(`/v1/apps/${id}/surfaces/${encodeURIComponent(surface)}/perform-region`, {
+      method: 'POST', body: JSON.stringify(body),
+    }).then((r) => r.data),
 
   // Operator (the agentic core)
   operator: (id: string) => api<Wrapped<AppOperator | null>>(`/v1/apps/${id}/operator`).then((r) => r.data),
+  team: (id: string) => api<Wrapped<AppTeam>>(`/v1/apps/${id}/team`).then((r) => r.data),
+  conversations: (id: string) => api<Wrapped<AppConversation[]>>(`/v1/apps/${id}/conversations`).then((r) => r.data),
+  conversationMessages: (id: string, conversationId: string) =>
+    api<Wrapped<AppConversationMessage[]>>(`/v1/apps/${id}/conversations/${conversationId}/messages`).then((r) => r.data),
+  takeoverConversation: (id: string, conversationId: string, active: boolean) =>
+    api<Wrapped<{ conversationId: string; handoffState: 'human' | null }>>(`/v1/apps/${id}/conversations/${conversationId}/takeover`, {
+      method: 'POST', body: JSON.stringify({ active }),
+    }).then((r) => r.data),
+  sendToConversation: (id: string, conversationId: string, body: string) =>
+    api<Wrapped<{ conversationId: string; delivered: boolean }>>(`/v1/apps/${id}/conversations/${conversationId}/send`, {
+      method: 'POST', body: JSON.stringify({ body }),
+    }).then((r) => r.data),
   runOperatorCommand: (id: string, command: string) =>
     api<Wrapped<unknown>>(`/v1/apps/${id}/operator/command`, { method: 'POST', body: JSON.stringify({ command }) }).then((r) => r.data),
   exportApp: (id: string) => api<Wrapped<AppManifestEnvelope>>(`/v1/apps/${id}/export`).then((r) => r.data),

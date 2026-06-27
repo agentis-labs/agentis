@@ -806,7 +806,7 @@ export function AbilityDetailPage() {
         </div>
 
         <div className="flex items-center gap-1.5">
-          <Button variant="secondary" size="sm" iconLeft={<Download size={13} />} onClick={handleExport} className="h-8 py-0">
+          <Button variant="secondary" size="sm" iconLeft={<Upload size={13} />} onClick={handleExport} className="h-8 py-0">
             Export
           </Button>
           {isDirty && !isCompiling && (
@@ -1834,7 +1834,7 @@ export function AbilityDetailPage() {
                                   </div>
                                   <div className="min-w-0">
                                     <span className="text-[12.5px] font-semibold text-text-primary block truncate">{agent.name}</span>
-                                    <span className="text-[9.5px] text-text-muted font-bold uppercase tracking-wider block leading-none mt-0.5">{agent.role || 'worker'}</span>
+                                    <span className="text-[9.5px] text-text-muted font-bold uppercase tracking-wider block leading-none mt-0.5">{agent.role === 'worker' ? 'specialist' : agent.role || 'specialist'}</span>
                                   </div>
                                 </div>
 

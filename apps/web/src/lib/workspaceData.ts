@@ -138,6 +138,8 @@ export interface WorkspaceIssue {
   linkedWorkflowId?: string | null;
   activeRunId?: string | null;
   labels: string[];
+  scheduledFor?: string | null;
+  recurrenceCron?: string | null;
   updatedAt: string;
   createdAt: string;
 }
@@ -225,6 +227,7 @@ export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.ACTIVITY_CREATED,
   REALTIME_EVENTS.ISSUE_CREATED,
   REALTIME_EVENTS.ISSUE_UPDATED,
+  REALTIME_EVENTS.ISSUE_DELETED,
 ] as const;
 
 const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'WAITING', 'PAUSED', 'CREATED', 'running', 'waiting', 'paused', 'pending']);

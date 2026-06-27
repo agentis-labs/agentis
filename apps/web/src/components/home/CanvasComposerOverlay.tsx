@@ -102,10 +102,15 @@ export function CanvasComposerOverlay({
     <div
       data-canvas-control
       className={clsx(
-        'absolute left-1/2 top-5 z-40 w-[min(640px,calc(100%-32px))] -translate-x-1/2 transition-opacity duration-300',
+        'absolute left-1/2 bottom-6 z-40 w-[min(640px,calc(100%-32px))] -translate-x-1/2 transition-opacity duration-300',
         dimmed ? 'opacity-30' : 'opacity-100',
       )}
     >
+      {inlineReply && (
+        <div className="mb-2 rounded-[14px] border border-line/60 bg-surface/88 px-3 py-2 text-[12px] text-text-secondary shadow-card animate-in fade-in slide-in-from-bottom-2 duration-200">
+          {inlineReply}
+        </div>
+      )}
       <div className="flex min-h-[52px] items-center gap-2 rounded-[18px] border border-line/50 bg-[rgba(10,12,16,0.86)] px-2.5 shadow-[0_18px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl transition-colors duration-200 focus-within:border-line-strong focus-within:bg-[rgba(10,12,16,0.96)]">
         <div className="relative shrink-0">
           <button
@@ -124,7 +129,7 @@ export function CanvasComposerOverlay({
             <ChevronDown size={12} className="text-text-muted" />
           </button>
           {pickerOpen && recipients.length > 0 && (
-            <div className="absolute left-0 top-full z-50 mt-2 max-h-56 w-64 overflow-y-auto rounded-[14px] border border-line/80 bg-surface shadow-dropdown">
+            <div className="absolute left-0 bottom-full z-50 mb-2 max-h-56 w-64 overflow-y-auto rounded-[14px] border border-line/80 bg-surface shadow-dropdown animate-in fade-in slide-in-from-bottom-2 duration-200">
               {recipients.map((entry) => (
                 <button
                   key={entry.id}
@@ -171,11 +176,6 @@ export function CanvasComposerOverlay({
           <Send size={15} />
         </button>
       </div>
-      {inlineReply && (
-        <div className="mt-2 rounded-[14px] border border-line/60 bg-surface/88 px-3 py-2 text-[12px] text-text-secondary shadow-card">
-          {inlineReply}
-        </div>
-      )}
     </div>
   );
 }

@@ -8,7 +8,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { CollectionInfo } from '@agentis/core';
-import { generateSurfaceView } from '../../src/services/surfaceGenerator.js';
+import { generateSurfaceView, generateSurfacePatch } from '../../src/services/surfaceGenerator.js';
+import type { ViewNode } from '@agentis/core';
 import type { StructuredCompleter } from '../../src/services/structuredCompleter.js';
 
 const tasks: CollectionInfo = {
@@ -76,5 +77,41 @@ describe('generateSurfaceView', () => {
       completer: completer(null),
     });
     expect(result.source).toBe('fallback');
+  });
+});
+
+describe('generateSurfacePatch (Phase 4 — NL → SurfacePatch)', () => {
+  const current: ViewNode = {
+    type: 'Stack',
+    children: [
+      { type: 'Heading', value: 'Deals' },
+      { type: 'Table', bind: { collection: 'tasks' }, columns: [{ key: 'title' }] },
+    ],
+  };
+
+  it('turns an instruction into the SurfacePatch ops the model returns', async () => {
+    const ops = [{ op: 'set', path: 'children/1/bind/query', value: { amount: { gt: 20000 } } }];
+    const result = await generateSurfacePatch({
+      instruction: 'show only deals over $20k',
+      current,
+      collections: [tasks],
+      workspaceId: 'ws-1',
+      completer: completer({ ops }),
+    });
+    expect(result.source).toBe('model');
+    expect(result.ops).toEqual(ops);
+  });
+
+  it('is a safe no-op when no design model is configured', async () => {
+    const result = await generateSurfacePatch({ instruction: 'do a thing', current, collections: [tasks], workspaceId: 'ws-1' });
+    expect(result.source).toBe('none');
+    expect(result.ops).toEqual([]);
+  });
+
+  it('no-ops when the model returns invalid or empty ops (keeps the surface untouched)', async () => {
+    const bad = await generateSurfacePatch({ instruction: 'x', current, collections: [tasks], workspaceId: 'ws-1', completer: completer({ ops: [{ op: 'nope' }] }) });
+    expect(bad.ops).toEqual([]);
+    const empty = await generateSurfacePatch({ instruction: 'x', current, collections: [tasks], workspaceId: 'ws-1', completer: completer({ ops: [] }) });
+    expect(empty.source).toBe('none');
   });
 });

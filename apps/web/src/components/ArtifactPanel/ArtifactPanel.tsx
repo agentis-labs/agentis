@@ -6,11 +6,13 @@
  * by artifact.type. Sandboxed iframe for HTML; native img for image; pre
  * for code/data; plain prose for document.
  */
-import { useEffect, useState } from 'react';
-import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, PanelRightClose, PanelRightOpen, Plus, Minus } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
+import { useChatPanelStore } from '../chat/ChatPanelStore';
 import { safeResourceUrl } from '../workflows/OutputViewers';
 import type { Artifact, PanelState } from './types';
 
@@ -54,41 +56,61 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
   if (state === 'closed') return null;
 
   function downloadArtifact() {
-    const blob = new Blob([artifact.content], {
-      type: artifact.type === 'html' ? 'text/html' : 'text/plain',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${artifact.title || artifact.id}.${extFor(artifact)}`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadArtifactFile(artifact);
   }
 
+  // Branded native share — sends the actual asset file (so the recipient gets the
+  // real screenshot/doc, not just a link) with a "made with Agentis" caption.
+  // Desktop browsers without Web Share fall back to copying a branded link.
   async function shareArtifact() {
-    const url = `${window.location.origin}/artifacts?open=${encodeURIComponent(artifact.id)}`;
+    const shareUrl = `${window.location.origin}/artifacts?open=${encodeURIComponent(artifact.id)}`;
+    const caption = `${artifact.title} — made with Agentis ✨`;
+    const nav = navigator as Navigator & {
+      canShare?: (data?: ShareData) => boolean;
+      share?: (data: ShareData) => Promise<void>;
+    };
     try {
-      await navigator.clipboard.writeText(url);
-      toast.success('Artifact link copied');
+      const file = artifactToFile(artifact);
+      if (file && nav.canShare?.({ files: [file] })) {
+        await nav.share!({ files: [file], title: artifact.title, text: caption });
+        return;
+      }
+      if (nav.share) {
+        await nav.share({ title: artifact.title, text: caption, url: shareUrl });
+        return;
+      }
+    } catch (err) {
+      // User-cancelled share is an AbortError — stay silent.
+      if ((err as Error)?.name === 'AbortError') return;
+    }
+    try {
+      await navigator.clipboard.writeText(`${caption}\n${shareUrl}`);
+      toast.success('Share link copied');
     } catch {
-      toast.error('Could not copy link');
+      toast.error('Could not share');
     }
   }
 
+  // Open chat with a semi-ready, type-aware prompt the user can refine before
+  // sending (the agent can pull the asset via agentis.assets.read using its ref).
   function iterateArtifact() {
-    window.dispatchEvent(new CustomEvent('agentis:room-general-message', {
-      detail: { message: `Iterate on artifact "${artifact.title}" (${artifact.id}).` },
-    }));
-    toast.success('Iteration request sent to chat');
+    useChatPanelStore.getState().openChat({
+      state: 'docked',
+      launchContext: { initialDraft: buildIterateDraft(artifact), autoSendInitialDraft: false },
+      returnPath: `${window.location.pathname}${window.location.search}`,
+    });
+    onClose();
   }
 
-  return (
+  const panel = (
     <div
       className={clsx(
-        'fixed z-40 flex flex-col rounded-lg border border-line bg-surface-1 shadow-2xl',
-        state === 'fullscreen' && 'inset-4',
-        state === 'docked' && 'right-4 top-4 bottom-4 w-[640px] max-w-[calc(100vw-2rem)]',
-        state === 'floating' && 'right-6 bottom-6 w-[480px] h-[360px]',
+        'fixed flex flex-col rounded-lg border border-line bg-surface shadow-2xl',
+        // §8.2 — fullscreen sits above the Shell chrome (top bar/sidebar) on its
+        // own backdrop; docked/floating stay below modals.
+        state === 'fullscreen' && 'inset-4 z-[81]',
+        state === 'docked' && 'right-4 top-4 bottom-4 z-40 w-[640px] max-w-[calc(100vw-2rem)]',
+        state === 'floating' && 'right-6 bottom-6 z-40 w-[480px] h-[360px]',
       )}
       role="dialog"
       aria-label={artifact.title}
@@ -166,10 +188,23 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
           </button>
         </div>
       </header>
-      <div className="flex-1 overflow-auto bg-surface-1">
+      <div className="flex-1 overflow-auto bg-surface">
         <ArtifactRenderer artifact={artifact} />
       </div>
     </div>
+  );
+
+  // Render through a portal so the panel escapes any transformed/stacked parent
+  // (the Shell grid, canvas, app surfaces). Fullscreen gets an opaque backdrop so
+  // the page behind never bleeds through (the prior "transparent on maximize" bug).
+  return createPortal(
+    <>
+      {state === 'fullscreen' && (
+        <div className="fixed inset-0 z-[80] bg-canvas/90 backdrop-blur-sm" onClick={onClose} aria-hidden />
+      )}
+      {panel}
+    </>,
+    document.body,
   );
 }
 
@@ -187,15 +222,7 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
     case 'image': {
       const safeSrc = safeResourceUrl(artifact.content, ['data:image/']);
       if (!safeSrc) return <div className="p-6 text-sm text-danger">Blocked unsafe image URL.</div>;
-      return (
-        <div className="flex h-full items-center justify-center p-4">
-          <img
-            src={safeSrc}
-            alt={artifact.title}
-            className="max-h-full max-w-full object-contain"
-          />
-        </div>
-      );
+      return <ZoomableImage src={safeSrc} alt={artifact.title} />;
     }
     case 'code':
       return (
@@ -205,6 +232,39 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
       );
     case 'data':
       return <DataView content={artifact.content} />;
+    case 'pdf': {
+      const safeSrc = safeResourceUrl(artifact.content, ['data:application/pdf']);
+      if (!safeSrc) return <DownloadFallback artifact={artifact} note="Preview unavailable for this PDF source." />;
+      return <iframe title={artifact.title} src={safeSrc} className="h-full w-full border-0" />;
+    }
+    case 'audio': {
+      const safeSrc = safeResourceUrl(artifact.content, ['data:audio/']);
+      if (!safeSrc) return <DownloadFallback artifact={artifact} note="Blocked unsafe audio source." />;
+      return (
+        <div className="flex h-full items-center justify-center p-6">
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <audio src={safeSrc} controls className="w-full max-w-xl" />
+        </div>
+      );
+    }
+    case 'video': {
+      const safeSrc = safeResourceUrl(artifact.content, ['data:video/']);
+      if (!safeSrc) return <DownloadFallback artifact={artifact} note="Blocked unsafe video source." />;
+      return (
+        <div className="flex h-full items-center justify-center p-4">
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <video src={safeSrc} controls className="max-h-full max-w-full" />
+        </div>
+      );
+    }
+    case 'spreadsheet':
+      // Inline CSV/TSV text renders as a table; binary sheets (xlsx) download.
+      if (artifact.content.startsWith('data:')) {
+        return <DownloadFallback artifact={artifact} note="Spreadsheet file — download to open." />;
+      }
+      return <DataView content={artifact.content} />;
+    case 'archive':
+      return <DownloadFallback artifact={artifact} note="Archive — download to extract its contents." />;
     case 'document':
     default:
       return (
@@ -215,6 +275,136 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
         </div>
       );
   }
+}
+
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 8;
+
+/**
+ * Pan + zoom image viewer. Scroll to zoom toward the cursor, drag to pan when
+ * zoomed in, double-click to toggle. A bottom-left toolbar mirrors the Brain
+ * canvas controls (+/−/fit). Zooming reveals the screenshot's native pixels, so a
+ * page that's unreadable when fit-to-window becomes legible.
+ */
+function ZoomableImage({ src, alt }: { src: string; alt: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const drag = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+
+  const reset = useCallback(() => {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  }, []);
+
+  // Zoom around a focal point (relative to the container center) so the pixel
+  // under the cursor stays put.
+  const zoomTo = useCallback((nextScaleRaw: number, focal?: { x: number; y: number }) => {
+    setScale((prev) => {
+      const next = Math.min(Math.max(nextScaleRaw, MIN_ZOOM), MAX_ZOOM);
+      if (next === prev) return prev;
+      const ratio = next / prev;
+      const fx = focal?.x ?? 0;
+      const fy = focal?.y ?? 0;
+      setOffset((o) =>
+        next === MIN_ZOOM
+          ? { x: 0, y: 0 }
+          : { x: fx - ratio * (fx - o.x), y: fy - ratio * (fy - o.y) },
+      );
+      return next;
+    });
+  }, []);
+
+  // Native non-passive wheel listener so we can preventDefault the page scroll.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const focal = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 };
+      setScale((prev) => {
+        const next = Math.min(Math.max(prev * (e.deltaY < 0 ? 1.15 : 1 / 1.15), MIN_ZOOM), MAX_ZOOM);
+        if (next === prev) return prev;
+        const ratio = next / prev;
+        setOffset((o) =>
+          next === MIN_ZOOM ? { x: 0, y: 0 } : { x: focal.x - ratio * (focal.x - o.x), y: focal.y - ratio * (focal.y - o.y) },
+        );
+        return next;
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  function onPointerDown(e: React.PointerEvent) {
+    if (scale <= MIN_ZOOM) return;
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    drag.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
+  }
+  function onPointerMove(e: React.PointerEvent) {
+    if (!drag.current) return;
+    setOffset({ x: drag.current.ox + (e.clientX - drag.current.x), y: drag.current.oy + (e.clientY - drag.current.y) });
+  }
+  function onPointerUp() {
+    drag.current = null;
+  }
+
+  const zoomed = scale > MIN_ZOOM;
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative h-full w-full select-none overflow-hidden bg-canvas"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerLeave={onPointerUp}
+      onDoubleClick={(e) => {
+        if (zoomed) return reset();
+        const rect = containerRef.current?.getBoundingClientRect();
+        const focal = rect ? { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 } : undefined;
+        zoomTo(2.5, focal);
+      }}
+      style={{ cursor: zoomed ? (drag.current ? 'grabbing' : 'grab') : 'zoom-in' }}
+    >
+      <div className="flex h-full w-full items-center justify-center p-4">
+        <img
+          src={src}
+          alt={alt}
+          draggable={false}
+          className="max-h-full max-w-full object-contain"
+          style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`, transition: drag.current ? 'none' : 'transform 80ms ease-out' }}
+        />
+      </div>
+
+      <div className="absolute bottom-3 left-3 z-10 flex flex-col gap-1">
+        <ZoomButton label="Zoom in" onClick={() => zoomTo(scale * 1.35)}><Plus size={14} /></ZoomButton>
+        <ZoomButton label="Zoom out" onClick={() => zoomTo(scale / 1.35)}><Minus size={14} /></ZoomButton>
+        <ZoomButton label="Reset zoom" onClick={reset}><Maximize2 size={13} /></ZoomButton>
+      </div>
+
+      {zoomed && (
+        <div className="pointer-events-none absolute bottom-3 right-3 z-10 rounded-md border border-line bg-surface-2/90 px-2 py-1 text-[10px] tabular-nums text-text-muted backdrop-blur">
+          {Math.round(scale * 100)}%
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ZoomButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="flex h-8 w-8 items-center justify-center rounded-btn border border-line bg-surface-2/90 text-text-secondary shadow-card backdrop-blur transition-colors hover:bg-surface hover:text-text-primary"
+    >
+      {children}
+    </button>
+  );
 }
 
 function DataView({ content }: { content: string }) {
@@ -268,10 +458,107 @@ function formatCell(v: unknown): string {
   return String(v);
 }
 
-function extFor(a: Artifact): string {
+/** Centered icon + download CTA for binary/unpreviewable assets (archives, xlsx, …). */
+function DownloadFallback({ artifact, note }: { artifact: Artifact; note: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full border border-line bg-surface-2 text-text-muted">
+        <Download size={20} />
+      </div>
+      <div className="text-[12px] text-text-muted">{note}</div>
+      <button
+        type="button"
+        onClick={() => downloadArtifactFile(artifact)}
+        className="inline-flex h-8 items-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-medium text-canvas hover:bg-accent-hover"
+      >
+        <Download size={13} />
+        Download {artifact.title || 'file'}
+      </button>
+    </div>
+  );
+}
+
+/** Decode a `data:<mime>;base64,<…>` (or plain) URL into a typed Blob. Returns the
+ * Blob — never the raw data URL — so downloads/shares produce valid, openable files
+ * (Chrome truncates large `data:` hrefs, which yielded corrupt downloads). */
+function dataUrlToBlob(dataUrl: string): { blob: Blob; mime: string } | null {
+  const m = /^data:([^;,]*)(;base64)?,([\s\S]*)$/.exec(dataUrl);
+  if (!m) return null;
+  const mime = m[1] || 'application/octet-stream';
+  const payload = m[3] ?? '';
+  if (m[2]) {
+    const bin = atob(payload);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    return { blob: new Blob([bytes], { type: mime }), mime };
+  }
+  return { blob: new Blob([decodeURIComponent(payload)], { type: mime }), mime };
+}
+
+/** Materialize an artifact as a File (for downloads + Web Share). */
+function artifactToFile(artifact: Artifact): File | null {
+  try {
+    if (artifact.content.startsWith('data:')) {
+      const decoded = dataUrlToBlob(artifact.content);
+      if (!decoded) return null;
+      return new File([decoded.blob], downloadName(artifact, decoded.mime), { type: decoded.mime });
+    }
+    const mime = artifact.type === 'html' ? 'text/html' : 'text/plain';
+    return new File([artifact.content], downloadName(artifact), { type: mime });
+  } catch {
+    return null;
+  }
+}
+
+function downloadName(artifact: Artifact, mime?: string): string {
+  return `${(artifact.title || artifact.id).replace(/[\\/:*?"<>|]+/g, '_')}.${extFor(artifact, mime)}`;
+}
+
+/** Download an artifact as a real file (data URLs are decoded to a Blob first). */
+function downloadArtifactFile(artifact: Artifact) {
+  const file = artifactToFile(artifact);
+  const a = document.createElement('a');
+  if (file) {
+    const url = URL.createObjectURL(file);
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    return;
+  }
+  // Last-resort fallback.
+  a.href = artifact.content;
+  a.download = downloadName(artifact);
+  a.click();
+}
+
+const MIME_EXT: Record<string, string> = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg',
+  'application/pdf': 'pdf', 'text/html': 'html', 'text/csv': 'csv', 'application/json': 'json',
+  'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg',
+  'video/mp4': 'mp4', 'video/webm': 'webm',
+  'application/zip': 'zip', 'application/gzip': 'gz',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+};
+
+/** A semi-ready chat prompt for iterating on an asset. The agent can load the
+ * asset itself via agentis.assets.read using the `artifact:<id>` ref. */
+function buildIterateDraft(a: Artifact): string {
+  return `Iterate on the asset "${a.title}" (artifact:${a.id}). `;
+}
+
+function extFor(a: Artifact, mime?: string): string {
+  if (mime && MIME_EXT[mime]) return MIME_EXT[mime];
   switch (a.type) {
     case 'html': return 'html';
     case 'image': return 'png';
+    case 'pdf': return 'pdf';
+    case 'spreadsheet': return a.content.startsWith('data:') ? 'xlsx' : 'csv';
+    case 'audio': return 'mp3';
+    case 'video': return 'mp4';
+    case 'archive': return 'zip';
     case 'code': return 'txt';
     case 'data': return 'json';
     default: return 'txt';

@@ -24,6 +24,10 @@ export type WorkflowNodeType =
   | 'transform'
   | 'filter'
   | 'integration'
+  | 'mcp'
+  | 'data_query'
+  | 'data_mutate'
+  | 'aggregate_window'
   | 'http_request'
   | 'workflow_store'
   | 'workspace_store'
@@ -83,6 +87,27 @@ export interface WorkflowGraph {
   outputContract?: WorkflowContract;
   /** Named phase groups for large graphs. */
   phases?: WorkflowPhase[];
+}
+
+/**
+ * Versioned, portable Workflow-as-Code document.
+ *
+ * This is separate from the persisted workflow row: IDs, workspace ownership,
+ * run history, and deployment settings must not travel with a workflow. The
+ * document is the stable unit for source control and Agentis Hub.
+ */
+export const WORKFLOW_FILE_API_VERSION = 'agentis/workflow/v1' as const;
+
+export interface WorkflowFile {
+  apiVersion: typeof WORKFLOW_FILE_API_VERSION;
+  kind: 'Workflow';
+  metadata: {
+    name: string;
+    description?: string | null;
+  };
+  spec: {
+    graph: WorkflowGraph;
+  };
 }
 
 /**
@@ -215,12 +240,17 @@ export type WorkflowNodeConfig = (
   | TransformNodeConfig
   | FilterNodeConfig
   | IntegrationNodeConfig
+  | McpNodeConfig
+  | DataQueryNodeConfig
+  | DataMutateNodeConfig
+  | AggregateWindowNodeConfig
   | HttpRequestNodeConfig
   | WorkflowStoreNodeConfig
   | WorkspaceStoreNodeConfig
   | EvaluatorNodeConfig
   | GuardrailsNodeConfig
   | LoopNodeConfig
+  | ConvergeNodeConfig
   | ParallelNodeConfig
   | ReturnOutputNodeConfig
   | ArtifactSaveNodeConfig
@@ -633,6 +663,85 @@ export interface IntegrationNodeConfig {
   credentialId?: string;
 }
 
+/**
+ * Call a tool on a registered MCP server (masterplan 2.3). The workspace's MCP
+ * servers (`mcp:servers`) become callable from a workflow — the same bridge that
+ * exposes them to agents. `toolId` is the server-prefixed bridged tool id.
+ */
+export interface McpNodeConfig {
+  kind: 'mcp';
+  toolId: string;
+  /** Argument values (may contain `{{variable}}` templates). */
+  arguments?: Record<string, unknown>;
+  /** Key under which the tool result is stored. Defaults to `content`. */
+  outputKey?: string;
+}
+
+/**
+ * Read or aggregate an Agentic App datastore collection from a workflow
+ * (masterplan 4.x). `mode: 'query'` returns rows (filter/sort/limit/cursor);
+ * `mode: 'aggregate'` returns count/sum/avg/min/max with optional group-by.
+ */
+export interface DataQueryNodeConfig {
+  kind: 'data_query';
+  appId: string;
+  collection: string;
+  mode?: 'query' | 'aggregate';
+  /** query: filter / sort / pagination. */
+  filter?: Record<string, unknown>;
+  sort?: Array<{ field: string; dir: 'asc' | 'desc' }>;
+  limit?: number;
+  cursor?: string;
+  /** aggregate: op (+ field for sum/avg/min/max) and optional groupBy. */
+  op?: 'count' | 'sum' | 'avg' | 'min' | 'max';
+  field?: string;
+  groupBy?: string;
+  /**
+   * Pagination (masterplan 1.7): when true the node follows the keyset cursor
+   * internally and returns EVERY matching row (up to `maxRows`), so a workflow
+   * doesn't have to loop pages itself. Only applies to `mode: 'query'`.
+   */
+  paginate?: boolean;
+  /** Hard cap on rows when `paginate` is set (default 1000, max 10000). */
+  maxRows?: number;
+  /** Key under which the result is stored. Defaults to `rows`/`buckets`. */
+  outputKey?: string;
+}
+
+/** Write to an Agentic App datastore collection from a workflow (insert/update/upsert/delete). */
+export interface DataMutateNodeConfig {
+  kind: 'data_mutate';
+  appId: string;
+  collection: string;
+  operation: 'insert' | 'update' | 'upsert' | 'delete';
+  /** Record body for insert/update/upsert (may contain `{{variable}}` templates). */
+  record?: Record<string, unknown>;
+  /** Target record id for update/delete. */
+  recordId?: string;
+  /** Match filter for upsert. */
+  match?: Record<string, unknown>;
+  outputKey?: string;
+}
+
+/**
+ * Batch events across runs (masterplan 1.7). Each run appends its input to a
+ * persistent buffer; downstream only fires once the window CLOSES — when the
+ * buffered count hits `maxCount` or `windowMs` has elapsed since the first item.
+ * Until then the node "holds" (completes without firing downstream), so a
+ * high-frequency trigger collapses into periodic batches (digests, lead batching).
+ */
+export interface AggregateWindowNodeConfig {
+  kind: 'aggregate_window';
+  /** Separate buffers per key (e.g. per customer). Defaults to one shared buffer. */
+  key?: string;
+  /** Flush when the buffer reaches this many items. */
+  maxCount?: number;
+  /** Flush when this long has elapsed since the first buffered item. */
+  windowMs?: number;
+  /** Key under which the flushed batch array is emitted. Defaults to `items`. */
+  outputKey?: string;
+}
+
 /** Raw outbound HTTP for cases without a named connector. */
 export interface HttpRequestNodeConfig {
   kind: 'http_request';
@@ -770,6 +879,65 @@ export interface ParallelNodeConfig {
   waitFor: 'all' | 'first';
   onBranchError: 'fail_all' | 'continue_with_results';
   mergeStrategy: 'merge_keys' | 'collect_all' | 'first_non_null';
+}
+
+// ────────────────────────────────────────────────────────────
+// Convergence loop — iterate a cohort until a goal is met
+// (AGENT-COOPERATION-10X §Pillar 1). The general agentic loop primitive:
+// stateful across iterations (via the blackboard), runs a whole sub-graph as
+// the body (not one node), governed by a pluggable continuation policy, and
+// protected by a hard iteration ceiling + budget + stall detection.
+// ────────────────────────────────────────────────────────────
+
+/** How a convergence loop decides whether to run another iteration. */
+export type ConvergeContinuation =
+  | {
+      /** Deterministic predicate over the body output. Loop CONTINUES while true. */
+      type: 'deterministic';
+      /** Safe condition, e.g. `body.openBugCount > 0`. `{{ }}` wrappers are stripped. */
+      expr: string;
+    }
+  | {
+      /** LLM judge against criteria. Loop CONTINUES while the verdict FAILS. */
+      type: 'judge';
+      /** Dot path into the body output to evaluate. */
+      targetPath: string;
+      criteria: string;
+      /** Minimum score (0–10) that counts as converged. Default 7. */
+      passThreshold?: number;
+      rubric?: Array<{ dimension: string; weight: number }>;
+    }
+  | {
+      /** Agents declare convergence by posting a done-signal to the blackboard. */
+      type: 'signal';
+      /** Blackboard channel the done-signal is read from. Default 'converge'. */
+      channel?: string;
+    };
+
+export interface ConvergeNodeConfig {
+  kind: 'converge';
+  /** The cohort sub-graph, invoked once per iteration via SubflowExecutor. */
+  bodyWorkflowId: string;
+  /** When to keep iterating. */
+  continuation: ConvergeContinuation;
+  /** Hard ceiling on iterations (safety net). Default 8. */
+  maxIterations?: number;
+  /** Circuit breaker — abort the loop when any limit is crossed. */
+  budget?: { usd?: number; ms?: number; tokens?: number };
+  /** Early-stop when iterations stop making progress (the efficiency guard). */
+  stallPolicy?: {
+    /** Consecutive no-change iterations that trigger a stall stop. Default 2. */
+    window?: number;
+    on?: 'no_progress' | 'oscillation';
+  };
+  /** Blackboard namespace carried across iterations. Defaults to the node id. */
+  stateKey?: string;
+  /** How iteration N sees N-1's output. Default 'accumulate'. */
+  carryStrategy?: 'accumulate' | 'replace' | 'diff';
+  /** Filesystem isolation for the cohort (AGENT-COOPERATION-10X §Pillar 3). Default 'auto'. */
+  isolation?: 'auto' | 'shared' | 'worktree' | 'tempdir';
+  /** What to do with the isolated worktree when the loop settles. Default 'discard'. */
+  preserve?: 'discard' | 'branch' | 'pr';
 }
 
 // ────────────────────────────────────────────────────────────
@@ -1194,6 +1362,7 @@ export interface ActiveExecution {
     | 'integration'
     | 'evaluator'
     | 'loop'
+    | 'converge'
     | 'browser'
     | 'session';
   executorRef: string;

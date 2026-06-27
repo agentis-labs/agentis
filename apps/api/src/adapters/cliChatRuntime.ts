@@ -7,10 +7,12 @@
  *   - spawn the binary with an abortable signal and piped stdio,
  *   - read NDJSON from stdout, line by line, and route each event to the right
  *     channel (answer text, live thinking, live activity, tool calls),
- *   - keep an IDLE-based watchdog (reset on every chunk) plus an absolute ceiling
- *     so an actively-streaming turn is never killed but a stuck one still ends,
- *   - on a stall, surface whatever was produced as a *paused* answer instead of
- *     discarding the work as a hard failure,
+ *   - keep the turn ALIVE for as long as the agent works: a quiet stretch emits a
+ *     "still working" heartbeat (never a kill); only operator cancel, process
+ *     exit, or a long SILENCE ceiling (no output at all, reset by any real output)
+ *     can stop it — so a capable agent finishes a big task no matter how long,
+ *   - on that silence ceiling, surface whatever was produced as a *paused* answer
+ *     instead of discarding the work as a hard failure,
  *   - extract Agentis tool-call markers from the final text, and
  *   - end the turn with exactly one terminal `done` delta.
  *
@@ -35,16 +37,42 @@ import { runtimeProgressActivity } from './runtimeProgress.js';
 /** Default safety cap for one chat turn when no explicit timeout is configured. */
 export const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
 
-/** Absolute ceiling for one chat turn, independent of the idle budget. */
-const DEFAULT_CHAT_HARD_CEILING_MS = 600_000;
+/**
+ * SILENCE ceiling (ms): the only automatic time-stop. A turn is reaped solely
+ * when the harness produces NO output (stdout AND stderr) for this long —
+ * continuously, since any real output resets it. Generous on purpose: a capable
+ * agent at high reasoning effort can think silently for minutes on a big task and
+ * must be allowed to finish. This bounds only a genuinely stuck/dead process.
+ * Overridable per-adapter via env; set <= 0 to disable entirely (unlimited).
+ */
+const DEFAULT_CHAT_HARD_CEILING_MS = 1_800_000;
+
+/** How often a quiet-but-alive turn emits a "still working" heartbeat to the UI. */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+
+/** Human-friendly elapsed string, e.g. "45s", "4m 12s", "1h 3m". */
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
 
 /**
- * Clamp an operator-supplied idle budget into a sane range: at least 1s, at most
- * the default turn cap. Shared so every CLI adapter treats `timeoutMs` the same.
+ * Clamp an idle budget into a sane range. The floor is 1s; the ceiling is the
+ * HARD ceiling, not the 180s default — so a caller that deliberately asks for a
+ * longer idle window (e.g. the chat loop hands a CLI harness its 240s round
+ * budget, because a harness re-spawns and is silent on stdout while its remote
+ * model thinks) actually gets it, instead of being quietly cut to 180s. The hard
+ * ceiling still bounds the whole turn. Only a non-finite input falls back to the
+ * 180s default. Shared so every CLI adapter treats `timeoutMs` the same.
  */
 export function clampChatTimeout(timeoutMs: number): number {
   if (!Number.isFinite(timeoutMs)) return DEFAULT_CHAT_TURN_TIMEOUT_MS;
-  return Math.max(1_000, Math.min(Math.floor(timeoutMs), DEFAULT_CHAT_TURN_TIMEOUT_MS));
+  return Math.max(1_000, Math.min(Math.floor(timeoutMs), DEFAULT_CHAT_HARD_CEILING_MS));
 }
 
 /**
@@ -144,38 +172,65 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     return;
   }
 
-  // A single interactive turn must be bounded even when no timeout is configured,
-  // or a CLI that wanders off can hang the conversation forever (no spinner end).
-  const idleTimeoutMs = cfg.idleTimeoutMs;
-  const hardCeilingMs = Math.max(cfg.hardCeilingMs, idleTimeoutMs);
-  let timeout: NodeJS.Timeout | undefined;
+  // LIVENESS model, NOT a time guillotine. A capable agent (e.g. Codex at high
+  // reasoning effort) can think silently for minutes on a large task — killing it
+  // mid-work is the bug we refuse to ship. So a quiet stretch no longer KILLS: it
+  // emits a "still working" heartbeat (keeping the UI alive and the operator able
+  // to Stop) and keeps waiting. The ONLY automatic stops are operator cancel, the
+  // process exiting, and an absolute SILENCE ceiling — total quiet (no stdout AND
+  // no stderr) for `hardCeilingMs`, the genuine "stuck process" signal. Real
+  // output resets the silence ceiling; self-emitted heartbeats do not. Set
+  // `hardCeilingMs <= 0` to disable the ceiling entirely (unlimited).
+  const turnStartedAt = Date.now();
+  const hardCeilingMs = cfg.hardCeilingMs;
+  const heartbeatMs = Math.max(5_000, Math.min(cfg.idleTimeoutMs, HEARTBEAT_INTERVAL_MS));
+  let heartbeatTimer: NodeJS.Timeout | undefined;
+  let silenceTimer: NodeJS.Timeout | undefined;
   let timedOut = false;
-  let hitHardCeiling = false;
   let terminalHandled = false;
-  const hardTimer = setTimeout(() => {
-    hitHardCeiling = true;
-    timedOut = true;
-    controller.abort();
-  }, hardCeilingMs);
-  hardTimer.unref?.();
-  const armIdle = () => {
-    if (timeout) clearTimeout(timeout);
-    timeout = setTimeout(() => {
+  const armHeartbeat = () => {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(() => {
+      const elapsed = Date.now() - turnStartedAt;
+      queue.push(runtimeProgressActivity({
+        id: `${cfg.logTag}-heartbeat`,
+        runtimeName: cfg.displayName,
+        text: `${cfg.displayName} is working — ${formatElapsed(elapsed)} elapsed`,
+      }));
+      armHeartbeat(); // keep beating; a heartbeat is NOT real output, so silence keeps counting
+    }, heartbeatMs);
+    heartbeatTimer.unref?.();
+  };
+  const armSilenceCeiling = () => {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    if (hardCeilingMs <= 0) return; // unlimited — operator cancel / process exit only
+    silenceTimer = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, idleTimeoutMs);
-    timeout.unref?.();
+    }, hardCeilingMs);
+    silenceTimer.unref?.();
+  };
+  // Real output (stdout/stderr) is the genuine liveness signal: it resets BOTH the
+  // heartbeat cadence and the silence ceiling. Heartbeats reset only themselves.
+  const markAlive = () => {
+    armHeartbeat();
+    armSilenceCeiling();
   };
   const clearTimers = () => {
-    if (timeout) clearTimeout(timeout);
-    clearTimeout(hardTimer);
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    if (silenceTimer) clearTimeout(silenceTimer);
   };
-  armIdle();
+  markAlive();
 
   let stderrText = '';
   child.stderr?.on('data', (data) => {
     const chunk = String(data);
     stderrText = `${stderrText}${chunk}`.slice(-1024);
+    // stderr output means the harness is ALIVE and working (a CLI agent prints its
+    // shell/tool output here — e.g. Codex running a test or grep). It's a real
+    // liveness signal, so reset the silence ceiling: a process busy on stderr but
+    // quiet on stdout is never reaped.
+    markAlive();
     cfg.logger.warn(`${cfg.logTag}.stderr`, { data: chunk.slice(0, 512) });
   });
 
@@ -197,9 +252,10 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     const { cleaned } = extractMarkerToolCalls(partial);
     const body = (cleaned || partial).trim();
     if (!body) return false;
-    const reason = hitHardCeiling
-      ? `Paused after ${Math.round(hardCeilingMs / 1000)}s — the runtime ran long without finishing. Ask me to continue.`
-      : `Paused after ${Math.round(idleTimeoutMs / 1000)}s with no new output — the runtime may have more to do. Ask me to continue.`;
+    // Only reached after `hardCeilingMs` of TOTAL silence — a genuinely stuck
+    // runtime, not a working one (working turns emit output, which resets the
+    // ceiling). Surface the partial answer instead of discarding it.
+    const reason = `Paused — ${cfg.displayName} went quiet for ${formatElapsed(hardCeilingMs)} with no output and may be stuck. Ask me to continue.`;
     queue.push({ type: 'text', delta: body });
     queue.push({ type: 'text', delta: `\n\n_${reason}_` });
     queue.push({ type: 'done', finishReason: 'max_turns' });
@@ -216,9 +272,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       return;
     }
     const error = timedOut
-      ? hitHardCeiling
-        ? `${cfg.displayName} ran past the ${Math.round(hardCeilingMs / 1000)}s ceiling without finishing and was stopped`
-        : `${cfg.displayName} went ${Math.round(idleTimeoutMs / 1000)}s without output and was stopped`
+      ? `${cfg.displayName} produced no output for ${formatElapsed(hardCeilingMs)} and appears stuck; it was stopped`
       : cfg.signal?.aborted
         ? `${cfg.displayName} request was canceled`
         : `${cfg.displayName} process error: ${err.message}`;
@@ -234,9 +288,9 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
       if (!line) continue;
-      // Any processed line means the harness is alive — reset the idle clock so an
-      // actively-streaming turn is never killed.
-      armIdle();
+      // Any processed line means the harness is alive — reset the silence ceiling
+      // so an actively-streaming turn is never reaped.
+      markAlive();
       let event: unknown;
       try {
         event = JSON.parse(line);

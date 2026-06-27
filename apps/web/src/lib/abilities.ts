@@ -388,7 +388,7 @@ export function compileStatusLabel(status: AbilityCompileStatus): string {
 }
 
 export const COMPILE_STAGE_LABELS: Record<AbilityCompileStage, string> = {
-  queued: 'Queued — waiting for worker',
+  queued: 'Queued — waiting for specialist',
   embedding_examples: 'Embedding examples',
   contextualizing_knowledge: 'Contextualising knowledge',
   generating_synthetic_examples: 'Generating synthetic examples',
@@ -429,13 +429,13 @@ export function compileStatusTone(status: AbilityCompileStatus): 'neutral' | 'am
   }
 }
 
-/** Download an exported ability package as a .ability file. */
+/** Download an exported ability package as a .agentisab file. */
 export function downloadAbilityPackage(pkg: AbilityPackage, slug: string): void {
   const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${slug || 'ability'}.ability`;
+  a.download = `${slug || 'ability'}.agentisab`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

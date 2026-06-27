@@ -23,13 +23,14 @@ import {
   collectionsInView,
   upsertSurfaceSchema,
   uiRenderSchema,
+  uiPerformRegionSchema,
   appManifestEnvelopeSchema,
   promoteAppEnvironmentSchema,
   upsertAppEnvironmentSchema,
   type AppInstallPreview,
   type AppRecord,
 } from '@agentis/core';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowGraph, AgentTool } from '@agentis/core';
@@ -44,6 +45,12 @@ import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { scanArtifactBytes, type ScanFinding } from '../services/registryScanner.js';
 import { generateSurfaceView } from '../services/surfaceGenerator.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
+import type { AppStaffingService } from '../services/appStaffing.js';
+import type { ConversationStore } from '../services/conversationStore.js';
+import type { AppContactService } from '../services/appContacts.js';
+import type { ConversationParticipantService } from '../services/conversationParticipants.js';
+import type { AppLearningService } from '../services/appLearning.js';
+import { AppLearningService as AppLearningStatic } from '../services/appLearning.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -55,6 +62,18 @@ export interface AppRoutesDeps {
   toolRuntime?: AgentToolRuntime;
   /** Powers agent-assisted surface generation. Omit → deterministic scaffold only. */
   completer?: StructuredCompleter;
+  /** Births an App's cast at creation (Phase R). Omit → Apps are created unstaffed. */
+  staffing?: AppStaffingService;
+  /** Append + realtime-publish operator messages into a live thread (Phase 2 takeover). */
+  conversations?: ConversationStore;
+  /** Deliver an operator's reply out to the origin channel (Phase 2 takeover). */
+  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string }): Promise<void> };
+  /** App relationship pipeline — list/update contacts (Phase 3). */
+  contacts?: AppContactService;
+  /** Multi-party threads (G1) — list/add/remove conversation participants + warm handoff. */
+  participants?: ConversationParticipantService;
+  /** Conversational learning loop (Phase M2) — record outcomes, surface learnings. */
+  learning?: AppLearningService;
 }
 
 const addMemberSchema = z.object({
@@ -69,11 +88,33 @@ const generateSurfaceRequestSchema = z.object({
   surface: z.string().min(1).optional(),
 });
 const operatorCommandSchema = z.object({ command: z.string().trim().min(1).max(4000) });
+const takeoverSchema = z.object({ active: z.boolean() });
+const operatorSendSchema = z.object({ body: z.string().trim().min(1).max(8000) });
+const addParticipantSchema = z.object({
+  participantType: z.enum(['agent', 'human', 'contact']),
+  participantId: z.string().trim().min(1).max(255).nullable().optional(),
+  role: z.enum(['primary', 'specialist', 'operator', 'customer']).default('specialist'),
+  active: z.boolean().default(true),
+});
+const contactPatchSchema = z.object({
+  stage: z.string().trim().max(64).nullable().optional(),
+  goal: z.string().trim().max(2000).nullable().optional(),
+  displayName: z.string().trim().max(255).nullable().optional(),
+  nextTouchAt: z.string().datetime().nullable().optional(),
+  data: z.record(z.unknown()).optional(),
+});
+const contactOutcomeSchema = z.object({
+  outcome: z.enum(['won', 'lost', 'abandoned']),
+  note: z.string().trim().max(2000).nullable().optional(),
+  setStage: z.string().trim().max(64).nullable().optional(),
+});
 
 const createAppRequestSchema = createAppSchema.extend({
   /** Create the first App workflow in the same transaction as the App itself. */
   createEntryWorkflow: z.boolean().default(false),
   entryWorkflowTitle: z.string().trim().min(1).max(255).optional(),
+  /** Starter graph for the entry workflow (template gallery, masterplan 5.5). Empty when omitted. */
+  entryWorkflowGraph: z.object({ version: z.literal(1), nodes: z.array(z.unknown()), edges: z.array(z.unknown()) }).passthrough().optional(),
 }).refine(
   (input) => !(input.createEntryWorkflow && input.entryWorkflowId),
   { message: 'entryWorkflowId and createEntryWorkflow cannot be used together' },
@@ -231,11 +272,24 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const user = c.get('user');
     const parsed = createAppRequestSchema.safeParse(await c.req.json());
     if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid app input');
-    const { createEntryWorkflow, entryWorkflowTitle, ...input } = parsed.data;
+    const { createEntryWorkflow, entryWorkflowTitle, entryWorkflowGraph, ...input } = parsed.data;
     if (input.domainId) ensureAppDomain(deps.db, ws.workspaceId, input.domainId);
 
+    // Birth the App's cast (Phase R). Best-effort — re-reads so the new owner shows.
+    const staffNewApp = async (app: AppRecord): Promise<AppRecord> => {
+      if (!deps.staffing) return app;
+      await deps.staffing.staffApp({
+        workspaceId: ws.workspaceId,
+        userId: user.id,
+        appId: app.id,
+        name: app.name,
+        description: app.description ?? '',
+      });
+      return store.get(ws.workspaceId, app.id);
+    };
+
     if (!createEntryWorkflow) {
-      return c.json({ data: store.create(ws.workspaceId, user.id, input) }, 201);
+      return c.json({ data: await staffNewApp(store.create(ws.workspaceId, user.id, input)) }, 201);
     }
 
     let created: AppRecord | null = null;
@@ -247,14 +301,14 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         ambientId: ws.ambientId ?? null,
         userId: user.id,
         title: entryWorkflowTitle ?? `${input.name} workflow`,
-        graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+        graph: entryWorkflowGraph ?? { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
         settings: {},
         concurrencyOverflow: 'queue',
       }).run();
       created = store.create(ws.workspaceId, user.id, { ...input, entryWorkflowId });
     });
     if (!created) throw new AgentisError('INTERNAL_ERROR', 'Failed to create app workflow');
-    return c.json({ data: created }, 201);
+    return c.json({ data: await staffNewApp(created) }, 201);
   });
 
   /**
@@ -415,6 +469,305 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     return c.json({ data: { ok: true } });
   });
 
+  /**
+   * The App's cast (Phase R) — members joined with agent identity, the operator
+   * marked, ordered operator-first. Powers the Team strip in the App view.
+   */
+  app.get('/:id/team', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const app = store.get(ws.workspaceId, appId);
+    const rows = deps.db
+      .select({
+        agentId: schema.appMembers.agentId,
+        memberRole: schema.appMembers.role,
+        name: schema.agents.name,
+        functionalRole: schema.agents.role,
+        colorHex: schema.agents.colorHex,
+        avatarGlyph: schema.agents.avatarGlyph,
+        status: schema.agents.status,
+      })
+      .from(schema.appMembers)
+      .innerJoin(schema.agents, eq(schema.agents.id, schema.appMembers.agentId))
+      .where(and(eq(schema.appMembers.appId, appId), eq(schema.agents.workspaceId, ws.workspaceId)))
+      .all();
+    const members = rows
+      .map((r) => ({ ...r, isOwner: r.agentId === app.ownerAgentId }))
+      .sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || (a.memberRole === 'operator' ? -1 : 1));
+    return c.json({ data: { ownerAgentId: app.ownerAgentId, members } });
+  });
+
+  // ── Live conversations (Living Apps Phase 1) ────────────────
+  // The App's real customer threads — the `conversations`/`messages` spine
+  // scoped to this App (conversations.app_id), NOT a datastore snapshot. Powers
+  // the live Inbox/ChatThread nodes (source:'conversations').
+
+  app.get('/:id/conversations', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId); // 404s if the App is not in this workspace
+    const limit = Math.min(Number(c.req.query('limit') ?? 50) || 50, 200);
+    const rows = deps.db
+      .select({
+        id: schema.conversations.id,
+        title: schema.conversations.title,
+        channelChatId: schema.conversations.channelChatId,
+        lastMessageAt: schema.conversations.lastMessageAt,
+        unreadCount: schema.conversations.unreadCount,
+        handoffState: schema.conversations.handoffState,
+        kind: schema.channelConnections.kind,
+      })
+      .from(schema.conversations)
+      .leftJoin(schema.channelConnections, eq(schema.channelConnections.id, schema.conversations.channelConnectionId))
+      .where(and(eq(schema.conversations.workspaceId, ws.workspaceId), eq(schema.conversations.appId, appId)))
+      .orderBy(desc(schema.conversations.lastMessageAt))
+      .limit(limit)
+      .all();
+    return c.json({ data: rows.map((r) => ({
+      id: r.id,
+      title: r.title ?? r.channelChatId ?? 'Conversation',
+      channel: r.kind ?? null,
+      lastMessageAt: r.lastMessageAt,
+      unread: r.unreadCount ?? 0,
+      handoffState: r.handoffState ?? null,
+    })) });
+  });
+
+  app.get('/:id/conversations/:conversationId/messages', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    // Authorize: the thread must belong to this App in this workspace.
+    const conv = deps.db
+      .select({ id: schema.conversations.id })
+      .from(schema.conversations)
+      .where(and(
+        eq(schema.conversations.id, conversationId),
+        eq(schema.conversations.workspaceId, ws.workspaceId),
+        eq(schema.conversations.appId, appId),
+      ))
+      .get();
+    if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
+    const limit = Math.min(Number(c.req.query('limit') ?? 100) || 100, 500);
+    const rows = deps.db
+      .select({
+        id: schema.conversationMessages.id,
+        authorType: schema.conversationMessages.authorType,
+        body: schema.conversationMessages.body,
+        createdAt: schema.conversationMessages.createdAt,
+        metadata: schema.conversationMessages.metadata,
+      })
+      .from(schema.conversationMessages)
+      .where(eq(schema.conversationMessages.conversationId, conversationId))
+      .orderBy(desc(schema.conversationMessages.createdAt))
+      .limit(limit)
+      .all();
+    // Map persisted author/metadata to a chat role: channel-inbound + operator = user.
+    const messages = rows.reverse().map((r) => {
+      const meta = (r.metadata ?? {}) as { channelInbound?: boolean };
+      const role: 'user' | 'agent' | 'system' =
+        r.authorType === 'operator' || meta.channelInbound ? 'user' : r.authorType === 'system' ? 'system' : 'agent';
+      return { id: r.id, role, content: r.body, at: r.createdAt };
+    });
+    return c.json({ data: messages });
+  });
+
+  // Operator takeover (Phase 2): park the resident agent so a human drives the
+  // thread, or hand it back. `active:false` returns control to the agent.
+  app.post('/:id/conversations/:conversationId/takeover', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    const parsed = takeoverSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid takeover input');
+    const conv = deps.db
+      .select({ id: schema.conversations.id })
+      .from(schema.conversations)
+      .where(and(eq(schema.conversations.id, conversationId), eq(schema.conversations.workspaceId, ws.workspaceId), eq(schema.conversations.appId, appId)))
+      .get();
+    if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
+    const handoffState = parsed.data.active ? 'human' : null;
+    deps.db.update(schema.conversations).set({ handoffState, updatedAt: new Date().toISOString() }).where(eq(schema.conversations.id, conversationId)).run();
+    return c.json({ data: { conversationId, handoffState } });
+  });
+
+  // Operator send (Phase 2): post a human reply into the live thread and deliver it
+  // to the origin channel. The customer sees one continuous agent — no seam.
+  app.post('/:id/conversations/:conversationId/send', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    const parsed = operatorSendSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid send input');
+    const conv = deps.db
+      .select({ id: schema.conversations.id, channelConnectionId: schema.conversations.channelConnectionId, channelChatId: schema.conversations.channelChatId })
+      .from(schema.conversations)
+      .where(and(eq(schema.conversations.id, conversationId), eq(schema.conversations.workspaceId, ws.workspaceId), eq(schema.conversations.appId, appId)))
+      .get();
+    if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
+    const body = parsed.data.body.trim();
+    let delivered = false;
+    if (conv.channelConnectionId && conv.channelChatId && deps.channels) {
+      try {
+        await deps.channels.deliverToConnection({ connectionId: conv.channelConnectionId, chatId: conv.channelChatId, body });
+        delivered = true;
+      } catch {
+        delivered = false;
+      }
+    }
+    deps.conversations?.appendOutbound({
+      workspaceId: ws.workspaceId,
+      conversationId,
+      operatorId: user.id,
+      body,
+      deliveryStatus: delivered ? 'delivered' : 'failed',
+      metadata: { operatorTakeover: true, channelReply: true, ...(conv.channelChatId ? { channelChatId: conv.channelChatId } : {}) },
+    });
+    return c.json({ data: { conversationId, delivered } });
+  });
+
+  // ── Multi-party participants (Living Apps Phase 2 · G1) ─────
+  // The cast in a thread beside conversations.agentId (the primary): a customer,
+  // the resident agent, an escalation specialist, a human operator. An active
+  // 'specialist' agent becomes the inbound responder (warm handoff); hand back by
+  // removing it. Authorized exactly like the conversation routes above.
+
+  const authorizeConversation = (workspaceId: string, appId: string, conversationId: string): void => {
+    const conv = deps.db
+      .select({ id: schema.conversations.id })
+      .from(schema.conversations)
+      .where(and(
+        eq(schema.conversations.id, conversationId),
+        eq(schema.conversations.workspaceId, workspaceId),
+        eq(schema.conversations.appId, appId),
+      ))
+      .get();
+    if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
+  };
+
+  app.get('/:id/conversations/:conversationId/participants', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    authorizeConversation(ws.workspaceId, appId, conversationId);
+    if (!deps.participants) return c.json({ data: [] });
+    // Seed the primary from conversations.agentId so the cast is never empty.
+    deps.participants.ensurePrimary(conversationId);
+    return c.json({ data: deps.participants.list(conversationId) });
+  });
+
+  app.post('/:id/conversations/:conversationId/participants', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    authorizeConversation(ws.workspaceId, appId, conversationId);
+    if (!deps.participants) throw new AgentisError('INTERNAL_ERROR', 'participants service unavailable');
+    const parsed = addParticipantSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid participant input');
+    if (parsed.data.participantType !== 'contact' && !parsed.data.participantId) {
+      throw new AgentisError('VALIDATION_FAILED', 'participantId is required for agent/human participants');
+    }
+    deps.participants.ensurePrimary(conversationId);
+    const id = deps.participants.add({
+      conversationId,
+      participantType: parsed.data.participantType,
+      participantId: parsed.data.participantId ?? null,
+      role: parsed.data.role,
+      active: parsed.data.active,
+    });
+    if (!id) throw new AgentisError('INTERNAL_ERROR', 'failed to add participant');
+    return c.json({ data: { id, participants: deps.participants.list(conversationId) } });
+  });
+
+  app.delete('/:id/conversations/:conversationId/participants/:participantId', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    authorizeConversation(ws.workspaceId, appId, conversationId);
+    if (!deps.participants) throw new AgentisError('INTERNAL_ERROR', 'participants service unavailable');
+    const participantId = c.req.param('participantId');
+    const removed = deps.participants.remove(conversationId, participantId);
+    if (!removed) throw new AgentisError('RESOURCE_NOT_FOUND', `participant ${participantId} not found`);
+    return c.json({ data: { id: participantId, participants: deps.participants.list(conversationId) } });
+  });
+
+  // ── Relationship pipeline (Living Apps Phase 3) ─────────────
+  // The App's contacts (leads/customers) with pipeline state + the proactivity
+  // clock. PATCH sets stage/goal/nextTouchAt — the follow-up sweep reads nextTouchAt.
+
+  app.get('/:id/contacts', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    if (!deps.contacts) return c.json({ data: [] });
+    return c.json({ data: deps.contacts.list(ws.workspaceId, appId) });
+  });
+
+  app.patch('/:id/contacts/:contactId', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    if (!deps.contacts) throw new AgentisError('INTERNAL_ERROR', 'contacts service not available');
+    const contactId = c.req.param('contactId');
+    const current = deps.contacts.get(ws.workspaceId, contactId);
+    if (!current || current.appId !== appId) throw new AgentisError('RESOURCE_NOT_FOUND', `contact ${contactId} not found in this app`);
+    const parsed = contactPatchSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid contact patch');
+    const updated = deps.contacts.update(ws.workspaceId, contactId, parsed.data);
+    // Phase M2 — a stage transition into a terminal stage (won/lost) IS an outcome.
+    // Derive it so the learning loop fires with no separate call (non-throwing).
+    const derived = AppLearningStatic.outcomeForStage(parsed.data.stage);
+    if (derived && deps.learning) {
+      void deps.learning.recordOutcome({ workspaceId: ws.workspaceId, appId, contactId, outcome: derived })
+        .catch(() => {});
+    }
+    return c.json({ data: updated });
+  });
+
+  // Phase M2 — explicitly record a terminal relationship outcome (won|lost|abandoned).
+  // Stamps the contact, deposits a graded lesson into the owner agent's memory plane,
+  // and triggers a scoped reflection pass that can graduate recurring wins into an
+  // ability. Non-throwing in the service; the loop never breaks the call.
+  app.post('/:id/contacts/:contactId/outcome', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    if (!deps.learning) throw new AgentisError('INTERNAL_ERROR', 'learning service not available');
+    const contactId = c.req.param('contactId');
+    if (deps.contacts) {
+      const current = deps.contacts.get(ws.workspaceId, contactId);
+      if (!current || current.appId !== appId) throw new AgentisError('RESOURCE_NOT_FOUND', `contact ${contactId} not found in this app`);
+    }
+    const parsed = contactOutcomeSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid outcome (expected won|lost|abandoned)');
+    const result = await deps.learning.recordOutcome({
+      workspaceId: ws.workspaceId,
+      appId,
+      contactId,
+      outcome: parsed.data.outcome,
+      note: parsed.data.note ?? null,
+      setStage: parsed.data.setStage ?? null,
+    });
+    return c.json({ data: result });
+  });
+
+  // Phase M2 visibility — "what this agent learned": recent graded lessons +
+  // graduated abilities for this App.
+  app.get('/:id/learnings', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    if (!deps.learning) return c.json({ data: { appId, ownerAgentId: null, lessons: [], abilities: [] } });
+    return c.json({ data: deps.learning.recentLearnings(ws.workspaceId, appId) });
+  });
+
   // ── Workflow adoption ───────────────────────────────────────
 
   app.get('/:id/workflows', (c) => {
@@ -519,6 +872,25 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const parsed = uiRenderSchema.shape.view.safeParse((await c.req.json()).view);
     if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid view tree');
     return c.json({ data: surfaces.render(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data) });
+  });
+
+  // Perform a transient region into a stable AgentRegion slot (Phase M3 / G12).
+  // Operator-driven pin/dismiss go through here too (pin:true freezes the
+  // current performed child into the stored tree; clear:true dismisses it).
+  app.post('/:id/surfaces/:name/perform-region', async (c) => {
+    const ws = getWorkspace(c);
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = uiPerformRegionSchema.safeParse({ ...body, surface: c.req.param('name') });
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid perform-region request');
+    return c.json({
+      data: surfaces.performRegion(ws.workspaceId, c.req.param('id'), parsed.data.surface, {
+        region: parsed.data.region,
+        ...(parsed.data.view !== undefined ? { view: parsed.data.view } : {}),
+        ...(parsed.data.reason !== undefined ? { reason: parsed.data.reason } : {}),
+        ...(parsed.data.pin !== undefined ? { pin: parsed.data.pin } : {}),
+        ...(parsed.data.clear !== undefined ? { clear: parsed.data.clear } : {}),
+      }),
+    });
   });
 
   // Agent-assisted surface authoring: NL prompt → validated ViewNode tree.

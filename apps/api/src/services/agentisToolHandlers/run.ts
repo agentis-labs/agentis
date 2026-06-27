@@ -12,6 +12,8 @@ import { REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type WorkflowRunSt
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import { collectFailedNodeIds, failedNodeCount } from '../runStateFailures.js';
+import { analyzeRunFailure } from '../runFailureAnalysis.js';
+import { recordWorkflowLesson, recallWorkflowLessons } from '../workflowPlaybook.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -175,21 +177,50 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         mutating: false,
       },
       handler: async (args, ctx) => {
-        const status = runStatus(deps, ctx.workspaceId, String(args.runId));
+        const runId = String(args.runId);
+        const status = runStatus(deps, ctx.workspaceId, runId);
         if (!status.found) return status;
-        const events = await deps.ledger.listForRun({ runId: String(args.runId), limit: 50 });
+        const events = await deps.ledger.listForRun({ runId, limit: 50 });
         const failures = events.filter((event) => /failed|error/i.test(event.eventType) || JSON.stringify(event.payload).toLowerCase().includes('error'));
+        // Grounded, rule-mapped diagnosis (real error → concrete fixes).
+        const analysis = analyzeRunFailure(deps.db, ctx.workspaceId, runId);
+
+        // Phase 5 (self-improving playbook) — when the cause is RECOGNIZED, append
+        // the failure-mode → fix to the workspace playbook so future builds design
+        // around it. Deduped on the lesson title; best-effort, never throws.
+        let learned: { recorded: boolean; memoryId?: string } = { recorded: false };
+        if (analysis?.recognized && analysis.error) {
+          try {
+            const failureMode = `${analysis.failedNodeTitle ?? analysis.nodeKind ?? 'node'} failed: ${analysis.error.replace(/\s+/g, ' ').trim().slice(0, 160)}`;
+            const fix = analysis.fixes[0] ?? analysis.explanation;
+            const exists = recallWorkflowLessons(deps.memory, ctx.workspaceId, 50)
+              .some((lesson) => lesson.title.toLowerCase() === failureMode.slice(0, 120).toLowerCase());
+            if (!exists && fix) {
+              const memoryId = recordWorkflowLesson(deps.memory, ctx.workspaceId, { failureMode, fix }, ctx.agentId);
+              if (memoryId) learned = { recorded: true, memoryId };
+            }
+          } catch {
+            /* learning is best-effort — never fail a diagnosis over it */
+          }
+        }
+
         return {
           ...status,
           failureEvents: failures,
-          diagnosis: failures.length > 0
-            ? `Found ${failures.length} failure-related ledger events. Start with the latest node/task error.`
-            : 'No explicit failure events found in the recent ledger slice. Check active nodes and adapter health.',
-          suggestedActions: [
-            'Inspect the failed node payload.',
-            'Check the assigned agent or extension configuration.',
-            'Patch timeout or routing settings before retrying if the cause is configuration-related.',
-          ],
+          ...(analysis ? { analysis } : {}),
+          diagnosis: analysis?.recognized
+            ? analysis.explanation
+            : failures.length > 0
+              ? `Found ${failures.length} failure-related ledger events. Start with the latest node/task error.`
+              : 'No explicit failure events found in the recent ledger slice. Check active nodes and adapter health.',
+          suggestedActions: analysis?.recognized && analysis.fixes.length > 0
+            ? analysis.fixes
+            : [
+                'Inspect the failed node payload.',
+                'Check the assigned agent or extension configuration.',
+                'Patch timeout or routing settings before retrying if the cause is configuration-related.',
+              ],
+          learned,
         };
       },
     },

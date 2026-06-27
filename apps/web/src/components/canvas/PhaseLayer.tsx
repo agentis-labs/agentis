@@ -61,9 +61,9 @@ export function stripPhasePrefix(name: string): string {
   return name.replace(/^Phase\s+\d+\s*[^A-Za-z0-9]*\s*/i, '').trim() || name;
 }
 
-const NODE_WIDTH = 252;
-const BASE_NODE_HEIGHT = 72;
-const AGENT_NODE_HEIGHT = 110;
+const NODE_WIDTH = 300;
+const BASE_NODE_HEIGHT = 86;
+const AGENT_NODE_HEIGHT = 124;
 const HEADER_HEIGHT = 104;
 const PAD_X = 20;
 const PAD_TOP = 20;
@@ -108,13 +108,16 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
             key={phase.id}
             data-phase-id={phase.id}
             data-testid="phase-band"
-            className={clsx('absolute rounded-2xl border transition-opacity duration-200', dimmed && 'opacity-20')}
+            className={clsx('absolute rounded-[20px] transition-opacity duration-200', dimmed && 'opacity-20')}
             style={{
               transform: `translate(${x}px, ${y}px)`,
               width,
               height,
-              borderColor: active ? `${phase.color}59` : `${phase.color}24`,
-              background: `linear-gradient(180deg, ${phase.color}12 0%, ${phase.color}08 100%)`,
+              // Minimal grouping: a smooth top-to-bottom tint (no border).
+              // The bottom is almost transparent but still visible.
+              background: active
+                ? `linear-gradient(180deg, ${phase.color}28 0%, ${phase.color}05 100%)`
+                : `linear-gradient(180deg, ${phase.color}18 0%, ${phase.color}03 100%)`,
               pointerEvents: 'none',
               zIndex: -1,
             }}
@@ -140,20 +143,21 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
             }}
           >
             <div
-              className="flex items-center gap-1.5 px-1 py-0.5"
+              className="inline-flex items-center gap-1.5"
               style={{
                 transform: counterScale !== 1 ? `scale(${counterScale})` : undefined,
                 transformOrigin: 'top left',
-                width: headerWidth,
+                maxWidth: headerWidth,
                 textShadow: active ? '0 1px 4px rgba(0,0,0,0.9)' : '0 1px 3px rgba(0,0,0,0.76)',
               }}
             >
-              <span className="shrink-0 font-semibold tabular-nums" style={{ color: phase.color, fontSize: compact ? 12 : 13 }}>
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: phase.color }} aria-hidden />
+              <span className="shrink-0 font-semibold tabular-nums" style={{ color: phase.color, fontSize: compact ? 11 : 12 }}>
                 {index + 1}
               </span>
               <span
                 className="min-w-0 flex-1 truncate font-semibold text-text-primary"
-                style={{ fontSize: compact ? 12 : 13 }}
+                style={{ fontSize: compact ? 11.5 : 12.5 }}
                 title={stripPhasePrefix(phase.name)}
               >
                 {stripPhasePrefix(phase.name)}

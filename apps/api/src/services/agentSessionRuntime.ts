@@ -34,7 +34,7 @@ import {
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
-import type { ScratchpadService } from './scratchpad.js';
+import type { ScratchpadService, BlackboardIdentity } from './scratchpad.js';
 import type { AgentToolRuntime } from './agentToolRuntime.js';
 import type { BridgedToolSpec } from './mcpToolBridge.js';
 import {
@@ -155,6 +155,13 @@ export interface AgentSessionRuntimeDeps {
   verifyCompletion?: TaskCompletionJudge;
   /** Cheap-model summarizer for compaction; falls back to truncation when absent. */
   summarize?: SummarizeFn;
+  /**
+   * Resolve the cross-runtime identity for an agent so blackboard entries are
+   * tagged with WHO + WHICH runtime (the operator panel renders this). Best-effort
+   * (in-memory adapter lookup); absent = entries carry just the agentId.
+   * (AGENT-COOPERATION-10X §Pillar 2.)
+   */
+  resolveRuntimeLabel?: (agentId: string) => { runtime?: string | null; label?: string | null } | undefined;
 }
 
 // Control-tool names — a closed set so we never branch on magic strings.
@@ -165,6 +172,8 @@ const TOOL = {
   scratchpadRead: 'scratchpad_read',
   broadcast: 'broadcast',
   readChannel: 'read_channel',
+  claim: 'claim',
+  convergeSignal: 'converge_signal',
   runInspect: 'run_inspect',
   flagDeviation: 'flag_deviation',
   recordDecision: 'record_decision',
@@ -523,7 +532,9 @@ export class AgentSessionRuntime {
         return { ok: true, matches: hits.map((h) => ({ step: h.stepNumber, role: h.role, content: clip(h.content, 600) })) };
       }
       case TOOL.scratchpadWrite: {
-        this.deps.scratchpad.write(runCtx.runId, String(args.key ?? ''), args.value ?? null);
+        this.deps.scratchpad.write(runCtx.runId, String(args.key ?? ''), args.value ?? null, {
+          identity: this.#identityFor(runCtx),
+        });
         return { ok: true };
       }
       case TOOL.scratchpadRead: {
@@ -531,11 +542,37 @@ export class AgentSessionRuntime {
         return { ok: true, value: key ? this.deps.scratchpad.read(runCtx.runId, key) : this.deps.scratchpad.snapshotOf(runCtx.runId) };
       }
       case TOOL.broadcast: {
-        this.deps.scratchpad.broadcast(runCtx.runId, String(args.channel ?? 'general'), runCtx.agentId, String(args.message ?? ''));
+        this.deps.scratchpad.broadcast(runCtx.runId, String(args.channel ?? 'general'), runCtx.agentId, String(args.message ?? ''), {
+          identity: this.#identityFor(runCtx),
+        });
         return { ok: true };
       }
       case TOOL.readChannel: {
         return { ok: true, messages: this.deps.scratchpad.readChannel(runCtx.runId, String(args.channel ?? 'general')) };
+      }
+      case TOOL.claim: {
+        // A structured assertion with confidence — the operator sees disagreement
+        // when one runtime supersedes another's claim. (AGENT-COOPERATION-10X §Pillar 4.)
+        const statement = String(args.statement ?? '').slice(0, 2000);
+        const confidence = typeof args.confidence === 'number' ? Math.max(0, Math.min(1, args.confidence)) : undefined;
+        const supersedes = typeof args.supersedes === 'string' && args.supersedes.trim() ? args.supersedes.trim() : undefined;
+        const id = this.deps.scratchpad.claim(runCtx.runId, statement, {
+          identity: this.#identityFor(runCtx),
+          confidence,
+          supersedes,
+          key: typeof args.key === 'string' ? args.key : undefined,
+        });
+        return { ok: true, claimId: id };
+      }
+      case TOOL.convergeSignal: {
+        // Let a cohort agent declare the convergence goal met — the `signal`
+        // continuation source for a `converge` loop. (§Pillar 1 + §Pillar 4.)
+        const channel = String(args.channel ?? 'converge');
+        const reason = String(args.reason ?? 'goal met').slice(0, 1000);
+        this.deps.scratchpad.broadcast(runCtx.runId, channel, runCtx.agentId, `done: ${reason}`, {
+          identity: this.#identityFor(runCtx),
+        });
+        return { ok: true, signalled: true };
       }
       case TOOL.runInspect: {
         const session = this.deps.sessions.get(sessionId);
@@ -748,6 +785,16 @@ export class AgentSessionRuntime {
     return this.deps.agentTools.listBridgedTools(workspaceId);
   }
 
+  /** Cross-runtime authoring identity for a blackboard write (who + which runtime). */
+  #identityFor(runCtx: SessionRunContext): BlackboardIdentity {
+    const resolved = this.deps.resolveRuntimeLabel?.(runCtx.agentId);
+    return {
+      agentId: runCtx.agentId,
+      runtime: resolved?.runtime ?? runCtx.role ?? null,
+      label: resolved?.label ?? runCtx.agentId,
+    };
+  }
+
   #emitStep(runCtx: SessionRunContext, sessionId: string, text: string, calls: ChatToolCall[]): void {
     this.deps.bus.publish(REALTIME_ROOMS.run(runCtx.runId), REALTIME_EVENTS.AGENT_WORK_STEP, {
       runId: runCtx.runId,
@@ -809,6 +856,37 @@ const CONTROL_TOOLS: ToolDefinition[] = [
     name: TOOL.readChannel,
     description: 'Read recent messages from a run-scoped channel.',
     parameters: { type: 'object', properties: { channel: { type: 'string', default: 'general' } } },
+  },
+  {
+    name: TOOL.claim,
+    description:
+      'Post a structured claim to the blackboard — an assertion the operator and peer agents can see, with confidence. ' +
+      'Use to assert a finding/result (e.g. "bug #3 fixed"). Pass `supersedes` with a prior claimId to revise or dispute it; ' +
+      'disagreement between runtimes is rendered explicitly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        statement: { type: 'string', description: 'The assertion, grounded in evidence.' },
+        confidence: { type: 'number', description: '0..1 confidence in the claim.' },
+        supersedes: { type: 'string', description: 'Optional claimId this revises/disputes.' },
+        key: { type: 'string', description: 'Optional stable key to group claims about the same subject.' },
+      },
+      required: ['statement'],
+    },
+  },
+  {
+    name: TOOL.convergeSignal,
+    description:
+      'Declare the convergence goal met for a cooperative loop you are running inside. Stops the surrounding `converge` ' +
+      'loop when it uses signal-based continuation. Only call when the objective is genuinely satisfied.',
+    parameters: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Why the goal is met, grounded in the result.' },
+        channel: { type: 'string', default: 'converge', description: 'Loop signal channel (default "converge").' },
+      },
+      required: ['reason'],
+    },
   },
   {
     name: TOOL.runInspect,

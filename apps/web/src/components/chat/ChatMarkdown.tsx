@@ -514,7 +514,17 @@ function parseTableAlignments(line: string): ('left' | 'center' | 'right' | null
 
 function sanitizeHref(href: string): string | null {
   const value = href.trim();
+  const artifactId = artifactIdFromApiHref(value);
+  // Artifact API endpoints require an Authorization header. A normal anchor
+  // navigation cannot provide one, so route these links through the app's
+  // authenticated artifact viewer instead of opening a misleading 401 page.
+  if (artifactId) return `/artifacts?open=${encodeURIComponent(artifactId)}`;
   if (/^(https?:\/\/|mailto:)/i.test(value)) return value;
   if (value.startsWith('/') || value.startsWith('#')) return value;
   return null;
+}
+
+function artifactIdFromApiHref(href: string): string | null {
+  const match = href.match(/^(?:https?:\/\/[^/]+)?\/v1\/artifacts\/([0-9a-f-]{36})(?:[/?#].*)?$/i);
+  return match?.[1] ?? null;
 }

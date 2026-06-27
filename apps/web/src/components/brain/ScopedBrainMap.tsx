@@ -13,11 +13,15 @@ export function ScopedBrainMap({
   detailEndpoint,
   layoutKey,
   emptyMessage,
+  scopeName,
+  scopeId,
 }: {
   endpoint: string | null;
   detailEndpoint?: string | null;
   layoutKey: string;
   emptyMessage: string;
+  scopeName?: string;
+  scopeId?: string;
 }) {
   const toast = useToast();
   const [graph, setGraph] = useState<BrainGraph | null>(null);
@@ -104,6 +108,8 @@ export function ScopedBrainMap({
               : `${detailEndpoint}/${encodeURIComponent(selectedNode.id)}`)
             : null}
           allowMutations={false}
+          scopeName={scopeName}
+          scopeId={scopeId}
           onClose={() => setSelectedId(null)}
           onGraphChanged={() => {}}
           onArchived={() => {}}

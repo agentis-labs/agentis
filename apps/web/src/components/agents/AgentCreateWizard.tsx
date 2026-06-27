@@ -74,6 +74,9 @@ interface AgentCreateWizardProps {
   intro?: string;
 }
 
+// Auto-pick order for zero-config runtime selection (most capable / most common first).
+const ADAPTER_PRIORITY: AdapterType[] = ['claude_code', 'codex', 'cursor', 'hermes_agent', 'openclaw'];
+
 const EMPTY_DETECTIONS: HarnessDetectionResult[] = [];
 const EMPTY_PLAYBOOKS: PlaybookEntry[] = [];
 const DEFAULT_CHANNELS: Record<ChannelKind, ChannelDraft> = {
@@ -223,11 +226,19 @@ export function AgentCreateWizard({
   const [customRole, setCustomRole] = useState('');
   const [reportsTo, setReportsTo] = useState('');
   const [agents, setAgents] = useState<ExistingAgent[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
+  // First-agent on-ramp: when the workspace is empty, hide the org-chart vocabulary
+  // and just commission "your agent" (the orchestrator). Operator can opt into the
+  // full role/hierarchy controls with "Set up a team structure".
+  const [showHierarchy, setShowHierarchy] = useState(false);
   const [detections, setDetections] = useState<HarnessDetectionResult[]>(EMPTY_DETECTIONS);
   const [detecting, setDetecting] = useState(false);
   const [playbookEntries, setPlaybookEntries] = useState<PlaybookEntry[]>(EMPTY_PLAYBOOKS);
   const [adapterType, setAdapterType] = useState<AdapterType>('claude_code');
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig>(DEFAULT_RUNTIME_CONFIG);
+  // Zero-config: the runtime is auto-picked from what's installed; the operator only
+  // opens this to override. Stays collapsed unless they ask, or nothing was detected.
+  const [runtimeAdvanced, setRuntimeAdvanced] = useState(false);
   const [playbook, setPlaybook] = useState('');
   const [capabilityTags, setCapabilityTags] = useState<string[]>([]);
   const [monthlyBudget, setMonthlyBudget] = useState('500');
@@ -240,6 +251,9 @@ export function AgentCreateWizard({
   const [testError, setTestError] = useState<string | null>(null);
   const avatarFileRef = useRef<HTMLInputElement>(null);
 
+  // True while we're commissioning the very first agent of an empty workspace and
+  // the operator hasn't asked for the full org controls.
+  const firstAgentOnRamp = agentsLoaded && agents.length === 0 && !initialRole && !lockInitialRole && !showHierarchy;
   const orchestrator = useMemo(() => agents.find((agent) => agent.role === 'orchestrator') ?? null, [agents]);
   const managers = useMemo(() => agents.filter((agent) => agent.role === 'manager'), [agents]);
   const detectionsByType = useMemo(() => new Map(detections.map((detection) => [detection.adapterType, detection])), [detections]);
@@ -279,6 +293,7 @@ export function AgentCreateWizard({
     setPlaybookEntries(EMPTY_PLAYBOOKS);
     setAdapterType('claude_code');
     setRuntimeConfig(DEFAULT_RUNTIME_CONFIG);
+    setRuntimeAdvanced(false);
     setPlaybook('');
     setCapabilityTags([]);
     setMonthlyBudget('500');
@@ -288,6 +303,8 @@ export function AgentCreateWizard({
     setTesting(false);
     setTestResult(null);
     setTestError(null);
+    setAgentsLoaded(false);
+    setShowHierarchy(false);
     seededRoleRef.current = null;
 
     void specialistsApi.list().then((res) => setSpecialties(res.specialists)).catch(() => setSpecialties([]));
@@ -300,16 +317,32 @@ export function AgentCreateWizard({
     ]).then(([agentsResult, detectResult, playbookResult, spacesResult]) => {
       const loadedAgents = agentsResult.status === 'fulfilled' ? agentsResult.value.agents ?? [] : [];
       setAgents(loadedAgents);
+      setAgentsLoaded(true);
+      // Empty workspace + no preset role → first-agent mode: default to orchestrator
+      // ("the agent you talk to") and keep the hierarchy controls tucked away.
+      if (loadedAgents.length === 0 && !initialRole && !lockInitialRole) {
+        setRole('orchestrator');
+        setName((current) => current.trim() || 'The Brain');
+      }
       setSpaces(spacesResult.status === 'fulfilled' ? spacesResult.value.data ?? [] : []);
       const existingOrchestrator = loadedAgents.find((agent) => agent.role === 'orchestrator');
       if (nextRole === 'manager' && existingOrchestrator && !initialReportsTo) {
         setReportsTo(existingOrchestrator.id);
       }
 
-      if (detectResult.status === 'fulfilled') {
-        setDetections(detectResult.value.adapters ?? detectResult.value.harnesses ?? []);
+      const loadedDetections = detectResult.status === 'fulfilled'
+        ? detectResult.value.adapters ?? detectResult.value.harnesses ?? []
+        : [];
+      setDetections(loadedDetections);
+
+      // Zero-config: auto-select the best installed runtime. Prefer a detected
+      // ("found") harness in priority order; otherwise leave the default and
+      // surface the picker so the operator can install/connect one.
+      const found = ADAPTER_PRIORITY.find((type) => loadedDetections.some((d) => d.adapterType === type && d.status === 'found'));
+      if (found) {
+        setAdapterType(found);
       } else {
-        setDetections([]);
+        setRuntimeAdvanced(true);
       }
 
       setDetecting(false);
@@ -679,6 +712,19 @@ export function AgentCreateWizard({
 
               </section>
 
+              {firstAgentOnRamp ? (
+                <section className="rounded-lg border border-line bg-surface-2 px-3 py-3 text-[12px] leading-relaxed text-text-muted">
+                  This is your first agent — it’ll be the one you talk to and that coordinates everything else.
+                  You can add managers and specialists under it later.
+                  <button
+                    type="button"
+                    onClick={() => setShowHierarchy(true)}
+                    className="ml-1 text-accent hover:underline"
+                  >
+                    Set up a team structure instead
+                  </button>
+                </section>
+              ) : (
               <section className="space-y-2">
                 <span className="text-xs font-medium text-text-secondary">Role</span>
                 <div className="flex flex-wrap gap-2">
@@ -762,17 +808,20 @@ export function AgentCreateWizard({
                   </div>
                 )}
               </section>
+              )}
 
-              <HierarchyNotice
-                role={role}
-                orchestrator={orchestrator}
-                reportsTo={reportsTo}
-                supervisors={supervisorOptions}
-                onReportsToChange={setReportsTo}
-                onBecomeOrchestrator={() => {
-                  if (!lockInitialRole) setRole('orchestrator');
-                }}
-              />
+              {!firstAgentOnRamp && (
+                <HierarchyNotice
+                  role={role}
+                  orchestrator={orchestrator}
+                  reportsTo={reportsTo}
+                  supervisors={supervisorOptions}
+                  onReportsToChange={setReportsTo}
+                  onBecomeOrchestrator={() => {
+                    if (!lockInitialRole) setRole('orchestrator');
+                  }}
+                />
+              )}
 
               {role === 'orchestrator' && (
                 <section className="rounded-lg border border-line bg-surface-2">
@@ -873,28 +922,49 @@ export function AgentCreateWizard({
             <section className="space-y-3 border-t border-line pt-5">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs font-medium text-text-secondary">Runtime</span>
-                <button
-                  type="button"
-                  onClick={() => void handleTestRuntime()}
-                  disabled={testing}
-                  className={secondaryBtnCls}
-                >
-                  {testing ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                  {testing ? 'Testing runtime…' : 'Test runtime'}
-                </button>
+                {runtimeAdvanced ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleTestRuntime()}
+                    disabled={testing}
+                    className={secondaryBtnCls}
+                  >
+                    {testing ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                    {testing ? 'Testing runtime…' : 'Test runtime'}
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => setRuntimeAdvanced(true)} className={secondaryBtnCls}>
+                    Configure
+                  </button>
+                )}
               </div>
 
-              <RuntimePicker
-                adapterType={adapterType}
-                runtimeConfig={runtimeConfig}
-                onAdapterChange={(value) => { setAdapterType(value); setTestResult(null); setTestError(null); }}
-                onConfigChange={setRuntimeConfig}
-                detections={detections}
-                detecting={detecting}
-                onRefreshDetections={refreshDetections}
-              />
-
-              <RuntimeTestReport testing={testing} result={testResult} error={testError} />
+              {runtimeAdvanced ? (
+                <>
+                  <RuntimePicker
+                    adapterType={adapterType}
+                    runtimeConfig={runtimeConfig}
+                    onAdapterChange={(value) => { setAdapterType(value); setTestResult(null); setTestError(null); }}
+                    onConfigChange={setRuntimeConfig}
+                    detections={detections}
+                    detecting={detecting}
+                    onRefreshDetections={refreshDetections}
+                  />
+                  <RuntimeTestReport testing={testing} result={testResult} error={testError} />
+                </>
+              ) : (
+                <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-xs text-text-secondary">
+                  {detecting ? (
+                    <><Loader2 size={13} className="animate-spin" /> Detecting installed runtimes…</>
+                  ) : (
+                    <>
+                      <Check size={13} className="text-accent" />
+                      <span className="text-text-primary">{runtimeLabel(adapterType)}</span>
+                      <span className="text-text-muted">· auto-selected{activeDetection?.status === 'found' ? ' (installed)' : ''}. Commission to go.</span>
+                    </>
+                  )}
+                </div>
+              )}
             </section>
           </div>
         </main>

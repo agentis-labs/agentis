@@ -70,8 +70,8 @@ export function computePhaseAwareLayout(
   graph: Pick<WorkflowGraph, 'nodes' | 'edges' | 'phases'>,
   options: PhaseLayoutOptions = {},
 ): PhaseLayoutResult {
-  const nodeWidth = options.nodeWidth ?? 252;
-  const nodeHeight = options.nodeHeight ?? 76;
+  const nodeWidth = options.nodeWidth ?? 300;
+  const nodeHeight = options.nodeHeight ?? 90;
   const nodeGapX = options.nodeGapX ?? 72;
   const nodeGapY = options.nodeGapY ?? 32;
   const laneGap = options.laneGap ?? 40;

@@ -9,6 +9,13 @@ import type { AuthService } from '../services/auth.js';
 import type { EventBus } from '../event-bus.js';
 import { getUser, requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
+import type { BroadcastDispatcher } from '../services/broadcastDispatcher.js';
+
+/**
+ * Virtual id the web Global Chat uses. It has no row of its own — it resolves to
+ * the workspace's singleton broadcast room (created on first use).
+ */
+const BROADCAST_ALIAS = '__broadcast__';
 
 const ROOM_KINDS = ['workspace', 'custom', 'thread'] as const;
 const VISIBILITIES = ['workspace', 'private'] as const;
@@ -47,7 +54,13 @@ const editMessageSchema = z.object({
   text: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
 });
 
-export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus }) {
+export function buildRoomRoutes(deps: {
+  db: AgentisSqliteDb;
+  auth: AuthService;
+  bus: EventBus;
+  /** Optional — when present, @mentions in Global Chat dispatch real agent turns. */
+  broadcast?: BroadcastDispatcher;
+}) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -125,13 +138,13 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
 
   app.get('/:id', (c) => {
     const ws = getWorkspace(c);
-    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     return c.json({ room: { ...room, agentIds: agentsForRoom(deps.db, room.id) } });
   });
 
   app.patch('/:id', async (c) => {
     const ws = getWorkspace(c);
-    const existing = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const existing = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     const body = updateRoomSchema.parse(await c.req.json());
     const next: Record<string, unknown> = { updatedAt: new Date().toISOString() };
     if (body.name !== undefined) next.name = body.name;
@@ -160,7 +173,7 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
         }
       }
     }
-    const room = loadRoom(deps.db, ws.workspaceId, existing.id);
+    const room = loadRoom(deps.db, ws.workspaceId, existing.id, ws.user.id);
     const payload = { ...room, agentIds: agentsForRoom(deps.db, room.id) };
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ROOM_UPDATED, { room: payload });
     return c.json({ room: payload });
@@ -168,7 +181,7 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
 
   app.delete('/:id', (c) => {
     const ws = getWorkspace(c);
-    const existing = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const existing = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     deps.db.delete(schema.rooms).where(eq(schema.rooms.id, existing.id)).run();
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ROOM_DELETED, { id: existing.id });
     return c.json({ ok: true, id: existing.id });
@@ -176,7 +189,7 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
 
   app.get('/:id/messages', (c) => {
     const ws = getWorkspace(c);
-    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 100), 1), 500);
     const before = c.req.query('before') ?? null;
     const beforeId = c.req.query('beforeId') ?? null;
@@ -203,7 +216,7 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
 
   app.post('/:id/messages', async (c) => {
     const ws = getWorkspace(c);
-    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     const body = messageSchema.parse(await c.req.json());
     const now = new Date().toISOString();
     const message = {
@@ -222,12 +235,31 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
     deps.db.update(schema.rooms).set({ lastMessageAt: now, updatedAt: now }).where(eq(schema.rooms.id, room.id)).run();
     deps.bus.publish(REALTIME_ROOMS.room(room.id), REALTIME_EVENTS.ROOM_MESSAGE_SENT, { message });
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ROOM_MESSAGE_RECEIVED, { roomId: room.id, message });
+
+    // Global Chat: an operator @mentioning agents wakes them for a real turn whose
+    // reply lands back in this room. Fire-and-forget so the post returns fast.
+    if (deps.broadcast && c.req.param('id') === BROADCAST_ALIAS && message.authorType === 'operator') {
+      const text = typeof message.content?.text === 'string' ? message.content.text : '';
+      const agentIds = body.mentions.length > 0
+        ? body.mentions
+        : deps.broadcast.resolveMentionedAgentIds(ws.workspaceId, text);
+      if (agentIds.length > 0 && text.trim()) {
+        deps.broadcast.dispatchMentions({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId ?? null,
+          userId: ws.user.id,
+          roomId: room.id,
+          agentIds,
+          userMessage: text,
+        });
+      }
+    }
     return c.json({ message }, 201);
   });
 
   app.patch('/:id/messages/:messageId', async (c) => {
     const ws = getWorkspace(c);
-    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     const messageId = c.req.param('messageId');
     const body = editMessageSchema.parse(await c.req.json());
     const existing = deps.db.select().from(schema.roomMessages)
@@ -251,7 +283,7 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
 
   app.delete('/:id/messages/:messageId', (c) => {
     const ws = getWorkspace(c);
-    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'));
+    const room = loadRoom(deps.db, ws.workspaceId, c.req.param('id'), ws.user.id);
     const messageId = c.req.param('messageId');
     const existing = deps.db.select().from(schema.roomMessages)
       .where(and(
@@ -270,12 +302,42 @@ export function buildRoomRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
   return app;
 }
 
-function loadRoom(db: AgentisSqliteDb, workspaceId: string, id: string) {
+function loadRoom(db: AgentisSqliteDb, workspaceId: string, id: string, userId: string) {
+  if (id === BROADCAST_ALIAS) return getOrCreateBroadcastRoom(db, workspaceId, userId);
   const row = db.select().from(schema.rooms)
     .where(and(eq(schema.rooms.id, id), eq(schema.rooms.workspaceId, workspaceId)))
     .get();
   if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', 'Room not found');
   return row;
+}
+
+/**
+ * The Global Chat is a single workspace-wide room, lazily provisioned the first
+ * time anyone opens or posts to it. Reuses the oldest `kind: 'workspace'` room so
+ * a workspace never ends up with two broadcast rooms.
+ */
+function getOrCreateBroadcastRoom(db: AgentisSqliteDb, workspaceId: string, userId: string) {
+  const existing = db.select().from(schema.rooms)
+    .where(and(eq(schema.rooms.workspaceId, workspaceId), eq(schema.rooms.kind, 'workspace')))
+    .orderBy(schema.rooms.createdAt)
+    .get();
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const room = {
+    id: randomUUID(),
+    workspaceId,
+    userId,
+    kind: 'workspace' as const,
+    name: 'Global Chat',
+    description: 'Workspace-wide chat. @mention agents to bring them in.',
+    visibility: 'workspace' as const,
+    pinnedAt: null,
+    lastMessageAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.insert(schema.rooms).values(room).run();
+  return db.select().from(schema.rooms).where(eq(schema.rooms.id, room.id)).get()!;
 }
 
 function agentsForRoom(db: AgentisSqliteDb, roomId: string): string[] {

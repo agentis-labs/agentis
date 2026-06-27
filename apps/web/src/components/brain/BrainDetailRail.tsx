@@ -1,17 +1,22 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
+  AlertTriangle,
   Archive,
   ArrowDownLeft,
   ArrowUpRight,
   ChevronDown,
   ChevronUp,
+  Gauge,
   GitBranch,
   Link2,
   Pencil,
   Save,
   Search,
+  ShieldCheck,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   X,
 } from 'lucide-react';
 import type {
@@ -26,6 +31,7 @@ import type {
 import { api, apiErrorMessage } from '../../lib/api';
 import { Button, IconButton } from '../shared/Button';
 import { useToast } from '../shared/Toast';
+import { useConfirm } from '../shared/ConfirmDialog';
 
 interface RailProps {
   brain: BrainResponse;
@@ -35,6 +41,8 @@ interface RailProps {
   linkPath?: string;
   atomPathBase?: string;
   allowMutations?: boolean;
+  scopeName?: string;
+  scopeId?: string;
   onClose: () => void;
   onGraphChanged: () => void | Promise<void>;
   onArchived: () => void | Promise<void>;
@@ -72,13 +80,27 @@ export function BrainDetailRail({
   linkPath,
   atomPathBase,
   allowMutations = true,
+  scopeName,
+  scopeId,
   onClose,
   onGraphChanged,
   onArchived,
 }: RailProps) {
   const toast = useToast();
+  const confirm = useConfirm();
+  const [health, setHealth] = useState<HealthSnapshot | null>(null);
+  const isCoreNode = node?.layer === 'core' || node?.id === 'core';
   const [detail, setDetail] = useState<BrainNodeDetail | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Load health data when the core node is selected
+  useEffect(() => {
+    if (!isCoreNode) { setHealth(null); return; }
+    const healthPath = scopeId
+      ? `/v1/brain/health?scopeId=${encodeURIComponent(scopeId)}`
+      : '/v1/brain/health';
+    void api<HealthSnapshot>(healthPath).then(setHealth).catch(() => {});
+  }, [isCoreNode, scopeId]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkQuery, setLinkQuery] = useState('');
@@ -204,6 +226,13 @@ export function BrainDetailRail({
 
   async function archiveNode() {
     if (!atom || !atomPathBase) return;
+    const ok = await confirm({
+      title: `Archive "${shortTitle(currentNode.label)}"?`,
+      body: 'This atom will be archived from the Brain graph. This action cannot be undone.',
+      tone: 'danger',
+      confirmLabel: 'Archive',
+    });
+    if (!ok) return;
     setArchiving(true);
     try {
       await api(`${atomPathBase}/${atom.atomKind}/${encodeURIComponent(atom.atomId)}`, { method: 'DELETE' });
@@ -289,16 +318,43 @@ export function BrainDetailRail({
               <TypeBadge type={node.type} kind={typeof node.metadata.kind === 'string' ? node.metadata.kind : undefined} />
             </div>
             <div className="mt-2.5 line-clamp-3 text-[16px] font-semibold leading-snug text-text-primary">
-              {humanTitle(node.label)}
+              {isCoreNode && scopeName ? `${scopeName} Brain` : humanTitle(node.label)}
             </div>
+            {typeof node.metadata.scopeLabel === 'string' && node.metadata.scopeLabel ? (
+              <div className="mt-2 inline-flex items-center gap-1.5 rounded-pill border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                {scopeKindLabel(node.metadata.scopeKind)}: {node.metadata.scopeLabel}
+              </div>
+            ) : node.metadata.workspaceGlobal === true && !isCoreNode ? (
+              <div className="mt-2 text-[11px] text-text-muted">Workspace-wide</div>
+            ) : null}
           </div>
           <IconButton icon={<X size={14} />} label="Close inspector" size="sm" onClick={onClose} />
         </div>
-        <div className="mt-4 grid grid-cols-3 gap-2">
-          <Metric label="Confidence" ratio={confidence} tone="cyan" />
-          <Metric label="Trust" ratio={trust} tone="violet" />
-          <Stat label="Links" value={String(connectionCount)} />
-        </div>
+        {isCoreNode && health ? (
+          <div className="mt-4 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="col-span-2 flex items-center justify-between rounded-card border border-line bg-bg-base px-3 py-2.5">
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Brain Health</div>
+                  <div className={`mt-1 text-[28px] font-bold leading-none ${scoreTone(health.healthScore)}`}>{health.healthScore}</div>
+                  <div className="mt-1 text-[10px] text-text-muted">Confidence &amp; retrieval readiness</div>
+                </div>
+                <ShieldCheck size={22} className={scoreTone(health.healthScore)} />
+              </div>
+              <HealthCard icon={<Gauge size={13} />} label="Context Coverage" value={pct(health.metrics.atomCoverageScore)} />
+              <HealthCard icon={<Sparkles size={13} />} label="Evaluator Signal" value={pct(health.metrics.evaluatorSignalRate)} />
+              <HealthCard icon={trendIcon(health.metrics.qualityTrend)} label="Quality" value={capitalize(health.metrics.qualityTrend)} detail={`${health.metrics.averageConfidenceDelta >= 0 ? '+' : ''}${health.metrics.averageConfidenceDelta.toFixed(3)} avg Δ`} />
+              <HealthCard icon={<AlertTriangle size={13} />} label="Disputes" value={String(health.metrics.disputedAtomCount)} detail={`${health.metrics.staleAtomCount} stale atoms`} />
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 grid grid-cols-3 gap-2">
+            <Metric label="Confidence" ratio={confidence} tone="cyan" />
+            <Metric label="Trust" ratio={trust} tone="violet" />
+            <Stat label="Links" value={String(connectionCount)} />
+          </div>
+        )}
         {canMutate && (
           <div className="mt-3 flex items-center gap-2">
             <Button variant="secondary" size="sm" iconLeft={<Sparkles size={12} />} loading={suggestLoading} onClick={() => void loadSuggestions()}>
@@ -572,6 +628,14 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Human label for a scoped atom's owner kind (Workspace Brain provenance). */
+function scopeKindLabel(kind: unknown): string {
+  if (kind === 'app') return 'App';
+  if (kind === 'agent') return 'Agent';
+  if (kind === 'workflow') return 'Workflow';
+  return 'Scope';
+}
+
 function layerColor(layer: BrainNode['layer']): string {
   switch (layer) {
     case 'core': return '#e2e8f0';
@@ -781,4 +845,54 @@ function relativeTime(iso: string): string {
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
   if (delta < 2_592_000_000) return `${Math.floor(delta / 86_400_000)}d ago`;
   return new Date(at).toLocaleDateString();
+}
+
+// ─── Health snapshot (for core-node panel) ────────────────────────────────────
+
+interface HealthSnapshot {
+  healthScore: number;
+  metrics: {
+    atomCoverageScore: number;
+    qualityTrend: 'rising' | 'flat' | 'falling';
+    averageConfidenceDelta: number;
+    evaluatorSignalRate: number;
+    staleAtomCount: number;
+    disputedAtomCount: number;
+  };
+  evaluatorSignalsThisWeek: number;
+  compressionStatus: { lastRunAt: string | null; atomsArchived: number };
+  intelligence: { degraded: boolean };
+}
+
+function HealthCard({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-card border border-line bg-bg-base px-2.5 py-2">
+      <div className="flex items-center justify-between gap-1 text-text-muted">
+        <span className="text-[9px] font-semibold uppercase tracking-wide">{label}</span>
+        {icon}
+      </div>
+      <div className="mt-1.5 text-[18px] font-semibold capitalize leading-none text-text-primary">{value}</div>
+      {detail && <div className="mt-1 text-[9px] text-text-muted">{detail}</div>}
+    </div>
+  );
+}
+
+function scoreTone(score: number): string {
+  if (score >= 75) return 'text-emerald-300';
+  if (score >= 45) return 'text-amber-300';
+  return 'text-rose-300';
+}
+
+function pct(value: number): string {
+  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
+}
+
+function capitalize(str: string): string {
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function trendIcon(trend: 'rising' | 'flat' | 'falling'): ReactNode {
+  if (trend === 'rising') return <TrendingUp size={13} className="text-emerald-300" />;
+  if (trend === 'falling') return <TrendingDown size={13} className="text-rose-300" />;
+  return <Gauge size={13} />;
 }

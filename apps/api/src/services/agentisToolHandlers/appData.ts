@@ -19,6 +19,7 @@ import {
   dataQuerySchema,
   surfaceActionSchema,
   uiPatchOpSchema,
+  uiPerformRegionSchema,
   viewNodeSchema,
   type AgentisToolContext,
 } from '@agentis/core';
@@ -26,10 +27,15 @@ import { z } from 'zod';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { buildAppStores, type AppStores } from '@agentis/app';
+import { generateSurfaceView, generateSurfacePatch } from '../surfaceGenerator.js';
+import { resolveSynthesisCompleter } from './build.js';
+import type { StructuredCompleter } from '../structuredCompleter.js';
 
 function resolveAppId(args: Record<string, unknown>, ctx: AgentisToolContext): string {
   if (typeof args.appId === 'string' && args.appId.trim()) return args.appId;
   if (ctx.viewport?.resourceKind === 'app' && ctx.viewport.resourceId) return ctx.viewport.resourceId;
+  // Ambient App for the turn — a resident channel agent's App (Living Apps Phase 0).
+  if (typeof ctx.appId === 'string' && ctx.appId.trim()) return ctx.appId;
   throw new AgentisError('VALIDATION_FAILED', 'no App in context — pass appId (or open the app first)');
 }
 
@@ -81,21 +87,45 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.app.create',
         family: 'app',
-        description: 'Create a new Agentic App (a full-stack product the agent operates: identity + surfaces + logic + data). Pass adoptWorkflowId to TURN AN EXISTING WORKFLOW INTO AN APP (the workflow becomes the App\'s logic — nothing is rebuilt). Returns the appId to thread through data_* and ui_*.',
-        inputSchema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, adoptWorkflowId: { type: 'string', description: 'Existing workflow id to adopt as the App\'s logic. Omit to start empty.' } }, required: ['name'] },
+        description: 'Create — or RESOLVE — the Agentic App (a full-stack product the agent operates: identity + surfaces + logic + data). This is idempotent: if the workflow you pass as adoptWorkflowId already belongs to an App (every built workflow does — build_workflow returns its appId), or an App with this name already exists, it REUSES that App instead of making a duplicate. So to refine an existing App, just edit it (data_*/ui_* with its appId) — do not create a renamed twin. Pass adoptWorkflowId to turn a bare workflow into an App. Returns the appId (and reused:true when an existing App was resolved).',
+        inputSchema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, adoptWorkflowId: { type: 'string', description: 'Existing workflow id to adopt as the App\'s logic. If it already has an owning App, that App is reused. Omit to start empty.' } }, required: ['name'] },
         mutating: true,
         autoExecute: true,
         mcpExposed: true,
       },
       handler: (args, ctx) => {
+        const name = str(args.name, 'name');
+        const description = typeof args.description === 'string' ? args.description : '';
         const adoptWorkflowId = typeof args.adoptWorkflowId === 'string' && args.adoptWorkflowId.trim() ? args.adoptWorkflowId : undefined;
-        const input = createAppSchema.parse({
-          name: str(args.name, 'name'),
-          description: typeof args.description === 'string' ? args.description : '',
-          ...(adoptWorkflowId ? { entryWorkflowId: adoptWorkflowId } : {}),
-        });
-        const app = store.create(ctx.workspaceId, ctx.userId, input);
-        return { appId: app.id, slug: app.slug, name: app.name, adoptedWorkflowId: adoptWorkflowId ?? null };
+        const norm = (value: string) => value.trim().toLowerCase();
+
+        // 1) The workflow is already an App's logic (build_workflow anchors every
+        //    new workflow to an App-of-one). Reuse that App — never spawn a twin —
+        //    and adopt the operator's intended name/description onto it.
+        if (adoptWorkflowId) {
+          const ownerAppId = store.appIdForWorkflow(ctx.workspaceId, adoptWorkflowId);
+          if (ownerAppId) {
+            const updated = store.update(ctx.workspaceId, ownerAppId, { name, ...(description ? { description } : {}) });
+            return { appId: updated.id, slug: updated.slug, name: updated.name, adoptedWorkflowId: adoptWorkflowId, reused: true };
+          }
+        }
+
+        // 2) An App with this exact name already exists → resolve it (this is what
+        //    "review/recreate the Fashion Store app" must hit instead of creating
+        //    a `-2` duplicate). Adopt the workflow into it when provided.
+        const existingByName = store.list(ctx.workspaceId, {}).find((app) => norm(app.name) === norm(name));
+        if (existingByName) {
+          if (adoptWorkflowId) store.adoptWorkflow(ctx.workspaceId, existingByName.id, adoptWorkflowId);
+          return { appId: existingByName.id, slug: existingByName.slug, name: existingByName.name, adoptedWorkflowId: adoptWorkflowId ?? null, reused: true };
+        }
+
+        // 3) Genuinely new App.
+        const app = store.create(
+          ctx.workspaceId,
+          ctx.userId,
+          createAppSchema.parse({ name, description, ...(adoptWorkflowId ? { entryWorkflowId: adoptWorkflowId } : {}) }),
+        );
+        return { appId: app.id, slug: app.slug, name: app.name, adoptedWorkflowId: adoptWorkflowId ?? null, reused: false };
       },
     },
     {
@@ -125,6 +155,82 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const workflowId = resolveWorkflowId(args, ctx);
         store.adoptWorkflow(ctx.workspaceId, appId, workflowId);
         return { appId, adoptedWorkflowId: workflowId, workflowIds: store.listWorkflowIds(ctx.workspaceId, appId) };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.app.scaffold',
+        family: 'app',
+        description:
+          'Set up an App\'s DATA model and kick off its interface. Defines the datastore `collections`, then: if a separate design model is configured it drafts a starter surface; otherwise it returns a DESIGN BRIEF and you author the console yourself with agentis.ui.render (the better result — you understand the domain). Either way, treat any starter as a starting point and enrich it into a real operating console via ui.render / ui.patch — do not ship the generic default. Use when the operator asks for an app with an interface (CRM, dashboard, tracker, pipeline, board, portal, console). An App with logic but no UI/data is INCOMPLETE.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            prompt: { type: 'string', description: 'What the interface should be, in plain language (e.g. "Lead CRM: pipeline board grouped by stage, an add-lead form, a total-pipeline-value metric").' },
+            surface: { type: 'string', description: 'Surface name to author. Defaults to "home".' },
+            collections: { type: 'array', description: 'Data format to define first: [{ name, schema: { fields: [{ key, type: "string"|"number"|"boolean"|"date"|"json", required?, indexed? }] } }]. Omit to bind to the App\'s existing collections.' },
+          },
+          required: ['prompt'],
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const surface = typeof args.surface === 'string' && args.surface.trim() ? args.surface.trim() : 'home';
+        const prompt = str(args.prompt, 'prompt');
+
+        // 1) Define the data format first so the surface can bind to real fields.
+        const collectionsDefined: string[] = [];
+        if (Array.isArray(args.collections)) {
+          for (const raw of args.collections) {
+            const c = obj(raw, 'collection');
+            const collectionName = str(c.name, 'collection.name');
+            data.defineCollection(ctx.workspaceId, appId, { name: collectionName, schema: collectionSchemaSchema.parse(c.schema) });
+            collectionsDefined.push(collectionName);
+          }
+        }
+
+        // 2) Author the surface. The capable AGENT that just designed this domain
+        //    should author the console itself — it understands the operating model
+        //    a schema-only scaffold never could. So when no SEPARATE design model
+        //    is configured, return a design brief and let the agent author via
+        //    ui.render (the powerful path). A configured design model may draft a
+        //    starter the agent then enriches.
+        const collections = data.listCollections(ctx.workspaceId, appId);
+        let completer: StructuredCompleter | undefined;
+        try { completer = resolveSynthesisCompleter(deps, ctx.workspaceId, ctx.agentId, prompt); } catch { completer = undefined; }
+        if (!completer) {
+          const names = collections.map((c) => c.name).join(', ') || '(define collections first)';
+          return {
+            appId,
+            surface,
+            collectionsDefined,
+            source: 'agent_author' as const,
+            authorYourself: true,
+            directive:
+              `Data is ready. Now AUTHOR the operating console for "${prompt}" by calling agentis.ui.render — compose a bespoke surface from the full grammar ` +
+              `(KPIStrip / Hero / Tabs / Split / DataBoard / StatusBoard / Timeline / Funnel / Gauge / ProgressBar / Callout / Chart / Table / Form / AgentConsole / ActivityStream) ` +
+              `bound to these collections: ${names}. Lead with the KPIs that matter, then the pipeline/board, the gates/approvals queues, validation status, and an operator rail ` +
+              `(AgentConsole + ActivityStream) in a Split. Declare every button/form action first with agentis.ui.action_schema (kind: workflow | tool | data). Do NOT render a generic card list.`,
+          };
+        }
+
+        const generated = await generateSurfaceView({
+          prompt,
+          collections,
+          workspaceId: ctx.workspaceId,
+          surface,
+          completer,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+
+        // 3) Persist actions before the view (forms/buttons reference them).
+        if (generated.actions.length > 0) surfaces.setActions(ctx.workspaceId, appId, surface, generated.actions);
+        const rendered = surfaces.render(ctx.workspaceId, appId, surface, generated.view);
+        return { appId, surface: rendered.name, revision: rendered.revision, collectionsDefined, actions: generated.actions.length, source: generated.source };
       },
     },
     {
@@ -245,7 +351,15 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.ui.render',
         family: 'app',
-        description: 'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge/CustomView). Tables/Lists bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Buttons/Forms reference an action declared with ui.action_schema. Replaces the surface view.',
+        description:
+          'THE way to build a powerful App interface: YOU design and author the surface as a typed ViewNode tree — a bespoke operating console, not a generic card list. You know the domain you just built, so compose a real console from the full grammar:\n' +
+          '• Headline metrics — KPIStrip (multiple labelled values + deltas + sparks), Metric, Gauge, ProgressBar, Callout.\n' +
+          '• Layout — Hero (title banner), Tabs, Accordion, Split (main + right rail, ratio), Toolbar, Stack/Row/Grid, Divider.\n' +
+          '• Data, bound to collections via { bind: { collection, query?, sort?, limit?, live? } } — DataBoard (kanban by groupBy), Table (columns + rowActions), List, StatusBoard, Timeline, Funnel, Calendar, Inbox, Chart (line/bar/area/pie).\n' +
+          '• Agent-native — AgentConsole (operator command line), ActivityStream (your live work feed), Narrative, ConversationThread, ChatThread.\n' +
+          '• Rich content — DocumentViewer, CodeViewer, MediaGallery, MapView, Image, Avatar, Badge. CodeSurface/CustomView render your own sandboxed JS/HTML for anything bespoke.\n' +
+          '• Inputs — Form (fields + submit action), Button (action). Declare every button/form action first with ui.action_schema (kind: workflow | tool | data).\n' +
+          'Compose for the operating model you designed: lead with the KPIs that matter, then the pipeline/board, gates/approvals queues, validation status, and an operator rail (AgentConsole + ActivityStream) in a Split. Replaces the surface view. Prefer this over a generic scaffold — a capable agent authoring the console directly is how Agentis ships powerful apps.',
         inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, view: { type: 'object' } }, required: ['surface', 'view'] },
         mutating: true,
         autoExecute: true,
@@ -268,6 +382,84 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const ops = z.array(uiPatchOpSchema).min(1).parse(args.ops);
         const result = surfaces.patch(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), ops);
         return { patched: true, surface: result.name, revision: result.revision };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.ui.compose',
+        family: 'app',
+        description:
+          'Edit an App surface by INSTRUCTION, like talking to a designer who re-renders as you speak — "show only deals over $20k", "put the funnel above the activity feed", "make the board group by stage". A design model reads the surface\'s CURRENT tree + the App\'s collections and emits a minimal SurfacePatch (set/insert/remove ops) that is applied live and re-renders in place. Preferred over hand-authoring ui.patch op paths for natural-language layout/filter/restyle requests. Returns the ops applied (empty when no design model is configured or the instruction can\'t be satisfied — then fall back to ui.render / ui.patch).',
+        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, instruction: { type: 'string', description: 'Plain-language change to make to the surface.' } }, required: ['surface', 'instruction'] },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const surfaceName = str(args.surface, 'surface');
+        const instruction = str(args.instruction, 'instruction');
+        const current = surfaces.get(ctx.workspaceId, appId, surfaceName);
+        if (current.view == null) throw new AgentisError('VALIDATION_FAILED', `surface ${surfaceName} has no view to compose against; call ui.render first`);
+        let completer: StructuredCompleter | undefined;
+        try { completer = resolveSynthesisCompleter(deps, ctx.workspaceId, ctx.agentId, instruction); } catch { completer = undefined; }
+        const generated = await generateSurfacePatch({
+          instruction,
+          current: current.view,
+          collections: data.listCollections(ctx.workspaceId, appId),
+          workspaceId: ctx.workspaceId,
+          surface: surfaceName,
+          ...(completer ? { completer } : {}),
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+        if (generated.ops.length === 0) {
+          return { composed: false, surface: surfaceName, ops: 0, source: generated.source, reason: completer ? 'no change derived from the instruction' : 'no design model configured' };
+        }
+        const result = surfaces.patch(ctx.workspaceId, appId, surfaceName, generated.ops);
+        return { composed: true, surface: result.name, revision: result.revision, ops: generated.ops.length, source: generated.source };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.ui.perform_region',
+        family: 'app',
+        description:
+          'PERFORM a transient region into a stable AgentRegion slot on a surface, live — the console composes itself. Use to push an unprompted panel into the operator\'s view when you notice something (e.g. render a "churn risk" panel into the "attention" region because 12 deals stalled at pricing). The frame stays stable; this child is ephemeral and dismissable by the operator — UNLESS you pass pin:true (then it freezes into the stored surface). ALWAYS pass a short `reason` (it is shown to the operator as "added because …"). Pass clear:true to dismiss a region. The surface must already contain an AgentRegion with this `region` id (render the frame with one first).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            surface: { type: 'string' },
+            region: { type: 'string', description: 'The AgentRegion slot id to perform into.' },
+            view: { type: 'object', description: 'The ViewNode to render into the slot. Omit with clear:true to dismiss.' },
+            reason: { type: 'string', description: 'Why this appeared — shown to the operator (e.g. "12 deals stalled at pricing").' },
+            pin: { type: 'boolean', description: 'Freeze this into the stored surface so it persists across reloads.' },
+            clear: { type: 'boolean', description: 'Dismiss the region (no view needed).' },
+          },
+          required: ['surface', 'region'],
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const parsed = uiPerformRegionSchema.parse({
+          surface: args.surface,
+          region: args.region,
+          ...(args.view !== undefined ? { view: args.view } : {}),
+          ...(args.reason !== undefined ? { reason: args.reason } : {}),
+          ...(args.pin !== undefined ? { pin: args.pin } : {}),
+          ...(args.clear !== undefined ? { clear: args.clear } : {}),
+        });
+        const result = surfaces.performRegion(ctx.workspaceId, appId, parsed.surface, {
+          region: parsed.region,
+          ...(parsed.view !== undefined ? { view: parsed.view } : {}),
+          ...(parsed.reason !== undefined ? { reason: parsed.reason } : {}),
+          ...(parsed.pin !== undefined ? { pin: parsed.pin } : {}),
+          ...(parsed.clear !== undefined ? { clear: parsed.clear } : {}),
+        });
+        return { performed: true, surface: result.name, region: parsed.region, revision: result.revision, pinned: parsed.pin === true, cleared: parsed.clear === true };
       },
     },
     {

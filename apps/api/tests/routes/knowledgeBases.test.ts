@@ -10,6 +10,7 @@ import ExcelJS from 'exceljs';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { buildKnowledgeBaseRoutes } from '../../src/routes/knowledgeBases.js';
+import { AppStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -108,6 +109,36 @@ describe('/v1/knowledge-bases document uploads', () => {
     expect(scopedJson.knowledgeBases.map((base) => base.id)).toEqual([workflowBase.id]);
   });
 
+  it('resolves App-scoped knowledge (App Brain → Knowledge) instead of 404 "Workflow not found"', async () => {
+    // The App Brain → Knowledge facet binds the scope to app.id, NOT a workflow
+    // id. The scope validation used to check only the workflows table and threw
+    // "Workflow not found"; an App is now a valid Knowledge scope.
+    const appRecord = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Agentis Fashion Store Factory' });
+
+    const listRes = await app().request(`/v1/knowledge-bases?scopeId=${appRecord.id}`, { headers: ctx.authHeaders });
+    expect(listRes.status).toBe(200);
+
+    const createRes = await app().request(`/v1/knowledge-bases?scopeId=${appRecord.id}`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'App knowledge' }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json() as {
+      knowledgeBase: { id: string; scopeId: string; ownerWorkflow?: { id: string; title: string } | null };
+    };
+    expect(created.knowledgeBase.scopeId).toBe(appRecord.id);
+    expect(created.knowledgeBase.ownerWorkflow).toMatchObject({ id: appRecord.id, title: 'Agentis Fashion Store Factory' });
+
+    const scopedList = await app().request(`/v1/knowledge-bases?scopeId=${appRecord.id}`, { headers: ctx.authHeaders });
+    const scopedJson = await scopedList.json() as { knowledgeBases: Array<{ id: string }> };
+    expect(scopedJson.knowledgeBases.map((base) => base.id)).toContain(created.knowledgeBase.id);
+
+    // A bogus scope still 404s — the validation didn't simply go permissive.
+    const bogusRes = await app().request(`/v1/knowledge-bases?scopeId=${randomUUID()}`, { headers: ctx.authHeaders });
+    expect(bogusRes.status).toBe(404);
+  });
+
   it('loads document chunk previews and safely renames document metadata', async () => {
     const kb = knowledge.createKnowledgeBase({ workspaceId: ctx.workspace.id, name: 'docs' });
     const document = await knowledge.addDocument({
@@ -148,6 +179,7 @@ describe('/v1/knowledge-bases document uploads', () => {
       name: 'operations.md',
       content: 'Release readiness requires a rollback plan and database backup validation.',
     });
+    await knowledge.flushPendingIndexing();
 
     const results = await knowledge.search({
       workspaceId: ctx.workspace.id,
@@ -192,6 +224,7 @@ describe('/v1/knowledge-bases document uploads', () => {
     expect(res.status).toBe(201);
     const document = (await res.json()) as { document: { id: string; chunks: number } };
     expect(document.document.chunks).toBeGreaterThan(1);
+    await knowledge.flushPendingIndexing();
     const links = ctx.db.select().from(schema.knowledgeLinks)
       .where(eq(schema.knowledgeLinks.workspaceId, ctx.workspace.id))
       .all()
@@ -241,6 +274,7 @@ describe('/v1/knowledge-bases document uploads', () => {
       name: 'approval.md',
       content: 'Release Safety requires approval after validation.',
     });
+    await knowledge.flushPendingIndexing();
 
     const chunk = ctx.db.select().from(schema.kbChunks).where(eq(schema.kbChunks.knowledgeBaseId, kb.id)).get()!;
     expect(chunk.metadata).toMatchObject({
@@ -269,6 +303,7 @@ describe('/v1/knowledge-bases document uploads', () => {
       name: 'recovery.md',
       content: 'The backup restoration procedure verifies restored rows.',
     });
+    await knowledge.flushPendingIndexing();
 
     const results = await knowledge.search({
       workspaceId: ctx.workspace.id,
@@ -331,9 +366,14 @@ describe('/v1/knowledge-bases document uploads', () => {
     const episodes = new EpisodicMemoryStore(ctx.db, ctx.logger);
     const intelligence = new SharedIntelligenceService(ctx.db, ctx.bus, episodes, ctx.logger);
     const linker = new KnowledgeAutoLinker(intelligence, ctx.logger, () => semanticProvider, (args) => enrichment.classifyRelation(args));
+    // Semantic linking compares the source vector against candidates' STORED
+    // vectors, so ingestion + linking must embed with the SAME provider (the
+    // production invariant — both resolve the workspace provider).
+    knowledge.setEmbeddingProviderResolver(() => semanticProvider);
     const kb = knowledge.createKnowledgeBase({ workspaceId: ctx.workspace.id, name: 'relations' });
     const first = await knowledge.addDocument({ workspaceId: ctx.workspace.id, knowledgeBaseId: kb.id, name: 'a.md', content: 'Deployment policy requires rollback.' });
     const second = await knowledge.addDocument({ workspaceId: ctx.workspace.id, knowledgeBaseId: kb.id, name: 'b.md', content: 'Rollback supports safe deployment.' });
+    await knowledge.flushPendingIndexing();
     const chunks = ctx.db.select().from(schema.kbChunks).where(eq(schema.kbChunks.knowledgeBaseId, kb.id)).all();
     await linker.autoLinkSemantic({
       workspaceId: ctx.workspace.id,

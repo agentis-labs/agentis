@@ -17,6 +17,8 @@ import {
   type PlanVerification,
   type PlanVerificationCriterion,
   type RealtimeEventName,
+  type WorkStepStatus,
+  projectPlanSteps,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -133,6 +135,47 @@ export function generatePlan(args: { conversationId?: string | null; objective: 
     createdAt: args.previous?.createdAt ?? now,
     updatedAt: now,
   };
+}
+
+function workStepToPlanNodeStatus(status: WorkStepStatus): PlanNode['status'] {
+  if (status === 'running') return 'running';
+  if (status === 'done') return 'completed';
+  if (status === 'failed') return 'failed';
+  return 'ready';
+}
+
+/**
+ * Rebuild a plan's build-stage nodes from an ordered list of step labels,
+ * preserving prior ids/status where the index still exists (so an in-flight
+ * step keeps its `running`/`completed` state across a re-set). Non-build stages
+ * (goal/decisions/verify) are left intact and edges are re-threaded in order.
+ */
+function withBuildSteps(plan: ChatPlan, labels: string[]): ChatPlan {
+  const nonBuild = plan.nodes.filter((item) => item.stage !== 'build');
+  const priorBuild = plan.nodes.filter((item) => item.stage === 'build');
+  const buildNodes = labels.map((label, index) => {
+    const prior = priorBuild[index];
+    return node('action', 'build', index, label, prior?.summary ?? label, {
+      ...(prior ? { id: prior.id, status: prior.status } : {}),
+    });
+  });
+  const merged = [...nonBuild, ...buildNodes];
+  const ordered = STAGES.flatMap((stage) => merged.filter((item) => item.stage === stage));
+  const edges: PlanEdge[] = ordered.slice(1).map((target, index) => ({
+    id: randomUUID(),
+    source: ordered[index]!.id,
+    target: target.id,
+  }));
+  return { ...plan, nodes: ordered, edges, updatedAt: new Date().toISOString() };
+}
+
+/** Overall plan status implied by its build-step statuses (never un-terminates). */
+function planStatusFromSteps(plan: ChatPlan, buildNodes: PlanNode[]): PlanStatus {
+  if (plan.status === 'completed' || plan.status === 'failed') return plan.status;
+  if (buildNodes.length === 0) return plan.status;
+  if (buildNodes.some((item) => item.status === 'failed')) return 'blocked';
+  if (buildNodes.every((item) => item.status === 'completed')) return 'completed';
+  return 'executing';
 }
 
 function applyPatch(plan: ChatPlan, patch: PlanPatch): ChatPlan {
@@ -259,6 +302,95 @@ export class PlanService {
       plan,
     );
     return plan;
+  }
+
+  /**
+   * Set the linear checklist the operator sees (the StepTrack). Creates the
+   * spine row if one isn't bound yet, so an agent can call this directly without
+   * a separate accept. Emits TASK_SPINE_UPDATED so chat / Live Workspace /
+   * channels all pick up the same steps.
+   */
+  setSteps(workspaceId: string, userId: string, args: {
+    planId?: string;
+    conversationId?: string | null;
+    title?: string;
+    objective?: string;
+    agentId?: string;
+    steps: string[];
+  }): ChatPlan {
+    const labels = args.steps.map((step) => step.trim()).filter(Boolean);
+    let plan = args.planId
+      ? this.byId(workspaceId, args.planId)
+      : (args.conversationId ? this.latest(workspaceId, args.conversationId) : null);
+    if (!plan) {
+      plan = this.createTask({
+        workspaceId,
+        userId,
+        conversationId: args.conversationId ?? null,
+        objective: args.objective ?? args.title ?? labels[0] ?? 'Task',
+        ...(args.title ? { title: args.title } : {}),
+      });
+    }
+    const next = withBuildSteps(plan, labels);
+    const buildNodes = next.nodes.filter((item) => item.stage === 'build');
+    const revised = this.revise(workspaceId, userId, {
+      ...next,
+      status: planStatusFromSteps(next, buildNodes),
+    });
+    this.publishTaskEvent(workspaceId, REALTIME_EVENTS.TASK_SPINE_UPDATED, revised, args.agentId ? { agentId: args.agentId } : {});
+    return revised;
+  }
+
+  /**
+   * Advance one step of the checklist. With no target, marks the active (or next
+   * pending) step `done` and auto-starts the following step — the common
+   * "finished a step" call. `status: 'failed'` marks it failed and blocks.
+   */
+  advanceStep(workspaceId: string, userId: string, args: {
+    planId?: string;
+    conversationId?: string | null;
+    agentId?: string;
+    index?: number;
+    label?: string;
+    status?: WorkStepStatus;
+  }): ChatPlan {
+    const plan = args.planId
+      ? this.byId(workspaceId, args.planId)
+      : (args.conversationId ? this.latest(workspaceId, args.conversationId) : null);
+    if (!plan) throw new AgentisError('RESOURCE_NOT_FOUND', 'No task spine to advance.');
+    const buildNodes = plan.nodes.filter((item) => item.stage === 'build');
+    if (buildNodes.length === 0) {
+      throw new AgentisError('VALIDATION_FAILED', 'Task spine has no steps; call agentis.task.set_steps first.');
+    }
+    const status = args.status ?? 'done';
+    let targetIndex: number;
+    if (typeof args.index === 'number') {
+      targetIndex = args.index;
+    } else if (args.label) {
+      targetIndex = buildNodes.findIndex((item) => item.title.toLowerCase() === args.label!.trim().toLowerCase());
+    } else {
+      const running = buildNodes.findIndex((item) => item.status === 'running');
+      targetIndex = running >= 0
+        ? running
+        : buildNodes.findIndex((item) => item.status !== 'completed' && item.status !== 'failed');
+    }
+    const target = buildNodes[targetIndex];
+    if (!target) throw new AgentisError('VALIDATION_FAILED', 'Could not resolve the step to advance.');
+    const nodeStatus = workStepToPlanNodeStatus(status);
+    let nodes = plan.nodes.map((item) => (item.id === target.id ? { ...item, status: nodeStatus } : item));
+    if (status === 'done') {
+      const next = buildNodes[targetIndex + 1];
+      if (next && next.status !== 'completed' && next.status !== 'failed') {
+        nodes = nodes.map((item) => (item.id === next.id ? { ...item, status: 'running' as const } : item));
+      }
+    }
+    const updated: ChatPlan = { ...plan, nodes, updatedAt: new Date().toISOString() };
+    const revised = this.revise(workspaceId, userId, {
+      ...updated,
+      status: planStatusFromSteps(updated, nodes.filter((item) => item.stage === 'build')),
+    });
+    this.publishTaskEvent(workspaceId, REALTIME_EVENTS.TASK_SPINE_UPDATED, revised, args.agentId ? { agentId: args.agentId } : {});
+    return revised;
   }
 
   patch(workspaceId: string, userId: string, planId: string, patch: PlanPatch): ChatPlan {
@@ -547,6 +679,7 @@ export class PlanService {
     extra: Record<string, unknown> = {},
   ): void {
     const runIds = plan.runIds ?? [];
+    const stepTrack = projectPlanSteps(plan);
     this.bus?.publish(REALTIME_ROOMS.workspace(workspaceId), event, {
       workspaceId,
       taskId: plan.id,
@@ -555,6 +688,9 @@ export class PlanService {
       objective: plan.objective,
       status: plan.status,
       version: plan.version,
+      steps: stepTrack.steps,
+      stepCurrent: stepTrack.current,
+      stepTotal: stepTrack.total,
       conversationId: plan.conversationId ?? undefined,
       runIds,
       runId: runIds[runIds.length - 1],

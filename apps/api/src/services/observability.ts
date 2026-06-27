@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, max as drizzleMax } from 'drizzle-orm';
+import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -124,6 +125,15 @@ export class ObservabilityService {
     const sequenceNumber = this.#nextSequence(input.workspaceId);
     const id = randomUUID();
     const scope = this.#scopeFor(input);
+    // Telemetry must never fail because the thing it describes isn't persisted
+    // yet. A `workflow.build.phase` event fires WHILE a workflow is being built —
+    // its workflowId has no row until the build commits — and the FK on
+    // workflow_id/run_id/agent_id would otherwise abort the insert and drop the
+    // event. Null out any reference whose target doesn't exist; the event still
+    // records (linkage is best-effort), instead of being lost to a FK error.
+    const runId = this.#fkOrNull(schema.workflowRuns, input.runId);
+    const workflowId = this.#fkOrNull(schema.workflows, input.workflowId);
+    const agentId = this.#fkOrNull(schema.agents, input.agentId);
     const row = {
       id,
       workspaceId: input.workspaceId,
@@ -139,9 +149,9 @@ export class ObservabilityService {
       actorId: input.actorId ?? null,
       targetType: input.targetType ?? null,
       targetId: input.targetId ?? null,
-      runId: input.runId ?? null,
-      workflowId: input.workflowId ?? null,
-      agentId: input.agentId ?? null,
+      runId,
+      workflowId,
+      agentId,
       nodeId: input.nodeId ?? null,
       approvalId: input.approvalId ?? null,
       correlationId: input.correlationId ?? null,
@@ -209,6 +219,22 @@ export class ObservabilityService {
       case 'brain': return event.kind === 'brain';
       case 'workspace':
       default: return true;
+    }
+  }
+
+  /**
+   * Return `id` only if a row with that id exists in `table`, else null — so a
+   * telemetry row never trips a FK constraint by pointing at an entity that
+   * hasn't been persisted yet (e.g. a workflow mid-build). Best-effort: any query
+   * error also degrades to null rather than throwing.
+   */
+  #fkOrNull(table: { id: AnySQLiteColumn }, id: string | null | undefined): string | null {
+    if (!id) return null;
+    try {
+      const row = this.db.select({ id: table.id }).from(table as never).where(eq(table.id, id)).limit(1).get();
+      return row ? id : null;
+    } catch {
+      return null;
     }
   }
 

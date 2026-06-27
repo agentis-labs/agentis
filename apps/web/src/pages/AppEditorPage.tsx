@@ -10,38 +10,45 @@
  * Interface. There is no separate run/build destination — the Interface facet
  * carries the live preview, and public sharing is a per-surface concern.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
   ArrowLeft,
   BrainCircuit,
   Boxes,
   Code2,
+  Copy,
   Database,
   Download,
   Eye,
   LayoutGrid,
   Loader2,
+  MoreVertical,
   Pencil,
   Plus,
   Save,
   Settings,
   Sparkles,
   SquareStack,
+  Trash2,
+  Upload,
   X,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
 import type { AppRecord, AppSurface, CollectionInfo, SurfaceAction, SurfaceKind, ViewNode } from '@agentis/core';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
-import { api, apiErrorMessage } from '../lib/api';
+import { api, apiErrorMessage, apiText } from '../lib/api';
+import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
+import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
-import { AppEngineModal } from '../components/apps/AppEngineModal';
+import { AppTeamStrip } from '../components/apps/AppTeamStrip';
+import { AppEngineModal, type AppEngineDomain, type AppEngineAgent } from '../components/apps/AppEngineModal';
 import { SurfaceCanvas } from '../components/apps/SurfaceCanvas';
 import {
   SURFACE_GROUPS,
   buildBlock,
-  buildStarterSurface,
   isBlockKind,
   type BlockKind,
   type ElementKind,
@@ -58,15 +65,20 @@ import {
   removeNodeAtPath,
   updateNodeAtPath,
 } from '../components/apps/viewTree';
-import { StudioSurfaceBuilder } from '../components/apps/StudioSurfaceBuilder';
+import { SurfaceBuilder } from '../components/apps/SurfaceBuilder';
 import { WorkflowCanvasPage, WorkflowBrainTab } from './WorkflowCanvasPage';
 import { SegmentedControl, type SegmentDef } from '../components/shared/SegmentedControl';
+import { useConfirm } from '../components/shared/ConfirmDialog';
 
 type AppFacet = 'interface' | 'workflow' | 'data' | 'brain';
 
 interface WorkflowRef {
   id: string;
   title: string;
+}
+
+function workflowFilename(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'workflow';
 }
 
 const FACETS: ReadonlyArray<SegmentDef<AppFacet>> = [
@@ -99,6 +111,23 @@ export function AppEditorPage() {
   const [nameDraft, setNameDraft] = useState('');
   const [editingName, setEditingName] = useState(false);
   const [engineOpen, setEngineOpen] = useState(false);
+  const [domains, setDomains] = useState<AppEngineDomain[]>([]);
+  const [agents, setAgents] = useState<AppEngineAgent[]>([]);
+
+  // Org options for the App Engine modal (Domain/Owner assignment). Auxiliary —
+  // failure here must not block the editor, so it loads independently.
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      api<{ data: AppEngineDomain[] }>('/v1/domains').then((r) => r.data ?? []).catch(() => [] as AppEngineDomain[]),
+      api<{ agents: AppEngineAgent[] }>('/v1/agents').then((r) => r.agents ?? []).catch(() => [] as AppEngineAgent[]),
+    ]).then(([domainRows, agentRows]) => {
+      if (cancelled) return;
+      setDomains(domainRows);
+      setAgents(agentRows);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const load = useCallback(async () => {
     setError(null);
@@ -136,6 +165,18 @@ export function AppEditorPage() {
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Deep-link from the /home canvas highlight ("Settings") opens straight into
+  // the engine modal so Domain/Owner is one click away. Consume the flag once.
+  useEffect(() => {
+    if (searchParams.get('engine') !== '1') return;
+    setEngineOpen(true);
+    setSearchParams((params) => {
+      const next = new URLSearchParams(params);
+      next.delete('engine');
+      return next;
+    }, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // Creation explicitly supplies `?facet=workflow`; every normal visit opens
   // on the Interface facet, whether it has a surface yet or not.
@@ -228,13 +269,56 @@ export function AppEditorPage() {
     }
   }, []);
 
+  const exportWorkflow = useCallback(async (workflow: WorkflowRef) => {
+    setBusy('workflow-export');
+    setStatus(null);
+    try {
+      const yaml = await apiText(`/v1/workflows/${workflow.id}/export`);
+      const blob = new Blob([yaml], { type: 'text/yaml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${workflowFilename(workflow.title)}.workflow.yaml`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatus(`Exported ${workflow.title}`);
+    } catch (e) {
+      setStatus(apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  const importWorkflow = useCallback(async (file: File) => {
+    setBusy('workflow-import');
+    setStatus(null);
+    try {
+      const yaml = await file.text();
+      if (!yaml.trim()) throw new Error('The workflow file is empty');
+      const imported = await api<{ workflowId: string; title: string }>('/v1/workflows/import', {
+        method: 'POST',
+        body: JSON.stringify({ yaml }),
+      });
+      await appsApi.adoptWorkflow(id, imported.workflowId);
+      await load();
+      setSelectedWorkflowId(imported.workflowId);
+      setFacet('workflow');
+      setStatus(`Imported ${imported.title}`);
+    } catch (e) {
+      setStatus(apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [id, load, setFacet]);
+
   const createSurface = useCallback(async () => {
     setBusy('surface');
     setStatus(null);
     try {
       const name = uniqueName('surface', surfaces.map((s) => s.name));
-      const starter = buildStarterSurface(collections);
-      await appsApi.upsertSurface(id, { name, kind: 'page', view: starter.view, actions: starter.actions });
+      // A new interface starts EMPTY and opens in Edit mode — you (or the agent on
+      // request) build it from scratch, instead of dropping a generic template.
+      await appsApi.upsertSurface(id, { name, kind: 'page', view: emptySurfaceView(), actions: [] });
       await load();
       setSelectedSurface(name);
       setFacet('interface');
@@ -243,7 +327,7 @@ export function AppEditorPage() {
     } finally {
       setBusy(null);
     }
-  }, [collections, id, load, setFacet, surfaces]);
+  }, [id, load, setFacet, surfaces]);
 
   const renameSurface = useCallback(async (currentName: string, nextName: string) => {
     const trimmed = nextName.trim();
@@ -328,15 +412,16 @@ export function AppEditorPage() {
     }
   }, [currentSurface, id, load, surfaceActionsDraft, surfaceDraft, surfaces]);
 
-  const deleteSurface = useCallback(async () => {
-    if (!currentSurface) return;
+  const deleteSurface = useCallback(async (surfaceName: string) => {
     setBusy('surface');
     setStatus(null);
     try {
-      await appsApi.removeSurface(id, currentSurface.name);
-      const next = surfaces.find((surface) => surface.name !== currentSurface.name)?.name ?? null;
+      await appsApi.removeSurface(id, surfaceName);
+      if (currentSurface?.name === surfaceName) {
+        const next = surfaces.find((surface) => surface.name !== surfaceName)?.name ?? null;
+        setSelectedSurface(next);
+      }
       await load();
-      setSelectedSurface(next);
       setStatus('Deleted');
     } catch (e) {
       setStatus(apiErrorMessage(e));
@@ -375,6 +460,20 @@ export function AppEditorPage() {
       setStatus(apiErrorMessage(e));
     }
   }, [app, id]);
+
+  const deleteWorkflow = useCallback(async (workflowId: string) => {
+    setBusy('workflow');
+    setStatus(null);
+    try {
+      await api(`/v1/workflows/${workflowId}`, { method: 'DELETE' });
+      await load();
+      setStatus('Deleted workflow');
+    } catch (e) {
+      setStatus(apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [load]);
 
   // ── Render ───────────────────────────────────────────────
 
@@ -443,6 +542,8 @@ export function AppEditorPage() {
           <Settings size={13} />
         </button>
         <span className="text-[11px] text-text-muted">v{app.version} · {app.status}</span>
+        <div className="mx-1 h-4 w-px bg-line" />
+        <AppTeamStrip appId={app.id} />
 
         <div className="ml-auto flex items-center gap-2">
           {status ? <span className="max-w-[180px] truncate text-[11px] text-text-muted">{status}</span> : null}
@@ -452,7 +553,7 @@ export function AppEditorPage() {
             onClick={() => void exportApp()}
             className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line px-2.5 text-[12px] text-text-secondary transition-colors hover:bg-canvas hover:text-text-primary"
           >
-            <Download size={13} /> Export
+            <Upload size={13} /> Export
           </button>
         </div>
       </div>
@@ -463,10 +564,13 @@ export function AppEditorPage() {
           <WorkflowFacet
             workflows={workflows}
             selectedId={selectedWorkflowId}
-            busy={busy === 'workflow'}
+            busy={busy?.startsWith('workflow') ?? false}
             onSelect={setSelectedWorkflowId}
             onAdd={() => void addWorkflow()}
             onRename={renameWorkflow}
+            onExport={(workflow) => void exportWorkflow(workflow)}
+            onImport={(file) => void importWorkflow(file)}
+            onDelete={(id) => void deleteWorkflow(id)}
           />
         )}
         {facet === 'interface' && (
@@ -491,16 +595,18 @@ export function AppEditorPage() {
             onGenerate={generateSurface}
             onUpdateSurface={(patch) => void updateSurfaceMeta(patch)}
             onDuplicateSurface={() => void duplicateSurface()}
-            onDeleteSurface={() => void deleteSurface()}
+            onDeleteSurface={(name) => void deleteSurface(name)}
           />
         )}
-        {facet === 'data' && <DataFacet collections={collections} />}
+        {facet === 'data' && <DataFacet collections={collections} appId={id} />}
         {facet === 'brain' && <BrainFacet app={app} />}
       </div>
       <AppEngineModal
         open={engineOpen}
         app={app}
         surfaces={surfaces}
+        domains={domains}
+        agents={agents}
         onClose={() => setEngineOpen(false)}
         onSave={saveAppSettings}
       />
@@ -517,6 +623,9 @@ function WorkflowFacet({
   onSelect,
   onAdd,
   onRename,
+  onExport,
+  onImport,
+  onDelete,
 }: {
   workflows: WorkflowRef[];
   selectedId: string | null;
@@ -524,9 +633,15 @@ function WorkflowFacet({
   onSelect: (id: string) => void;
   onAdd: () => void;
   onRename: (workflowId: string, title: string) => Promise<void>;
+  onExport: (workflow: WorkflowRef) => void;
+  onImport: (file: File) => void;
+  onDelete: (workflowId: string) => void;
 }) {
+  const confirm = useConfirm();
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   function startRename(workflow: WorkflowRef) {
     setRenamingId(workflow.id);
@@ -549,12 +664,36 @@ function WorkflowFacet({
 
   if (workflows.length === 0) {
     return (
-      <FacetEmpty
-        icon={<WorkflowIcon size={30} />}
-        title="No workflow yet"
-        body="The Workflow facet holds this App's logic — automations, agent orchestration, schedules, and app actions."
-        action={{ label: 'Create workflow', busy, onClick: onAdd }}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex shrink-0 items-center justify-end border-b border-line bg-surface px-3 py-1.5">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".yaml,.yml,text/yaml,application/x-yaml"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) onImport(file);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+            disabled={busy}
+            className="inline-flex h-7 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            Import workflow
+          </button>
+        </div>
+        <FacetEmpty
+          icon={<WorkflowIcon size={30} />}
+          title="No workflow yet"
+          body="Create a workflow or import a versioned Workflow-as-Code YAML file. Imported workflows become part of this App."
+          action={{ label: 'Create workflow', busy, onClick: onAdd }}
+        />
+      </div>
     );
   }
   return (
@@ -564,7 +703,7 @@ function WorkflowFacet({
           <div
             key={wf.id}
             className={clsx(
-              'flex h-7 shrink-0 items-center rounded-btn text-[12px] font-medium transition-colors',
+              'group flex h-7 shrink-0 items-center rounded-btn text-[12px] font-medium transition-colors',
               selectedId === wf.id ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-canvas hover:text-text-primary',
             )}
           >
@@ -587,21 +726,56 @@ function WorkflowFacet({
                 aria-selected={selectedId === wf.id}
                 type="button"
                 onClick={() => onSelect(wf.id)}
+                onContextMenu={(e) => { e.preventDefault(); setMenuOpenId(wf.id); }}
                 className="h-7 max-w-52 truncate px-2.5 text-left"
               >
                 {wf.title}
               </button>
             )}
-            {selectedId === wf.id && renamingId !== wf.id ? (
-              <button
-                type="button"
-                onClick={() => startRename(wf)}
-                className="mr-1 rounded-btn p-1 text-accent/70 hover:bg-accent/10 hover:text-accent"
-                title="Rename workflow"
-                aria-label={`Rename ${wf.title}`}
-              >
-                <Pencil size={11} />
-              </button>
+            {renamingId !== wf.id ? (
+              <DropdownMenu.Root open={menuOpenId === wf.id} onOpenChange={(open) => setMenuOpenId(open ? wf.id : null)}>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className={clsx("rounded-btn p-1 hover:bg-canvas disabled:cursor-wait disabled:opacity-50", menuOpenId === wf.id ? "opacity-100 text-text-primary" : "opacity-0 group-hover:opacity-100 text-text-muted")}
+                    title="More actions"
+                  >
+                    <MoreVertical size={11} />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content align="start" className="z-50 min-w-[140px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
+                    <DropdownMenu.Item
+                      onClick={() => startRename(wf)}
+                      className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                    >
+                      <Pencil size={12} /> Rename
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      onClick={() => onExport(wf)}
+                      className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                    >
+                      <Upload size={12} /> Export
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-px bg-line" />
+                    <DropdownMenu.Item
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Delete workflow "${wf.title}"?`,
+                          body: 'This action cannot be undone.',
+                          tone: 'danger',
+                          confirmLabel: 'Delete',
+                        });
+                        if (ok) onDelete(wf.id);
+                      }}
+                      className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-red-500 outline-none hover:bg-red-500/10 focus:bg-red-500/10"
+                    >
+                      <Trash2 size={12} /> Delete
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
             ) : null}
           </div>
         ))}
@@ -612,6 +786,27 @@ function WorkflowFacet({
           className="inline-flex h-7 shrink-0 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
         >
           {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+        </button>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".yaml,.yml,text/yaml,application/x-yaml"
+          className="sr-only"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = '';
+            if (file) onImport(file);
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => importInputRef.current?.click()}
+          disabled={busy}
+          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
+          title="Import workflow YAML"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+          Import
         </button>
       </div>
       <div className="min-h-0 flex-1">
@@ -668,15 +863,27 @@ function InterfaceFacet({
   onGenerate: (prompt: string) => Promise<void>;
   onUpdateSurface: (patch: { kind?: SurfaceKind; shareable?: boolean }) => void;
   onDuplicateSurface: () => void;
-  onDeleteSurface: () => void;
+  onDeleteSurface: (surfaceName: string) => void;
 }) {
+  const confirm = useConfirm();
   const [mode, setMode] = useState<BuilderMode>('live');
   const [renamingSurface, setRenamingSurface] = useState<string | null>(null);
   const [surfaceNameDraft, setSurfaceNameDraft] = useState('');
+  const [menuOpenSurface, setMenuOpenSurface] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<number[]>([]);
   const [prompt, setPrompt] = useState('');
   const view = parseViewDraft(draft);
   const selectedNode = view ? getNodeAtPath(view, selectedPath) : null;
+
+  // A new/empty surface opens in Edit mode — there's nothing to preview Live yet,
+  // so drop the operator straight into building from scratch. A populated surface
+  // opens in Live. Re-evaluated only when switching surfaces, not on every edit.
+  useEffect(() => {
+    const v = current?.view as { type?: string; children?: unknown[] } | null | undefined;
+    const empty = !v || (v.type === 'Stack' && (!v.children || v.children.length === 0));
+    setMode(empty ? 'edit' : 'live');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
 
   function setView(next: ViewNode) {
     onDraftChange(JSON.stringify(next, null, 2));
@@ -774,21 +981,61 @@ function InterfaceFacet({
                 <button
                   type="button"
                   onClick={() => { onSelect(surface.name); setSelectedPath([]); }}
+                  onContextMenu={(e) => { e.preventDefault(); setMenuOpenSurface(surface.name); }}
                   className="h-7 max-w-44 truncate px-2.5 text-left"
                 >
                   {surface.name}
                 </button>
               )}
               {renamingSurface !== surface.name ? (
-                <button
-                  type="button"
-                  onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
-                  className="mr-1 rounded-btn p-1 opacity-0 hover:bg-canvas group-hover:opacity-100"
-                  aria-label={`Rename ${surface.name}`}
-                  title="Rename surface"
-                >
-                  <Pencil size={11} />
-                </button>
+                <DropdownMenu.Root open={menuOpenSurface === surface.name} onOpenChange={(open) => setMenuOpenSurface(open ? surface.name : null)}>
+                  <DropdownMenu.Trigger asChild>
+                    <button
+                      type="button"
+                      className={clsx("mr-1 rounded-btn p-1 hover:bg-canvas", menuOpenSurface === surface.name ? "opacity-100 text-text-primary" : "opacity-0 group-hover:opacity-100 text-text-muted")}
+                      title="More actions"
+                    >
+                      <MoreVertical size={11} />
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.Content align="start" className="z-50 min-w-[140px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
+                      <DropdownMenu.Item
+                        onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
+                        className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                      >
+                        <Pencil size={12} /> Rename
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        onClick={() => {
+                          if (selected !== surface.name) {
+                            onSelect(surface.name);
+                            setSelectedPath([]);
+                          }
+                          setTimeout(() => onDuplicateSurface(), 0);
+                        }}
+                        className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                      >
+                        <Copy size={12} /> Duplicate
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Separator className="my-1 h-px bg-line" />
+                      <DropdownMenu.Item
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: `Delete surface "${surface.name}"?`,
+                            body: 'This action cannot be undone.',
+                            tone: 'danger',
+                            confirmLabel: 'Delete',
+                          });
+                          if (ok) onDeleteSurface(surface.name);
+                        }}
+                        className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-red-500 outline-none hover:bg-red-500/10 focus:bg-red-500/10"
+                      >
+                        <Trash2 size={12} /> Delete
+                      </DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
               ) : null}
             </div>
           ))}
@@ -821,6 +1068,31 @@ function InterfaceFacet({
             </button>
           ))}
         </div>
+
+        {mode === 'edit' && view ? (
+          <div className="flex items-center gap-1.5" title="Surface look — applies to the whole surface">
+            <select
+              aria-label="Surface theme"
+              value={view.style?.theme ?? 'analytics'}
+              onChange={(event) => setView({ ...view, style: { ...view.style, theme: event.target.value as 'console' | 'analytics' | 'product' | 'editorial' } })}
+              className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+            >
+              <option value="console">Console</option>
+              <option value="analytics">Analytics</option>
+              <option value="product">Product</option>
+              <option value="editorial">Editorial</option>
+            </select>
+            <select
+              aria-label="Surface density"
+              value={view.style?.density ?? 'comfortable'}
+              onChange={(event) => setView({ ...view, style: { ...view.style, density: event.target.value as 'comfortable' | 'compact' } })}
+              className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+            >
+              <option value="comfortable">Comfortable</option>
+              <option value="compact">Compact</option>
+            </select>
+          </div>
+        ) : null}
 
         {mode === 'edit' ? (
           <form onSubmit={(event) => void submitPrompt(event)} className="ml-auto flex min-w-[220px] flex-1 items-center gap-1.5 sm:max-w-md">
@@ -877,7 +1149,7 @@ function InterfaceFacet({
             )}
           </div>
         ) : current ? (
-          <StudioSurfaceBuilder
+          <SurfaceBuilder
             appId={appId}
             current={current}
             draft={draft}
@@ -887,7 +1159,7 @@ function InterfaceFacet({
             onActionsChange={onActionsChange}
             onUpdateSurface={onUpdateSurface}
             onDuplicateSurface={onDuplicateSurface}
-            onDeleteSurface={onDeleteSurface}
+            onDeleteSurface={() => onDeleteSurface(current.name)}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-text-muted">No surface selected</div>
@@ -1123,33 +1395,103 @@ function surfaceNodeLabel(node: ViewNode): string {
   return canHaveChildren(node) ? `${node.children.length} children` : '';
 }
 
-function DataFacet({ collections }: { collections: CollectionInfo[] }) {
+function DataFacet({ collections, appId }: { collections: CollectionInfo[]; appId: string }) {
   return (
     <main className="h-full min-h-0 overflow-auto p-6">
-      <div className="mb-4">
-        <h2 className="text-[15px] font-semibold text-text-primary">Data</h2>
-        <p className="mt-1 text-[12px] text-text-muted">Typed datastore collections owned by this App.</p>
-      </div>
-      {collections.length === 0 ? (
-        <FacetEmpty icon={<Database size={30} />} title="No collections yet" body="Collections defined by agents or app actions appear here, each a typed table the Interface can bind to." />
-      ) : (
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-          {collections.map((collection) => (
-            <div key={collection.id} className="rounded-card border border-line bg-surface p-4">
-              <div className="text-[14px] font-semibold text-text-primary">{collection.name}</div>
-              <div className="mt-1 text-[12px] text-text-muted">{collection.schema.fields.length} fields</div>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {collection.schema.fields.slice(0, 8).map((field) => (
-                  <span key={field.key} className="rounded-full border border-line bg-canvas px-2 py-0.5 text-[10px] text-text-secondary">
-                    {field.key}:{field.type}
-                  </span>
-                ))}
+      <section className="mb-8">
+        <div className="mb-4">
+          <h2 className="text-[15px] font-semibold text-text-primary">Collections</h2>
+          <p className="mt-1 text-[12px] text-text-muted">Typed datastore collections owned by this App.</p>
+        </div>
+        {collections.length === 0 ? (
+          <FacetEmpty icon={<Database size={30} />} title="No collections yet" body="Collections defined by agents or app actions appear here, each a typed table the Interface can bind to." />
+        ) : (
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
+            {collections.map((collection) => (
+              <div key={collection.id} className="rounded-card border border-line bg-surface p-4">
+                <div className="text-[14px] font-semibold text-text-primary">{collection.name}</div>
+                <div className="mt-1 text-[12px] text-text-muted">{collection.schema.fields.length} fields</div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {collection.schema.fields.slice(0, 8).map((field) => (
+                    <span key={field.key} className="rounded-full border border-line bg-canvas px-2 py-0.5 text-[10px] text-text-secondary">
+                      {field.key}:{field.type}
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
+        )}
+      </section>
+      <AppAssets appId={appId} />
+    </main>
+  );
+}
+
+/** Assets produced by (or filed under) this App — screenshots, docs, exports. */
+function AppAssets({ appId }: { appId: string }) {
+  const [assets, setAssets] = useState<Artifact[]>([]);
+  const [selected, setSelected] = useState<Artifact | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const reload = useCallback(() => {
+    if (!appId) return;
+    void api<{ artifacts: Artifact[] }>(`/v1/artifacts?appId=${encodeURIComponent(appId)}&limit=100`)
+      .then((res) => setAssets(res.artifacts ?? []))
+      .catch(() => setAssets([]))
+      .finally(() => setLoaded(true));
+  }, [appId]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  return (
+    <section>
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-[15px] font-semibold text-text-primary">Assets</h2>
+          <p className="mt-1 text-[12px] text-text-muted">Outputs this App has produced. Manage the full library under <Boxes size={11} className="inline -mt-0.5" /> Assets.</p>
+        </div>
+      </div>
+      {!loaded ? (
+        <div className="text-[12px] text-text-muted">Loading…</div>
+      ) : assets.length === 0 ? (
+        <FacetEmpty icon={<Boxes size={30} />} title="No assets yet" body="When this App's agents or workflows produce screenshots, docs, or exports, they appear here." />
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
+          {assets.map((a) => {
+            const preview = a.thumbnailUrl ?? (a.type === 'image' && a.content.startsWith('data:image/') ? a.content : null);
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => setSelected(a)}
+                className="group flex flex-col overflow-hidden rounded-lg border border-line bg-surface text-left transition hover:border-accent/40 hover:shadow-lg"
+              >
+                <div className="relative h-40 w-full overflow-hidden bg-surface-2">
+                  {preview ? (
+                    <>
+                      <img src={preview} alt={a.title} className="absolute inset-0 h-full w-full object-cover object-top" />
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-surface/95 to-transparent" />
+                    </>
+                  ) : (
+                    <span className="flex h-full w-full items-center justify-center text-text-muted transition group-hover:text-accent">
+                      <Database size={24} />
+                    </span>
+                  )}
+                </div>
+                <div className="p-2.5">
+                  <div className="truncate text-[11px] font-medium text-text-primary">{a.title}</div>
+                  <div className="mt-0.5 text-[9px] uppercase tracking-wider text-text-muted">{a.type}</div>
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
-    </main>
+      {selected && (
+        <ArtifactPanel artifact={selected} state="fullscreen" onClose={() => setSelected(null)} />
+      )}
+    </section>
   );
 }
 

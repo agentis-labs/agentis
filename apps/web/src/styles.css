@@ -389,12 +389,6 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
 .duration-200 { animation-duration: 200ms; }
 .duration-300 { animation-duration: 300ms; }
 
-/* Shimmer sweep for ExecutionFeed running steps */
-@keyframes shimmer-sweep {
-  0% { transform: translateX(-150%); }
-  100% { transform: translateX(350%); }
-}
-
 @keyframes chat-skeleton-sweep {
   0% { transform: translateX(-120%); opacity: 0.35; }
   45% { opacity: 0.9; }

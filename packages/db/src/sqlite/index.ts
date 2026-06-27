@@ -72,7 +72,8 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
         name: string;
       }>;
       if (!columns.some((column) => column.name === 'scope_id')) {
-        sqlite.exec('ALTER TABLE knowledge_bases ADD COLUMN scope_id TEXT REFERENCES workflows(id) ON DELETE CASCADE');
+        // Polymorphic scope (workflow OR app) — no FK (see migration v92).
+        sqlite.exec('ALTER TABLE knowledge_bases ADD COLUMN scope_id TEXT');
       }
     }
   }
@@ -130,6 +131,14 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Layer 6 §6.4 — pin artifacts to the workspace output gallery.
   addColumn('artifacts', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
 
+  // Assets §1 (migration v90) — group artifacts by producing App + origin class.
+  addColumn('artifacts', 'app_id', 'TEXT REFERENCES apps(id) ON DELETE SET NULL');
+  addColumn('artifacts', 'origin', "TEXT NOT NULL DEFAULT 'manual'");
+
+  // Live Workspace §C (migration v91) — issues become the schedulable backlog.
+  addColumn('issues', 'scheduled_for', 'TEXT');
+  addColumn('issues', 'recurrence_cron', 'TEXT');
+
   // Company OS layer (migration v2): conversation messages can be linked to an
   // issue. embedded-sql.ts predates this column — patch the drift here.
   addColumn('conversation_messages', 'issue_id', 'TEXT');
@@ -137,6 +146,24 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   addColumn('conversations', 'archived_at', 'TEXT');
   addColumn('conversations', 'channel_connection_id', 'TEXT REFERENCES channel_connections(id) ON DELETE SET NULL');
   addColumn('conversations', 'channel_chat_id', 'TEXT');
+  addColumn('conversations', 'permission_mode', "TEXT NOT NULL DEFAULT 'ask'");
+
+  // Living Apps Phase 0 (migration v95) — a channel/conversation can belong to an App.
+  // Plain TEXT: this drift runs before the apps table exists, so no inline FK
+  // (the Drizzle schema .references() carries the ORM relation).
+  addColumn('channel_connections', 'app_id', 'TEXT');
+  addColumn('conversations', 'app_id', 'TEXT');
+  // Living Apps Phase 2 (migration v96) — operator takeover state.
+  addColumn('conversations', 'handoff_state', 'TEXT');
+  // Living Apps Phase M2 (migration v99) — terminal relationship outcome (the
+  // learning loop). Plain TEXT, no FK. app_contacts is post-baseline so this is a
+  // no-op until the versioned runner creates it; kept for drift safety.
+  addColumn('app_contacts', 'outcome', 'TEXT');
+  addColumn('app_contacts', 'outcome_at', 'TEXT');
+  sqlite.exec(`
+CREATE INDEX IF NOT EXISTS idx_channel_connections_app ON channel_connections(app_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_app ON conversations(app_id);
+`);
   sqlite.exec(`
 DROP INDEX IF EXISTS uq_conversation_agent;
 DROP INDEX IF EXISTS uq_conversation_agent_active;

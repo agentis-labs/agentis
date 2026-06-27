@@ -46,12 +46,17 @@ const SUPPORTED_NODE_KINDS = new Set([
   'transform',
   'filter',
   'integration',
+  'mcp',
+  'data_query',
+  'data_mutate',
+  'aggregate_window',
   'http_request',
   'workflow_store',
   'workspace_store',
   'evaluator',
   'guardrails',
   'loop',
+  'converge',
   'parallel',
   'return_output',
   'artifact_save',
@@ -396,6 +401,23 @@ export function validateWorkflowGraph(
           fail(`Node ${node.id} (loop) missing outputArrayKey`);
         }
         break;
+      case 'converge': {
+        if (!node.config.bodyWorkflowId) {
+          fail(`Node ${node.id} (converge) missing bodyWorkflowId`);
+        }
+        const cont = node.config.continuation;
+        if (!cont || typeof cont !== 'object') {
+          fail(`Node ${node.id} (converge) missing continuation policy`);
+        } else if (cont.type === 'deterministic' && !cont.expr?.trim()) {
+          fail(`Node ${node.id} (converge) deterministic continuation missing expr`);
+        } else if (cont.type === 'judge' && (!cont.targetPath?.trim() || !cont.criteria?.trim())) {
+          fail(`Node ${node.id} (converge) judge continuation requires targetPath + criteria`);
+        }
+        if (node.config.maxIterations !== undefined && node.config.maxIterations <= 0) {
+          fail(`Node ${node.id} (converge) maxIterations must be > 0`);
+        }
+        break;
+      }
       default:
         break;
     }

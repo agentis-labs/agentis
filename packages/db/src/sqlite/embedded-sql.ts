@@ -445,6 +445,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   channel_chat_id       TEXT,
   title                 TEXT,
   execution_mode        TEXT NOT NULL DEFAULT 'chat',
+  permission_mode       TEXT NOT NULL DEFAULT 'ask',
   archived_at           TEXT,
   unread_count          INTEGER NOT NULL DEFAULT 0,
   last_message_at       TEXT,

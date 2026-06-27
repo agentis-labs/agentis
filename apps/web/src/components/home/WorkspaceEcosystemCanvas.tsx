@@ -14,7 +14,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { REALTIME_EVENTS } from '@agentis/core';
+import { REALTIME_EVENTS, type WorkStepTrack } from '@agentis/core';
 import {
   AlertTriangle,
   Bot,
@@ -38,6 +38,8 @@ import {
   X,
   Square,
   Wrench,
+  Trash2,
+  Pencil,
   Loader2,
   Zap,
   RefreshCw,
@@ -64,6 +66,7 @@ import {
   liveNodeIdsFromSessions,
   type WorkSession,
 } from '../../lib/workSessions';
+import { buildStepIndex, sessionStepTrack, type StepIndex } from '../../lib/workSteps';
 import {
   isActiveObservation,
   observationTone,
@@ -398,15 +401,20 @@ export function WorkspaceEcosystemCanvas({
     [model.nodes],
   );
   const workspaceActivity = useWorkspaceActivity(activeRunIds, { nodeTitle: nodeTitleFor });
-  const requestStatus = useMemo(() => workspaceRequestStatus(workspaceActivity), [workspaceActivity]);
+  // `now` (1s tick) is a dep so liveness RE-EVALUATES as wall-clock advances, not
+  // only when a new event arrives. Without it, a session/orchestrator that goes
+  // quiet stays "active" forever until the next event or a page refresh.
+  const staleTick = Math.floor(now / 3000);
+  const requestStatus = useMemo(() => workspaceRequestStatus(workspaceActivity), [workspaceActivity, staleTick]);
   const commandCenter = useActivityStream({ type: 'workspace', limit: 160 });
   const workSessions = useMemo(() => buildWorkSessions({
     activity: workspaceActivity,
     activeRuns: activeRuns.filter(isActiveRun),
     failedRuns,
     observabilityEvents: commandCenter.events,
+    now,
     limit: 16,
-  }), [activeRuns, commandCenter.events, failedRuns, workspaceActivity]);
+  }), [activeRuns, commandCenter.events, failedRuns, workspaceActivity, now]);
   const liveIds = useMemo(() => liveNodeIdsFromSessions(workSessions), [workSessions]);
 
   // Canvas node ids currently working (agent-/workflow- prefixed), plus the
@@ -1045,6 +1053,7 @@ export function WorkspaceEcosystemCanvas({
       <LiveWorkspacePanel
         open={liveWorkspaceOpen}
         fleet={fleet}
+        agents={agents}
         activeRuns={activeRuns.filter(isActiveRun)}
         approvals={approvals}
         failedRuns={failedRuns}
@@ -1322,6 +1331,10 @@ function CanvasNodeCard({
   const elapsed = node.startedAt ? formatElapsed(node.startedAt, now) : null;
   const isAgentNode = node.kind === 'orchestrator' || node.kind === 'manager' || node.kind === 'worker';
   const isOperationalWarning = Boolean(node.outOfCredits || node.warn);
+  // A failing App/workflow card should read as a quiet RED state — a small red
+  // status dot, not a whole orange-washed card. (Agent attention/approval keeps
+  // the amber warn treatment; only resource failures go minimal-red.)
+  const isFailingResource = node.kind === 'workflow' && Boolean(node.warn) && !node.outOfCredits;
   // Liveness = a formal active run OR live workspace activity for this node.
   const isLive = Boolean(node.active) || live;
   const compact = node.height <= 60 || node.kind === 'artifact';
@@ -1369,13 +1382,15 @@ function CanvasNodeCard({
         node.ghost && 'home-ghost-breathe',
         node.outOfCredits
           ? 'border-warn bg-warn/5 shadow-[0_0_12px_rgba(245,158,11,0.25)]'
-          : node.warn
-            ? 'border-warn/40 bg-warn-soft'
-            : isLive
-              ? 'border-accent/35 bg-accent-soft'
-              : node.ghost
-                ? 'border-dashed border-line bg-surface/45 text-text-muted'
-                : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
+          : isFailingResource
+            ? 'border-danger/35 bg-surface/90 hover:border-danger/55 hover:bg-surface'
+            : node.warn
+              ? 'border-warn/40 bg-warn-soft'
+              : isLive
+                ? 'border-accent/35 bg-accent-soft'
+                : node.ghost
+                  ? 'border-dashed border-line bg-surface/45 text-text-muted'
+                  : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
         isLive && !node.warn && !node.outOfCredits && 'home-orchestrator-aura',
         selected && 'ring-2 ring-violet-300/55',
         // Visual hierarchy at scale: idle workflows recede so the ones that are
@@ -1401,13 +1416,15 @@ function CanvasNodeCard({
             avatarClass,
             node.outOfCredits
               ? 'border-warn/50 bg-warn/10 text-warn shadow-[0_0_8px_rgba(245,158,11,0.2)]'
-              : node.warn
-                ? 'border-warn/35 bg-warn-soft text-warn'
-                : isLive
-                  ? 'border-accent/35 bg-accent-soft text-accent'
-                  : node.ghost
-                    ? 'border-line bg-canvas/50 text-text-muted'
-                    : 'border-line bg-surface-2 text-text-secondary',
+              : isFailingResource
+                ? 'border-line bg-surface-2 text-text-secondary'
+                : node.warn
+                  ? 'border-warn/35 bg-warn-soft text-warn'
+                  : isLive
+                    ? 'border-accent/35 bg-accent-soft text-accent'
+                    : node.ghost
+                      ? 'border-line bg-canvas/50 text-text-muted'
+                      : 'border-line bg-surface-2 text-text-secondary',
           )}
           style={{ color: isOperationalWarning ? undefined : node.accent ?? undefined }}
         >
@@ -1436,7 +1453,7 @@ function CanvasNodeCard({
               title={isAgentNode ? `${node.title} ${statusLabelText}` : undefined}
               className={clsx(
                 'absolute bottom-1 left-1 h-2 w-2 animate-pulse-dot rounded-full',
-                node.status === 'offline' ? 'bg-danger' : 'bg-warn',
+                isFailingResource || node.status === 'offline' ? 'bg-danger' : 'bg-warn',
               )}
             />
           )}
@@ -1577,6 +1594,7 @@ function LiveActivityStream({
 function LiveWorkspacePanel({
   open,
   fleet,
+  agents,
   activeRuns,
   approvals,
   failedRuns,
@@ -1596,6 +1614,7 @@ function LiveWorkspacePanel({
 }: {
   open: boolean;
   fleet: WorkspaceFleetOverview | null;
+  agents: WorkspaceAgent[];
   activeRuns: WorkspaceActiveRun[];
   approvals: WorkspaceApproval[];
   failedRuns: WorkspaceFailedRun[];
@@ -1630,7 +1649,6 @@ function LiveWorkspacePanel({
     handle: HTMLElement;
   } | null>(null);
   const [view, setView] = useState<'live' | 'tech'>('live');
-  const [density, setDensity] = useState<'compact' | 'expanded'>('compact');
   const [panelFullscreen, setPanelFullscreen] = useState(false);
   const [panelNow, setPanelNow] = useState(() => Date.now());
 
@@ -1652,39 +1670,47 @@ function LiveWorkspacePanel({
   }, []);
 
   if (!open) return null;
-  const activeSessions = workSessions.filter((session) => session.active).slice(0, 4);
-  const hasLiveTriage = activeSessions.length > 0 || activeRuns.length > 0 || approvals.length > 0 || failedRuns.length > 0;
+  // One card per real task: the same dispatch emits agent-, run-, and workflow-
+  // keyed events that the session builder splits apart — collapse them by the
+  // actor so the operator sees a single coherent task, not three.
+  const activeSessions = dedupeActiveSessions(workSessions.filter((session) => session.active)).slice(0, 6);
+  // Structured step tracks (the agent's task spine) keyed for per-session lookup.
+  const stepIndex = buildStepIndex(activity);
   const activeObservations = observabilityEvents
     .filter((event) => LIVE_WORKSPACE_KINDS.has(event.kind) && isActiveObservation(event) && isRecentIso(event.createdAt, 30 * 60_000))
     .slice(0, 5);
   const waitingObservations = observabilityEvents
-    .filter((event) => event.status === 'waiting' || event.status === 'blocked' || event.kind === 'approval')
+    .filter((event) => (event.status === 'waiting' || event.status === 'blocked' || event.kind === 'approval') && isRecentIso(event.createdAt, 30 * 60_000))
     .slice(0, 4);
+  // Recency gate — stale failures (days old) and re-run workflows must not keep
+  // nagging. Drop failed observations outside the live window, and failed runs
+  // whose workflow is currently running again or finished long ago.
   const incidentObservations = observabilityEvents
-    .filter((event) => event.status === 'failed')
+    .filter((event) => event.status === 'failed' && (event.runId || event.workflowId) && isRecentIso(event.createdAt, 10 * 60_000))
     .slice(0, 4);
-  const evidenceEvents = observabilityEvents
-    .filter((event) => event.kind === 'tool' || event.kind === 'artifact' || event.kind === 'brain' || event.evidence.length > 0)
-    .slice(0, 5);
-  const recentEvents = observabilityEvents.slice(0, 10);
+  const activeWorkflowIds = new Set(activeRuns.map((run) => run.workflowId).filter(Boolean) as string[]);
+  const attentionFailedRuns = failedRuns.filter((run) =>
+    (!run.workflowId || !activeWorkflowIds.has(run.workflowId))
+    && (!run.finishedAt || isRecentIso(run.finishedAt, 12 * 60 * 60_000)));
   const hasLiveEvents = observabilityEvents.length > 0;
-  const showStream = activity.length > 0 && !hasLiveEvents;
-  const showBeacon = hasLiveTriage || requestStatus.busy || activeObservations.length > 0 || showStream;
-  const focusEvent = activeObservations[0] ?? recentEvents[0] ?? null;
-  const allAttentionGroups = buildAttentionGroups(approvals, failedRuns, waitingObservations, incidentObservations);
-  const attentionGroups = allAttentionGroups.slice(0, 3);
+  const showStream = activity.length > 0 && activeSessions.length === 0 && !hasLiveEvents;
+  const showBeacon = activeSessions.length > 0 || requestStatus.busy || approvals.length > 0 || attentionFailedRuns.length > 0 || showStream;
+  const allAttentionGroups = buildAttentionGroups(approvals, attentionFailedRuns, waitingObservations, incidentObservations);
+  const attentionGroups = allAttentionGroups.slice(0, 4);
   const hiddenAttentionCount = Math.max(0, allAttentionGroups.length - attentionGroups.length);
-  const signalEvents = dedupeObservations([...evidenceEvents, ...recentEvents])
-    .filter((event) => !isActiveObservation(event) || !LIVE_WORKSPACE_KINDS.has(event.kind))
-    .slice(0, 3);
   const liveCount = Math.max(activeSessions.length, activeRuns.length, activeObservations.filter((event) => event.status !== 'waiting' && event.status !== 'blocked').length);
   const waitingCount = Math.max(approvals.length, waitingObservations.length);
-  const incidentCount = Math.max(failedRuns.length, incidentObservations.length);
-  // Issues — open backlog (exclude done/cancelled)
-  const openIssues = issues.filter((i) => i.status !== 'done' && i.status !== 'cancelled').slice(0, 2);
-  const issueCount = issues.filter((i) => i.status !== 'done' && i.status !== 'cancelled').length;
-  const heroSession = activeSessions[0] ?? null;
-  const heroRun = heroSession?.runId ? activeRuns.find((run) => run.id === heroSession.runId) ?? null : activeRuns[0] ?? null;
+  // Issues — open backlog (exclude done/cancelled), newest scheduled first.
+  const backlogIssues = issues
+    .filter((issue) => issue.status !== 'done' && issue.status !== 'cancelled')
+    .sort((a, b) => issueScheduleRank(a) - issueScheduleRank(b));
+  // History — tasks that already ran, newest first, so the operator can come
+  // back and see what happened.
+  const doneIssues = issues
+    .filter((issue) => issue.status === 'done' || issue.status === 'cancelled')
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, 12);
+  const techEvents = observabilityEvents.filter((event) => isRecentIso(event.createdAt, 2 * 60 * 60_000));
   const panelWide = panelFullscreen || frame.width >= 620;
   const panelStyle: CSSProperties = panelFullscreen
     ? {
@@ -1895,44 +1921,19 @@ function LiveWorkspacePanel({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <LiveWorkspacePulse
-            liveCount={liveCount}
-            waitingCount={waitingCount}
-            incidentCount={incidentCount}
-            evidenceCount={evidenceEvents.length}
-            issueCount={issueCount}
-            connected={streamConnected}
-            fleet={fleet}
-          />
-        </div>
-
         {view === 'live' ? (
-          <>
-            <HeroTaskCard
-              session={heroSession}
-              run={heroRun}
-              focusEvent={focusEvent}
-              requestStatus={requestStatus}
-              now={panelNow}
-              onOpen={() => {
-                if (heroSession?.runId) openRunModal({ runId: heroSession.runId, workflowId: heroSession.workflowId, source: 'live-workspace-hero' });
-                else if (heroRun) openRunModal({ runId: heroRun.id, workflowId: heroRun.workflowId, source: 'live-workspace-hero' });
-                else if (heroSession?.workflowId) onSelectWorkflow(heroSession.workflowId);
-              }}
-            />
+          <div className="space-y-3">
+            {activeSessions.length === 0 && allAttentionGroups.length === 0 && !showStream && <LiveWorkspaceEmptyState />}
 
-            {!hasLiveTriage && !showStream && !hasLiveEvents && <LiveWorkspaceEmptyState />}
-
-            {(hasLiveEvents || hasLiveTriage) && (
-              <LiveWorkspaceSection storageKey="active" label="Active tasks" icon={<ActivityIcon size={12} />} empty="No active work" count={liveCount}>
+            {activeSessions.length > 0 && (
+              <section className="space-y-1.5">
+                <SectionHeading icon={<ActivityIcon size={12} />} label="Active work" count={activeSessions.length} />
                 {activeSessions.map((session) => (
-                  <WorkSessionRow
+                  <ActiveWorkRow
                     key={session.id}
                     session={session}
+                    track={sessionStepTrack(session, stepIndex)}
                     now={panelNow}
-                    density={panelWide ? 'expanded' : density}
-                    wide={panelWide}
                     onOpen={() => {
                       if (session.runId) openRunModal({ runId: session.runId, workflowId: session.workflowId, source: 'live-workspace' });
                       else if (session.workflowId) onSelectWorkflow(session.workflowId);
@@ -1940,17 +1941,15 @@ function LiveWorkspacePanel({
                     }}
                   />
                 ))}
-                {activeSessions.length === 0 && activeObservations.slice(0, density === 'compact' ? 2 : 5).map((event) => (
-                  <ObservationRow key={event.id} event={event} onSelectWorkflow={onSelectWorkflow} onOpenRun={onNavigate} compact={density === 'compact'} />
-                ))}
-                {activeSessions.length === 0 && activeRuns.slice(0, density === 'compact' ? 2 : 5).map((run) => (
-                  <ActiveRunMiniRow key={run.id} run={run} onOpen={() => openRunModal({ runId: run.id, workflowId: run.workflowId, source: 'live-workspace' })} />
-                ))}
-              </LiveWorkspaceSection>
+              </section>
+            )}
+
+            {activeSessions.length === 0 && showStream && (
+              <LiveActivityStream activity={activity} onSelectWorkflow={onSelectWorkflow} />
             )}
 
             {allAttentionGroups.length > 0 && (
-              <LiveWorkspaceSection storageKey="attention" label="Needs attention" icon={<AlertTriangle size={12} />} empty="Nothing needs you" count={allAttentionGroups.length} className="mt-3" defaultOpen={allAttentionGroups.length > 0}>
+              <LiveWorkspaceSection storageKey="attention" label="Needs attention" icon={<AlertTriangle size={12} />} empty="Nothing needs you" count={allAttentionGroups.length} defaultOpen>
                 {attentionGroups.map((group) => (
                   <AttentionGroupRow
                     key={group.id}
@@ -1970,18 +1969,18 @@ function LiveWorkspacePanel({
               </LiveWorkspaceSection>
             )}
 
-            {hasLiveEvents && <LiveSignalStrip events={signalEvents} onSelectWorkflow={onSelectWorkflow} onOpenRun={onNavigate} />}
-            {showStream && <LiveActivityStream activity={activity} onSelectWorkflow={onSelectWorkflow} />}
-            {issueCount > 0 && (
-              <LiveWorkspaceSection storageKey="backlog" label="Backlog" icon={<ListTodo size={12} />} empty="No open issues" count={issueCount} className="mt-3" defaultOpen={panelFullscreen}>
-                {openIssues.map((issue) => <IssueControlRow key={issue.id} issue={issue} compact onAccept={async () => { await api(`/v1/issues/${issue.id}/accept`, { method: 'POST', body: JSON.stringify({ agentId: issue.assigneeAgentId ?? null }) }).catch(() => undefined); onRefresh(); }} onOpenRun={issue.activeRunId ? () => openRunModal({ runId: issue.activeRunId, source: 'live-workspace-issue' }) : undefined} />)}
-                {issueCount > 2 && <button type="button" onClick={() => onNavigate('/issues')} className="flex h-7 w-full items-center justify-center rounded-md border border-line/70 bg-canvas/35 text-[10px] text-text-muted hover:bg-surface-2 hover:text-text-primary">+{issueCount - 2} more</button>}
-              </LiveWorkspaceSection>
-            )}
-            {panelFullscreen && <div className="mt-3"><IssueCreateRow onCreated={onRefresh} compact /></div>}
-          </>
+            <BacklogScheduleSection
+              issues={backlogIssues}
+              doneIssues={doneIssues}
+              agents={agents}
+              defaultOpen={panelFullscreen}
+              onRefresh={onRefresh}
+              onNavigate={onNavigate}
+              onOpenRun={(runId) => openRunModal({ runId, source: 'live-workspace-issue' })}
+            />
+          </div>
         ) : (
-          <LiveWorkspaceTechnicalFeed events={observabilityEvents} activity={activity} connected={streamConnected} wide={panelWide} />
+          <LiveWorkspaceTechnicalFeed events={techEvents} activity={activity} connected={streamConnected} wide={panelWide} />
         )}
       </div>
       {!panelFullscreen && (
@@ -2014,125 +2013,6 @@ const OBSERVATION_TONE_BORDER: Record<ObservationTone, string> = {
   danger: 'border-danger/25 bg-danger-soft/50',
   muted: 'border-line bg-canvas/40',
 };
-
-function HeroTaskCard({
-  session,
-  run,
-  focusEvent,
-  requestStatus,
-  now,
-  onOpen,
-}: {
-  session: WorkSession | null;
-  run: WorkspaceActiveRun | null;
-  focusEvent: ObservabilityEvent | null;
-  requestStatus: WorkspaceRequestStatus;
-  now: number;
-  onOpen: () => void;
-}) {
-  const title = session?.title ?? run?.workflowName ?? (requestStatus.busy ? 'Work in progress' : 'Workspace is quiet');
-  const step = currentSessionStep(session) ?? run?.currentStep ?? focusEvent?.summary ?? focusEvent?.title ?? requestStatus.label ?? 'No active step';
-  const agentName = session?.participantNames[0] ?? session?.agentName ?? run?.agents?.[0]?.name ?? 'Agentis';
-  const startedAt = run?.startedAt ?? sessionStart(session);
-  const elapsed = startedAt ? formatElapsed(startedAt, now) : null;
-  const pct = progressPercent(session?.progress ?? runProgressObject(run));
-  const active = Boolean(session || run || requestStatus.busy);
-  const actionable = Boolean(session?.runId || session?.workflowId || run);
-
-  return (
-    <button
-      type="button"
-      onClick={actionable ? onOpen : undefined}
-      disabled={!actionable}
-      className="group relative mb-3 w-full overflow-hidden rounded-xl border border-accent/25 bg-gradient-to-br from-accent/12 via-surface/80 to-accent/4 px-4 py-4 text-left shadow-[0_18px_60px_rgba(0,0,0,0.22)] transition hover:border-accent/45 disabled:cursor-default disabled:hover:border-accent/25"
-    >
-      <span aria-hidden="true" className="absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-accent/70 to-transparent" />
-      <div className="flex items-start gap-3">
-        <span className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-canvas/60 text-[15px] font-semibold text-accent shadow-[0_0_28px_rgba(74,222,128,0.12)]">
-          {active && <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full border border-canvas bg-accent shadow-[0_0_18px_rgba(74,222,128,0.8)]" />}
-          {initialsFromName(agentName)}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-accent">{active ? 'Happening now' : 'Standing by'}</span>
-          <span className="mt-1 block truncate text-[17px] font-semibold leading-tight text-text-primary">{title}</span>
-          <span className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-[10px] text-text-muted">
-            <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-line/70 bg-canvas/40 px-2 py-1">
-              <Bot size={11} className="text-accent" />
-              <span className="truncate">{agentName}</span>
-            </span>
-            {elapsed && <span className="rounded-full border border-line/70 bg-canvas/40 px-2 py-1 font-mono tabular-nums">{elapsed}</span>}
-          </span>
-        </span>
-      </div>
-      <div className="mt-4 rounded-lg border border-white/5 bg-canvas/35 px-3 py-2">
-        <div className="flex items-start gap-2 text-[12px] leading-snug text-text-secondary">
-          <span className={clsx('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-accent' : 'bg-text-muted')} />
-          <span className="line-clamp-2 min-w-0">{step}</span>
-        </div>
-        <div className="mt-3 h-1 overflow-hidden rounded-full bg-accent/20">
-          <div
-            className={clsx('h-full rounded-full bg-accent shadow-[0_0_10px_rgba(74,222,128,0.75)] transition-all duration-500', pct == null && active && 'w-2/5 animate-pulse')}
-            style={pct != null ? { width: `${pct}%` } : undefined}
-          />
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function LiveWorkspacePulse({
-  liveCount,
-  waitingCount,
-  incidentCount,
-  evidenceCount,
-  issueCount,
-  connected,
-  fleet,
-}: {
-  liveCount: number;
-  waitingCount: number;
-  incidentCount: number;
-  evidenceCount: number;
-  issueCount: number;
-  connected: boolean;
-  fleet: WorkspaceFleetOverview | null;
-}) {
-  return (
-    <section className="w-full rounded-xl border border-line/70 bg-canvas/35 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-          <ActivityIcon size={12} />
-          System pulse
-        </div>
-        <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
-          <span className={clsx('h-1.5 w-1.5 rounded-full', connected ? 'bg-accent' : 'bg-text-muted/50')} />
-          {connected ? 'live' : 'replay'}
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-1.5 min-[400px]:grid-cols-6">
-        <LiveWorkspaceMetric value={liveCount} label="live" tone="accent" />
-        <LiveWorkspaceMetric value={waitingCount} label="waiting" tone={waitingCount > 0 ? 'warn' : 'muted'} />
-        <LiveWorkspaceMetric value={incidentCount} label="risk" tone={incidentCount > 0 ? 'danger' : 'muted'} />
-        <LiveWorkspaceMetric value={evidenceCount} label="evidence" tone="muted" />
-        <LiveWorkspaceMetric value={issueCount} label="backlog" tone={issueCount > 0 ? 'warn' : 'muted'} />
-        <LiveWorkspaceMetric 
-          value={Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(fleet?.runs.totalTokens ?? 0)} 
-          label="tokens" 
-          tone="muted" 
-        />
-      </div>
-    </section>
-  );
-}
-
-function LiveWorkspaceMetric({ value, label, tone }: { value: number | string; label: string; tone: ObservationTone }) {
-  return (
-    <div className="min-w-0 rounded-lg border border-line/50 bg-surface/45 px-2 py-1.5">
-      <div className={clsx('font-mono text-[12px] leading-none tabular-nums', OBSERVATION_TONE_TEXT[tone])}>{value}</div>
-      <div className="mt-0.5 truncate text-[8px] uppercase tracking-[0.08em] text-text-muted">{label}</div>
-    </div>
-  );
-}
 
 function LiveWorkspaceEmptyState() {
   return (
@@ -2369,117 +2249,6 @@ interface CommandAttentionGroup {
   approval?: WorkspaceApproval;
 }
 
-function WorkSessionRow({
-  session,
-  onOpen,
-  now,
-  density = 'compact',
-  wide = false,
-}: {
-  session: WorkSession;
-  onOpen: () => void;
-  now: number;
-  density?: 'compact' | 'expanded';
-  wide?: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const pct = session.progress && session.progress.total > 0
-    ? clamp(session.progress.completed / session.progress.total, 0.04, 1)
-    : null;
-  const participantLabel = session.participantNames.length > 0
-    ? session.participantNames.slice(0, 2).join(', ')
-    : session.agentName ?? (session.kind === 'workflow' || session.kind === 'run' ? 'workflow tool' : 'agent');
-  const extraParticipants = Math.max(0, session.participantNames.length - 2);
-  const tone = session.status === 'failed'
-    ? 'danger'
-    : session.status === 'waiting' || session.status === 'blocked'
-      ? 'warn'
-      : 'accent';
-  const lastStep = currentSessionStep(session) ?? session.detail;
-  const toolCount = session.events.filter((event) => event.kind === 'tool' || event.tool).length;
-  const startedAt = sessionStart(session);
-  const elapsed = startedAt ? formatElapsed(startedAt, now) : null;
-  const details = session.events
-    .slice(-8)
-    .reverse()
-    .map((event) => ({
-      id: event.id,
-      label: event.phase ?? event.kind,
-      detail: event.detail || event.title,
-      at: event.at,
-    }));
-  const canExpand = details.length > 0;
-
-  return (
-    <div
-      className={clsx(
-        'group w-full text-left transition duration-150',
-        density === 'compact' ? 'rounded-card border border-line/70 bg-canvas/35 px-2.5 py-2' : 'border-t border-line/70 px-1 py-2 first:border-t-0',
-        tone === 'danger'
-          ? 'hover:bg-danger-soft/20'
-          : tone === 'warn'
-            ? 'hover:bg-warn-soft/20'
-            : 'hover:bg-surface-2/45',
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <span
-          className={clsx(
-            'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
-            tone === 'danger' ? 'bg-danger' : tone === 'warn' ? 'bg-warn' : 'bg-accent animate-pulse-dot',
-          )}
-        />
-        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left active:scale-[0.99]">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate text-[12px] font-semibold text-text-primary">{session.title}</span>
-            <span className="shrink-0 border border-line/70 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.08em] text-text-muted">
-              {session.kind === 'run' ? 'workflow' : session.kind}
-            </span>
-          </span>
-          <span className={clsx('mt-0.5 block text-[10.5px] text-text-secondary', density === 'compact' ? 'line-clamp-2' : 'truncate')}>-&gt; {lastStep}</span>
-          <span className={clsx('flex min-w-0 items-center gap-1.5', density === 'compact' ? 'mt-1.5' : 'mt-1')}>
-            <span className="truncate text-[9.5px] text-text-muted">{participantLabel}</span>
-            {extraParticipants > 0 && (
-              <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[8px] text-text-muted">+{extraParticipants}</span>
-            )}
-            {toolCount > 0 && <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[8px] text-text-muted">{toolCount} tools</span>}
-            {elapsed && <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[8px] text-text-muted tabular-nums">{elapsed}</span>}
-          </span>
-        </button>
-        {density === 'expanded' && canExpand && (
-          <button
-            type="button"
-            aria-label={expanded ? 'Hide task steps' : 'Show task steps'}
-            onClick={(event) => {
-              event.stopPropagation();
-              setExpanded((value) => !value);
-            }}
-            className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-surface-2 hover:text-text-primary active:scale-[0.96]"
-          >
-            <ChevronDown size={12} className={clsx('transition-transform duration-150', expanded && 'rotate-180')} />
-          </button>
-        )}
-      </div>
-      {pct != null && (
-        <span className="mt-2 block h-px overflow-hidden rounded-full bg-line/70">
-          <span className="block h-full bg-accent transition-[width] duration-300" style={{ width: `${pct * 100}%` }} />
-        </span>
-      )}
-      {density === 'expanded' && expanded && canExpand && (
-        <div className={clsx('ml-[4px] mt-2 space-y-1 border-l border-line/70 pl-3', wide && 'grid grid-cols-2 gap-x-4')}>
-          {details.map((item) => (
-            <div key={item.id} className="grid grid-cols-[64px_minmax(0,1fr)_34px] gap-2 py-0.5 text-[9.5px] leading-snug">
-              <span className="truncate font-mono uppercase tracking-[0.08em] text-text-muted">{item.label}</span>
-              <span className="truncate text-text-secondary">{item.detail}</span>
-              <span className="text-right font-mono text-[9px] text-text-muted">{formatAge(item.at)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function currentSessionStep(session: WorkSession | null): string | null {
   if (!session) return null;
   const event = session.events.at(-1);
@@ -2489,47 +2258,6 @@ function currentSessionStep(session: WorkSession | null): string | null {
 function sessionStart(session: WorkSession | null): string | null {
   if (!session) return null;
   return session.events[0]?.at ?? session.at ?? null;
-}
-
-function runProgressObject(run: WorkspaceActiveRun | null | undefined): { completed: number; total: number } | undefined {
-  if (!run?.totalSteps || run.totalSteps <= 0) return undefined;
-  return { completed: run.stepIndex ?? 0, total: run.totalSteps };
-}
-
-function progressPercent(progress: { completed: number; total: number } | undefined): number | null {
-  if (!progress || progress.total <= 0) return null;
-  return clamp((progress.completed / progress.total) * 100, 4, 100);
-}
-
-function initialsFromName(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return 'A';
-  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('') || 'A';
-}
-
-function ActiveRunMiniRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => void }) {
-  const pct = run.totalSteps && run.totalSteps > 0 ? clamp(((run.stepIndex ?? 0) / run.totalSteps) * 100, 0, 100) : null;
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="flex w-full items-center gap-2 rounded-card border border-accent/20 bg-accent/5 px-2 py-1.5 text-left hover:border-accent/40 hover:bg-surface-2"
-    >
-      <span className="relative flex h-2 w-2 shrink-0">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent/60" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[11px] font-medium text-text-primary">{run.workflowName}</span>
-        <span className="mt-0.5 block truncate text-[10px] text-text-secondary">{run.currentStep ?? 'Running'}</span>
-        {pct != null && (
-          <span className="mt-1 block h-0.5 overflow-hidden rounded-full bg-line/70">
-            <span className="block h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${pct}%` }} />
-          </span>
-        )}
-      </span>
-    </button>
-  );
 }
 
 function AttentionGroupRow({
@@ -2590,278 +2318,6 @@ function AttentionGroupRow({
       </div>
     </div>
   );
-}
-
-function LiveSignalStrip({
-  events,
-  onSelectWorkflow,
-  onOpenRun,
-}: {
-  events: ObservabilityEvent[];
-  onSelectWorkflow: (workflowId: string) => void;
-  onOpenRun: (route: string) => void;
-}) {
-  if (events.length === 0) return null;
-  return (
-    <section className="mt-2.5 border-t border-line/70 pt-2.5">
-      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-        <Wrench size={12} />
-        Signal
-      </div>
-      <div className="space-y-1">
-        {events.map((event) => (
-          <CommandSignalRow key={event.id} event={event} onSelectWorkflow={onSelectWorkflow} onOpenRun={onOpenRun} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function CommandSignalRow({
-  event,
-  onSelectWorkflow,
-  onOpenRun,
-}: {
-  event: ObservabilityEvent;
-  onSelectWorkflow: (workflowId: string) => void;
-  onOpenRun: (route: string) => void;
-}) {
-  const tone = observationTone(event);
-  const clickable = Boolean(event.workflowId || event.runId);
-  const content = (
-    <>
-      <span className={clsx('shrink-0', OBSERVATION_TONE_TEXT[tone])}>{observationIcon(event.kind)}</span>
-      <span className="min-w-0 flex-1 truncate text-[11px] text-text-secondary">{event.title}</span>
-      <span className="shrink-0 font-mono text-[9px] text-text-muted tabular-nums">{formatAge(event.createdAt)}</span>
-    </>
-  );
-  const className = clsx(
-    'flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition',
-    clickable && 'hover:bg-surface-2 hover:text-text-primary',
-  );
-
-  if (clickable) {
-    return (
-      <button
-        type="button"
-        className={className}
-        onClick={() => {
-          if (event.workflowId) onSelectWorkflow(event.workflowId);
-          else if (event.runId) openRunModal({ runId: event.runId, source: 'home-signal' });
-        }}
-      >
-        {content}
-      </button>
-    );
-  }
-
-  return <div className={className}>{content}</div>;
-}
-
-function ObservationRow({
-  event,
-  onSelectWorkflow,
-  onOpenRun,
-  compact = false,
-}: {
-  event: ObservabilityEvent;
-  onSelectWorkflow: (workflowId: string) => void;
-  onOpenRun: (route: string) => void;
-  compact?: boolean;
-}) {
-  const tone = observationTone(event);
-  const clickable = Boolean(event.workflowId || event.runId);
-  const content = (
-    <>
-      <span className={clsx('mt-0.5 shrink-0', OBSERVATION_TONE_TEXT[tone])}>{observationIcon(event.kind)}</span>
-      <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-center gap-2">
-          <span className={clsx('truncate font-medium text-text-primary', compact ? 'text-[11px]' : 'text-[12px]')}>{event.title}</span>
-          <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9px] uppercase', OBSERVATION_TONE_TEXT[tone])}>
-            {event.status}
-          </span>
-        </span>
-        <span className={clsx('mt-0.5 block leading-snug text-text-secondary', compact ? 'truncate text-[10px]' : 'line-clamp-2 text-[11px]')}>
-          {event.summary || event.detail || event.sourceEvent}
-        </span>
-        {!compact && <ObservationProgress event={event} />}
-        <span className={clsx('mt-1 flex min-w-0 items-center gap-1.5 text-text-muted', compact ? 'text-[9px]' : 'text-[10px]')}>
-          <span className="truncate">{compactStrings([event.kind, actorLabel(event)]).join(' - ')}</span>
-          <span className="shrink-0 font-mono tabular-nums">{formatAge(event.createdAt)}</span>
-        </span>
-      </span>
-    </>
-  );
-  const className = clsx(
-    'flex w-full items-start gap-2 rounded-card border text-left transition',
-    compact ? 'px-2 py-1.5' : 'px-2.5 py-2',
-    OBSERVATION_TONE_BORDER[tone],
-    clickable && 'hover:border-accent/40 hover:bg-surface-2',
-  );
-  if (clickable) {
-    return (
-      <button
-        type="button"
-        className={className}
-        onClick={() => {
-          if (event.workflowId) onSelectWorkflow(event.workflowId);
-          else if (event.runId) openRunModal({ runId: event.runId, source: 'home-observation' });
-        }}
-      >
-        {content}
-      </button>
-    );
-  }
-  return <div className={className}>{content}</div>;
-}
-
-function ObservationProgress({ event }: { event: ObservabilityEvent }) {
-  const completed = event.progress?.completed;
-  const total = event.progress?.total;
-  if (completed == null || total == null || total <= 0) {
-    return event.progress?.label ? <div className="mt-1 text-[10px] text-text-muted">{event.progress.label}</div> : null;
-  }
-  const pct = clamp(completed / total, 0, 1) * 100;
-  return (
-    <div className="mt-2">
-      <div className="h-1 overflow-hidden rounded-full bg-line/70">
-        <div className="h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${pct}%` }} />
-      </div>
-      <div className="mt-1 font-mono text-[10px] text-text-muted tabular-nums">{completed}/{total}</div>
-    </div>
-  );
-}
-
-function ApprovalDecisionRow({
-  approval,
-  onApprove,
-  onReject,
-}: {
-  approval: WorkspaceApproval;
-  onApprove: () => void;
-  onReject: () => void;
-}) {
-  const selfHeal = isSelfHealApproval(approval);
-  return (
-    <div className={selfHeal
-      ? 'rounded-card border border-accent/25 bg-accent/[0.08] px-3 py-2'
-      : 'rounded-card border border-warn/25 bg-warn-soft/60 px-3 py-2'}
-    >
-      <div className="truncate text-[12px] font-medium text-text-primary">{selfHeal ? 'Self-healing fix ready' : approval.workflowName ?? approval.title ?? 'Approval needed'}</div>
-      <div className="mt-0.5 line-clamp-2 whitespace-pre-line text-[11px] leading-snug text-text-secondary">{approval.summary ?? approval.agentName ?? 'Waiting for an operator decision.'}</div>
-      <div className="mt-2 flex gap-1.5">
-        <button
-          type="button"
-          onClick={onApprove}
-          className="inline-flex h-7 items-center gap-1 rounded-btn bg-text-primary px-2.5 text-[11px] font-medium text-canvas hover:bg-white"
-        >
-          <CheckCircle2 size={12} /> {selfHeal ? 'Approve fix' : 'Approve'}
-        </button>
-        <button
-          type="button"
-          onClick={onReject}
-          className="inline-flex h-7 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-        >
-          <X size={12} /> Reject
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function FailedRunControlRow({
-  run,
-  onInspect,
-  onRetry,
-  onDetails,
-}: {
-  run: WorkspaceFailedRun;
-  onInspect: () => void;
-  onRetry: () => void;
-  onDetails: () => void;
-}) {
-  return (
-    <div className="rounded-card border border-danger/25 bg-danger-soft/50 px-3 py-2">
-      <button type="button" onClick={onInspect} className="block w-full text-left">
-        <div className="truncate text-[12px] font-medium text-text-primary">{run.workflowName ?? 'Failed workflow'}</div>
-        <div className="mt-0.5 truncate text-[11px] text-text-muted">{run.failedNode ? `Failed at ${run.failedNode}` : 'Needs operator review'}</div>
-      </button>
-      <div className="mt-2 flex gap-1.5">
-        {run.workflowId && (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-          >
-            <RefreshCw size={11} /> Retry
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={onDetails}
-          className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-        >
-          Details
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function EvidenceRow({
-  event,
-  onSelectWorkflow,
-  onOpenRun,
-}: {
-  event: ObservabilityEvent;
-  onSelectWorkflow: (workflowId: string) => void;
-  onOpenRun: (route: string) => void;
-}) {
-  const evidence = evidenceLabel(event);
-  return (
-    <ObservationRow
-      event={{
-        ...event,
-        summary: evidence || event.summary || event.detail || event.sourceEvent,
-      }}
-      onSelectWorkflow={onSelectWorkflow}
-      onOpenRun={onOpenRun}
-      compact
-    />
-  );
-}
-
-function observationIcon(kind: ObservabilityEvent['kind']) {
-  switch (kind) {
-    case 'agent': return <Sparkles size={12} />;
-    case 'approval': return <AlertTriangle size={12} />;
-    case 'artifact': return <FileText size={12} />;
-    case 'brain': return <BrainCircuit size={12} />;
-    case 'listener': return <Zap size={12} />;
-    case 'node': return <Workflow size={12} />;
-    case 'run': return <ActivityIcon size={12} />;
-    case 'tool': return <Wrench size={12} />;
-    case 'workflow': return <Workflow size={12} />;
-    default: return <ActivityIcon size={12} />;
-  }
-}
-
-function actorLabel(event: ObservabilityEvent): string | null {
-  if (event.actorType && event.actorId) return `${event.actorType}:${event.actorId.slice(0, 8)}`;
-  if (event.agentId) return `agent:${event.agentId.slice(0, 8)}`;
-  if (event.runId) return `run:${event.runId.slice(0, 8)}`;
-  return null;
-}
-
-function evidenceLabel(event: ObservabilityEvent): string | null {
-  const first = event.evidence[0];
-  if (first) {
-    return compactStrings([
-      stringField(first, ['label', 'type', 'name']),
-      stringField(first, ['value', 'title', 'summary']),
-    ]).join(': ') || null;
-  }
-  return stringField(event.rawPayloadRedacted, ['tool', 'toolName', 'name', 'command', 'title', 'summary']) ?? null;
 }
 
 function buildAttentionGroups(
@@ -2992,6 +2448,453 @@ function formatAge(value: string): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+function SectionHeading({ icon, label, count }: { icon: ReactNode; label: string; count?: number }) {
+  return (
+    <div className="flex items-center justify-between px-0.5">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+        <span className="text-text-muted">{icon}</span>
+        {label}
+      </div>
+      {count != null && (
+        <span className="rounded-full border border-line/70 bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-text-muted tabular-nums">{count}</span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One task = one card. Collapsed it shows only the task and its current step +
+ * a thin progress line. The chevron expands it to the full step checklist with
+ * the agent's live thought under the running step (image-3 model). Spine steps
+ * when the agent published them; the derived current step otherwise.
+ */
+function ActiveWorkRow({
+  session,
+  track,
+  now,
+  onOpen,
+}: {
+  session: WorkSession;
+  track: WorkStepTrack | null;
+  now: number;
+  onOpen: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const agentName = session.participantNames[0] ?? session.agentName ?? 'Agentis';
+  const startedAt = sessionStart(session);
+  const elapsed = startedAt ? formatElapsed(startedAt, now) : null;
+  const thought = currentSessionStep(session) ?? session.detail;
+  const failed = session.status === 'failed';
+  const waiting = session.status === 'waiting' || session.status === 'blocked';
+  const steps = track?.steps ?? [];
+  const hasSteps = steps.length > 0;
+  const total = track?.total ?? session.progress?.total ?? 0;
+  const current = track?.current ?? session.progress?.completed ?? 0;
+  const pct = total > 0 ? Math.min(100, Math.max(4, Math.round((current / total) * 100))) : null;
+  const runningStep = steps.find((step) => step.status === 'running');
+  const currentLabel = hasSteps
+    ? (runningStep?.label ?? steps[Math.min(Math.max(current, 1), steps.length) - 1]?.label ?? steps[0]?.label ?? null)
+    : thought;
+  const dot = failed ? 'bg-danger' : waiting ? 'bg-warn' : 'bg-accent animate-pulse-dot';
+
+  return (
+    <div className="overflow-hidden rounded-card border border-line/70 bg-canvas/35">
+      <div className="flex items-center gap-2 px-2.5 py-2">
+        <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', dot)} />
+        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left active:scale-[0.99]">
+          <div className="truncate text-[12px] font-medium text-text-primary">{session.title}</div>
+          <div className="mt-0.5 truncate text-[11px] text-text-secondary">{currentLabel ?? 'Working…'}</div>
+        </button>
+        {total > 0 && <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">{current}/{total}</span>}
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-label={expanded ? 'Collapse task' : 'Expand task'}
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        >
+          <ChevronDown size={13} className={clsx('transition-transform duration-150', expanded && 'rotate-180')} />
+        </button>
+      </div>
+      <div className="px-2.5 pb-2">
+        <div className="h-1 overflow-hidden rounded-full bg-line/60">
+          <div
+            className={clsx('h-full rounded-full bg-accent transition-[width] duration-500', pct == null && !failed && 'w-2/5 animate-pulse', failed && 'bg-danger')}
+            style={pct != null ? { width: `${pct}%` } : undefined}
+          />
+        </div>
+      </div>
+      {expanded && (
+        <div className="border-t border-line/60 px-2.5 py-2">
+          <div className="mb-2 flex items-center gap-1.5 text-[9.5px] text-text-muted">
+            <Bot size={10} className="text-accent" />
+            <span className="truncate">{agentName}</span>
+            {elapsed && <span className="font-mono tabular-nums">· {elapsed}</span>}
+          </div>
+          {hasSteps ? (
+            <ol className="space-y-1.5">
+              {steps.map((step, index) => (
+                <li key={step.id || `${index}-${step.label}`}>
+                  <div className="flex items-start gap-2">
+                    <ActiveStepIcon status={step.status} />
+                    <span className={clsx(
+                      'min-w-0 flex-1 text-[11px] leading-snug',
+                      step.status === 'pending' && 'text-text-muted/70',
+                      step.status === 'running' && 'font-medium text-text-primary',
+                      step.status === 'done' && 'text-text-muted line-through decoration-line/50',
+                      step.status === 'failed' && 'text-danger',
+                    )}>
+                      {step.label}
+                    </span>
+                  </div>
+                  {step.status === 'running' && thought && thought !== step.label && (
+                    <div className="ml-[20px] mt-0.5 line-clamp-2 text-[10px] italic text-text-muted">{thought}</div>
+                  )}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <div className="line-clamp-3 text-[10px] italic text-text-muted">{thought ?? 'Working…'}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActiveStepIcon({ status }: { status: WorkStepTrack['steps'][number]['status'] }) {
+  if (status === 'running') return <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin text-accent" />;
+  if (status === 'done') return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-accent" />;
+  if (status === 'failed') return <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />;
+  return <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-line" />;
+}
+
+/**
+ * Collapse the work sessions of a single dispatch (which the session builder
+ * splits into agent-, run-, and workflow-keyed rows) into one card per actor.
+ * Keys on the agent name first, since that's the one identifier every variant
+ * of a dispatch's events carries.
+ */
+function dedupeActiveSessions(sessions: WorkSession[]): WorkSession[] {
+  const byKey = new Map<string, WorkSession>();
+  for (const session of sessions) {
+    const key = activeTaskKey(session);
+    const existing = byKey.get(key);
+    if (!existing || isRicherSession(session, existing)) byKey.set(key, existing ? mergeSessionMeta(session, existing) : session);
+  }
+  return Array.from(byKey.values()).sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function activeTaskKey(session: WorkSession): string {
+  return session.agentName
+    ?? session.participantNames[0]
+    ?? session.agentId
+    ?? session.workflowId
+    ?? session.runId
+    ?? session.id;
+}
+
+function isRicherSession(candidate: WorkSession, current: WorkSession): boolean {
+  const score = (session: WorkSession) =>
+    (session.progress ? 2 : 0)
+    + (looksGenericTitle(session.title) ? 0 : 1)
+    + (session.events.length > 0 ? 1 : 0);
+  return score(candidate) > score(current);
+}
+
+function mergeSessionMeta(winner: WorkSession, loser: WorkSession): WorkSession {
+  return {
+    ...winner,
+    progress: winner.progress ?? loser.progress,
+    participantNames: Array.from(new Set([...winner.participantNames, ...loser.participantNames])),
+    participantAgentIds: Array.from(new Set([...winner.participantAgentIds, ...loser.participantAgentIds])),
+  };
+}
+
+function looksGenericTitle(title: string): boolean {
+  return /^workflow\s+[0-9a-f:]/i.test(title) || /^agent:/i.test(title);
+}
+
+function BacklogScheduleSection({
+  issues,
+  doneIssues,
+  agents,
+  defaultOpen,
+  onRefresh,
+  onNavigate,
+  onOpenRun,
+}: {
+  issues: WorkspaceIssue[];
+  doneIssues: WorkspaceIssue[];
+  agents: WorkspaceAgent[];
+  defaultOpen: boolean;
+  onRefresh: () => void;
+  onNavigate: (route: string) => void;
+  onOpenRun: (runId: string) => void;
+}) {
+  const [showHistory, setShowHistory] = useState(false);
+  const visible = issues.slice(0, 4);
+  return (
+    <LiveWorkspaceSection storageKey="backlog" label="Backlog & schedule" icon={<ListTodo size={12} />} empty="No tasks queued" count={issues.length} defaultOpen={defaultOpen}>
+      {visible.map((issue) => (
+        <ScheduledIssueRow
+          key={issue.id}
+          issue={issue}
+          agents={agents}
+          onAccept={async () => {
+            await api(`/v1/issues/${issue.id}/accept`, { method: 'POST', body: JSON.stringify({ agentId: issue.assigneeAgentId ?? null }) }).catch(() => undefined);
+            onRefresh();
+          }}
+          onChanged={onRefresh}
+          onOpenRun={issue.activeRunId ? () => onOpenRun(issue.activeRunId!) : undefined}
+        />
+      ))}
+      {issues.length > visible.length && (
+        <button type="button" onClick={() => onNavigate('/issues')} className="flex h-7 w-full items-center justify-center rounded-md border border-line/70 bg-canvas/35 text-[10px] text-text-muted hover:bg-surface-2 hover:text-text-primary">+{issues.length - visible.length} more in backlog</button>
+      )}
+      <ScheduleTaskForm agents={agents} onCreated={onRefresh} />
+      {doneIssues.length > 0 && (
+        <div className="mt-1 border-t border-line/50 pt-1.5">
+          <button type="button" onClick={() => setShowHistory((value) => !value)} className="flex w-full items-center justify-between text-[10px] text-text-muted hover:text-text-secondary">
+            <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={11} className="text-text-muted" /> History · {doneIssues.length} done</span>
+            <ChevronDown size={12} className={clsx('transition-transform', showHistory && 'rotate-180')} />
+          </button>
+          {showHistory && (
+            <div className="mt-1.5 space-y-1">
+              {doneIssues.map((issue) => (
+                <div key={issue.id} className="flex items-center gap-2 rounded-card px-2 py-1 text-[10px]">
+                  <CheckCircle2 size={11} className={clsx('shrink-0', issue.status === 'cancelled' ? 'text-text-muted' : 'text-accent')} />
+                  <span className="min-w-0 flex-1 truncate text-text-secondary">{issue.title}</span>
+                  <span className="shrink-0 font-mono text-text-muted">{formatAge(issue.updatedAt)}</span>
+                </div>
+              ))}
+              <button type="button" onClick={() => onNavigate('/issues')} className="mt-0.5 w-full text-center text-[9.5px] text-text-muted hover:text-text-secondary">View all in Issues →</button>
+            </div>
+          )}
+        </div>
+      )}
+    </LiveWorkspaceSection>
+  );
+}
+
+function ScheduledIssueRow({
+  issue,
+  agents,
+  onAccept,
+  onChanged,
+  onOpenRun,
+}: {
+  issue: WorkspaceIssue;
+  agents: WorkspaceAgent[];
+  onAccept: () => Promise<void>;
+  onChanged: () => void;
+  onOpenRun?: () => void;
+}) {
+  const [accepting, setAccepting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [title, setTitle] = useState(issue.title);
+  const [assigneeAgentId, setAssigneeAgentId] = useState(issue.assigneeAgentId ?? '');
+  const [when, setWhen] = useState(issue.scheduledFor ? toLocalInput(issue.scheduledFor) : '');
+  const agent = agents.find((candidate) => candidate.id === issue.assigneeAgentId);
+  const schedule = issue.scheduledFor ? formatSchedule(issue.scheduledFor) : null;
+
+  async function handleAccept() {
+    setAccepting(true);
+    try { await onAccept(); } finally { setAccepting(false); }
+  }
+
+  async function handleDelete() {
+    setBusy(true);
+    try {
+      await api(`/v1/issues/${issue.id}`, { method: 'DELETE' }).catch(() => undefined);
+      onChanged();
+    } finally { setBusy(false); }
+  }
+
+  async function handleSave() {
+    setBusy(true);
+    try {
+      await api(`/v1/issues/${issue.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          title: title.trim() || issue.title,
+          assigneeAgentId: assigneeAgentId || null,
+          scheduledFor: when ? new Date(when).toISOString() : null,
+        }),
+      }).catch(() => undefined);
+      setEditing(false);
+      onChanged();
+    } finally { setBusy(false); }
+  }
+
+  if (editing) {
+    return (
+      <div className="rounded-card border border-accent/30 bg-canvas/40 px-2 py-2">
+        <input
+          autoFocus
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          onKeyDown={(event) => { if (event.key === 'Escape') setEditing(false); }}
+          className="w-full bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+        />
+        <div className="mt-2 grid grid-cols-2 gap-1.5">
+          <select value={assigneeAgentId} onChange={(event) => setAssigneeAgentId(event.target.value)} className="h-7 rounded-btn border border-line bg-surface-2 px-1.5 text-[10px] text-text-secondary outline-none">
+            <option value="">Unassigned</option>
+            {agents.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+          </select>
+          <input type="datetime-local" value={when} onChange={(event) => setWhen(event.target.value)} className="h-7 rounded-btn border border-line bg-surface-2 px-1.5 text-[10px] text-text-secondary outline-none" />
+        </div>
+        <div className="mt-2 flex gap-1.5">
+          <button type="button" disabled={busy} onClick={() => void handleSave()} className="inline-flex h-6 items-center gap-1 rounded-btn bg-accent px-2 text-[10px] font-medium text-canvas hover:bg-accent/90 disabled:opacity-50">
+            {busy ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}Save
+          </button>
+          <button type="button" onClick={() => setEditing(false)} className="inline-flex h-6 items-center rounded-btn border border-line px-2 text-[10px] text-text-muted hover:bg-surface-2">Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group flex items-center gap-2 rounded-card border border-line bg-canvas/40 px-2 py-1.5">
+      <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', issue.status === 'blocked' ? 'bg-danger' : schedule ? 'bg-accent' : 'bg-text-muted/60')} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[11px] font-medium text-text-primary">{issue.title}</div>
+        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 font-mono text-[9px] text-text-muted">
+          <span className="truncate">{issue.identifier}</span>
+          {agent && <span className="inline-flex items-center gap-0.5"><Bot size={9} className="text-accent" />{agent.name}</span>}
+          {schedule && <span className={clsx('inline-flex items-center gap-0.5', schedule.overdue ? 'text-warn' : 'text-text-muted')}><Clock size={9} />{schedule.label}{issue.recurrenceCron ? ' · repeats' : ''}</span>}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {issue.status !== 'in_progress' && issue.status !== 'done' && (
+          <button type="button" disabled={accepting} onClick={() => void handleAccept()} title="Run now" aria-label="Run now" className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-accent/10 text-accent hover:bg-accent/20 disabled:opacity-50">
+            {accepting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+          </button>
+        )}
+        {issue.activeRunId && onOpenRun && (
+          <button type="button" onClick={onOpenRun} title="Inspect run" aria-label="Inspect run" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
+            <ActivityIcon size={10} />
+          </button>
+        )}
+        <button type="button" onClick={() => setEditing(true)} title="Edit" aria-label="Edit task" className="inline-flex h-5 w-5 items-center justify-center rounded-md text-text-muted opacity-0 transition hover:bg-surface-2 hover:text-text-primary group-hover:opacity-100">
+          <Pencil size={10} />
+        </button>
+        <button type="button" disabled={busy} onClick={() => void handleDelete()} title="Delete" aria-label="Delete task" className="inline-flex h-5 w-5 items-center justify-center rounded-md text-text-muted opacity-0 transition hover:bg-danger-soft hover:text-danger group-hover:opacity-100 disabled:opacity-50">
+          <Trash2 size={10} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function toLocalInput(iso: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return '';
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+const RECURRENCE_PRESETS: Array<{ value: string; label: string; cron: string | null }> = [
+  { value: 'none', label: 'Once', cron: null },
+  { value: 'hourly', label: 'Hourly', cron: '0 * * * *' },
+  { value: 'daily', label: 'Daily', cron: '0 9 * * *' },
+  { value: 'weekly', label: 'Weekly (Mon)', cron: '0 9 * * 1' },
+];
+
+function ScheduleTaskForm({ agents, onCreated }: { agents: WorkspaceAgent[]; onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState('');
+  const [assigneeAgentId, setAssigneeAgentId] = useState('');
+  const [when, setWhen] = useState('');
+  const [recurrence, setRecurrence] = useState('none');
+  const [saving, setSaving] = useState(false);
+
+  async function handleCreate() {
+    if (!title.trim()) return;
+    setSaving(true);
+    try {
+      const scheduledFor = when ? new Date(when).toISOString() : null;
+      const recurrenceCron = RECURRENCE_PRESETS.find((preset) => preset.value === recurrence)?.cron ?? null;
+      await api('/v1/issues', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: title.trim(),
+          status: scheduledFor ? 'todo' : 'backlog',
+          priority: 'medium',
+          labels: [],
+          assigneeAgentId: assigneeAgentId || null,
+          scheduledFor,
+          recurrenceCron: scheduledFor ? recurrenceCron : null,
+        }),
+      });
+      setTitle(''); setAssigneeAgentId(''); setWhen(''); setRecurrence('none'); setOpen(false);
+      onCreated();
+    } catch { /* ignore */ } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="flex w-full items-center justify-center gap-1.5 rounded-card border border-dashed border-line px-2 py-1.5 text-[11px] text-text-muted transition-colors hover:border-accent/40 hover:text-accent">
+        <Plus size={11} />
+        Schedule a task
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-card border border-accent/30 bg-canvas/40 px-2.5 py-2">
+      <input
+        autoFocus
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+        onKeyDown={(event) => { if (event.key === 'Escape') { setOpen(false); } }}
+        placeholder="What should happen…"
+        className="w-full bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+      />
+      <div className="mt-2 grid grid-cols-2 gap-1.5">
+        <select value={assigneeAgentId} onChange={(event) => setAssigneeAgentId(event.target.value)} className="h-7 rounded-btn border border-line bg-surface-2 px-1.5 text-[10px] text-text-secondary outline-none">
+          <option value="">Unassigned</option>
+          {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+        </select>
+        <select value={recurrence} onChange={(event) => setRecurrence(event.target.value)} disabled={!when} className="h-7 rounded-btn border border-line bg-surface-2 px-1.5 text-[10px] text-text-secondary outline-none disabled:opacity-50">
+          {RECURRENCE_PRESETS.map((preset) => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
+        </select>
+      </div>
+      <input
+        type="datetime-local"
+        value={when}
+        onChange={(event) => setWhen(event.target.value)}
+        className="mt-1.5 h-7 w-full rounded-btn border border-line bg-surface-2 px-1.5 text-[10px] text-text-secondary outline-none"
+      />
+      <div className="mt-2 flex gap-1.5">
+        <button type="button" disabled={!title.trim() || saving} onClick={() => void handleCreate()} className="inline-flex h-6 items-center gap-1 rounded-btn bg-accent px-2 text-[10px] font-medium text-canvas hover:bg-accent/90 disabled:opacity-50">
+          {saving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+          {when ? 'Schedule' : 'Add to backlog'}
+        </button>
+        <button type="button" onClick={() => { setOpen(false); setTitle(''); }} className="inline-flex h-6 items-center rounded-btn border border-line px-2 text-[10px] text-text-muted hover:bg-surface-2">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function issueScheduleRank(issue: WorkspaceIssue): number {
+  if (!issue.scheduledFor) return Number.MAX_SAFE_INTEGER;
+  const time = new Date(issue.scheduledFor).getTime();
+  return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
+}
+
+function formatSchedule(iso: string): { label: string; overdue: boolean } {
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return { label: 'scheduled', overdue: false };
+  const deltaMs = time - Date.now();
+  const overdue = deltaMs < 0;
+  const minutes = Math.round(Math.abs(deltaMs) / 60_000);
+  const rel = minutes < 1 ? 'now' : minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.round(minutes / 60)}h` : `${Math.round(minutes / 1440)}d`;
+  return { label: overdue ? `due ${rel} ago` : `in ${rel}`, overdue };
+}
+
 const ISSUE_STATUS_TONE: Record<string, string> = {
   backlog: 'bg-surface-2 text-text-muted',
   todo: 'bg-surface-2 text-text-muted',
@@ -3009,183 +2912,6 @@ const ISSUE_PRIORITY_TONE: Record<string, string> = {
   low: 'bg-surface-2 text-text-muted',
   none: 'bg-surface-2 text-text-muted',
 };
-
-function IssueControlRow({
-  issue,
-  onAccept,
-  onOpenRun,
-  compact = false,
-}: {
-  issue: WorkspaceIssue;
-  onAccept: () => Promise<void>;
-  onOpenRun?: () => void;
-  compact?: boolean;
-}) {
-  const [accepting, setAccepting] = useState(false);
-
-  async function handleAccept() {
-    setAccepting(true);
-    try { await onAccept(); } finally { setAccepting(false); }
-  }
-
-  const humanize = (v: string) => v.replaceAll('_', ' ');
-
-  if (compact) {
-    return (
-      <div className="flex items-center gap-2 rounded-card border border-line bg-canvas/40 px-2 py-1.5">
-        <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', issue.status === 'blocked' ? 'bg-danger' : 'bg-text-muted/60')} />
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate text-[11px] font-medium text-text-primary">{issue.title}</span>
-            <span className={clsx('shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-semibold', ISSUE_PRIORITY_TONE[issue.priority] ?? 'bg-surface-2 text-text-muted')}>
-              {issue.priority}
-            </span>
-          </div>
-          <div className="mt-0.5 truncate font-mono text-[9px] text-text-muted">{issue.identifier} - {humanize(issue.status)}</div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {issue.status !== 'in_progress' && issue.status !== 'done' && (
-            <button
-              type="button"
-              disabled={accepting}
-              onClick={() => void handleAccept()}
-              title="Accept"
-              aria-label="Accept issue"
-              className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-accent/10 text-accent hover:bg-accent/20 disabled:opacity-50"
-            >
-              {accepting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
-            </button>
-          )}
-          {issue.activeRunId && onOpenRun && (
-            <button
-              type="button"
-              onClick={onOpenRun}
-              title="Inspect run"
-              aria-label="Inspect run"
-              className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary"
-            >
-              <ActivityIcon size={10} />
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-card border border-line bg-canvas/40 px-2.5 py-2">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="rounded-full bg-surface-2 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-text-muted">
-          {issue.identifier}
-        </span>
-        <span className={clsx('rounded-full px-1.5 py-0.5 text-[9px] font-semibold', ISSUE_STATUS_TONE[issue.status] ?? 'bg-surface-2 text-text-muted')}>
-          {humanize(issue.status)}
-        </span>
-        <span className={clsx('rounded-full px-1.5 py-0.5 text-[9px] font-semibold', ISSUE_PRIORITY_TONE[issue.priority] ?? 'bg-surface-2 text-text-muted')}>
-          {issue.priority}
-        </span>
-      </div>
-      <div className="mt-1.5 text-[12px] font-medium leading-snug text-text-primary line-clamp-2">
-        {issue.title}
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {issue.status !== 'in_progress' && issue.status !== 'done' && (
-          <button
-            type="button"
-            disabled={accepting}
-            onClick={() => void handleAccept()}
-            className="inline-flex h-6 items-center gap-1 rounded-btn bg-accent/10 px-2 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-          >
-            {accepting ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
-            Accept
-          </button>
-        )}
-        {issue.activeRunId && onOpenRun && (
-          <button
-            type="button"
-            onClick={onOpenRun}
-            className="inline-flex h-6 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2 text-[10px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-          >
-            <ActivityIcon size={10} className="shrink-0" />
-            Inspect run
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function IssueCreateRow({ onCreated, compact = false }: { onCreated: () => void; compact?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  async function handleCreate() {
-    if (!title.trim()) return;
-    setSaving(true);
-    try {
-      await api('/v1/issues', {
-        method: 'POST',
-        body: JSON.stringify({ title: title.trim(), status: 'backlog', priority: 'medium', labels: [] }),
-      });
-      setTitle('');
-      setOpen(false);
-      onCreated();
-    } catch { /* ignore */ } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className={clsx(
-          'flex w-full items-center gap-1.5 rounded-card border border-dashed border-line text-[11px] text-text-muted transition-colors hover:border-accent/40 hover:text-accent',
-          compact ? 'justify-center px-2 py-1.5' : 'mt-2 px-2.5 py-2',
-        )}
-      >
-        <Plus size={11} />
-        New issue
-      </button>
-    );
-  }
-
-  return (
-    <div className={clsx('rounded-card border border-accent/30 bg-canvas/40 px-2.5 py-2', !compact && 'mt-2')}>
-      <input
-        autoFocus
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') void handleCreate();
-          if (e.key === 'Escape') { setOpen(false); setTitle(''); }
-        }}
-        placeholder="Issue title…"
-        className="w-full bg-transparent text-[12px] text-text-primary placeholder:text-text-muted outline-none"
-      />
-      <div className="mt-2 flex gap-1.5">
-        <button
-          type="button"
-          disabled={!title.trim() || saving}
-          onClick={() => void handleCreate()}
-          className="inline-flex h-6 items-center gap-1 rounded-btn bg-accent px-2 text-[10px] font-medium text-canvas hover:bg-accent/90 disabled:opacity-50"
-        >
-          {saving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
-          Save
-        </button>
-        <button
-          type="button"
-          onClick={() => { setOpen(false); setTitle(''); }}
-          className="inline-flex h-6 items-center rounded-btn border border-line px-2 text-[10px] text-text-muted hover:bg-surface-2"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function clampLiveWorkspaceFrame(frame: LiveWorkspaceFrame, containerSize: VirtualCanvasSize): LiveWorkspaceFrame {
   const maxWidth = Math.max(LIVE_WORKSPACE_MIN_WIDTH, containerSize.width - LIVE_WORKSPACE_MARGIN * 2);
@@ -3377,7 +3103,7 @@ function agentNode(
     kind: role,
     tier: role === 'orchestrator' ? 0 : role === 'manager' ? 1 : 2,
     title: agent.name,
-    subtitle: role === 'orchestrator' ? `orchestrator - ${status}` : role === 'manager' ? `${managerLabel} - ${status}` : `worker - ${status}`,
+    subtitle: role === 'orchestrator' ? `orchestrator - ${status}` : role === 'manager' ? `${managerLabel} - ${status}` : `specialist - ${status}`,
     x: pos.x,
     y: pos.y,
     width: size.width,
@@ -3651,16 +3377,23 @@ function buildResourceNodes(
       if (!workflowSpaceName) workflowSpaceName = sourceNode?.spaceName ?? null;
       if (!workflowAccent) workflowAccent = sourceNode?.accent;
     }
-    // The owning specialist wins the anchor over the domain manager — the
-    // specialist is who actually runs the workflow. Falls back to the domain
-    // source (and then any connected agent) when the specialist isn't on-canvas.
+    // The owning specialist normally wins the anchor over the domain manager —
+    // the specialist is who actually runs the workflow. BUT an explicit domain
+    // assignment is authoritative: if the resource is placed in a domain whose
+    // manager is NOT the owner's manager, the domain wins, so it never drifts
+    // into an unrelated manager's cluster (e.g. an App in General › SEO must not
+    // surface under Marketing just because its owner reports there).
     const ownerAnchorId = ownerSourceId && sourceXById.has(ownerSourceId) && isWorkflowAnchorSource(ownerSourceId, sourceNodeById)
       ? ownerSourceId
       : undefined;
-    const anchoredSourceId = ownerAnchorId
-      ?? (domainSourceId && sourceXById.has(domainSourceId)
-        ? domainSourceId
-        : connectedAgentIds?.find((sourceId) => sourceXById.has(sourceId) && isWorkflowAnchorSource(sourceId, sourceNodeById)));
+    const domainAnchorId = domainSourceId && sourceXById.has(domainSourceId) ? domainSourceId : undefined;
+    const ownerHonoursDomain = !ownerAnchorId
+      || !domainAnchorId
+      || ownerAnchorId === domainAnchorId
+      || sourceBelongsToManager(ownerAnchorId, domainAnchorId, sourceNodeById);
+    const anchoredSourceId = (ownerHonoursDomain ? ownerAnchorId : undefined)
+      ?? domainAnchorId
+      ?? connectedAgentIds?.find((sourceId) => sourceXById.has(sourceId) && isWorkflowAnchorSource(sourceId, sourceNodeById));
     const failed = failedRuns.find((item) => item.workflowId === workflow.id || item.workflowName === wfLabel);
     const statusNeedsAttention = /fail|error|blocked/i.test(workflow.status ?? '');
     const isActive = Boolean(run) || activeWorkflowIds.has(workflow.id);
@@ -3972,11 +3705,11 @@ function buildResourceNodes(
 function resolveResourceCollisions(resources: CanvasNode[]): CanvasNode[] {
   const placed: CanvasNode[] = [];
 
+  // No two resource cards may ever overlap — a hard invariant. The band packer
+  // keeps nodes apart *within* a lane, but sibling lanes (and subdomain/fallback
+  // anchors) can land on overlapping x-slots, so every node — App/workflow cards
+  // included — gets a final nudge-down pass against everything already placed.
   return resources.map((resource) => {
-    if (resource.kind === 'workflow') {
-      placed.push(resource);
-      return resource;
-    }
     let y = resource.y;
     while (placed.some((other) => nodesOverlap({ ...resource, y }, other))) {
       y += Math.max(resource.height, RESOURCE_LAYOUT.rowGap) + RESOURCE_LAYOUT.nodeClearance;
@@ -4090,6 +3823,12 @@ function sourceBelongsToManager(sourceId: string, managerId: string, sourceNodeB
   if (!source || !manager) return false;
   if (source.spaceId && manager.spaceId && source.spaceId === manager.spaceId) return true;
   if (source.role !== 'worker' || !source.agent || !manager.agent) return false;
+  // Shared Domain ⇒ same authority subtree (mirrors findParentManager). A
+  // specialist owning a Subdomain of the manager's Domain belongs to it even
+  // when reportsTo points elsewhere.
+  const sourceDomain = stringField(source.agent, ['domainId']);
+  const managerDomain = stringField(manager.agent, ['domainId']);
+  if (sourceDomain && managerDomain && sourceDomain === managerDomain) return true;
   const reportsTo = stringField(source.agent, ['reportsTo', 'managerId', 'parentAgentId']);
   return reportsTo === manager.agent.id || reportsTo === manager.agent.name || reportsTo === managerId;
 }
@@ -4214,15 +3953,32 @@ function deriveTopBranchLayout(
   const spaceSourceIds = new Map<string, string>();
   roles.managers.forEach((agent) => {
     const id = `agent-${agent.id}`;
-    const spaceId = stringField(agent as unknown as Record<string, unknown>, ['spaceId']) ?? null;
+    const record = agent as unknown as Record<string, unknown>;
+    const spaceId = stringField(record, ['spaceId']) ?? null;
+    // Manager-owned org: a manager is responsible for a Domain (domainId), which
+    // is the key Apps/workflows are assigned under. Register both so a domain
+    // whose id differs from (or exists without) the legacy spaceId still anchors
+    // its resources beneath the owning manager.
+    const domainId = stringField(record, ['domainId']) ?? null;
     managerNodeIds.push(id);
     if (spaceId) spaceSourceIds.set(spaceId, id);
+    if (domainId) spaceSourceIds.set(domainId, id);
   });
   for (let index = roles.managers.length; index < managerCount; index += 1) {
     const id = `ghost-manager-${index}`;
     const space = spaces[index - roles.managers.length] ?? null;
     managerNodeIds.push(id);
     if (space) spaceSourceIds.set(space.id, id);
+  }
+  // Subdomains (e.g. General › SEO) don't have their own top-branch lane — their
+  // resources cluster under the SAME manager as their parent Domain. Map each
+  // subdomain id onto the parent domain's source so an App assigned to a
+  // subdomain still anchors beneath the right manager (instead of falling
+  // through to the owning specialist's unrelated cluster).
+  for (const space of spaces) {
+    if (!space.parentDomainId || spaceSourceIds.has(space.id)) continue;
+    const parentSource = spaceSourceIds.get(space.parentDomainId);
+    if (parentSource) spaceSourceIds.set(space.id, parentSource);
   }
   // The orchestrator's direct-workflows group is a branch too (a workflow with
   // no space, or whose space has no manager).
@@ -4329,6 +4085,15 @@ function phaseReached(current: EntrancePhase, target: EntrancePhase): boolean {
 function findParentManager(agent: WorkspaceAgent, managerNodeIds: string[], managers: WorkspaceAgent[], index: number): string | null {
   if (managerNodeIds.length === 0) return null;
   const record = agent as unknown as Record<string, unknown>;
+  // Domain responsibility is authoritative for the org tree: a specialist that
+  // owns a Domain (or a Subdomain of one) sits under that Domain's manager —
+  // even if its raw `reportsTo` still points at a different manager. This keeps
+  // the canvas consistent with where the specialist's work/Apps actually live.
+  const domainId = stringField(record, ['domainId']);
+  if (domainId) {
+    const byDomain = managers.findIndex((manager) => stringField(manager as unknown as Record<string, unknown>, ['domainId']) === domainId);
+    if (byDomain >= 0) return managerNodeIds[byDomain] ?? null;
+  }
   const reportsTo = stringField(record, ['reportsTo', 'managerId', 'parentAgentId']);
   if (reportsTo) {
     const managerIndex = managers.findIndex((manager) => manager.id === reportsTo || manager.name === reportsTo);

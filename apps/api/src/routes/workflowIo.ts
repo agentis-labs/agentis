@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { parse, stringify } from 'yaml';
-import { AgentisError, type WorkflowGraph } from '@agentis/core';
+import { AgentisError, WORKFLOW_FILE_API_VERSION, type WorkflowFile, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -21,7 +21,8 @@ import { buildWorkspaceInventory, classifyIntent, planWorkflow } from '../servic
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 
-interface WorkflowDoc { name: string; description?: string | null; graph: WorkflowGraph }
+/** Existing unversioned exports remain importable while new files use WorkflowFile. */
+interface LegacyWorkflowDoc { name: string; description?: string | null; graph: WorkflowGraph }
 
 export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthService }) {
   const app = new Hono();
@@ -32,7 +33,12 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
     const wf = deps.db.select().from(schema.workflows)
       .where(and(eq(schema.workflows.id, c.req.param('id')), eq(schema.workflows.workspaceId, ws.workspaceId))).get();
     if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', 'workflow not found');
-    const doc: WorkflowDoc = { name: wf.title, description: wf.description ?? null, graph: wf.graph as WorkflowGraph };
+    const doc: WorkflowFile = {
+      apiVersion: WORKFLOW_FILE_API_VERSION,
+      kind: 'Workflow',
+      metadata: { name: wf.title, description: wf.description ?? null },
+      spec: { graph: wf.graph as WorkflowGraph },
+    };
     const yaml = stringify(doc, { lineWidth: 0 });
     return c.body(yaml, 200, { 'content-type': 'text/yaml; charset=utf-8', 'content-disposition': `attachment; filename="${slug(wf.title)}.workflow.yaml"` });
   });
@@ -54,33 +60,34 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
     const ws = getWorkspace(c);
     const body = (await c.req.json().catch(() => ({}))) as { yaml?: string };
     if (!body.yaml || typeof body.yaml !== 'string') throw new AgentisError('VALIDATION_FAILED', 'import requires a `yaml` string');
-    let doc: WorkflowDoc;
+    let source: WorkflowFile | LegacyWorkflowDoc;
     try {
-      doc = parse(body.yaml) as WorkflowDoc;
+      source = parse(body.yaml) as WorkflowFile | LegacyWorkflowDoc;
     } catch (err) {
       throw new AgentisError('VALIDATION_FAILED', `invalid YAML: ${(err as Error).message}`);
     }
-    if (!doc || !doc.graph || !Array.isArray(doc.graph.nodes)) {
+    const doc = normalizeWorkflowFile(source);
+    if (!doc.spec.graph || !Array.isArray(doc.spec.graph.nodes)) {
       throw new AgentisError('VALIDATION_FAILED', 'YAML must contain a `graph` with `nodes`');
     }
     const graph: WorkflowGraph = {
       version: 1,
-      nodes: doc.graph.nodes,
-      edges: Array.isArray(doc.graph.edges) ? doc.graph.edges : [],
-      viewport: doc.graph.viewport ?? { x: 0, y: 0, zoom: 1 },
-      ...(doc.graph.phases ? { phases: doc.graph.phases } : {}),
-      ...(doc.graph.inputContract ? { inputContract: doc.graph.inputContract } : {}),
-      ...(doc.graph.outputContract ? { outputContract: doc.graph.outputContract } : {}),
+      nodes: doc.spec.graph.nodes,
+      edges: Array.isArray(doc.spec.graph.edges) ? doc.spec.graph.edges : [],
+      viewport: doc.spec.graph.viewport ?? { x: 0, y: 0, zoom: 1 },
+      ...(doc.spec.graph.phases ? { phases: doc.spec.graph.phases } : {}),
+      ...(doc.spec.graph.inputContract ? { inputContract: doc.spec.graph.inputContract } : {}),
+      ...(doc.spec.graph.outputContract ? { outputContract: doc.spec.graph.outputContract } : {}),
     };
     validateWorkflowGraph(graph); // reject bad graphs on import (CI-style gate)
     const id = randomUUID();
     const now = new Date().toISOString();
     deps.db.insert(schema.workflows).values({
       id, workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
-      title: doc.name || 'Imported workflow', description: doc.description?.trim() || null, graph,
+      title: doc.metadata.name || 'Imported workflow', description: doc.metadata.description?.trim() || null, graph,
       settings: {}, concurrencyOverflow: 'queue', createdAt: now, updatedAt: now,
     }).run();
-    return c.json({ workflowId: id, title: doc.name || 'Imported workflow', nodeCount: graph.nodes.length }, 201);
+    return c.json({ workflowId: id, title: doc.metadata.name || 'Imported workflow', nodeCount: graph.nodes.length }, 201);
   });
 
   return app;
@@ -88,4 +95,24 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'workflow';
+}
+
+function normalizeWorkflowFile(source: WorkflowFile | LegacyWorkflowDoc): WorkflowFile {
+  if (isWorkflowFile(source)) return source;
+  const legacy = source as LegacyWorkflowDoc;
+  return {
+    apiVersion: WORKFLOW_FILE_API_VERSION,
+    kind: 'Workflow',
+    metadata: { name: legacy?.name ?? 'Imported workflow', description: legacy?.description },
+    spec: { graph: legacy?.graph },
+  };
+}
+
+function isWorkflowFile(source: unknown): source is WorkflowFile {
+  if (!source || typeof source !== 'object') return false;
+  const doc = source as Partial<WorkflowFile>;
+  if (doc.apiVersion && doc.apiVersion !== WORKFLOW_FILE_API_VERSION) {
+    throw new AgentisError('VALIDATION_FAILED', `unsupported workflow apiVersion: ${String(doc.apiVersion)}`);
+  }
+  return doc.apiVersion === WORKFLOW_FILE_API_VERSION && doc.kind === 'Workflow' && Boolean(doc.metadata) && Boolean(doc.spec);
 }

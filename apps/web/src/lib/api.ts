@@ -131,6 +131,16 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
   return (await res.json()) as T;
 }
 
+/** Fetch a non-JSON API response while preserving the normal auth/refresh flow. */
+export async function apiText(path: string, init: RequestInit = {}): Promise<string> {
+  const res = await rawFetch(path, init);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    throw body.error as ApiError;
+  }
+  return res.text();
+}
+
 export async function streamSse(
   path: string,
   init: RequestInit = {},

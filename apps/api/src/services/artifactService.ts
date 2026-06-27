@@ -17,14 +17,17 @@
 
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type ArtifactType } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
 import { assertSafeUrl } from './safeUrl.js';
 
-export type ArtifactType = 'html' | 'image' | 'document' | 'code' | 'data';
+export type { ArtifactType };
+
+/** Assets §1 — coarse source class used to group artifacts in the library. */
+export type ArtifactOrigin = 'agent' | 'app' | 'workflow' | 'channel' | 'manual';
 
 export interface PersistArtifactInput {
   workspaceId: string;
@@ -37,11 +40,29 @@ export interface PersistArtifactInput {
   /** Owner user. When absent, resolved to the workspace owner. */
   userId?: string;
   agentId?: string | null;
+  appId?: string | null;
   workflowId?: string | null;
   runId?: string | null;
   conversationId?: string | null;
   nodeId?: string | null;
+  /** Override the derived source class (defaults from the strongest provenance). */
+  origin?: ArtifactOrigin;
   savedBy?: string;
+}
+
+/** Derive the coarse source class from whatever provenance the caller supplied. */
+export function deriveArtifactOrigin(input: {
+  origin?: ArtifactOrigin;
+  appId?: string | null;
+  runId?: string | null;
+  workflowId?: string | null;
+  agentId?: string | null;
+}): ArtifactOrigin {
+  if (input.origin) return input.origin;
+  if (input.appId) return 'app';
+  if (input.runId || input.workflowId) return 'workflow';
+  if (input.agentId) return 'agent';
+  return 'manual';
 }
 
 export interface PersistedArtifact {
@@ -87,8 +108,10 @@ export class ArtifactService {
       runId: input.runId ?? null,
       workflowId: input.workflowId ?? null,
       agentId: input.agentId ?? null,
+      appId: input.appId ?? null,
       conversationId: input.conversationId ?? null,
       nodeId: input.nodeId ?? null,
+      origin: deriveArtifactOrigin(input),
       type: input.type,
       title,
       content: input.content,

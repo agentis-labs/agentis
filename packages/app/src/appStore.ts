@@ -255,4 +255,16 @@ export class AppStore {
       .all()
       .map((r) => r.id);
   }
+
+  /** The id of the App that owns this workflow, or null if it is still a bare
+   *  (ownerless) workflow. The inverse of {@link adoptWorkflow} — used to keep
+   *  every workflow anchored to an App-of-one and to route to the owning App. */
+  appIdForWorkflow(workspaceId: string, workflowId: string): string | null {
+    const row = this.db
+      .select({ appId: schema.workflows.appId })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, workflowId)))
+      .get();
+    return row?.appId ?? null;
+  }
 }

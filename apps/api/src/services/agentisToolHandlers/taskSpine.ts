@@ -51,6 +51,83 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     },
     {
       definition: {
+        id: 'agentis.task.set_steps',
+        family: 'run',
+        description:
+          'Publish the ordered checklist the operator watches live (the StepTrack shown in chat, the Live Workspace, and channels). '
+          + 'Call this when you start multi-step work; pass short imperative step labels. Creates the task spine if none exists yet.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            steps: { type: 'array', items: { type: 'string' }, description: 'Ordered step labels, e.g. ["Fetch profile", "Extract metadata", "Save artifact"].' },
+            taskId: { type: 'string', description: 'Existing task spine id; omit to use/create this conversation\'s spine.' },
+            title: { type: 'string' },
+            objective: { type: 'string' },
+          },
+          required: ['steps'],
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: (args, ctx) => {
+        if (!deps.plans) throw new Error('task spine service not available');
+        const steps = Array.isArray(args.steps)
+          ? args.steps.filter((item): item is string => typeof item === 'string')
+          : [];
+        if (steps.length === 0) throw new Error('steps must be a non-empty array of strings');
+        const plan = deps.plans.setSteps(ctx.workspaceId, ctx.userId, {
+          conversationId: ctx.conversationId ?? null,
+          ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
+          ...(args.taskId ? { planId: String(args.taskId) } : {}),
+          ...(args.title ? { title: String(args.title) } : {}),
+          ...(args.objective ? { objective: String(args.objective) } : {}),
+          steps,
+        });
+        return { taskId: plan.id, status: plan.status, steps: plan.nodes.filter((node) => node.stage === 'build').map((node) => node.title) };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.task.advance_step',
+        family: 'run',
+        description:
+          'Advance the live checklist. With no target, marks the current step done and starts the next — call it each time you finish a step. '
+          + 'Pass status:"failed" when a step fails. Keeps the operator\'s progress bar truthful.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            taskId: { type: 'string' },
+            index: { type: 'number', description: '0-based step to update; omit to advance the active step.' },
+            label: { type: 'string', description: 'Step label to update (alternative to index).' },
+            status: { type: 'string', enum: ['running', 'done', 'failed'], description: 'Defaults to "done".' },
+          },
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: (args, ctx) => {
+        if (!deps.plans) throw new Error('task spine service not available');
+        const status = ['running', 'done', 'failed'].includes(String(args.status))
+          ? String(args.status) as 'running' | 'done' | 'failed'
+          : undefined;
+        const plan = deps.plans.advanceStep(ctx.workspaceId, ctx.userId, {
+          conversationId: ctx.conversationId ?? null,
+          ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
+          ...(args.taskId ? { planId: String(args.taskId) } : {}),
+          ...(typeof args.index === 'number' ? { index: args.index } : {}),
+          ...(args.label ? { label: String(args.label) } : {}),
+          ...(status ? { status } : {}),
+        });
+        const buildNodes = plan.nodes.filter((node) => node.stage === 'build');
+        return {
+          taskId: plan.id,
+          status: plan.status,
+          steps: buildNodes.map((node) => ({ label: node.title, status: node.status })),
+        };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.task.inspect',
         family: 'inspect',
         description: 'Inspect one durable task spine row by task/plan id.',

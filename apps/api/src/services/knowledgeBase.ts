@@ -65,11 +65,24 @@ export interface ListKnowledgeBaseOptions {
   includeWorkspace?: boolean;
 }
 
+/** A document's chunks queued for background enrich + embed + link. */
+interface IndexJob {
+  documentId: string;
+  workspaceId: string;
+  name: string;
+  mimeType: string;
+  scopeId: string | null;
+  chunks: string[];
+  chunkIds: string[];
+}
+
 export class KnowledgeBaseService {
   private autoLinker: Pick<KnowledgeAutoLinker, 'autoLink' | 'autoLinkSemantic'> | null = null;
   private embeddingProviderResolver: ((workspaceId: string) => EmbeddingProvider) | null = null;
   private enrichmentProvider: BrainEnrichmentProvider | null = null;
   private graphWriter: Pick<EnrichedKnowledgeGraphWriter, 'writeDocument'> | null = null;
+  /** In-flight background indexing jobs — awaited by `flushPendingIndexing`. */
+  readonly #pendingIndexing = new Set<Promise<unknown>>();
 
   constructor(private readonly db: AgentisSqliteDb) {}
 
@@ -323,14 +336,24 @@ export class KnowledgeBaseService {
     const knowledgeBase = this.getKnowledgeBase(args.workspaceId, args.knowledgeBaseId);
     const now = new Date().toISOString();
     const documentId = randomUUID();
+    const mimeType = args.mimeType ?? 'text/plain';
     const chunks = chunkText(args.content);
+    // §perf — the document + ALL its chunks are inserted SYNCHRONOUSLY (text +
+    // deterministic context only), so the upload request returns in milliseconds.
+    // Embedding, per-chunk LLM grounding, link- and graph-writing used to run
+    // inside this request — dozens of model calls deep for a multi-chunk doc —
+    // which hung the upload AND starved the single-threaded API (every other
+    // request, including the SPA bootstrap, stalled → "Loading…" everywhere).
+    // They now run in the background (see #indexDocumentInBackground), which
+    // yields to the event loop between chunks so the API stays responsive. The
+    // document shows immediately as `indexing` and flips to `ready` when indexed.
     const document = {
       id: documentId,
       knowledgeBaseId: args.knowledgeBaseId,
       workspaceId: args.workspaceId,
       name: args.name,
-      mimeType: args.mimeType ?? 'text/plain',
-      status: 'ready',
+      mimeType,
+      status: 'indexing',
       tokenCount: tokenize(args.content).length,
       error: null,
       archivedAt: null,
@@ -339,34 +362,11 @@ export class KnowledgeBaseService {
     };
     this.db.insert(schema.kbDocuments).values(document).run();
     const chunkIds: string[] = [];
-    const enrichments: Array<ChunkEnrichment | null> = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index]!;
       const chunkId = randomUUID();
       chunkIds.push(chunkId);
-      const generated = await this.enrichmentProvider?.enrichChunk({
-        workspaceId: args.workspaceId,
-        documentName: args.name,
-        mimeType: args.mimeType ?? 'text/plain',
-        chunkIndex: index,
-        chunkCount: chunks.length,
-        content: chunk,
-      }).catch(() => null);
-      const contextPrefix = generated?.contextPrefix ?? contextualPrefix(args.name, index, chunks.length, args.mimeType ?? 'text/plain');
-      const embeddingText = `${contextPrefix}\n\n${chunk}`;
-      const provider = this.embeddingProvider(args.workspaceId);
-      // Resolve the embedding BEFORE the chunk is considered indexed. The default
-      // provider is now async (local e5 / OpenAI); the previous fire-and-forget
-      // update raced retrieval, leaving freshly-uploaded chunks vectorless (so
-      // search silently degraded to lexical). Await it here — ingestion is not a
-      // hot path — and degrade to lexical only if embedding genuinely fails.
-      let embedding: number[] | null = null;
-      try {
-        const raw = provider.embed(embeddingText);
-        embedding = raw instanceof Promise ? await raw : raw;
-      } catch {
-        embedding = null;
-      }
+      const contextPrefix = contextualPrefix(args.name, index, chunks.length, mimeType);
       this.db.insert(schema.kbChunks).values({
         id: chunkId,
         documentId,
@@ -377,33 +377,152 @@ export class KnowledgeBaseService {
         metadata: {
           source: args.name,
           contextPrefix,
-          importanceScore: generated?.importanceScore ?? inferImportance(chunk),
-          entities: generated?.entities ?? extractEntities(chunk),
-          ingestionType: ingestionType(args.mimeType ?? 'text/plain'),
-          ...(generated ? {
-            generatedSummary: generated.summary,
-            keyFacts: generated.keyFacts,
-            enrichment: { generated: true, model: generated.model ?? 'configured-model' },
-          } : { enrichment: { generated: false, strategy: 'deterministic_context' } }),
+          importanceScore: inferImportance(chunk),
+          entities: extractEntities(chunk),
+          ingestionType: ingestionType(mimeType),
+          enrichment: { generated: false, strategy: 'pending' },
         } as unknown as object,
-        ...(Array.isArray(embedding) ? { embedding } : {}),
         tokenCount: tokenize(chunk).length,
         createdAt: now,
       }).run();
-      enrichments.push(generated ?? null);
     }
 
-    this.linkDocumentChunks(documentId, args.workspaceId, args.name, knowledgeBase.scopeId);
-    if (this.graphWriter && enrichments.some(Boolean)) {
-      await this.graphWriter.writeDocument({
-        workspaceId: args.workspaceId,
-        documentId,
-        documentName: args.name,
-        chunkIds,
-        enrichments,
+    this.#startIndexing({
+      documentId,
+      workspaceId: args.workspaceId,
+      name: args.name,
+      mimeType,
+      scopeId: knowledgeBase.scopeId,
+      chunks,
+      chunkIds,
+    });
+
+    return { ...document, chunks: chunks.length };
+  }
+
+  /** Spawn + track a background indexing job so tests can await completion. */
+  #startIndexing(job: IndexJob): void {
+    const p = this.#indexDocumentInBackground(job);
+    this.#pendingIndexing.add(p);
+    void p.finally(() => this.#pendingIndexing.delete(p));
+  }
+
+  /**
+   * Await all in-flight background indexing. Production never needs this (uploads
+   * return immediately and index asynchronously); tests use it to assert the
+   * fully-indexed state deterministically.
+   */
+  async flushPendingIndexing(): Promise<void> {
+    await Promise.allSettled([...this.#pendingIndexing]);
+  }
+
+  /**
+   * §perf — the heavy half of ingestion, run OFF the upload request. Enriches +
+   * embeds each chunk (updating its row in place), then links + graph-writes,
+   * then flips the document to `ready`. A short breather between chunks keeps the
+   * event loop responsive so a large document never blocks the API.
+   */
+  #indexDocumentInBackground(job: IndexJob): Promise<void> {
+    const markReady = () => {
+      try {
+        this.db.update(schema.kbDocuments)
+          .set({ status: 'ready', updatedAt: new Date().toISOString() })
+          .where(and(eq(schema.kbDocuments.workspaceId, job.workspaceId), eq(schema.kbDocuments.id, job.documentId)))
+          .run();
+      } catch { /* document may have been deleted mid-index */ }
+    };
+    return (async () => {
+      const provider = this.embeddingProvider(job.workspaceId);
+      const enrichments: Array<ChunkEnrichment | null> = [];
+      for (let index = 0; index < job.chunks.length; index += 1) {
+        const chunk = job.chunks[index]!;
+        const chunkId = job.chunkIds[index]!;
+        const generated = (await this.enrichmentProvider?.enrichChunk({
+          workspaceId: job.workspaceId,
+          documentName: job.name,
+          mimeType: job.mimeType,
+          chunkIndex: index,
+          chunkCount: job.chunks.length,
+          content: chunk,
+        }).catch(() => null)) ?? null;
+        const contextPrefix = generated?.contextPrefix ?? contextualPrefix(job.name, index, job.chunks.length, job.mimeType);
+        let embedding: number[] | null = null;
+        try {
+          const raw = provider.embed(`${contextPrefix}\n\n${chunk}`);
+          embedding = raw instanceof Promise ? await raw : raw;
+        } catch { embedding = null; }
+        try {
+          this.db.update(schema.kbChunks).set({
+            metadata: {
+              source: job.name,
+              contextPrefix,
+              importanceScore: generated?.importanceScore ?? inferImportance(chunk),
+              entities: generated?.entities ?? extractEntities(chunk),
+              ingestionType: ingestionType(job.mimeType),
+              ...(generated ? {
+                generatedSummary: generated.summary,
+                keyFacts: generated.keyFacts,
+                enrichment: { generated: true, model: generated.model ?? 'configured-model' },
+              } : { enrichment: { generated: false, strategy: 'deterministic_context' } }),
+            } as unknown as object,
+            ...(Array.isArray(embedding) ? { embedding } : {}),
+          }).where(and(eq(schema.kbChunks.workspaceId, job.workspaceId), eq(schema.kbChunks.id, chunkId))).run();
+        } catch { /* keep indexing the rest */ }
+        enrichments.push(generated);
+        // §perf — a real breather, not just setImmediate. Each embed blocks the
+        // main thread ~80–160ms (the on-device model's JS tokenize/pool work runs
+        // synchronously), so back-to-back chunks could otherwise starve incoming
+        // requests. A short timer hands the event loop dedicated idle time between
+        // chunks, so the rest of Agentis stays fully responsive while a large
+        // document indexes in the background — it just indexes a touch slower.
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+      try {
+        await this.linkDocumentChunks(job.documentId, job.workspaceId, job.name, job.scopeId);
+        if (this.graphWriter && enrichments.some(Boolean)) {
+          await this.graphWriter.writeDocument({
+            workspaceId: job.workspaceId,
+            documentId: job.documentId,
+            documentName: job.name,
+            chunkIds: job.chunkIds,
+            enrichments,
+          });
+        }
+      } catch { /* best effort — links/graph are enhancements */ }
+      markReady();
+    })().catch(markReady);
+  }
+
+  /**
+   * §perf — re-run background indexing for any document left `indexing` by a
+   * restart mid-ingest, so it never stays stuck without embeddings. Called once
+   * at startup. Re-embedding already-embedded chunks is an idempotent UPDATE.
+   */
+  resumeStalledIndexing(): void {
+    const stalled = this.db.select().from(schema.kbDocuments)
+      .where(eq(schema.kbDocuments.status, 'indexing')).all();
+    for (const doc of stalled) {
+      const chunkRows = this.db.select({ id: schema.kbChunks.id, content: schema.kbChunks.content })
+        .from(schema.kbChunks)
+        .where(and(eq(schema.kbChunks.workspaceId, doc.workspaceId), eq(schema.kbChunks.documentId, doc.id)))
+        .orderBy(schema.kbChunks.chunkIndex)
+        .all();
+      if (chunkRows.length === 0) { // nothing to index — don't leave it stuck
+        this.db.update(schema.kbDocuments).set({ status: 'ready' }).where(eq(schema.kbDocuments.id, doc.id)).run();
+        continue;
+      }
+      const kb = this.db.select({ scopeId: schema.knowledgeBases.scopeId })
+        .from(schema.knowledgeBases).where(eq(schema.knowledgeBases.id, doc.knowledgeBaseId)).get();
+      this.#startIndexing({
+        documentId: doc.id,
+        workspaceId: doc.workspaceId,
+        name: doc.name,
+        mimeType: doc.mimeType,
+        scopeId: kb?.scopeId ?? null,
+        chunks: chunkRows.map((row) => row.content),
+        chunkIds: chunkRows.map((row) => row.id),
       });
     }
-    return { ...document, chunks: chunks.length };
   }
 
   archiveDocument(workspaceId: string, knowledgeBaseId: string, documentId: string) {
@@ -549,7 +668,7 @@ export class KnowledgeBaseService {
     return Boolean(document && !document.archivedAt);
   }
 
-  private linkDocumentChunks(documentId: string, workspaceId: string, name: string, scopeId: string | null): number {
+  private async linkDocumentChunks(documentId: string, workspaceId: string, name: string, scopeId: string | null): Promise<number> {
     if (!this.autoLinker) return 0;
     const chunks = this.db.select().from(schema.kbChunks)
       .where(and(eq(schema.kbChunks.workspaceId, workspaceId), eq(schema.kbChunks.documentId, documentId)))
@@ -570,7 +689,13 @@ export class KnowledgeBaseService {
         siblingHeadKind: chunk.id === head.id ? null : 'kb_chunk' as const,
       };
       linked += this.autoLinker.autoLink(input);
-      void this.autoLinker.autoLinkSemantic(input);
+      // §perf — semantic linking embeds the source + classifies relations (LLM).
+      // Run it SERIALLY with a breather, not fired-and-forgotten once per chunk:
+      // the old burst started N semantic passes at once (each re-embedding every
+      // candidate) and pinned the event loop for minutes. Awaiting + yielding
+      // keeps the rest of Agentis responsive while the document links.
+      try { await this.autoLinker.autoLinkSemantic(input); } catch { /* best effort */ }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
     }
     return linked;
   }

@@ -251,7 +251,11 @@ describe('ChatSessionExecutor', () => {
     expect(adapter.calls[1]!.some((message) => message.role === 'tool' && String(message.content).includes('ship chat loop'))).toBe(true);
   });
 
-  it('stops runaway tool loops at maxTurns', async () => {
+  it('stops a runaway tool loop via the progress monitor, not a wall clock', async () => {
+    // The model issues the SAME tool call with identical args every round — a
+    // classic loop. There is no turn time limit anymore; the progress monitor must
+    // detect the identical repetition and stop within a few rounds (well short of
+    // the absolute defensive ceiling), with an honest explanation.
     const adapter = new FakeChatAdapter(async function* () {
       yield { type: 'tool_call', id: 'tool_1', name: 'agentis.plan', args: { goal: 'loop' } };
       yield { type: 'done', finishReason: 'tool_calls' };
@@ -262,10 +266,17 @@ describe('ChatSessionExecutor', () => {
       agentId: 'agent_1',
       userId: 'user_1',
       conversationId: 'conv_1',
-      maxTurns: 1,
     }));
 
-    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'max_turns' });
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+    // A handful of identical rounds, not 150 — the monitor caught it fast.
+    expect(adapter.calls.length).toBeLessThan(6);
+    const text = deltas
+      .filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text')
+      .map((d) => d.delta)
+      .join(' ')
+      .toLowerCase();
+    expect(text).toContain('repeating');
   });
 
   it('pauses mutating tools for confirmation and resumes after approval', async () => {

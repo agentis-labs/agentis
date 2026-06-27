@@ -41,6 +41,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'merge',    label: 'Merge',    glyph: '⤳', description: 'Join multiple branches together', defaults: { requiredInputs: 'all' } },
       { type: 'wait',     label: 'Wait',     glyph: '⏲', description: 'Pause for a duration before resuming', defaults: { delayMs: 60_000 } },
       { type: 'loop',     label: 'Loop',     glyph: '↻', description: 'Iterate over an array with concurrency control', defaults: { maxConcurrency: 1, onIterationError: 'stop_all', outputArrayKey: 'results' } },
+      { type: 'converge', label: 'Converge', glyph: '⟳', description: 'Re-run a cohort until a goal is met, stalls, or hits budget', defaults: { continuation: { type: 'judge', targetPath: 'output', criteria: 'The objective is fully met.' }, maxIterations: 8, isolation: 'auto', stallPolicy: { window: 2 } } },
       { type: 'parallel', label: 'Parallel', glyph: '⫴', description: 'Fan out to N branches in parallel', defaults: { waitFor: 'all', onBranchError: 'fail_all', mergeStrategy: 'merge_keys' } },
       { type: 'subflow',  label: 'Subflow',  glyph: '▦', description: 'Embed another workflow inline', defaults: { inputMapping: {}, outputMapping: {} } },
       { type: 'stop_error', label: 'Stop & Error', glyph: '⛔', description: 'Terminate the run with a custom error', defaults: { errorMessage: 'Stopped' } },

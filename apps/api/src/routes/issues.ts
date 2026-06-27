@@ -19,6 +19,8 @@ const issueSchema = z.object({
   status: z.enum(['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']).optional(),
   priority: z.enum(['urgent', 'high', 'medium', 'low', 'none']).optional(),
   labels: z.array(z.string()).optional(),
+  scheduledFor: z.string().datetime().nullable().optional(),
+  recurrenceCron: z.string().trim().min(1).max(120).nullable().optional(),
 });
 const updateIssueSchema = issueSchema.partial();
 const acceptSchema = z.object({ agentId: z.string().uuid().nullable().optional() });
@@ -63,6 +65,13 @@ export function buildIssueRoutes(deps: {
     const issue = deps.issues.update(ws.workspaceId, c.req.param('id'), updateIssueSchema.parse(await c.req.json()));
     if (!issue) throw new AgentisError('RESOURCE_NOT_FOUND', 'Issue not found');
     return c.json({ issue });
+  });
+
+  app.delete('/:id', (c) => {
+    const ws = getWorkspace(c);
+    const removed = deps.issues.delete(ws.workspaceId, c.req.param('id'));
+    if (!removed) throw new AgentisError('RESOURCE_NOT_FOUND', 'Issue not found');
+    return c.json({ ok: true });
   });
 
   app.post('/:id/accept', async (c) => {

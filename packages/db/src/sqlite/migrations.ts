@@ -2098,4 +2098,228 @@ CREATE INDEX IF NOT EXISTS idx_memory_episodes_scope_recency
   ON memory_episodes(workspace_id, scope_id, updated_at);
 `,
   },
+  {
+    version: 90,
+    name: 'artifacts_app_and_origin',
+    sql: `
+-- Assets §1 — make artifacts groupable by what generated them. app_id binds an
+-- artifact to its producing App (for the App "Data & Assets" view); origin is the
+-- coarse source class (agent | app | workflow | channel | manual). Backfill origin
+-- from the strongest existing signal. Mirrored in src/sqlite/schema.ts +
+-- the index.ts drift path.
+ALTER TABLE artifacts ADD COLUMN app_id TEXT REFERENCES apps(id) ON DELETE SET NULL;
+ALTER TABLE artifacts ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual';
+UPDATE artifacts SET origin = CASE
+  WHEN run_id IS NOT NULL OR workflow_id IS NOT NULL THEN 'workflow'
+  WHEN agent_id IS NOT NULL THEN 'agent'
+  ELSE 'manual'
+END;
+CREATE INDEX IF NOT EXISTS idx_artifacts_app ON artifacts(workspace_id, app_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifacts_origin ON artifacts(workspace_id, origin, created_at);
+`,
+  },
+  {
+    version: 91,
+    name: 'issues_scheduling',
+    sql: `
+-- Live Workspace §C — issues become the schedulable backlog. scheduled_for is
+-- the ISO time the assigned agent should auto-start (picked up by the due
+-- sweep); recurrence_cron reschedules it after each fire. Mirrored in
+-- src/sqlite/schema.ts + the index.ts drift path.
+ALTER TABLE issues ADD COLUMN scheduled_for TEXT;
+ALTER TABLE issues ADD COLUMN recurrence_cron TEXT;
+CREATE INDEX IF NOT EXISTS idx_issues_scheduled ON issues(workspace_id, scheduled_for);
+`,
+  },
+  {
+    version: 92,
+    name: 'knowledge_bases_polymorphic_scope',
+    sql: `
+-- Knowledge scope is now polymorphic: a scoped Knowledge brain is owned by a
+-- Workflow OR an Agentic App (App Brain → Knowledge binds scope_id = app.id).
+-- The old FK pinned scope_id to workflows(id), so an App id raised a FK error
+-- (surfaced as a 500 on create / "Workflow not found" path). Rebuild the table
+-- to drop that FK; scope ownership is validated in the route against both tables.
+-- Mirrored in src/sqlite/schema.ts (scopeId loses .references) + index.ts drift.
+PRAGMA foreign_keys = OFF;
+CREATE TABLE knowledge_bases_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  scope_id TEXT,
+  name TEXT NOT NULL,
+  description TEXT,
+  embedding_model TEXT NOT NULL DEFAULT 'lexical-v1',
+  embedding_dimension INTEGER NOT NULL DEFAULT 0,
+  chunking_config TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO knowledge_bases_next (
+  id, workspace_id, scope_id, name, description, embedding_model, embedding_dimension, chunking_config, created_at, updated_at
+)
+SELECT id, workspace_id, scope_id, name, description, embedding_model, embedding_dimension, chunking_config, created_at, updated_at
+FROM knowledge_bases;
+DROP TABLE knowledge_bases;
+ALTER TABLE knowledge_bases_next RENAME TO knowledge_bases;
+PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS idx_knowledge_bases_scope ON knowledge_bases(workspace_id, scope_id);
+`,
+  },
+  {
+    version: 93,
+    name: 'conversation_permission_mode',
+    sql: `
+-- Per-conversation permission mode (Claude-Code style): 'ask' confirms mutating
+-- actions, 'plan' proposes a plan and blocks mutations (reuses execution_mode
+-- enforcement), 'auto' bypasses confirmation. Sticky per thread; flipped by the
+-- chat composer toggle or by slash commands (/ask /plan /auto) over channels.
+-- Mirrored in src/sqlite/schema.ts + embedded-sql.ts + index.ts drift.
+ALTER TABLE conversations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask';
+`,
+  },
+  {
+    version: 94,
+    name: 'blackboard_entries',
+    sql: `
+-- Blackboard — durable, identity-tagged inter-agent shared state
+-- (AGENT-COOPERATION-10X). Promotes the run-scoped scratchpad/channel bus into
+-- a persisted store so a convergence loop's cross-iteration memory survives an
+-- API restart and is fully auditable. Every entry records WHO (agent) on WHICH
+-- runtime wrote it, and WHICH iteration produced it, so an operator can read a
+-- multi-runtime negotiation. Mirrored in src/sqlite/schema.ts (blackboardEntries).
+CREATE TABLE IF NOT EXISTS blackboard_entries (
+  id               TEXT PRIMARY KEY,
+  run_id           TEXT NOT NULL,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  namespace        TEXT NOT NULL DEFAULT 'run',   -- converge.stateKey | 'run'
+  kind             TEXT NOT NULL,                  -- fact | message | claim | artifact_ref
+  key              TEXT,                           -- KV key for facts
+  channel          TEXT,                           -- channel name for messages
+  author_agent_id  TEXT,
+  author_runtime   TEXT,                           -- opus | codex | cursor | …
+  author_label     TEXT,                           -- display name
+  iteration        INTEGER NOT NULL DEFAULT 0,
+  confidence       REAL,                           -- 0..1 for claims
+  supersedes       TEXT,                           -- id of the entry this revises
+  value            TEXT,                           -- JSON
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_blackboard_run ON blackboard_entries(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_blackboard_run_ns ON blackboard_entries(run_id, namespace);
+`,
+  },
+  {
+    version: 95,
+    name: 'living_apps_channel_conversation_app_id',
+    sql: `
+-- Living Apps Phase 0 — the App owns the relationship. A channel connection and
+-- a conversation can now belong to an Agentic App, so an inbound turn runs in
+-- the App's context (its datastore, actions, and operating doctrine) and the
+-- live thread is visible on the App's surfaces. Nullable + ON DELETE SET NULL,
+-- so every existing channel/conversation keeps working untouched.
+-- Mirrored in src/sqlite/schema.ts (channelConnections.appId / conversations.appId)
+-- + the idempotent column-drift path in index.ts. Plain TEXT (no inline FK):
+-- channel_connections + conversations are created in the embedded baseline, so the
+-- drift adds this column BEFORE the apps table exists (apps is a later migration) —
+-- an inline REFERENCES apps(id) would fail with "no such table: apps". The schema's
+-- Drizzle .references() carries the ORM relation; app deletion degrades gracefully.
+ALTER TABLE channel_connections ADD COLUMN app_id TEXT;
+ALTER TABLE conversations ADD COLUMN app_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_channel_connections_app ON channel_connections(app_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_app ON conversations(app_id);
+`,
+  },
+  {
+    version: 96,
+    name: 'living_apps_conversation_handoff',
+    sql: `
+-- Living Apps Phase 2 — operator handoff. 'human' parks the resident agent so an
+-- operator can drive the thread (take over); null/'agent' = the agent answers.
+-- Mirrored in src/sqlite/schema.ts (conversations.handoffState) + index.ts drift.
+ALTER TABLE conversations ADD COLUMN handoff_state TEXT;
+`,
+  },
+  {
+    version: 97,
+    name: 'living_apps_app_contacts',
+    sql: `
+-- Living Apps Phase 3 — the relationship entity. One row per contact an App
+-- talks to, unifying a person across channels (peer_id) and carrying pipeline
+-- state (stage/goal) + the proactivity clock (next_touch_at → the follow-up
+-- sweep). Mirrored in src/sqlite/schema.ts (appContacts).
+CREATE TABLE IF NOT EXISTS app_contacts (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id          TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  channel_kind    TEXT,
+  handle          TEXT,
+  peer_id         TEXT,
+  display_name    TEXT,
+  stage           TEXT,
+  goal            TEXT,
+  data_json       TEXT NOT NULL DEFAULT '{}',
+  last_touch_at   TEXT,
+  next_touch_at   TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_contacts_handle ON app_contacts(app_id, channel_kind, handle);
+CREATE INDEX IF NOT EXISTS idx_app_contacts_due ON app_contacts(workspace_id, next_touch_at);
+CREATE INDEX IF NOT EXISTS idx_app_contacts_app ON app_contacts(app_id, stage);
+`,
+  },
+  {
+    version: 98,
+    name: 'living_apps_conversation_participants',
+    sql: `
+-- Living Apps Phase 2 (G1) — multi-party threads. ADDITIVE: conversations.agent_id
+-- stays the singular PRIMARY participant; this join layers more parties beside it
+-- (customer + resident agent + escalation specialist + human operator in ONE
+-- thread). An active 'specialist' agent participant becomes the inbound responder
+-- (warm handoff). New table → inline FK to conversations is fine (it exists by now).
+-- Mirrored in src/sqlite/schema.ts (conversationParticipants).
+CREATE TABLE IF NOT EXISTS conversation_participants (
+  id                TEXT PRIMARY KEY,
+  conversation_id   TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  participant_type  TEXT NOT NULL,
+  participant_id    TEXT,
+  role              TEXT NOT NULL,
+  active            INTEGER NOT NULL DEFAULT 1,
+  joined_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  left_at           TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_participants_party
+  ON conversation_participants(conversation_id, participant_type, participant_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_conversation
+  ON conversation_participants(conversation_id, active);
+
+-- Backfill: seed the primary agent participant for existing App conversations.
+INSERT INTO conversation_participants (id, conversation_id, participant_type, participant_id, role, active, joined_at)
+SELECT
+  lower(hex(randomblob(16))),
+  c.id, 'agent', c.agent_id, 'primary', 1,
+  strftime('%Y-%m-%dT%H:%M:%fZ','now')
+FROM conversations c
+WHERE c.app_id IS NOT NULL AND c.agent_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM conversation_participants p
+    WHERE p.conversation_id = c.id AND p.participant_type = 'agent' AND p.participant_id = c.agent_id
+  );
+`,
+  },
+  {
+    version: 99,
+    name: 'living_apps_contact_outcome',
+    sql: `
+-- Living Apps Phase M2 (G10) — the conversational learning loop. A resident App
+-- relationship reaches an OUTCOME (won | lost | abandoned); recording it is what
+-- lets the agent deposit a graded lesson and graduate winning patterns into an
+-- ability. ADDITIVE: plain TEXT columns on app_contacts (no inline FK — even
+-- though app_contacts is post-baseline, we keep the safe pattern). NULL = no
+-- outcome yet (every existing row behaves exactly as before).
+-- Mirrored in src/sqlite/schema.ts (appContacts.outcome / outcomeAt).
+ALTER TABLE app_contacts ADD COLUMN outcome TEXT;
+ALTER TABLE app_contacts ADD COLUMN outcome_at TEXT;
+`,
+  },
 ];

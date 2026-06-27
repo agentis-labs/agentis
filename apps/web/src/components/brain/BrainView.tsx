@@ -240,6 +240,7 @@ export function BrainView({
             detailPath={`${graphUrl}/node/${encodeURIComponent(selectedId!)}`}
             linkPath="/v1/brain/links"
             atomPathBase="/v1/brain/atoms"
+            scopeName="Workspace"
             onClose={() => setSelectedId(null)}
             onGraphChanged={() => reloadBrain(false)}
             onArchived={() => {

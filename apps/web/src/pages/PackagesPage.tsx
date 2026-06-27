@@ -37,10 +37,17 @@ import {
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { AppRecord } from '@agentis/core';
+import type { AppRecord, AppManifestEnvelope } from '@agentis/core';
 import { api, apiErrorMessage } from '../lib/api';
 import { appsApi } from '../lib/appsApi';
-import { abilitiesApi, compileStatusLabel, compileStatusTone, type Ability } from '../lib/abilities';
+import {
+  abilitiesApi,
+  compileStatusLabel,
+  compileStatusTone,
+  downloadAbilityPackage,
+  type Ability,
+  type AbilityPackage,
+} from '../lib/abilities';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 import { Button } from '../components/shared/Button';
@@ -323,22 +330,14 @@ export function PackagesPage() {
   async function handleImport() {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.agentis,.agentisagt,.json,application/json';
+    input.accept = '.agentisapp,.agentiswf,.agentisagt,.agentisab,.agentisext,.agentis,.json,application/json';
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
       try {
         const text = await file.text();
         const json = JSON.parse(text) as Record<string, unknown>;
-        const manifest = 'manifest' in json
-          ? json.manifest
-          : 'packageManifest' in json
-            ? json.packageManifest
-            : json;
-        await api('/v1/packages/import', {
-          method: 'POST',
-          body: JSON.stringify({ manifest }),
-        });
+        await routeImport(file.name, json);
         toast.success('Imported', file.name);
         void refresh();
       } catch (err) {
@@ -348,12 +347,74 @@ export function PackagesPage() {
     input.click();
   }
 
+  /** Detect the package kind from its envelope shape (or extension) and import via the right route. */
+  async function routeImport(fileName: string, json: Record<string, unknown>) {
+    // Agentic App — `.agentisapp` envelope carries a discriminating `format`.
+    if (json.format === '.agentisapp' || fileName.endsWith('.agentisapp')) {
+      const envelope = json as unknown as AppManifestEnvelope;
+      const preview = await appsApi.previewImport(envelope);
+      await appsApi.importApp(envelope, preview.permissions ?? []);
+      return;
+    }
+    // Ability — `.agentisab` carries an ability shape under `manifest`.
+    if (fileName.endsWith('.agentisab') || fileName.endsWith('.ability') || isAbilityPackage(json)) {
+      await abilitiesApi.import(json as unknown as AbilityPackage);
+      return;
+    }
+    // Extension — a raw node-worker manifest with operations + permissions.
+    if (fileName.endsWith('.agentisext') || isExtensionManifest(json)) {
+      await api('/v1/extensions/install-local', {
+        method: 'POST',
+        body: JSON.stringify({ manifest: json, permissionsAcknowledged: json.permissions ?? [] }),
+      });
+      return;
+    }
+    // Workflow / agent package (default) — `.agentiswf` / `.agentisagt` / legacy `.agentis`.
+    const manifest = 'manifest' in json
+      ? json.manifest
+      : 'packageManifest' in json
+        ? json.packageManifest
+        : json;
+    await api('/v1/packages/import', { method: 'POST', body: JSON.stringify({ manifest }) });
+  }
+
   async function handleExportWorkflow(pkg: WorkflowPackage) {
     try {
       const detail = await api<PackageDetail>(`/v1/packages/${pkg.id}`);
-      const ext = detail.package.kind === 'agent' ? 'agentisagt' : 'agentis';
+      const ext = detail.package.kind === 'agent' ? 'agentisagt' : 'agentiswf';
       downloadJson(detail.package.manifest, `${pkg.slug || slugify(pkg.name)}.${ext}`);
       toast.success('Exported', pkg.name);
+    } catch (err) {
+      toast.error('Export failed', apiErrorMessage(err));
+    }
+  }
+
+  async function handleExportApp(app: AppRecord) {
+    try {
+      const envelope = await appsApi.exportApp(app.id);
+      downloadJson(envelope, `${app.slug || slugify(app.name)}.agentisapp`);
+      toast.success('Exported', app.name);
+    } catch (err) {
+      toast.error('Export failed', apiErrorMessage(err));
+    }
+  }
+
+  async function handleExportAbility(ability: Ability) {
+    try {
+      const pkg = await abilitiesApi.export(ability.id);
+      downloadAbilityPackage(pkg, ability.slug || slugify(ability.name));
+      toast.success('Exported', ability.name);
+    } catch (err) {
+      toast.error('Export failed', apiErrorMessage(err));
+    }
+  }
+
+  function handleExportExtension(extension: WorkspaceExtension) {
+    try {
+      // The manifest (incl. source, operations, permissions) is already on the record —
+      // serialize it directly as a portable, re-importable `.agentisext`.
+      downloadJson(extension.manifest, `${extension.slug || slugify(extension.name)}.agentisext`);
+      toast.success('Exported', extension.name);
     } catch (err) {
       toast.error('Export failed', apiErrorMessage(err));
     }
@@ -502,6 +563,9 @@ export function PackagesPage() {
                 item={item}
                 onOpen={() => handleOpenItem(item)}
                 onExportWorkflow={() => void handleExportWorkflow(item.source as WorkflowPackage)}
+                onExportApp={() => void handleExportApp(item.source as AppRecord)}
+                onExportAbility={() => void handleExportAbility(item.source as Ability)}
+                onExportExtension={() => handleExportExtension(item.source as WorkspaceExtension)}
                 onDuplicateWorkflow={() => void handleDuplicateWorkflow(item.source as WorkflowPackage)}
                 onDeleteWorkflow={() => void handleDeleteWorkflow(item.source as WorkflowPackage)}
               />
@@ -638,23 +702,29 @@ function LibraryCard({
   item,
   onOpen,
   onExportWorkflow,
+  onExportApp,
+  onExportAbility,
+  onExportExtension,
   onDuplicateWorkflow,
   onDeleteWorkflow,
 }: {
   item: LibraryItem;
   onOpen: () => void;
   onExportWorkflow: () => void;
+  onExportApp: () => void;
+  onExportAbility: () => void;
+  onExportExtension: () => void;
   onDuplicateWorkflow: () => void;
   onDeleteWorkflow: () => void;
 }) {
   if (item.kind === 'app') {
-    return <AppLibraryCard app={item.source as AppRecord} onOpen={onOpen} />;
+    return <AppLibraryCard app={item.source as AppRecord} onOpen={onOpen} onExport={onExportApp} />;
   }
   if (item.kind === 'extension') {
-    return <ExtensionCard extension={item.source as WorkspaceExtension} onOpen={onOpen} />;
+    return <ExtensionCard extension={item.source as WorkspaceExtension} onOpen={onOpen} onExport={onExportExtension} />;
   }
   if (item.kind === 'ability') {
-    return <AbilityCard ability={item.source as Ability} onOpen={onOpen} />;
+    return <AbilityCard ability={item.source as Ability} onOpen={onOpen} onExport={onExportAbility} />;
   }
   if (item.kind === 'agent') {
     return (
@@ -678,7 +748,7 @@ function LibraryCard({
   );
 }
 
-function AppLibraryCard({ app, onOpen }: { app: AppRecord; onOpen: () => void }) {
+function AppLibraryCard({ app, onOpen, onExport }: { app: AppRecord; onOpen: () => void; onExport: () => void }) {
   const iconIsImage = Boolean(app.icon && (app.icon.startsWith('http') || app.icon.startsWith('data:image/')));
   return (
     <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
@@ -687,27 +757,28 @@ function AppLibraryCard({ app, onOpen }: { app: AppRecord; onOpen: () => void })
           {iconIsImage ? <img src={app.icon ?? ''} alt="" className="h-full w-full object-cover" /> : app.icon ? <span className="text-[17px]">{app.icon}</span> : <LayoutGrid size={17} />}
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+          <div className="flex min-w-0 items-center gap-2">
+            <button type="button" onClick={onOpen} className="min-w-0 truncate text-left text-subheading text-text-primary hover:underline">
               {app.name}
             </button>
-            <span className="rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">{app.status}</span>
+            <span className="shrink-0 rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">{app.status}</span>
           </div>
-          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{app.slug}{app.version ? `@${app.version}` : ''}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{app.slug}{app.version ? `@${app.version}` : ''}</div>
           {app.description && <div className="mt-2 line-clamp-2 text-[12px] leading-5 text-text-secondary">{app.description}</div>}
         </div>
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
         <Pill icon={<LayoutGrid size={11} />} label="Agentic App" />
       </div>
-      <div className="mt-4">
+      <div className="mt-4 flex gap-1.5">
         <Button variant="secondary" size="sm" iconLeft={<LayoutGrid size={12} />} onClick={onOpen}>Open app</Button>
+        <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={11} />} onClick={onExport}>Export</Button>
       </div>
     </article>
   );
 }
 
-function ExtensionCard({ extension, onOpen }: { extension: WorkspaceExtension; onOpen: () => void }) {
+function ExtensionCard({ extension, onOpen, onExport }: { extension: WorkspaceExtension; onOpen: () => void; onExport: () => void }) {
   const permissions = extension.manifest.permissions ?? [];
   const operationCount = extension.manifest.operations?.length ?? 1;
   return (
@@ -717,15 +788,15 @@ function ExtensionCard({ extension, onOpen }: { extension: WorkspaceExtension; o
           <Puzzle size={17} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+          <div className="flex min-w-0 items-center gap-2">
+            <button type="button" onClick={onOpen} className="min-w-0 truncate text-left text-subheading text-text-primary hover:underline">
               {extension.name || extension.slug}
             </button>
-            <span className="rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">
+            <span className="shrink-0 rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">
               {extension.runtime}
             </span>
           </div>
-          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{extension.slug}{extension.version ? `@${extension.version}` : ''}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{extension.slug}{extension.version ? `@${extension.version}` : ''}</div>
           <div className="mt-2 inline-flex rounded-pill border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">
             {operationCount} {operationCount === 1 ? 'operation' : 'operations'}
           </div>
@@ -744,6 +815,7 @@ function ExtensionCard({ extension, onOpen }: { extension: WorkspaceExtension; o
       </div>
       <div className="mt-4 flex items-center gap-2">
         <Button variant="secondary" size="sm" iconLeft={<FileJson size={12} />} onClick={onOpen}>Inspect</Button>
+        <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={11} />} onClick={onExport}>Export</Button>
         <button
           type="button"
           onClick={() => void navigator.clipboard?.writeText(extension.slug)}
@@ -756,7 +828,7 @@ function ExtensionCard({ extension, onOpen }: { extension: WorkspaceExtension; o
   );
 }
 
-function AbilityCard({ ability, onOpen }: { ability: Ability; onOpen: () => void }) {
+function AbilityCard({ ability, onOpen, onExport }: { ability: Ability; onOpen: () => void; onExport: () => void }) {
   const tone = compileStatusTone(ability.compileStatus);
   const badgeTone = tone === 'green' ? 'accent' : tone === 'amber' ? 'warn' : tone === 'red' ? 'danger' : 'muted';
   return (
@@ -766,10 +838,10 @@ function AbilityCard({ ability, onOpen }: { ability: Ability; onOpen: () => void
           {ability.iconEmoji ?? '\u26A1'}
         </span>
         <div className="min-w-0 flex-1">
-          <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+          <button type="button" onClick={onOpen} className="block w-full truncate text-left text-subheading text-text-primary hover:underline">
             {ability.name}
           </button>
-          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{ability.slug}{ability.version ? `@${ability.version}` : ''}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{ability.slug}{ability.version ? `@${ability.version}` : ''}</div>
           {ability.description && (
             <div className="mt-2 line-clamp-2 text-[12px] leading-5 text-text-secondary">{ability.description}</div>
           )}
@@ -786,8 +858,9 @@ function AbilityCard({ ability, onOpen }: { ability: Ability; onOpen: () => void
         <Pill icon={<FileJson size={11} />} label={`${ability.exampleCount} examples`} />
         <Pill icon={<Database size={11} />} label={`${ability.knowledgeCount} knowledge`} />
       </div>
-      <div className="mt-4">
+      <div className="mt-4 flex gap-1.5">
         <Button variant="secondary" size="sm" iconLeft={<Zap size={12} />} onClick={onOpen}>Open ability</Button>
+        <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={11} />} onClick={onExport}>Export</Button>
       </div>
     </article>
   );
@@ -815,10 +888,10 @@ function WorkflowPackageCard({
           <WorkflowIcon size={16} />
         </span>
         <div className="min-w-0 flex-1">
-          <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+          <button type="button" onClick={onOpen} className="block w-full truncate text-left text-subheading text-text-primary hover:underline">
             {p.name}
           </button>
-          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{p.slug}{p.version ? `@${p.version}` : ''}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{p.slug}{p.version ? `@${p.version}` : ''}</div>
           {p.description && <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">{p.description}</div>}
         </div>
         <div className="relative">
@@ -882,15 +955,15 @@ function AgentPackageCard({
           <Bot size={17} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={onOpen} className="truncate text-subheading text-text-primary hover:underline">
+          <div className="flex min-w-0 items-center gap-2">
+            <button type="button" onClick={onOpen} className="min-w-0 truncate text-left text-subheading text-text-primary hover:underline">
               {p.name}
             </button>
-            <span className={`rounded-pill border px-1.5 py-0.5 text-[10px] ${roleColorTone}`}>
+            <span className={`shrink-0 rounded-pill border px-1.5 py-0.5 text-[10px] ${roleColorTone}`}>
               {roleLabel}
             </span>
           </div>
-          <div className="mt-0.5 font-mono text-[11px] text-text-muted">{p.slug}{p.version ? `@${p.version}` : ''}</div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{p.slug}{p.version ? `@${p.version}` : ''}</div>
           {p.description && <div className="mt-2 line-clamp-2 text-[12px] text-text-secondary">{p.description}</div>}
         </div>
         <div className="relative">
@@ -1179,7 +1252,7 @@ function PackageDetailDrawer({
 
   async function drawerExport() {
     if (!detail) return;
-    const ext = detail.package.kind === 'agent' ? 'agentisagt' : 'agentis';
+    const ext = detail.package.kind === 'agent' ? 'agentisagt' : 'agentiswf';
     downloadJson(detail.package.manifest, `${detail.package.slug}.${ext}`);
     toast.success('Exported', detail.package.name);
   }
@@ -1417,6 +1490,21 @@ function schemaType(value: string): string {
   } catch {
     return 'invalid';
   }
+}
+
+/** An exported ability package is tagged `format_version` and wraps a `manifest.compiled_prompt`. */
+function isAbilityPackage(json: Record<string, unknown>): boolean {
+  const manifest = json.manifest;
+  return Boolean(
+    json.format_version
+    && manifest && typeof manifest === 'object'
+    && 'compiled_prompt' in (manifest as Record<string, unknown>),
+  );
+}
+
+/** A node-worker extension manifest is identified by its runtime + operations. */
+function isExtensionManifest(json: Record<string, unknown>): boolean {
+  return json.runtime === 'node_worker' && Array.isArray(json.operations);
 }
 
 function pluralKind(kind: LibraryKind): Exclude<LibraryFilter, 'all'> {

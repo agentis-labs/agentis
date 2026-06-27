@@ -66,6 +66,38 @@ export function buildBrainRoutes(deps: BrainRoutesDeps) {
     return c.json({ graph });
   });
 
+  // §scope-visibility — whether a scope's (App/Agent/Workflow) atoms surface in
+  // the Workspace Brain. Default: visible. Stored as workspace.brainSettings
+  // .hiddenScopeIds (the exception list).
+  const readHiddenScopes = (workspaceId: string): string[] => {
+    const row = deps.db.select({ brainSettings: schema.workspaces.brainSettings })
+      .from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get();
+    const raw = row?.brainSettings;
+    const settings = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+    const hidden = settings.hiddenScopeIds;
+    return Array.isArray(hidden) ? hidden.filter((x): x is string => typeof x === 'string') : [];
+  };
+
+  app.get('/scopes/:scopeId/visibility', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ surfacedInWorkspace: !readHiddenScopes(ws.workspaceId).includes(c.req.param('scopeId')) });
+  });
+
+  app.put('/scopes/:scopeId/visibility', async (c) => {
+    const ws = getWorkspace(c);
+    const scopeId = c.req.param('scopeId');
+    const body = await c.req.json().catch(() => ({})) as { surfacedInWorkspace?: boolean };
+    const surfaced = body.surfacedInWorkspace !== false;
+    const current = readHiddenScopes(ws.workspaceId);
+    const next = surfaced ? current.filter((id) => id !== scopeId) : [...new Set([...current, scopeId])];
+    const row = deps.db.select({ brainSettings: schema.workspaces.brainSettings })
+      .from(schema.workspaces).where(eq(schema.workspaces.id, ws.workspaceId)).get();
+    const settings = row?.brainSettings && typeof row.brainSettings === 'object' ? row.brainSettings as Record<string, unknown> : {};
+    deps.db.update(schema.workspaces).set({ brainSettings: { ...settings, hiddenScopeIds: next } })
+      .where(eq(schema.workspaces.id, ws.workspaceId)).run();
+    return c.json({ surfacedInWorkspace: surfaced });
+  });
+
   app.get('/health', (c) => {
     if (!deps.health) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain health service not available');
     const ws = getWorkspace(c);

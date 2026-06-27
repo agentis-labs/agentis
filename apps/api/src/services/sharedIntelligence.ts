@@ -7,6 +7,7 @@ import {
   type BrainGraphLink,
   type BrainGraphNode,
   type BrainGraphScope,
+  type BrainScopeKind,
   type KnowledgeAtomKind,
   type KnowledgeLinkRelation,
   type RuntimeEpisodeType,
@@ -1923,6 +1924,34 @@ export class SharedIntelligenceService {
     return link;
   }
 
+  /** Resolve scope ids to their owning App / Agent / Workflow (for provenance). */
+  #resolveScopeOwners(workspaceId: string, scopeIds: string[]): Map<string, { kind: BrainScopeKind; name: string }> {
+    const owners = new Map<string, { kind: BrainScopeKind; name: string }>();
+    const ids = [...new Set(scopeIds)];
+    if (ids.length === 0) return owners;
+    for (const row of this.db.select({ id: schema.apps.id, name: schema.apps.name }).from(schema.apps)
+      .where(and(eq(schema.apps.workspaceId, workspaceId), inArray(schema.apps.id, ids))).all()) {
+      owners.set(row.id, { kind: 'app', name: row.name });
+    }
+    for (const row of this.db.select({ id: schema.agents.id, name: schema.agents.name }).from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), inArray(schema.agents.id, ids))).all()) {
+      if (!owners.has(row.id)) owners.set(row.id, { kind: 'agent', name: row.name });
+    }
+    for (const row of this.db.select({ id: schema.workflows.id, title: schema.workflows.title }).from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), inArray(schema.workflows.id, ids))).all()) {
+      if (!owners.has(row.id)) owners.set(row.id, { kind: 'workflow', name: row.title });
+    }
+    return owners;
+  }
+
+  /** Scope ids the operator has hidden from the Workspace Brain (default: none). */
+  #hiddenScopeIds(workspaceId: string): Set<string> {
+    const row = this.db.select({ brainSettings: schema.workspaces.brainSettings }).from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId)).get();
+    const hidden = parseJsonRecord(row?.brainSettings).hiddenScopeIds;
+    return new Set(Array.isArray(hidden) ? hidden.filter((x): x is string => typeof x === 'string') : []);
+  }
+
   getGraph(workspaceId: string, options: BrainGraphOptions = {}): BrainGraph {
     const scope = options.scope ?? 'workspace';
     const scopeId = options.scopeId ?? null;
@@ -1974,16 +2003,54 @@ export class SharedIntelligenceService {
       reinforceByNode.set(link.target, (reinforceByNode.get(link.target) ?? 0) + link.reinforceCount);
     }
 
+    // §scope-provenance — in the workspace view, exclude atoms whose owning scope
+    // the operator has hidden from the Workspace Brain (default: nothing hidden).
+    const hidden = scope === 'workspace' ? this.#hiddenScopeIds(workspaceId) : new Set<string>();
     const nodes = [coreNode(workspaceId, scope, scopeId)];
     const atomNodes = [...atomByKey.values()]
       .map((atom) => ({ ...atom.node, reinforceCount: Math.max(atom.node.reinforceCount, reinforceByNode.get(atom.node.id) ?? 1) }))
-      .filter((node) => node.confidence >= minConfidence)
+      .filter((node) => node.confidence >= minConfidence && !(node.scopeId && hidden.has(node.scopeId)))
       .sort((a, b) => scoreNode(b) - scoreNode(a))
       .slice(0, limit);
     nodes.push(...atomNodes);
 
+    // §scope-provenance — every scoped atom is LABELED with its owner (App/Agent/
+    // Workflow) and CONNECTED to a synthetic owner node, so the Workspace Brain
+    // never shows orphaned scoped memory/knowledge. Owner nodes appear in the
+    // workspace view only (a scoped view is already that one owner's brain).
+    const ownerLinks: BrainGraphLink[] = [];
+    if (scope === 'workspace') {
+      const owners = this.#resolveScopeOwners(workspaceId, atomNodes.map((n) => n.scopeId ?? '').filter(Boolean));
+      const nowIso = new Date().toISOString();
+      const ownerNodes = new Map<string, BrainGraphNode>();
+      for (const node of atomNodes) {
+        const owner = node.scopeId ? owners.get(node.scopeId) : undefined;
+        if (!node.scopeId || !owner) continue;
+        node.scopeKind = owner.kind;
+        node.scopeLabel = owner.name;
+        const ownerId = `scope:${node.scopeId}`;
+        if (!ownerNodes.has(ownerId)) {
+          ownerNodes.set(ownerId, {
+            id: ownerId, atomId: node.scopeId, atomKind: 'scope_owner', label: owner.name,
+            confidence: 1, reinforceCount: 1, scopeId: node.scopeId, scopeKind: owner.kind,
+            scopeLabel: owner.name, createdAt: nowIso, updatedAt: nowIso, metadata: { ownerKind: owner.kind },
+          });
+        }
+        ownerLinks.push({
+          id: `own:${node.id}`, source: node.id, target: ownerId,
+          sourceAtomId: node.atomId, sourceKind: node.atomKind as KnowledgeAtomKind,
+          targetAtomId: node.scopeId, targetKind: 'scope_owner', relation: 'owned_by',
+          confidence: 1, reinforceCount: 1, scopeId: node.scopeId, createdAt: nowIso, updatedAt: nowIso,
+        });
+      }
+      nodes.push(...ownerNodes.values());
+    }
+
     const visible = new Set(nodes.map((node) => node.id));
-    const visibleLinks = graphLinks.filter((link) => visible.has(link.source) && visible.has(link.target));
+    const visibleLinks = [
+      ...graphLinks.filter((link) => visible.has(link.source) && visible.has(link.target)),
+      ...ownerLinks.filter((link) => visible.has(link.source) && visible.has(link.target)),
+    ];
     const lastActivityAt = latestActivity(nodes, visibleLinks);
     const adapterTypes = new Set<string>();
     for (const node of nodes) if (node.adapterType) adapterTypes.add(node.adapterType);
@@ -1996,7 +2063,7 @@ export class SharedIntelligenceService {
         workspaceId,
         scope,
         scopeId,
-        atomCount: nodes.length - 1,
+        atomCount: atomNodes.length,
         linkCount: visibleLinks.length,
         lastActivityAt,
         adapterTypes: [...adapterTypes].sort(),
@@ -2034,7 +2101,7 @@ export class SharedIntelligenceService {
   listLinkCandidates(
     workspaceId: string,
     options: { scopeId?: string | null; includeWorkspace?: boolean; limit?: number } = {},
-  ): Array<{ id: string; kind: KnowledgeAtomKind; label: string; text: string; tokens: Set<string> }> {
+  ): Array<{ id: string; kind: KnowledgeAtomKind; label: string; text: string; tokens: Set<string>; embedding: number[] | null }> {
     const atoms = this.loadAtoms(workspaceId, {
       scope: options.scopeId ? 'scoped' : 'workspace',
       scopeId: options.scopeId ?? null,
@@ -2047,6 +2114,10 @@ export class SharedIntelligenceService {
       label: atom.node.label,
       text: atom.text,
       tokens: new Set(tokenize(atom.text)),
+      // §perf — carry the STORED vector so semantic linking compares against it
+      // instead of re-embedding every candidate's text on every call (that turned
+      // a single document's linking into N×candidates embeds and froze the API).
+      embedding: atom.embedding ?? null,
     }));
   }
 
@@ -2163,7 +2234,7 @@ export class SharedIntelligenceService {
         updatedAt: node.updatedAt,
       };
     }
-    if (node.atomKind === 'warning' || node.atomKind === 'gap') return null;
+    if (node.atomKind === 'warning' || node.atomKind === 'gap' || node.atomKind === 'scope_owner') return null;
     // Organizational overlay nodes resolve through /v1/grounding, not the atom store.
     if (node.atomKind === 'grounding_source' || node.atomKind === 'grounding_entity' || node.atomKind === 'grounding_claim') return null;
 
@@ -2761,7 +2832,7 @@ function sourceLabel(source: unknown, fallback: string): string {
 // Accepts the widened link-kind union; grounding_* kinds never resolve to atoms
 // here (the organizational overlay is served by /v1/grounding/graph), so their
 // keys simply never match and the links filter out.
-function atomKey(kind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim', id: string): string {
+function atomKey(kind: KnowledgeAtomKind | 'grounding_source' | 'grounding_entity' | 'grounding_claim' | 'scope_owner', id: string): string {
   return `${kind}:${id}`;
 }
 

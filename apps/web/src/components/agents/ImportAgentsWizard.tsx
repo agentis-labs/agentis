@@ -8,7 +8,6 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import type { ComponentType, SVGProps } from 'react';
 import { Sparkles, Check, AlertCircle, Loader2, Search, FolderTree, Zap, ChevronRight, ChevronDown, RefreshCw } from 'lucide-react';
 import { apiErrorMessage } from '../../lib/api';
 import {
@@ -20,26 +19,15 @@ import {
   type AgentImportPreview,
   type ImportAgentSpec,
 } from '../../lib/agentImport';
-import { ClaudeIcon, CodexIcon, CursorIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
 import { Drawer } from '../shared/Drawer';
 import { Button } from '../shared/Button';
+import { harnessOf, type HarnessIcon } from './harnessMeta';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onImported?: () => void;
 }
-
-type IconType = ComponentType<SVGProps<SVGSVGElement>>;
-const HARNESS: Record<string, { label: string; Icon: IconType }> = {
-  claude_code: { label: 'Claude Code', Icon: ClaudeIcon },
-  codex: { label: 'Codex', Icon: CodexIcon },
-  cursor: { label: 'Cursor', Icon: CursorIcon },
-  hermes_agent: { label: 'Hermes', Icon: HermesIcon },
-  openclaw: { label: 'OpenClaw', Icon: OpenClawIcon },
-  http: { label: 'HTTP', Icon: HttpIcon },
-};
-function harnessOf(t: string) { return HARNESS[t] ?? { label: t, Icon: HttpIcon }; }
 
 interface PerAgent {
   acceptedHashes?: string[];   // undefined = all
@@ -245,7 +233,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
 }
 
 function RosterRow({ agent, Icon, checked, active, onToggle, onFocus }: {
-  agent: DiscoveredAgentRow; Icon: IconType; checked: boolean; active: boolean; onToggle: () => void; onFocus: () => void;
+  agent: DiscoveredAgentRow; Icon: HarnessIcon; checked: boolean; active: boolean; onToggle: () => void; onFocus: () => void;
 }) {
   const s = agent.summary;
   const chips = [s.memoryFiles > 0 ? `${s.memoryFiles} mem` : null, s.skills > 0 ? `${s.skills} skills` : null, s.workspaceFiles > 0 ? `${s.workspaceFiles} rules` : null].filter(Boolean).join(' · ');

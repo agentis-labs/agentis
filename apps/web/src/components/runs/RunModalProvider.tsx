@@ -12,14 +12,19 @@ import {
   Code2,
   ExternalLink,
   FileText,
+  Flag,
+  GitBranch,
   ListTree,
   Maximize2,
+  MessageSquare,
   Play,
+  Repeat,
   RotateCcw,
   Square,
   X,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { api, apiErrorMessage } from '../../lib/api';
 import {
   closeRunModal,
@@ -99,14 +104,48 @@ interface LedgerEntry {
   emittedAt?: string;
 }
 
-interface ScratchpadEntry {
-  id?: string;
-  key?: string;
-  value?: unknown;
-  createdAt?: string;
+interface BlackboardAuthor {
+  agentId?: string | null;
+  runtime?: string | null;
+  label?: string | null;
 }
 
-type ModalTab = 'nodes' | 'ledger' | 'scratchpad';
+interface BlackboardEntry {
+  id: string;
+  runId?: string;
+  namespace: string;
+  kind: 'fact' | 'message' | 'claim' | 'artifact_ref';
+  key?: string | null;
+  channel?: string | null;
+  author: BlackboardAuthor;
+  iteration: number;
+  confidence?: number | null;
+  supersedes?: string | null;
+  value: unknown;
+  at: string;
+}
+
+/** One pass of a `converge` loop — drives the iteration timeline. */
+interface ConvergeIteration {
+  nodeId: string;
+  iteration: number;
+  verdict: string;
+  continue?: boolean;
+  score?: number;
+  stallStreak?: number;
+  durationMs?: number;
+  spendMs?: number;
+  maxIterations?: number;
+}
+
+interface ConvergeSettled {
+  nodeId: string;
+  verdict: string;
+  iterations: number;
+  preserved?: { preserved?: boolean; branch?: string; prUrl?: string; changedFiles?: number };
+}
+
+type ModalTab = 'nodes' | 'ledger' | 'blackboard';
 
 export function RunModalProvider({ children }: { children: React.ReactNode }) {
   const modal = useRunModalSnapshot();
@@ -134,7 +173,9 @@ function RunModal() {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
-  const [scratchpad, setScratchpad] = useState<ScratchpadEntry[]>([]);
+  const [blackboard, setBlackboard] = useState<BlackboardEntry[]>([]);
+  const [convergeIters, setConvergeIters] = useState<ConvergeIteration[]>([]);
+  const [convergeSettled, setConvergeSettled] = useState<ConvergeSettled | null>(null);
   const [activity, setActivity] = useState<RealtimeActivity[]>([]);
   const [tab, setTab] = useState<ModalTab>('nodes');
   const [loading, setLoading] = useState(true);
@@ -184,13 +225,38 @@ function RunModal() {
   useEffect(() => {
     setDetail(null);
     setLedger([]);
-    setScratchpad([]);
+    setBlackboard([]);
+    setConvergeIters([]);
+    setConvergeSettled(null);
     setActivity([]);
     setTab('nodes');
     setError(null);
     setLoading(Boolean(runId));
     if (runId) void refreshDetail();
   }, [runId]);
+
+  // Live blackboard + convergence timeline — entries stream in as agents write,
+  // so the operator watches a multi-runtime cooperation unfold in real time.
+  useRealtime([REALTIME_EVENTS.BLACKBOARD_ENTRY], (event) => {
+    const payload = event.payload as { runId?: string; entry?: BlackboardEntry };
+    if (!runId || payload?.runId !== runId || !payload.entry) return;
+    setBlackboard((current) =>
+      current.some((e) => e.id === payload.entry!.id) ? current : [...current, payload.entry!].slice(-500),
+    );
+  });
+  useRealtime([REALTIME_EVENTS.CONVERGE_ITERATION], (event) => {
+    const payload = event.payload as (ConvergeIteration & { runId?: string }) | undefined;
+    if (!runId || payload?.runId !== runId) return;
+    setConvergeIters((current) => {
+      const next = current.filter((it) => !(it.nodeId === payload.nodeId && it.iteration === payload.iteration));
+      return [...next, payload].sort((a, b) => a.iteration - b.iteration);
+    });
+  });
+  useRealtime([REALTIME_EVENTS.CONVERGE_SETTLED], (event) => {
+    const payload = event.payload as (ConvergeSettled & { runId?: string }) | undefined;
+    if (!runId || payload?.runId !== runId) return;
+    setConvergeSettled(payload);
+  });
 
   useEffect(() => {
     if (runId || !workflowId) return;
@@ -216,7 +282,7 @@ function RunModal() {
       const res = await api<{ entries?: LedgerEntry[]; events?: LedgerEntry[] }>(`/v1/runs/${runId}/ledger`);
       setLedger(res.entries ?? res.events ?? []);
     } catch (err) {
-      toast.error('Ledger unavailable', apiErrorMessage(err));
+      toast.error('Activity log unavailable', apiErrorMessage(err));
     }
   }, [ledger.length, runId, toast]);
 
@@ -225,14 +291,11 @@ function RunModal() {
   }, [tab, loadLedger]);
 
   useEffect(() => {
-    if (!runId || tab !== 'scratchpad' || scratchpad.length > 0) return;
-    void api<{ entries?: ScratchpadEntry[]; scratchpad?: Record<string, unknown> }>(`/v1/runs/${runId}/scratchpad`)
-      .then((res) => {
-        if (res.entries) setScratchpad(res.entries);
-        else setScratchpad(Object.entries(res.scratchpad ?? {}).map(([key, value]) => ({ key, value })));
-      })
-      .catch((err) => toast.error('Scratchpad unavailable', apiErrorMessage(err)));
-  }, [runId, scratchpad.length, tab, toast]);
+    if (!runId || tab !== 'blackboard' || blackboard.length > 0) return;
+    void api<{ entries?: BlackboardEntry[] }>(`/v1/runs/${runId}/blackboard`)
+      .then((res) => setBlackboard(res.entries ?? []))
+      .catch((err) => toast.error('Blackboard unavailable', apiErrorMessage(err)));
+  }, [runId, blackboard.length, tab, toast]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -405,22 +468,31 @@ function RunModal() {
             </aside>
             <main className="flex min-w-0 flex-1 flex-col">
               <div className="flex gap-1 border-b border-line px-4 py-2">
-                {(['nodes', 'ledger', 'scratchpad'] as const).map((item) => (
+                {(['nodes', 'ledger', 'blackboard'] as const).map((item) => {
+                  // De-jargoned labels for non-developers (masterplan 5.3) — the
+                  // internal keys stay the same; only the display text changes.
+                  const label = item === 'ledger' ? 'Activity log' : item === 'blackboard' ? 'Blackboard' : 'Steps';
+                  const count = item === 'blackboard' && blackboard.length > 0 ? blackboard.length : null;
+                  return (
                   <button
                     key={item}
                     type="button"
                     onClick={() => setTab(item)}
                     className={clsx(
-                      'inline-flex h-8 items-center gap-1.5 rounded-btn px-2.5 text-[12px] font-medium capitalize transition-colors active:scale-[0.98]',
+                      'inline-flex h-8 items-center gap-1.5 rounded-btn px-2.5 text-[12px] font-medium transition-colors active:scale-[0.98]',
                       tab === item ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:bg-surface-2 hover:text-text-primary',
                     )}
                   >
                     {item === 'nodes' && <ListTree size={12} />}
                     {item === 'ledger' && <FileText size={12} />}
-                    {item === 'scratchpad' && <Braces size={12} />}
-                    {item}
+                    {item === 'blackboard' && <Braces size={12} />}
+                    {label}
+                    {count !== null && (
+                      <span className="rounded-full bg-accent/15 px-1.5 text-[10px] font-semibold text-accent">{count}</span>
+                    )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-4">
                 {tab === 'nodes' && (
@@ -433,7 +505,9 @@ function RunModal() {
                   />
                 )}
                 {tab === 'ledger' && <RunLedger entries={ledger} />}
-                {tab === 'scratchpad' && <RunScratchpad entries={scratchpad} />}
+                {tab === 'blackboard' && (
+                  <RunBlackboard entries={blackboard} iterations={convergeIters} settled={convergeSettled} />
+                )}
               </div>
             </main>
           </div>
@@ -569,7 +643,7 @@ function RunNodesTable({
                       <div className="max-w-[220px] truncate text-[13px] font-medium text-text-primary">{node.title}</div>
                       <div className="font-mono text-[10px] text-text-muted">{node.nodeId}</div>
                     </td>
-                    <td className="px-3 py-3 font-mono text-[11px] text-text-muted">{node.kind ?? node.type}</td>
+                    <td className="px-3 py-3 text-[11px] text-text-muted">{humanizeKind(node.kind ?? node.type)}</td>
                     <td className="px-3 py-3"><StatusBadge status={node.status} size="sm" /></td>
                     <td className="px-3 py-3 text-[12px] text-text-muted">{formatDuration(node.durationMs)}</td>
                     <td className="px-3 py-3">
@@ -689,20 +763,279 @@ function RunLedger({ entries }: { entries: LedgerEntry[] }) {
   );
 }
 
-function RunScratchpad({ entries }: { entries: ScratchpadEntry[] }) {
-  if (entries.length === 0) return <ModalEmpty icon={<Braces size={28} />} title="Scratchpad empty" body="No scratchpad data has been captured for this run." />;
+// ───────────────────────────────────────────────────────────────────────────
+// Blackboard panel — the operator's live view of inter-agent shared state
+// (AGENT-COOPERATION-10X §Pillar 2/3). Facts (KV), the channel conversation,
+// the claims ledger, and the convergence iteration timeline — each entry tagged
+// with WHO on WHICH runtime, streaming in as agents write.
+// ───────────────────────────────────────────────────────────────────────────
+
+const RUNTIME_PALETTE: Array<[string, string]> = [
+  ['opus', '#c084fc'], ['claude', '#c084fc'], ['anthropic', '#c084fc'],
+  ['codex', '#34d399'], ['gpt', '#34d399'], ['openai', '#34d399'],
+  ['cursor', '#60a5fa'],
+  ['hermes', '#fbbf24'],
+  ['gemini', '#f472b6'], ['google', '#f472b6'],
+  ['system', '#94a3b8'],
+];
+function runtimeColor(runtime?: string | null): string {
+  const key = (runtime ?? '').toLowerCase();
+  if (!key) return '#94a3b8';
+  for (const [name, color] of RUNTIME_PALETTE) if (key.includes(name)) return color;
+  let h = 0;
+  for (let i = 0; i < key.length; i += 1) h = (h * 31 + key.charCodeAt(i)) % 360;
+  return `hsl(${h} 65% 64%)`;
+}
+
+function IdentityChip({ author }: { author: BlackboardAuthor }) {
+  const color = runtimeColor(author.runtime);
+  const name = author.label || author.agentId || 'agent';
   return (
-    <div className="space-y-2">
-      {entries.map((entry, index) => (
-        <div key={entry.id ?? entry.key ?? index} className="rounded-card border border-line bg-surface-1 p-3">
-          <div className="mb-1 font-mono text-[11px] text-text-muted">{entry.key ?? entry.id ?? `entry-${index + 1}`}</div>
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text-secondary">
-            {formatJson(entry.value ?? entry)}
-          </pre>
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px]">
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+      <span className="font-medium text-text-primary">{name}</span>
+      {author.runtime && <span className="text-text-muted">· {author.runtime}</span>}
+    </span>
+  );
+}
+
+function verdictTone(verdict: string): { color: string; label: string } {
+  switch (verdict) {
+    case 'goal_met':
+    case 'pass':
+    case 'converged':
+    case 'signalled_done':
+      return { color: '#34d399', label: verdict.replace(/_/g, ' ') };
+    case 'stalled':
+      return { color: '#fbbf24', label: 'stalled' };
+    case 'budget_exhausted':
+      return { color: '#f87171', label: 'budget exhausted' };
+    case 'max_iterations':
+      return { color: '#94a3b8', label: 'max iterations' };
+    default:
+      return { color: '#94a3b8', label: verdict.replace(/_/g, ' ') };
+  }
+}
+
+function ConvergeTimeline({ iterations, settled }: { iterations: ConvergeIteration[]; settled: ConvergeSettled | null }) {
+  if (iterations.length === 0 && !settled) return null;
+  const preserved = settled?.preserved;
+  return (
+    <div className="mb-4 rounded-card border border-line bg-surface-1 p-3">
+      <div className="mb-2 flex items-center gap-2 text-[12px] font-medium text-text-primary">
+        <Repeat size={13} className="text-text-muted" />
+        Convergence loop
+        {settled && (
+          <span
+            className="ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+            style={{ color: verdictTone(settled.verdict).color, backgroundColor: `${verdictTone(settled.verdict).color}22` }}
+          >
+            {verdictTone(settled.verdict).label} · {settled.iterations} iter
+          </span>
+        )}
+      </div>
+      <div className="flex flex-wrap items-stretch gap-1.5">
+        {iterations.map((it) => {
+          const tone = verdictTone(it.verdict);
+          return (
+            <div
+              key={`${it.nodeId}:${it.iteration}`}
+              title={`Iteration ${it.iteration + 1} — ${it.verdict}${typeof it.score === 'number' ? ` · score ${it.score.toFixed(1)}` : ''}${it.stallStreak ? ` · no-progress streak ${it.stallStreak}` : ''}`}
+              className={clsx(
+                'flex min-w-[44px] flex-col items-center rounded-btn border px-2 py-1',
+                it.stallStreak ? 'border-amber-400/50' : 'border-line',
+              )}
+            >
+              <span className="text-[10px] text-text-muted">#{it.iteration + 1}</span>
+              <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: tone.color }} />
+              {typeof it.score === 'number' && <span className="mt-0.5 text-[10px] text-text-muted">{it.score.toFixed(1)}</span>}
+            </div>
+          );
+        })}
+      </div>
+      {preserved?.preserved && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2 text-[11px] text-text-secondary">
+          <span className="inline-flex items-center gap-1"><GitBranch size={12} className="text-text-muted" />{preserved.branch}</span>
+          {preserved.prUrl && (
+            <a href={preserved.prUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent hover:underline">
+              Pull request <ExternalLink size={11} />
+            </a>
+          )}
+          {typeof preserved.changedFiles === 'number' && <span className="text-text-muted">{preserved.changedFiles} files changed</span>}
         </div>
-      ))}
+      )}
     </div>
   );
+}
+
+function blackboardTime(at: string): string {
+  const d = new Date(at);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function RunBlackboard({
+  entries,
+  iterations,
+  settled,
+}: {
+  entries: BlackboardEntry[];
+  iterations: ConvergeIteration[];
+  settled: ConvergeSettled | null;
+}) {
+  const [view, setView] = useState<'facts' | 'chat' | 'claims'>('facts');
+
+  const facts = useMemo(() => {
+    // KV semantics — latest entry per namespace+key wins.
+    const map = new Map<string, BlackboardEntry>();
+    for (const e of entries) if (e.kind === 'fact' && e.key) map.set(`${e.namespace}:${e.key}`, e);
+    return [...map.values()].sort((a, b) => a.at.localeCompare(b.at));
+  }, [entries]);
+  const messages = useMemo(
+    () => entries.filter((e) => e.kind === 'message').sort((a, b) => a.at.localeCompare(b.at)),
+    [entries],
+  );
+  const claims = useMemo(() => entries.filter((e) => e.kind === 'claim'), [entries]);
+  const supersededIds = useMemo(
+    () => new Set(claims.map((c) => c.supersedes).filter((id): id is string => Boolean(id))),
+    [claims],
+  );
+
+  if (entries.length === 0 && iterations.length === 0 && !settled) {
+    return (
+      <ModalEmpty
+        icon={<Braces size={28} />}
+        title="Blackboard empty"
+        body="When agents share facts, message each other, or post claims during this run, they appear here live — tagged by who wrote them."
+      />
+    );
+  }
+
+  const tabs: Array<{ key: typeof view; label: string; icon: React.ReactNode; count: number }> = [
+    { key: 'facts', label: 'Facts', icon: <Braces size={12} />, count: facts.length },
+    { key: 'chat', label: 'Conversation', icon: <MessageSquare size={12} />, count: messages.length },
+    { key: 'claims', label: 'Claims', icon: <Flag size={12} />, count: claims.length },
+  ];
+
+  return (
+    <div>
+      <ConvergeTimeline iterations={iterations} settled={settled} />
+      <div className="mb-3 flex gap-1">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setView(t.key)}
+            className={clsx(
+              'inline-flex h-7 items-center gap-1.5 rounded-btn px-2.5 text-[11px] font-medium transition-colors',
+              view === t.key ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:bg-surface-2 hover:text-text-primary',
+            )}
+          >
+            {t.icon}
+            {t.label}
+            {t.count > 0 && <span className="text-text-muted">{t.count}</span>}
+          </button>
+        ))}
+      </div>
+
+      {view === 'facts' && (
+        facts.length === 0 ? (
+          <ViewEmpty text="No shared facts yet." />
+        ) : (
+          <div className="space-y-2">
+            {facts.map((e) => (
+              <div key={e.id} className="rounded-card border border-line bg-surface-1 p-3">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="font-mono text-[11px] text-text-primary">{e.key}</span>
+                  <div className="flex items-center gap-2">
+                    {e.namespace !== 'run' && <NamespaceTag namespace={e.namespace} iteration={e.iteration} />}
+                    <IdentityChip author={e.author} />
+                  </div>
+                </div>
+                <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text-secondary">
+                  {formatJson(e.value)}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {view === 'chat' && (
+        messages.length === 0 ? (
+          <ViewEmpty text="No channel messages yet." />
+        ) : (
+          <div className="space-y-1.5">
+            {messages.map((e) => (
+              <div key={e.id} className="flex items-start gap-2 rounded-card border border-line bg-surface-1 px-3 py-2">
+                <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: runtimeColor(e.author.runtime) }} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <span className="font-medium text-text-primary">{e.author.label || e.author.agentId || 'agent'}</span>
+                    {e.channel && <span className="rounded bg-surface-2 px-1 text-[10px] text-text-muted">#{e.channel}</span>}
+                    <span className="ml-auto text-[10px] text-text-muted">{blackboardTime(e.at)}</span>
+                  </div>
+                  <div className="mt-0.5 whitespace-pre-wrap break-words text-[12px] text-text-secondary">{String(e.value ?? '')}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {view === 'claims' && (
+        claims.length === 0 ? (
+          <ViewEmpty text="No claims posted yet." />
+        ) : (
+          <div className="space-y-2">
+            {claims.map((e) => {
+              const superseded = supersededIds.has(e.id);
+              return (
+                <div
+                  key={e.id}
+                  className={clsx(
+                    'rounded-card border bg-surface-1 p-3',
+                    superseded ? 'border-line opacity-60' : 'border-line',
+                  )}
+                >
+                  <div className="mb-1.5 flex items-center gap-2">
+                    <IdentityChip author={e.author} />
+                    {e.supersedes && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] font-medium text-amber-500">
+                        disputes prior
+                      </span>
+                    )}
+                    {superseded && <span className="text-[10px] text-text-muted">superseded</span>}
+                    <span className="ml-auto text-[10px] text-text-muted">{blackboardTime(e.at)}</span>
+                  </div>
+                  <div className={clsx('text-[12px] text-text-secondary', superseded && 'line-through')}>{String(e.value ?? '')}</div>
+                  {typeof e.confidence === 'number' && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <div className="h-1 w-24 overflow-hidden rounded-full bg-surface-2">
+                        <div className="h-full rounded-full bg-accent" style={{ width: `${Math.round(e.confidence * 100)}%` }} />
+                      </div>
+                      <span className="text-[10px] text-text-muted">{Math.round(e.confidence * 100)}% confident</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function NamespaceTag({ namespace, iteration }: { namespace: string; iteration: number }) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">
+      {namespace} · iter {iteration + 1}
+    </span>
+  );
+}
+
+function ViewEmpty({ text }: { text: string }) {
+  return <div className="py-10 text-center text-[12px] text-text-muted">{text}</div>;
 }
 
 function RunModalSkeleton() {
@@ -746,6 +1079,12 @@ function StatusIcon({ status }: { status: string }) {
   if (/fail|error/i.test(status)) return <AlertTriangle size={15} className="text-danger" />;
   if (/complete|success/i.test(status)) return <CheckCircle2 size={15} className="text-accent" />;
   return <Clock size={15} className="text-text-muted" />;
+}
+
+/** Turn an engine node kind (`agent_task`) into a human label (`Agent task`) — masterplan 5.3. */
+function humanizeKind(kind: string | undefined): string {
+  if (!kind) return '—';
+  return kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatDuration(ms?: number): string {

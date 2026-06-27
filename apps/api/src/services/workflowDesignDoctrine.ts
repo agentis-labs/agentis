@@ -1,0 +1,82 @@
+/**
+ * Workflow Design Doctrine (WORKFLOW-DESIGN-10X Phase 1).
+ *
+ * The Iron Rules (SYNTHESIS_ARCHITECT_PREAMBLE) keep a graph STRUCTURALLY clean —
+ * single-responsibility nodes, native integrations, a terminal output. They do
+ * NOT teach the agent to design for FAILURE and CONTROL FLOW. Real processes
+ * (qualify→reject loops, ordering gates, flaky-fetch fallbacks, approval before
+ * an irreversible action, validate-then-rollback, recurring state, bounded
+ * batches) are mostly exception-handling — and a happy-path line drops all of it.
+ *
+ * This doctrine is injected into BOTH the synthesis prompt and the reviewer
+ * prompt (they share SYNTHESIS_ARCHITECT_PREAMBLE) and into the orchestrator's
+ * architecture knowledge, so every authored graph is designed — and audited —
+ * for robustness, not just structure. The deterministic enforcement that backs
+ * it lives in auditWorkflowRobustness (Phase 2); the named patterns here have
+ * real graph-fragment builders in workflowPatterns.ts (Phase 4).
+ */
+
+export const WORKFLOW_DESIGN_DOCTRINE = [
+  'WORKFLOW DESIGN DOCTRINE — design for failure and control flow, not just the happy path.',
+  'A real process is mostly gates, branches, and exception handling. A linear',
+  'gather → analyze → deliver line is almost never correct once the work involves',
+  'qualification, external fetches, irreversible actions, recurring state, or batches.',
+  'Before you finalize a graph, answer these and encode the answer as NODES:',
+  '  D1. What can REJECT or be DISQUALIFIED here? Add a router/evaluator gate with a',
+  '      reject branch that loops back (re-try the upstream step / next candidate) or',
+  '      stops cleanly — never assume the happy outcome.',
+  '  D2. What step is IRREVERSIBLE or externally visible (deploy, publish, send,',
+  '      pay, delete, overwrite)? Put a checkpoint (human approval) OR an evaluator',
+  '      gate IMMEDIATELY before it. (Cron/listener triggers run unattended — gate',
+  '      with an evaluator, not a human checkpoint, unless approval was requested.)',
+  '  D3. What EXTERNAL fetch/scrape/API call can be flaky (rate limits, empty DOM,',
+  '      bad encoding, format surprises)? Give it a fallback path (an error edge to an',
+  '      alternate node) and VERIFY the result before consuming it — do not let a',
+  '      failed fetch silently become empty input downstream.',
+  '  D4. Does this RECUR (cron / persistent_listener) or process a stream? Add a',
+  '      workflow_store read (cursor / seen-set) near the start and a workflow_store',
+  '      write near the end so each run is idempotent and de-duplicated.',
+  '  D5. Is this a BATCH of N items? Wrap the per-item work in a loop or parallel node',
+  '      with a BOUNDED maxConcurrency and join with merge — never fan out unbounded.',
+  '  D6. After an irreversible action, VALIDATE it actually worked (HTTP 200, file',
+  '      present, build/tests passed) before reporting success; on failure, branch to',
+  '      a ROLLBACK/cleanup path instead of declaring done.',
+  '  D7. Is the goal OPEN-ENDED — "keep refining/fixing/researching UNTIL <condition>",',
+  '      a draft→critique→revise loop, a research↔debate loop, or a plan→act→reflect',
+  '      loop? Do NOT hand-wire an evaluator with a fixed retry count back to one node —',
+  '      that re-runs a SINGLE node a fixed N times and carries no state between tries.',
+  '      Use a `converge` node: it re-runs a whole COHORT sub-workflow each iteration,',
+  '      carries state across iterations on the blackboard, and stops on goal / STALL',
+  '      (no-progress) / budget / ceiling with an honest verdict. This is the right',
+  '      primitive for multi-runtime cooperation (e.g. Opus researches → Codex fixes →',
+  '      verify → repeat until zero defects) — far more efficient than fixed retries.',
+  'ROBUST PATTERN CATALOG (compose these; do not reinvent them):',
+  '  • qualify-or-reject loop — fetch candidate → agent/evaluator qualify → router:',
+  '      pass→continue, fail→loop back to fetch the next candidate.',
+  '  • ordering gate — only run step B after step A passes (e.g. check website ONLY',
+  '      after the profile qualifies); enforce with a router, not by hoping for order.',
+  '  • fetch-with-fallback — http_request/browser primary → on error, alternate',
+  '      extractor/screenshot → evaluator confirms the artifact is usable.',
+  '  • approval-before-irreversible — checkpoint (manual) → integration (deploy/send).',
+  '  • validate-before-transition — irreversible action → evaluator (live 200 / build',
+  '      ok / manifest correct) → router: ok→commit state, fail→rollback.',
+  '  • bounded-parallel-batch — loop/parallel(maxConcurrency=N) → merge.',
+  '  • stateful-cursor/dedup — workflow_store get (seen) → work on new only →',
+  '      workflow_store set (seen) (Rule 13, but applied to dedup and resumability).',
+  '  • rollback-on-failure — on a failed validation gate, run the compensating cleanup',
+  '      (remove the deployed resource, blacklist the record) before the terminal node.',
+  '  • convergence loop — converge { bodyWorkflowId: <cohort>, continuation, maxIterations,',
+  '      stallPolicy, isolation, preserve }. Re-runs the cohort until the goal is met;',
+  '      continuation is deterministic ("body.openCount > 0"), judge (criteria), or signal',
+  '      (an agent calls converge_signal). Agents in the cohort cooperate over the blackboard',
+  '      (scratchpad_write / broadcast / claim) and an operator watches it live. Use for',
+  '      ANY iterate-until-done goal — prefer it over a fixed-N evaluator retry edge.',
+  'Retrieve any of these as a ready-to-splice node+edge fragment with the',
+  'agentis.workflow.patterns tool (it returns the reject/fallback/rollback branches too).',
+  'A graph that only models success is INCOMPLETE. Cast the gates, fallbacks, loops,',
+  'and state the real process needs — that is the difference between a demo and a',
+  'workflow you can trust to run unattended.',
+  'After you diagnose and FIX a novel run failure, record it with agentis.workflow.learn',
+  '(failureMode → fix) so future builds in this workspace design around it automatically.',
+  '',
+].join('\n');

@@ -294,6 +294,47 @@ export const extensionKv = sqliteTable(
 );
 
 // ────────────────────────────────────────────────────────────
+// Blackboard — durable, identity-tagged inter-agent shared state
+// (AGENT-COOPERATION-10X). The run-scoped scratchpad/channel bus persists here
+// so a convergence loop's working memory survives restart and is auditable.
+// ────────────────────────────────────────────────────────────
+
+export const blackboardEntries = sqliteTable(
+  'blackboard_entries',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id').notNull(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    /** converge.stateKey for loop state, else 'run'. */
+    namespace: text('namespace').notNull().default('run'),
+    /** fact | message | claim | artifact_ref */
+    kind: text('kind').notNull(),
+    /** KV key for facts. */
+    key: text('key'),
+    /** Channel name for messages (the gossip bus). */
+    channel: text('channel'),
+    /** Authoring identity — who + which runtime wrote it. */
+    authorAgentId: text('author_agent_id'),
+    authorRuntime: text('author_runtime'),
+    authorLabel: text('author_label'),
+    /** Convergence iteration that produced this entry. */
+    iteration: integer('iteration').notNull().default(0),
+    /** 0..1 confidence for claims. */
+    confidence: real('confidence'),
+    /** id of the entry this revises (disagreement is visible). */
+    supersedes: text('supersedes'),
+    value: text('value', { mode: 'json' }),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    byRun: index('idx_blackboard_run').on(table.runId, table.createdAt),
+    byRunNs: index('idx_blackboard_run_ns').on(table.runId, table.namespace),
+  }),
+);
+
+// ────────────────────────────────────────────────────────────
 // Workflows, runs, run-state snapshots, tasks
 // ────────────────────────────────────────────────────────────
 
@@ -566,8 +607,12 @@ export const artifacts = sqliteTable('artifacts', {
   runId: text('run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
   workflowId: text('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
   agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+  /** Assets §1 — the App that produced/owns this artifact (when any). */
+  appId: text('app_id').references(() => apps.id, { onDelete: 'set null' }),
   conversationId: text('conversation_id'),
   nodeId: text('node_id'),
+  /** Assets §1 — what generated it: agent | app | workflow | channel | manual. */
+  origin: text('origin').notNull().default('manual'),
   /** html | image | document | code | data */
   type: text('type').notNull().default('document'),
   title: text('title').notNull(),
@@ -822,9 +867,15 @@ export const conversations = sqliteTable('conversations', {
     .references((): AnySQLiteColumn => channelConnections.id, { onDelete: 'set null' }),
   /** Provider chat/thread id used with channelConnectionId to isolate external conversations. */
   channelChatId: text('channel_chat_id'),
+  /** When set, this thread belongs to an Agentic App — the agent answers in App context (Living Apps Phase 0, migration v95). */
+  appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'set null' }),
+  /** Living Apps Phase 2 — 'human' when an operator has taken over (the resident agent stays quiet); null/'agent' = the agent drives. */
+  handoffState: text('handoff_state'),
   title: text('title'),
   /** chat | plan */
   executionMode: text('execution_mode').notNull().default('chat'),
+  /** Per-conversation permission mode: ask | plan | auto (see migration v93). */
+  permissionMode: text('permission_mode').notNull().default('ask'),
   archivedAt: text('archived_at'),
   unreadCount: integer('unread_count').notNull().default(0),
   lastMessageAt: text('last_message_at'),
@@ -941,6 +992,10 @@ export const issues = sqliteTable('issues', {
   status: text('status').notNull().default('backlog'),
   priority: text('priority').notNull().default('medium'),
   labels: text('labels', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** ISO timestamp the assigned agent should auto-start this issue (the due sweep). */
+  scheduledFor: text('scheduled_for'),
+  /** Optional cron expression to reschedule scheduledFor after each due fire. */
+  recurrenceCron: text('recurrence_cron'),
   ...baseTimestamps(),
 });
 
@@ -1015,6 +1070,8 @@ export const channelConnections = sqliteTable('channel_connections', {
   agentId: text('agent_id')
     .notNull()
     .references(() => agents.id, { onDelete: 'cascade' }),
+  /** When set, inbound turns on this channel run in the App's context (Living Apps Phase 0, migration v95). */
+  appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'set null' }),
   /** telegram | discord */
   kind: text('kind').notNull(),
   name: text('name').notNull(),
@@ -1176,8 +1233,12 @@ export const knowledgeBases = sqliteTable('knowledge_bases', {
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
-  /** Null = workspace knowledge; set = knowledge owned by one workflow Brain. */
-  scopeId: text('scope_id').references(() => workflows.id, { onDelete: 'cascade' }),
+  /**
+   * Null = workspace knowledge; set = knowledge owned by one scope's Brain.
+   * Polymorphic: a Workflow id OR an Agentic App id (App Brain → Knowledge). No
+   * FK — ownership is validated in the route against both tables (migration v92).
+   */
+  scopeId: text('scope_id'),
   name: text('name').notNull(),
   description: text('description'),
   embeddingModel: text('embedding_model').notNull().default('lexical-v1'),
@@ -2684,6 +2745,81 @@ export const appMembers = sqliteTable(
   (table) => ({
     pk: primaryKey({ columns: [table.appId, table.agentId] }),
     byAgent: index('idx_app_members_agent').on(table.agentId),
+  }),
+);
+
+// Living Apps Phase 3 — the relationship entity (migration v97). One row per
+// contact an App talks to (a lead/customer), unifying a person across channels
+// via peerId and carrying the pipeline state (stage/goal) + the proactivity
+// clock (nextTouchAt → the follow-up sweep dispatches a turn when due).
+export const appContacts = sqliteTable(
+  'app_contacts',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    appId: text('app_id').notNull().references((): AnySQLiteColumn => apps.id, { onDelete: 'cascade' }),
+    /** The channel this identity came in on (telegram/whatsapp/…). */
+    channelKind: text('channel_kind'),
+    /** The per-channel handle (chat id / sender id). */
+    handle: text('handle'),
+    /** Cross-channel peer identity (ChannelIdentityService) — same person across channels. */
+    peerId: text('peer_id'),
+    displayName: text('display_name'),
+    /** Pipeline stage (new | qualifying | …) — App-defined. */
+    stage: text('stage'),
+    /** The agent's goal for this relationship. */
+    goal: text('goal'),
+    /** Terminal relationship outcome (LIVING-APPS-10X Phase M2 · G10): won | lost | abandoned. */
+    outcome: text('outcome'),
+    /** When the outcome was recorded — feeds the graded-lesson + graduation loop. */
+    outcomeAt: text('outcome_at'),
+    dataJson: text('data_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    lastTouchAt: text('last_touch_at'),
+    /** When set + due, the proactive sweep dispatches a follow-up turn. */
+    nextTouchAt: text('next_touch_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    uniqueHandle: uniqueIndex('idx_app_contacts_handle').on(table.appId, table.channelKind, table.handle),
+    dueIdx: index('idx_app_contacts_due').on(table.workspaceId, table.nextTouchAt),
+    byApp: index('idx_app_contacts_app').on(table.appId, table.stage),
+  }),
+);
+
+/**
+ * Multi-party conversation threads (LIVING-APPS-10X Phase 2 · G1, migration v98).
+ *
+ * `conversations.agentId` stays the singular PRIMARY participant (many readers).
+ * This join layers additional parties beside it: a customer, a resident agent, an
+ * escalation specialist agent, a human operator — all in ONE thread. An active
+ * 'specialist' agent participant becomes the inbound responder (warm handoff);
+ * a human operator pairs with conversations.handoffState='human' (the agent parks).
+ */
+export const conversationParticipants = sqliteTable(
+  'conversation_participants',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references((): AnySQLiteColumn => conversations.id, { onDelete: 'cascade' }),
+    /** agent | human | contact */
+    participantType: text('participant_type').notNull(),
+    /** agentId / userId / app_contact id — nullable for an external contact identified by handle. */
+    participantId: text('participant_id'),
+    /** primary | specialist | operator | customer (App-defined beyond these). */
+    role: text('role').notNull(),
+    /** Active participants are in the thread now; specialists drive inbound when active. */
+    active: integer('active').notNull().default(1),
+    joinedAt: text('joined_at').notNull().default(isoNow() as unknown as string),
+    leftAt: text('left_at'),
+  },
+  (table) => ({
+    uniqueParty: uniqueIndex('idx_conversation_participants_party').on(
+      table.conversationId,
+      table.participantType,
+      table.participantId,
+    ),
+    byConversation: index('idx_conversation_participants_conversation').on(table.conversationId, table.active),
   }),
 );
 

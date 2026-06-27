@@ -232,6 +232,27 @@ export async function buildWorkspaceInventory(
 
 export type WorkflowArchetype = 'atomic' | 'pipeline' | 'orchestrated' | 'enterprise';
 
+/**
+ * Robustness signals (WORKFLOW-DESIGN-10X Phase 3) — the design-doctrine variables
+ * the happy-path classifier was blind to. Drive both the synthesis brief (so the
+ * model is told what gates/state the request needs) and the planner (so Phase
+ * Cards materialize real gate/approval/validate nodes).
+ */
+export interface RobustnessSignals {
+  /** Screening/qualification work → needs a reject branch (D1). */
+  qualifies: boolean;
+  /** Human approval expected before an irreversible action (D2). */
+  approval: boolean;
+  /** The result must be verified after the fact (D6). */
+  validates: boolean;
+  /** An irreversible / externally-visible action is present (deploy/publish/send/delete). */
+  irreversible: boolean;
+  /** Processes many items → bounded fan-out + per-item handling (D5). */
+  batch: boolean;
+  /** Open-ended "iterate until done" goal → a converge loop, not fixed retries (D7). */
+  iterative: boolean;
+}
+
 export interface IntentClassification {
   archetype: WorkflowArchetype;
   triggerType: 'manual' | 'cron' | 'webhook' | 'persistent_listener';
@@ -239,6 +260,7 @@ export interface IntentClassification {
   missingCredentials: string[];
   estimatedNodeCount: number;
   requiresPlanConfirmation: boolean;
+  robustness: RobustnessSignals;
 }
 
 /** Stage 3 — classify the request + flag missing dependencies. Deterministic, no LLM. */
@@ -312,6 +334,18 @@ export function classifyIntent(
   else if (processingSignals >= 1 || sourceSignals >= 1) archetype = 'pipeline';
   else archetype = 'atomic';
 
+  // Robustness signals (Phase 3) — what gates/state/bounds this request implies.
+  // Leading \b only — these are PREFIX matchers ("validat" must match "validate",
+  // "qualif" → "qualify", "approv" → "approve"); a trailing \b would reject them.
+  const robustness: RobustnessSignals = {
+    qualifies: /\b(qualif|screen|vet|shortlist|eligib|reject|disqualif|candidate|prospect|filter out|approve or reject|triage)/.test(lower),
+    approval: /\b(approv|confirm|sign[- ]?off|review before|only after|human[- ]in[- ]the[- ]loop|ask me before|wait for (me|confirmation)|require.{0,12}confirmation)/.test(lower),
+    validates: /\b(validat|verif|health[- ]?check|smoke test|typecheck|build (passes|succeeds|ok)|confirm.{0,20}(live|deployed|200|success)|sanity check|qa\b)/.test(lower),
+    irreversible: /\b(deploy|publish|release|go live|ship|send|e-?mail|post|charge|pay|delete|remove|drop|overwrite|seed)/.test(connectorText) || requiredIntegrations.length > 0,
+    batch: /\b(each|every|all (the |of )?|per[ -]|batch|bulk|multiple|several|many|list of|for every|in parallel)/.test(lower),
+    iterative: /\b(until (no|zero|all|it|the|every|there)|iterat|keep (going|trying|refining|fixing|improving)|refine|revise|critique|loop until|over and over|repeat(edly)? until|converge|back and forth|debate|until (done|passing|green|resolved|fixed|complete)|fix.{0,20}until|round[- ]?trip)/.test(lower),
+  };
+
   return {
     archetype,
     triggerType,
@@ -319,10 +353,14 @@ export function classifyIntent(
     missingCredentials,
     estimatedNodeCount,
     requiresPlanConfirmation: archetype === 'enterprise',
+    robustness,
   };
 }
 
 // ── Enterprise Planner (ORCH §4.3 / §9) ──────────────────────────────────────
+
+/** The control-flow role of a Phase Card (Phase 3) — drives which node kind it materializes to. */
+export type PlanPhaseKind = 'work' | 'gate' | 'approval' | 'validate';
 
 export interface PlanPhase {
   name: string;
@@ -333,6 +371,8 @@ export interface PlanPhase {
   estimatedCostCents: [number, number];
   /** Per-phase model override (set when the operator edits a Phase Card). */
   model?: string;
+  /** Control-flow role; defaults to 'work'. Gate/approval/validate become real guard nodes. */
+  kind?: PlanPhaseKind;
 }
 
 export interface WorkflowPlan {
@@ -356,6 +396,7 @@ export function planWorkflow(
   const lower = description.toLowerCase();
   const phases: PlanPhase[] = [];
   const has = (re: RegExp) => re.test(lower);
+  const r = classification.robustness;
 
   const fetches = has(
     /scrape|fetch|gather|collect|monitor|listen|source|feed|crawl|read (from|the)/,
@@ -375,6 +416,17 @@ export function planWorkflow(
       nodeKinds: ['parallel', 'http_request', 'merge'],
       agentRole: 'researcher',
       estimatedCostCents: [0, 1],
+      kind: 'work',
+    });
+  // D1 — qualification gate: screen candidates and reject the weak ones before
+  // spending downstream, with a reject branch back to the source.
+  if (r.qualifies)
+    phases.push({
+      name: 'Qualify & Gate',
+      description: 'Screen each candidate against the bar; a fail rejects it and re-tries the source instead of proceeding.',
+      nodeKinds: ['evaluator', 'router'],
+      estimatedCostCents: [0, 1],
+      kind: 'gate',
     });
   if (analyzes)
     phases.push({
@@ -383,6 +435,7 @@ export function planWorkflow(
       nodeKinds: ['transform', 'agent_task'],
       agentRole: 'analyst',
       estimatedCostCents: [1, 3],
+      kind: 'work',
     });
   if (drafts)
     phases.push({
@@ -391,16 +444,38 @@ export function planWorkflow(
       nodeKinds: ['agent_task'],
       agentRole: 'writer',
       estimatedCostCents: [1, 3],
+      kind: 'work',
     });
-  if (delivers) {
+  if (delivers || r.irreversible) {
     const slug = classification.requiredIntegrations[0];
+    // D2 — approval before the irreversible action, when the request implies it.
+    if (r.approval)
+      phases.push({
+        name: 'Human Approval',
+        description: 'Pause for explicit operator approval before the irreversible action.',
+        nodeKinds: ['checkpoint'],
+        estimatedCostCents: [0, 0],
+        kind: 'approval',
+      });
     phases.push({
-      name: 'Deliver',
-      description: `Route the result to its destination${slug ? ` via ${slug}` : ''}.`,
-      nodeKinds: ['checkpoint', 'integration'],
+      name: slug ? 'Deliver' : 'Execute Action',
+      description: slug
+        ? `Route the result to its destination via ${slug}.`
+        : 'Perform the irreversible/external action (deploy, publish, send, etc.).',
+      nodeKinds: ['integration'],
       requiredCredential: slug,
       estimatedCostCents: [0, 0],
+      kind: 'work',
     });
+    // D6 — validate the irreversible action actually worked; rollback on failure.
+    if (r.validates && r.irreversible)
+      phases.push({
+        name: 'Validate & Rollback',
+        description: 'Verify the action succeeded (live/health check); on failure, run the compensating rollback before finishing.',
+        nodeKinds: ['evaluator', 'router'],
+        estimatedCostCents: [0, 1],
+        kind: 'validate',
+      });
   }
   if (phases.length === 0) {
     phases.push({
@@ -409,6 +484,7 @@ export function planWorkflow(
       nodeKinds: ['agent_task', 'return_output'],
       agentRole: 'writer',
       estimatedCostCents: [1, 3],
+      kind: 'work',
     });
   }
 
@@ -489,7 +565,14 @@ export interface PreflightWarning {
     | 'BODY_REQUIRED'
     | 'CAPABILITY_MISMATCH'
     | 'GRAMMAR_VIOLATION'
-    | 'SCHEDULE_INACTIVE';
+    | 'SCHEDULE_INACTIVE'
+    // ── Robustness audit (WORKFLOW-DESIGN-10X Phase 2, doctrine D1–D7) ──
+    | 'MISSING_STATE'
+    | 'UNBOUNDED_BATCH'
+    | 'MISSING_DELIVERY_GUARD'
+    | 'SINGLE_BRANCH_ROUTER'
+    | 'NO_FAILURE_HANDLING'
+    | 'MISSING_CONVERGENCE';
   nodeId?: string;
   message: string;
 }

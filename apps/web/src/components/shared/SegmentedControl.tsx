@@ -34,7 +34,7 @@ export function SegmentedControl<T extends string = string>({
     <div
       role="tablist"
       className={clsx(
-        'inline-flex items-center gap-1 rounded-full border border-line bg-surface p-1 shadow-sm',
+        'inline-flex items-center gap-1.5',
         className,
       )}
     >
@@ -51,8 +51,8 @@ export function SegmentedControl<T extends string = string>({
               'group relative inline-flex items-center gap-2 rounded-full font-medium transition-colors',
               padX, padY, text,
               active
-                ? 'bg-accent text-white shadow'
-                : 'text-text-secondary hover:text-text-primary',
+                ? 'bg-accent-soft text-accent'
+                : 'text-text-muted hover:text-text-primary',
             )}
           >
             {seg.icon}

@@ -22,11 +22,14 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { AgentAdapter, ChatDelta, ChatMessage, ChatTurnContext } from '@agentis/core';
+import type { AgentAdapter, ChatDelta, ChatMessage, ChatPermissionMode, ChatTurnContext } from '@agentis/core';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from './chatSessionExecutor.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from './chatPermissionMode.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
+import type { AppContactService } from './appContacts.js';
+import type { ConversationParticipantService } from './conversationParticipants.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress } from './agentWorkProgress.js';
@@ -54,6 +57,10 @@ export interface ChannelTurnDispatcherDeps {
   fallbackAdapter?: () => AgentAdapter | undefined;
   /** Cross-surface peer identity — records senders and recalls them (§5.2). */
   identity?: ChannelIdentityService;
+  /** App relationship entity — upserts/touches a contact for App-bound turns (Phase 3). */
+  contacts?: AppContactService;
+  /** Multi-party threads (G1) — resolve the active responder (specialist warm handoff) + seed the primary. */
+  participants?: ConversationParticipantService;
   /**
    * Batch rapid-fire inbound messages within this window (ms) into a single
    * turn (OMNICHANNEL §3.3). 0 (default) runs each message immediately.
@@ -81,6 +88,8 @@ export interface ChannelTurnInput {
   ambientId: string | null;
   userId: string;
   agentId: string;
+  /** When the channel belongs to an Agentic App, the turn runs in its context (Living Apps Phase 0). */
+  appId?: string | null;
   conversationId: string;
   connectionId: string;
   kind: string;
@@ -165,7 +174,27 @@ export class ChannelTurnDispatcher {
   async #executeTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
     const clientTurnId = `channel-${randomUUID()}`;
     try {
-      const adapter = this.#resolveAdapter(input.agentId, input.workspaceId);
+      // App relationship (Phase 3): record/refresh the contact for this inbound,
+      // so the App's pipeline + lastTouch clock stay current with zero agent effort.
+      this.#touchContact(input);
+      // Operator takeover (Living Apps Phase 2): a human is driving this thread, so
+      // the resident agent stays quiet. The inbound message is already mirrored for
+      // the operator to answer; do not auto-reply.
+      if (this.#isHumanDriving(input.conversationId)) {
+        this.#publishWorkStep(input, clientTurnId, {
+          phase: 'received',
+          step: 'handoff',
+          description: 'Operator is handling this conversation',
+          ...(input.from ? { detail: `From ${input.from}` } : {}),
+        });
+        return { replied: false, reason: 'human_handling' };
+      }
+      // Multi-party threads (G1): the inbound turn is answered by the active
+      // responder — an active 'specialist' agent (warm handoff target) if present,
+      // else the primary agent participant, else conversations.agentId (back-compat).
+      // The primary is seeded idempotently from conversations.agentId on the way in.
+      const responderAgentId = this.#resolveResponder(input);
+      const adapter = this.#resolveAdapter(responderAgentId, input.workspaceId);
       if (!adapter) {
         this.#publishWorkStep(input, clientTurnId, {
           phase: 'fail',
@@ -177,12 +206,27 @@ export class ChannelTurnDispatcher {
         return { replied: false, reason: 'no_chat_adapter' };
       }
 
+      // Channels have no composer toggle, so the permission mode is switched by a
+      // leading slash command (/ask /plan /auto). A bare command persists the mode
+      // and acknowledges; a command with a task ("/plan build X") switches AND runs.
+      const modeCommand = parseModeCommand(input.text);
+      if (modeCommand) {
+        this.#persistPermissionMode(input.conversationId, modeCommand.mode);
+        if (!modeCommand.rest) {
+          await this.#persistAndDeliver(input, MODE_SWITCH_ACK[modeCommand.mode]);
+          return { replied: true };
+        }
+      }
+      const permissionMode = modeCommand?.mode ?? this.#permissionMode(input.conversationId);
+      const runtimeText = modeCommand ? (modeCommand.rest || defaultTaskForMode(permissionMode)) : input.text;
+
       // Show "typing…" while the (possibly slow) turn runs; cleared in finally.
       void this.deps.setTyping?.(input.connectionId, input.chatId, true).catch(() => {});
 
       const pendingKey = `${input.connectionId}:${input.chatId}`;
       const pending = this.#takeFreshPending(pendingKey);
-      const decision = pending ? interpretConfirmation(input.text) : null;
+      // A mode command is never a yes/no answer to a pending confirmation.
+      const decision = pending && !modeCommand ? interpretConfirmation(input.text) : null;
 
       let stream: AsyncIterable<import('@agentis/core').ChatDelta>;
       if (pending && decision !== null) {
@@ -197,16 +241,26 @@ export class ChannelTurnDispatcher {
         const ctx: ChatTurnContext = {
           workspaceId: input.workspaceId,
           ambientId: input.ambientId,
-          agentId: input.agentId,
+          agentId: responderAgentId,
           userId: input.userId,
           conversationId: input.conversationId,
+          ...(input.appId ? { appId: input.appId } : {}),
           clientTurnId,
+          executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
+          permissionMode,
           maxTurns: 8,
           viewport: null,
         };
         const senderSummary = this.#recordIdentity(input);
-        stream = runTurn(adapter, this.#buildHistory(input, excludeMessageIds), input.text, ctx, {
+        // App-scoped addendum: tell the resident agent which App it operates and to
+        // persist what it learns where the App's surfaces read it (Living Apps §4.2).
+        const appAddendum = input.appId ? this.#appOperatingAddendum(input.appId) : null;
+        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, appAddendum]
+          .filter((s): s is string => Boolean(s))
+          .join('\n\n');
+        stream = runTurn(adapter, this.#buildHistory(input, excludeMessageIds), runtimeText, ctx, {
           channelContext: { kind: input.kind, from: input.from ?? null, chatId: input.chatId, threadId: input.threadId ?? null, senderSummary },
+          ...(systemAddendum ? { systemAddendum } : {}),
         });
       }
 
@@ -282,6 +336,101 @@ export class ChannelTurnDispatcher {
     } finally {
       void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
     }
+  }
+
+  /**
+   * The resident-agent operating addendum for an App-bound channel turn. Names the
+   * App and instructs the agent to treat this as a living relationship — persist
+   * what it learns to the App's datastore so its surfaces stay current (§4.2/§4.4).
+   * Returns null if the App can't be resolved (degrade to a normal channel turn).
+   */
+  #appOperatingAddendum(appId: string): string | null {
+    try {
+      const app = this.deps.db
+        .select({ name: schema.apps.name })
+        .from(schema.apps)
+        .where(eq(schema.apps.id, appId))
+        .get();
+      if (!app) return null;
+      return [
+        `You are the resident agent of the Agentic App "${app.name}". This conversation is a living relationship that belongs to the App, not a one-off chat.`,
+        `Persist what you learn about this contact (facts, stage, next steps, outcomes) to the App's datastore with data_insert / data_upsert — its surfaces read those collections, so unsaved knowledge never reaches the operator's console. Keep exact records in the datastore; promote only durable lessons to the App's brain.`,
+      ].join('\n\n');
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.app_addendum_failed', { appId, err: (err as Error).message });
+      return null;
+    }
+  }
+
+  /** Upsert/touch the App contact for an App-bound inbound turn (Phase 3). Never throws. */
+  #touchContact(input: ChannelTurnInput): void {
+    if (!input.appId || !this.deps.contacts) return;
+    try {
+      // The most stable per-channel handle: sender id for Slack/Discord, chat address for DMs.
+      const handle = (input.kind === 'slack' || input.kind === 'discord') ? (input.from ?? input.chatId) : input.chatId;
+      this.deps.contacts.touch({
+        workspaceId: input.workspaceId,
+        appId: input.appId,
+        channelKind: input.kind,
+        handle,
+        ...(input.from ? { displayName: input.from } : {}),
+      });
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.contact_touch_failed', { appId: input.appId, err: (err as Error).message });
+    }
+  }
+
+  /**
+   * Resolve the agent that should answer this inbound turn (G1 multi-party).
+   * Seeds the primary participant from conversations.agentId, then picks the active
+   * specialist (warm handoff) over the primary; falls back to input.agentId when no
+   * participants layer exists. Non-throwing — degrades to input.agentId on error.
+   */
+  #resolveResponder(input: ChannelTurnInput): string {
+    if (!this.deps.participants) return input.agentId;
+    try {
+      this.deps.participants.ensurePrimary(input.conversationId, input.agentId);
+      return this.deps.participants.activeResponderAgent(input.conversationId, input.agentId);
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.responder_failed', {
+        conversationId: input.conversationId,
+        err: (err as Error).message,
+      });
+      return input.agentId;
+    }
+  }
+
+  /** True when an operator has taken over this thread — the resident agent stays quiet (Phase 2). */
+  #isHumanDriving(conversationId: string): boolean {
+    const row = this.deps.db
+      .select({ handoffState: schema.conversations.handoffState })
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, conversationId))
+      .get();
+    return row?.handoffState === 'human';
+  }
+
+  /** Read the conversation's sticky permission mode (default ask). */
+  #permissionMode(conversationId: string): ChatPermissionMode {
+    const row = this.deps.db
+      .select({ permissionMode: schema.conversations.permissionMode })
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, conversationId))
+      .get();
+    return (row?.permissionMode as ChatPermissionMode | undefined) ?? 'ask';
+  }
+
+  /** Persist a new sticky permission mode (and the matching executionMode block). */
+  #persistPermissionMode(conversationId: string, mode: ChatPermissionMode): void {
+    this.deps.db
+      .update(schema.conversations)
+      .set({
+        permissionMode: mode,
+        executionMode: mode === 'plan' ? 'plan' : 'chat',
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.conversations.id, conversationId))
+      .run();
   }
 
   /** Persist a reply as an agent message and deliver it to the channel. */

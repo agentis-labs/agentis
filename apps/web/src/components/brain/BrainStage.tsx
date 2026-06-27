@@ -798,6 +798,7 @@ function hslToHex(h: number, s: number, l: number): string {
 }
 
 function dotColor(node: BrainNode): string {
+  if (node.type === 'scope_owner') return '#fbbf24'; // App/Agent/Workflow owner hub
   if (node.type === 'warning') return '#fb7185';
   if (node.type === 'gap') return '#94a3b8';
 
@@ -833,6 +834,7 @@ function edgeStroke(edge: BrainEdge): string {
     case 'used_in': return '#7c83ff';
     case 'supersedes': return '#fb923c';
     case 'measures': return '#f59e0b';
+    case 'owned_by': return '#fbbf24';
     default: return '#94a3b8';
   }
 }

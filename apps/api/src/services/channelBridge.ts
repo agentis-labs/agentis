@@ -513,6 +513,7 @@ export class ChannelBridge {
       agentId: row.agentId,
       channelConnectionId: row.id,
       channelChatId: parsed.chatId,
+      appId: row.appId ?? null,
     });
     const fromTag = parsed.from ? `[${parsed.from}] ` : '';
     const message = this.deps.conversations.appendMirrored({
@@ -557,6 +558,7 @@ export class ChannelBridge {
         ambientId: row.ambientId,
         userId: row.userId,
         agentId: row.agentId,
+        appId: row.appId ?? null,
         conversationId: conversation.id,
         connectionId: row.id,
         kind: row.kind,

@@ -18,6 +18,7 @@ import { registerCapabilityTools } from './capability.js';
 import { registerTaskSpineTools } from './taskSpine.js';
 import { registerChannelTools } from './channel.js';
 import { registerBrowserTools } from './browser.js';
+import { registerAssetTools } from './assets.js';
 import { registerMcpBridgeTools } from './mcp.js';
 import { registerAppDataTools } from './appData.js';
 
@@ -32,6 +33,7 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerTaskSpineTools(registry, deps);
   registerChannelTools(registry, deps);
   registerBrowserTools(registry, deps);
+  registerAssetTools(registry, deps);
   registerMcpBridgeTools(registry, deps);
   registerAppDataTools(registry, deps);
 }

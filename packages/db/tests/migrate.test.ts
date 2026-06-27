@@ -20,7 +20,11 @@ function tempDbPath(): string {
 
 describe('runSqliteMigrations', () => {
   it('reserves the Agentic App migration versions and mirrors schema exports', () => {
-    expect(SQLITE_MIGRATIONS.slice(-7).map((migration) => [migration.version, migration.name])).toEqual([
+    // The Agentic App migration block (82–88), asserted by version so unrelated
+    // later migrations (memory indexes, artifacts) don't make this brittle.
+    expect(
+      SQLITE_MIGRATIONS.filter((m) => m.version >= 82 && m.version <= 88).map((m) => [m.version, m.name]),
+    ).toEqual([
       [82, 'agentic_apps'],
       [83, 'app_datastore'],
       [84, 'app_surfaces'],
@@ -56,6 +60,68 @@ describe('runSqliteMigrations', () => {
       const appId = workflowColumns.find((column) => column.name === 'app_id');
       expect(appId).toBeDefined();
       expect(appId?.notnull).toBe(0);
+
+      // Assets §1 (v90) — artifacts gain app_id (nullable) + origin (default 'manual').
+      const artifactColumns = sqlite.prepare("PRAGMA table_info('artifacts')").all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }>;
+      expect(artifactColumns.map((c) => c.name)).toEqual(expect.arrayContaining(['app_id', 'origin']));
+      const origin = artifactColumns.find((c) => c.name === 'origin');
+      expect(origin?.notnull).toBe(1);
+      expect(origin?.dflt_value).toBe("'manual'");
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('v98 creates conversation_participants and backfills the primary for App conversations', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      // Table exists after migration.
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_participants'").get()).toBeDefined();
+
+      const v98 = SQLITE_MIGRATIONS.find((m) => m.version === 98);
+      expect(v98?.name).toBe('living_apps_conversation_participants');
+
+      // Seed a minimal App conversation (FKs off — we only exercise the backfill SQL).
+      sqlite.pragma('foreign_keys = OFF');
+      sqlite.exec(`
+INSERT INTO conversations (id, workspace_id, user_id, agent_id, app_id)
+VALUES ('conv-1', 'ws-1', 'user-1', 'agent-1', 'app-1');
+INSERT INTO conversations (id, workspace_id, user_id, agent_id)
+VALUES ('conv-bare', 'ws-1', 'user-1', 'agent-2');
+`);
+
+      // Re-run the backfill statement (idempotent NOT EXISTS guard).
+      sqlite.exec(v98!.sql);
+
+      const parties = sqlite.prepare("SELECT conversation_id AS conv, participant_type AS type, participant_id AS pid, role, active FROM conversation_participants").all() as Array<{ conv: string; type: string; pid: string; role: string; active: number }>;
+      // The App conversation is seeded with its primary agent; the bare one is not.
+      expect(parties).toEqual([
+        { conv: 'conv-1', type: 'agent', pid: 'agent-1', role: 'primary', active: 1 },
+      ]);
+
+      // Second run is a no-op (no duplicate primary).
+      sqlite.exec(v98!.sql);
+      const count = sqlite.prepare("SELECT COUNT(*) AS n FROM conversation_participants").get() as { n: number };
+      expect(count.n).toBe(1);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('v99 adds outcome columns to app_contacts (the learning loop)', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const v99 = SQLITE_MIGRATIONS.find((m) => m.version === 99);
+      expect(v99?.name).toBe('living_apps_contact_outcome');
+
+      const cols = sqlite.prepare("PRAGMA table_info('app_contacts')").all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toEqual(expect.arrayContaining(['outcome', 'outcome_at']));
     } finally {
       sqlite.close();
     }

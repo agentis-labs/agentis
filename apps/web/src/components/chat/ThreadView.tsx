@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { REALTIME_EVENTS, type ChatDelta, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
+import { REALTIME_EVENTS, type ChatDelta, type ChatPermissionMode, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
+import { PermissionModePicker } from './PermissionModePicker';
+import { readPlanStepTrack } from '../../lib/workSteps';
+import { StepTrack } from '../shared/StepTrack';
 import { api, apiErrorMessage, streamSse } from '../../lib/api';
 import { useViewportAwareness } from '../../lib/viewportContext';
 import { openRunModal } from '../../lib/runModal';
@@ -15,8 +18,7 @@ import type { ToolCallData as ToolCallPillData } from './toolCalls';
 import { ProactiveCard, type ProactiveCardData } from './ProactiveCard';
 import { ChatMarkdown } from './ChatMarkdown';
 import { useChatPanelStore } from './ChatPanelStore';
-import { ExecutionFeed } from './ExecutionFeed';
-import { LiveActivityTrace } from './LiveActivityTrace';
+import { AgentTurnTrace } from './AgentTurnTrace';
 import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessage } from './messageModel';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
@@ -56,6 +58,7 @@ type RoomMsg = {
   id: string;
   authorType: string;
   authorId?: string | null;
+  contentType?: string;
   content: Record<string, unknown>;
   createdAt: string;
 };
@@ -113,6 +116,7 @@ interface ChatMessage {
   authorName?: string;
   authorKind: 'operator' | 'agent' | 'system';
   text: string;
+  artifactIds?: string[];
   createdAt: string;
   source?: string;
   metadata?: MessageMeta;
@@ -168,13 +172,63 @@ function normalizeAgentMessage(message: AgentMsg): ChatMessage {
 }
 
 function normalizeRoomMessage(message: RoomMsg): ChatMessage {
+  const content = message.content ?? {};
   return {
     id: message.id,
     authorId: message.authorId ?? '',
     authorKind: message.authorType as ChatMessage['authorKind'],
-    text: typeof message.content?.text === 'string' ? message.content.text : '',
+    text:
+      typeof content.text === 'string'
+        ? content.text
+        : typeof content.caption === 'string'
+          ? content.caption
+          : '',
+    artifactIds: extractArtifactIdsFromRoomContent(message.contentType, content),
     createdAt: message.createdAt,
   };
+}
+
+function extractArtifactIdsFromRoomContent(contentType: string | undefined, content: Record<string, unknown>): string[] {
+  const ids = new Set<string>();
+  collectArtifactIds(content, ids);
+  if ((contentType === 'image' || contentType === 'document' || contentType === 'artifact_card') && typeof content.artifactId === 'string') {
+    ids.add(content.artifactId);
+  }
+  return [...ids];
+}
+
+function collectArtifactIds(value: unknown, out: Set<string>): void {
+  if (!value) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectArtifactIds(item, out));
+    return;
+  }
+  if (typeof value !== 'object') return;
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === 'artifactId' && typeof nested === 'string' && nested.trim()) {
+      out.add(nested.trim());
+      continue;
+    }
+    if (key === 'artifactIds' && Array.isArray(nested)) {
+      nested.forEach((item) => {
+        if (typeof item === 'string' && item.trim()) out.add(item.trim());
+      });
+      continue;
+    }
+    if ((key === 'ref' || key === 'url') && typeof nested === 'string') {
+      const artifactId = artifactIdFromRef(nested);
+      if (artifactId) out.add(artifactId);
+    }
+    collectArtifactIds(nested, out);
+  }
+}
+
+function artifactIdFromRef(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^artifact:/i.test(trimmed)) return trimmed.slice('artifact:'.length).trim() || null;
+  const match = trimmed.match(/^(?:https?:\/\/[^/]+)?\/v1\/artifacts\/([0-9a-f-]{36})(?:[/?#].*)?$/i);
+  return match?.[1] ?? null;
 }
 
 function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
@@ -238,6 +292,16 @@ function defaultRuntimeModel(adapterType?: string | null): string | null {
   return null;
 }
 
+/** Read a persisted permission mode from localStorage, validating the value. */
+function readStoredPermissionMode(key: string): ChatPermissionMode | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw === 'ask' || raw === 'plan' || raw === 'auto' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 export function ThreadView({
   kind,
   id,
@@ -273,12 +337,39 @@ export function ThreadView({
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
   const [agentTyping, setAgentTyping] = useState(false);
   const [composerInitialText, setComposerInitialText] = useState(initialDraft ?? '');
+  // Per-conversation permission mode (ask | plan | auto). Sticky locally so the
+  // composer reflects the operator's choice across reloads; also persisted
+  // server-side so channels and the next turn agree (default ask).
+  const permissionModeKey = `agentis:permission-mode:${id}:${conversationId ?? 'active'}`;
+  const [permissionMode, setPermissionModeState] = useState<ChatPermissionMode>('ask');
+  useEffect(() => {
+    if (kind !== 'agent') return;
+    const stored = readStoredPermissionMode(permissionModeKey);
+    setPermissionModeState(stored ?? 'ask');
+  }, [permissionModeKey, kind]);
+  async function setPermissionMode(mode: ChatPermissionMode) {
+    setPermissionModeState(mode);
+    try { window.localStorage.setItem(permissionModeKey, mode); } catch { /* ignore */ }
+    if (conversationId) {
+      try {
+        await api(`/v1/conversations/session/${conversationId}/mode`, {
+          method: 'POST',
+          body: JSON.stringify({ mode }),
+        });
+      } catch (error) {
+        toast.error('Could not change mode', apiErrorMessage(error));
+      }
+    }
+  }
   const typingTimer = useRef<number | null>(null);
   const activeChatAbortRef = useRef<AbortController | null>(null);
   const autoSentDraftKeyRef = useRef<string | null>(null);
   const consumedLaunchKeyRef = useRef<string | null>(null);
   const pendingViewportOverrideRef = useRef<ViewportContext | null>(initialViewportOverride ?? null);
   const openedCanvasWorkflowIdsRef = useRef<Set<string>>(new Set());
+  // The real workspace room id behind the virtual `__broadcast__` view, so live
+  // room events (which carry the real id) can be scoped to Global Chat.
+  const broadcastRoomIdRef = useRef<string | null>(null);
   const setActiveTask = useChatPanelStore((store) => store.setActiveTask);
   const updateActiveTask = useChatPanelStore((store) => store.updateActiveTask);
   const toast = useToast();
@@ -554,6 +645,18 @@ export function ThreadView({
     void loadInitial();
   }, [kind, id, conversationId]);
 
+  // Resolve the backing room id for Global Chat so live agent replies (posted
+  // under the real id) can be matched to this workspace-wide view.
+  useEffect(() => {
+    broadcastRoomIdRef.current = null;
+    if (kind !== 'room' || id !== '__broadcast__') return;
+    let cancelled = false;
+    api<{ room: { id: string } }>('/v1/rooms/__broadcast__')
+      .then((res) => { if (!cancelled) broadcastRoomIdRef.current = res.room.id; })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [kind, id]);
+
   useEffect(() => {
     setLoadedConversationId(conversationId ?? null);
   }, [kind, id, conversationId]);
@@ -589,6 +692,27 @@ export function ThreadView({
       : rtSubscribe('conversation', { agentId: id });
   }, [kind, id]);
 
+  // Live task-spine steps for this conversation — the same StepTrack the Live
+  // Workspace shows, so progress is visible right in the chat. Task spine events
+  // are published to the workspace room, so we subscribe to it explicitly.
+  const [stepTrack, setStepTrack] = useState<WorkStepTrack | null>(null);
+  useEffect(() => { setStepTrack(null); }, [kind, id, conversationId]);
+  useEffect(() => rtSubscribe('workspace', {}), []);
+  useRealtime([
+    REALTIME_EVENTS.TASK_SPINE_ACCEPTED,
+    REALTIME_EVENTS.TASK_SPINE_UPDATED,
+    REALTIME_EVENTS.TASK_SPINE_COMPLETED,
+    REALTIME_EVENTS.TASK_SPINE_VERIFIED,
+    REALTIME_EVENTS.TASK_SPINE_BLOCKED,
+    REALTIME_EVENTS.TASK_SPINE_FAILED,
+  ], (env) => {
+    const payload = env.payload as { conversationId?: string | null };
+    const expected = loadedConversationId ?? conversationId ?? null;
+    if (!payload.conversationId || !expected || payload.conversationId !== expected) return;
+    const track = readPlanStepTrack(env.payload as Record<string, unknown>);
+    if (track) setStepTrack(track);
+  });
+
   useRealtime([
     REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
     REALTIME_EVENTS.CONVERSATION_MESSAGE_SENT,
@@ -620,7 +744,10 @@ export function ThreadView({
       }
       return;
     }
-    if (payload.roomId !== id) return;
+    // Global Chat is a virtual view over a real backing room; match live events
+    // (incl. the agent replies the broadcast dispatcher posts) to that room id.
+    const targetRoomId = id === '__broadcast__' ? broadcastRoomIdRef.current : id;
+    if (!targetRoomId || payload.roomId !== targetRoomId) return;
     if (env.event === REALTIME_EVENTS.ROOM_MESSAGE_DELETED) {
       setMessages((prev) => prev.filter((message) => message.id !== payload.id));
       return;
@@ -675,15 +802,17 @@ export function ThreadView({
 
   useRealtime([REALTIME_EVENTS.CANVAS_BUILD_COMPLETE], (env) => {
     if (kind !== 'agent') return;
-    const payload = env.payload as { agentId?: string | null; workflowId?: string; runId?: string } | undefined;
+    const payload = env.payload as { agentId?: string | null; workflowId?: string; appId?: string | null; runId?: string } | undefined;
     const workflowId = payload?.workflowId;
     if (!workflowId) return;
     if (payload?.agentId && payload.agentId !== id) return;
     if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
     openedCanvasWorkflowIdsRef.current.add(workflowId);
-    window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, runId: payload?.runId ?? null } }));
-    navigate(`/apps/workflows/${workflowId}`);
-    toast.success('Logic opened on canvas');
+    // Agentis ships Apps — open the owning App, not the bare workflow canvas.
+    const appId = payload?.appId ?? null;
+    window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, appId, runId: payload?.runId ?? null } }));
+    navigate(appId ? `/apps/${appId}` : `/apps/workflows/${workflowId}`);
+    toast.success(appId ? 'App opened' : 'Logic opened on canvas');
   });
 
   useEffect(() => () => {
@@ -866,6 +995,7 @@ export function ThreadView({
           clientTurnId,
           useViewportContext: options?.useViewportContext !== false,
           viewportOverride,
+          permissionMode,
         }),
       }, {
         onEvent(event, data) {
@@ -1317,6 +1447,11 @@ export function ThreadView({
             <span>{name} is thinking…</span>
           </div>
         )}
+        {stepTrack && stepTrack.steps.length > 0 && (streamingAgentActive || agentTyping) && (
+          <div className="mt-2 rounded-xl border border-line/60 bg-surface-2/40 px-3 py-2 shadow-sm transition-colors duration-150 hover:border-line">
+            <StepTrack track={stepTrack} />
+          </div>
+        )}
         {!isAtBottom && (
           <button
             type="button"
@@ -1366,7 +1501,9 @@ export function ThreadView({
           agentId={kind === 'agent' ? id : undefined}
           isRunning={streamingAgentActive}
           onStop={stopActiveTurn}
-          footer={undefined}
+          footer={kind === 'agent' ? (
+            <PermissionModePicker value={permissionMode} onChange={(mode) => void setPermissionMode(mode)} />
+          ) : undefined}
         />
       )}
     </div>
@@ -1404,6 +1541,11 @@ function MessageBubble({
   const bodyAfterPlan = parsedAgentPlan?.after ?? '';
   const toolCalls = msg.metadata?.toolCalls ?? [];
   const activities = msg.metadata?.activity ?? [];
+  const artifactIds = useMemo(() => {
+    const ids = new Set(msg.artifactIds ?? []);
+    toolCalls.forEach((call) => collectArtifactIds(call.result, ids));
+    return [...ids];
+  }, [msg.artifactIds, toolCalls]);
 
   useEffect(() => {
     if (isEditing) setEditDraft(msg.text);
@@ -1441,9 +1583,10 @@ function MessageBubble({
                 : 'bg-surface-2 text-text-primary shadow-[0_18px_35px_-30px_rgba(0,0,0,0.7)]',
           )}
         >
-          {!isOperator && (streaming || activities.length > 0) && (
-            <LiveActivityTrace
+          {!isOperator && (streaming || activities.length > 0 || toolCalls.length > 0) && (
+            <AgentTurnTrace
               activities={activities}
+              toolCalls={toolCalls}
               turn={msg.metadata?.turn}
               streaming={streaming}
               failed={msg.deliveryStatus === 'failed'}
@@ -1459,9 +1602,7 @@ function MessageBubble({
               </div>
             )
           )}
-          {!isOperator && toolCalls.length > 0 && (
-            <ExecutionFeed toolCalls={toolCalls} streaming={streaming} />
-          )}
+          <ChatArtifactAttachments artifactIds={artifactIds} />
           {msg.metadata?.confirmation && (
             <ConfirmationCard
               data={msg.metadata.confirmation}
@@ -1542,7 +1683,7 @@ function MessageBubble({
             <div className="mt-2 break-words [overflow-wrap:anywhere]">
               <ChatMarkdown text={bodyAfterPlan} />
             </div>
-          ) : (msg.metadata?.card || msg.metadata?.confirmation || parsedAgentPlan || toolCalls.length > 0 || activities.length > 0 || bodyBeforePlan) ? null : streaming && !isOperator ? (
+          ) : (msg.metadata?.card || msg.metadata?.confirmation || parsedAgentPlan || toolCalls.length > 0 || activities.length > 0 || bodyBeforePlan || artifactIds.length > 0) ? null : streaming && !isOperator ? (
             <TypingDots />
           ) : !isOperator ? null : (
             <div className="text-[12px] italic text-text-muted">No text content</div>
@@ -1551,6 +1692,70 @@ function MessageBubble({
         {!isOperator && <MessageActions onCopy={onCopy} />}
       </div>
     </li>
+  );
+}
+
+type ChatArtifact = {
+  id: string;
+  type: 'html' | 'image' | 'document' | 'code' | 'data';
+  title: string;
+  content: string;
+};
+
+/**
+ * Artifact previews need to load through `api()` so requests carry the
+ * workspace Bearer token instead of opening raw `/v1/artifacts/:id` links.
+ */
+function ChatArtifactAttachments({ artifactIds }: { artifactIds: string[] }) {
+  const artifactKey = artifactIds.join(',');
+  const [artifacts, setArtifacts] = useState<ChatArtifact[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!artifactIds.length) {
+      setArtifacts([]);
+      return () => { cancelled = true; };
+    }
+    void Promise.all(
+      artifactIds.map(async (id) => {
+        const response = await api<{ artifact: ChatArtifact }>(`/v1/artifacts/${encodeURIComponent(id)}`);
+        return response.artifact;
+      }),
+    ).then((loaded) => {
+      if (!cancelled) setArtifacts(loaded);
+    }).catch(() => {
+      if (!cancelled) setArtifacts([]);
+    });
+    return () => { cancelled = true; };
+  }, [artifactKey]); // artifactKey is the stable identity of the requested artifacts.
+
+  if (!artifacts.length) return null;
+  return (
+    <div className="mb-2 grid gap-2 sm:grid-cols-2">
+      {artifacts.map((artifact) => {
+        const image = artifact.type === 'image' && artifact.content.startsWith('data:image/');
+        return (
+          <Link
+            key={artifact.id}
+            to={`/artifacts?open=${encodeURIComponent(artifact.id)}`}
+            className="group overflow-hidden rounded-lg border border-line bg-canvas/50 text-left transition hover:border-accent/50 hover:bg-canvas"
+          >
+            {image && (
+              <img
+                src={artifact.content}
+                alt={artifact.title}
+                className="max-h-64 w-full bg-canvas object-contain"
+              />
+            )}
+            <div className="flex min-w-0 items-center gap-2 px-2.5 py-2 text-[11px]">
+              <FileText size={13} className="shrink-0 text-accent" />
+              <span className="truncate font-medium text-text-primary">{artifact.title}</span>
+              <span className="ml-auto shrink-0 uppercase tracking-wide text-text-muted">{artifact.type}</span>
+            </div>
+          </Link>
+        );
+      })}
+    </div>
   );
 }
 

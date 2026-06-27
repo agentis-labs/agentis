@@ -54,8 +54,12 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
 
   const onSurfaceEvent = useCallback(
     (env: RealtimeEnvelope) => {
-      const payload = env.payload as { appId?: string } | undefined;
+      const payload = env.payload as { appId?: string; region?: string } | undefined;
       if (payload?.appId && payload.appId !== appId) return;
+      // Performed-region pushes (Phase M3) carry a `region` and are handled in
+      // place by the matching AgentRegion node — a full reload would wipe the
+      // transient (un-pinned) content, so skip it here.
+      if (payload?.region) return;
       setReloadKey((k) => k + 1);
     },
     [appId],
@@ -136,7 +140,7 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
   }
   return (
     <RuntimeProvider value={ctx}>
-      <div className="mx-auto w-full max-w-3xl p-4">
+      <div className="w-full p-4 sm:p-6">
         {surface.view ? <ViewRenderer node={surface.view} /> : <p className="text-text-muted">Empty surface.</p>}
       </div>
     </RuntimeProvider>

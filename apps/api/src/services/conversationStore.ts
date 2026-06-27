@@ -95,6 +95,8 @@ export class ConversationStore {
     agentId: string;
     channelConnectionId: string;
     channelChatId: string;
+    /** When the channel belongs to an Agentic App, the thread is owned by it (Living Apps Phase 0). */
+    appId?: string | null;
   }) {
     const existing = this.deps.db
       .select()
@@ -110,7 +112,18 @@ export class ConversationStore {
       )
       .orderBy(desc(schema.conversations.createdAt), desc(schema.conversations.lastMessageAt))
       .get();
-    if (existing) return existing;
+    if (existing) {
+      // Backfill: a pre-existing thread adopts the App once its channel is bound.
+      if (args.appId && existing.appId !== args.appId) {
+        this.deps.db
+          .update(schema.conversations)
+          .set({ appId: args.appId, updatedAt: new Date().toISOString() })
+          .where(eq(schema.conversations.id, existing.id))
+          .run();
+        return { ...existing, appId: args.appId };
+      }
+      return existing;
+    }
 
     const row = {
       id: randomUUID(),
@@ -121,6 +134,7 @@ export class ConversationStore {
       mirroredSessionId: null,
       channelConnectionId: args.channelConnectionId,
       channelChatId: args.channelChatId,
+      appId: args.appId ?? null,
       title: null,
       archivedAt: null,
       unreadCount: 0,

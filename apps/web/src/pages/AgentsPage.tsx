@@ -10,6 +10,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Plus, Network, List as ListIcon, Search, SearchX, X, Zap, Sparkles, Download } from 'lucide-react';
 import { ImportAgentsWizard } from '../components/agents/ImportAgentsWizard';
+import { harnessOf } from '../components/agents/harnessMeta';
+import { checkImportUpdates, type ImportUpdate } from '../lib/agentImport';
 import clsx from 'clsx';
 import { api, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
@@ -56,6 +58,7 @@ interface AgentRow {
     workflows: number;
   } | null;
   spaceTag?: string | null;
+  importOrigin?: { adapterType: string; externalId: string } | null;
 }
 
 interface Space extends DomainOption {}
@@ -129,6 +132,10 @@ export function AgentsPage() {
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
   const [selectedAgent, setSelectedAgent] = useState<AgentRow | null>(null);
+  // §AGENT-TRANSITION P4 — ambient surface for the continuous harness sync: new
+  // memory accrued by already-imported agents, ready to pull (approval-gated).
+  const [importUpdates, setImportUpdates] = useState<ImportUpdate[]>([]);
+  const [dismissedUpdates, setDismissedUpdates] = useState(false);
 
   useEffect(() => {
     try { localStorage.setItem('agentis.agents.view', view); } catch { /* ignore */ }
@@ -160,10 +167,20 @@ export function AgentsPage() {
     }
   }
 
+  async function loadImportUpdates() {
+    try {
+      const res = await checkImportUpdates();
+      const updates = res?.updates ?? [];
+      setImportUpdates(updates);
+      if (updates.length > 0) setDismissedUpdates(false);
+    } catch { /* best-effort — the banner just stays hidden */ }
+  }
+
   useEffect(() => {
     const ws = wsStore.get();
     const unsubscribe = ws ? rtSubscribe('workspace', { workspaceId: ws }) : undefined;
     void refresh();
+    void loadImportUpdates();
     return () => unsubscribe?.();
   }, []);
 
@@ -179,6 +196,10 @@ export function AgentsPage() {
     ],
     () => { void refresh(); },
   );
+
+  // The 6h continuous-sync service emits this when imported agents accrue new
+  // harness memory — refresh the banner so the operator can pull it in.
+  useRealtime([REALTIME_EVENTS.HARNESS_IMPORT_UPDATES], () => { void loadImportUpdates(); });
 
   useEffect(() => {
     const onBackgroundInstallUpdate = () => { void refresh(); };
@@ -379,6 +400,14 @@ export function AgentsPage() {
         )}
       </div>
 
+      {importUpdates.length > 0 && !dismissedUpdates && (
+        <ImportUpdatesBanner
+          updates={importUpdates}
+          onReview={() => setImportingAgents(true)}
+          onDismiss={() => setDismissedUpdates(true)}
+        />
+      )}
+
       {/* List body */}
       <div className={clsx('min-h-0 flex-1', view === 'fleet' ? 'overflow-hidden px-0 py-0' : 'overflow-y-auto px-6 py-5')}>
         {agents.length === 0 ? (
@@ -518,6 +547,57 @@ export function AgentsPage() {
   );
 }
 
+/**
+ * Ambient surface for the continuous harness sync — shows when imported agents
+ * have accrued new memory/skills upstream, with the harness logos and a single
+ * approval-gated "Review & pull" CTA into the import wizard.
+ */
+function ImportUpdatesBanner({
+  updates,
+  onReview,
+  onDismiss,
+}: {
+  updates: ImportUpdate[];
+  onReview: () => void;
+  onDismiss: () => void;
+}) {
+  const totalMemories = updates.reduce((sum, u) => sum + (u.pendingMemory ?? u.pendingNew ?? 0), 0);
+  const totalSkills = updates.reduce((sum, u) => sum + (u.pendingSkills ?? 0), 0);
+  const harnesses = Array.from(new Set(updates.map((u) => u.adapterType)));
+  const parts: string[] = [];
+  if (totalMemories > 0) parts.push(`${totalMemories} new ${totalMemories === 1 ? 'memory' : 'memories'}`);
+  if (totalSkills > 0) parts.push(`${totalSkills} new ${totalSkills === 1 ? 'skill' : 'skills'}`);
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-b border-accent/30 bg-accent-soft/60 px-6 py-2.5">
+      <div className="flex items-center gap-1.5">
+        {harnesses.map((type) => {
+          const { Icon, label } = harnessOf(type);
+          return <Icon key={type} className="h-4 w-4 text-text-secondary" aria-label={label} />;
+        })}
+      </div>
+      <div className="text-[13px] text-text-primary">
+        <span className="font-semibold">{parts.join(' · ') || 'New memory'}</span>
+        <span className="text-text-secondary">
+          {' '}from {updates.length} imported {updates.length === 1 ? 'agent' : 'agents'} — pull it into Agentis Brain.
+        </span>
+      </div>
+      <div className="ml-auto flex items-center gap-2">
+        <Button variant="primary" size="sm" iconLeft={<Download size={13} />} onClick={onReview}>
+          Review &amp; pull
+        </Button>
+        <button
+          type="button"
+          aria-label="Dismiss"
+          onClick={onDismiss}
+          className="rounded-btn p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        >
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AgentFleetHeaderControls({
   filter,
   search,
@@ -619,7 +699,7 @@ function SpecialistBench({
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[12px] font-semibold text-text-primary">{agent.name}</span>
                 <span className="mt-0.5 block truncate text-[10px] text-text-muted">
-                  {labelize(agent.role ?? 'specialist')} · {agentHarnessLabel(agent)}
+                  {labelize(agent.role === 'worker' ? 'specialist' : (agent.role ?? 'specialist'))} · {agentHarnessLabel(agent)}
                 </span>
               </span>
               <StatusBadge status={agent.status ?? 'offline'} size="sm" />
@@ -655,7 +735,9 @@ function formatAgentRole(role: string | null | undefined, spaceId: string | null
     }
     return 'Manager';
   }
-  return 'Agent';
+  if (norm === 'worker') return 'Specialist';
+  if (norm) return labelize(norm);
+  return 'Specialist';
 }
 
 function AgentTable({ rows, spaces, onSelect }: { rows: AgentRow[]; spaces: Space[]; onSelect: (id: string) => void }) {

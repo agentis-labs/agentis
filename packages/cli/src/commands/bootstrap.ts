@@ -80,8 +80,8 @@ const ROLE_COLOR: Record<AgentRole, string> = {
 
 const DEFAULT_DESCRIPTION: Record<AgentRole, string> = {
   orchestrator: 'Workspace orchestrator. Routes goals, coordinates managers, keeps the system aligned.',
-  manager: 'Domain manager. Turns strategy into scoped execution for workers.',
-  worker: 'Specialist worker. Executes tasks within a focused operating lane.',
+  manager: 'Domain manager. Turns strategy into scoped execution for specialists.',
+  worker: 'Specialist. Executes tasks within a focused operating lane.',
 };
 
 const DEFAULT_INSTRUCTIONS: Record<AgentRole, string> = {
@@ -144,7 +144,7 @@ export async function runBootstrapCmd(argv: string[]): Promise<number> {
       reportsTo = existingOrchestrator.id;
     }
     if (role !== 'orchestrator' && !reportsTo) {
-      writeJson({ ok: false, error: 'Managers and workers require an existing orchestrator or an explicit --reports-to id.' }, true);
+      writeJson({ ok: false, error: 'Managers and specialists require an existing orchestrator or an explicit --reports-to id.' }, true);
       return 1;
     }
 
@@ -269,6 +269,7 @@ function requireFlag(flags: Flags, key: string): string {
 }
 
 function parseRole(value: string): AgentRole {
+  if (value === 'specialist') return 'worker';
   if (value === 'orchestrator' || value === 'manager' || value === 'worker') return value;
   throw new Error(`Unsupported role: ${value}`);
 }
@@ -290,7 +291,7 @@ function parseConfigSource(value?: string): ConfigSource {
 function defaultNameForRole(role: AgentRole): string {
   if (role === 'orchestrator') return 'The Brain';
   if (role === 'manager') return 'Department Manager';
-  return 'Specialist Worker';
+  return 'Specialist';
 }
 
 function initials(name: string): string {

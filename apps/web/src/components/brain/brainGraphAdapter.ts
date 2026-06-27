@@ -61,6 +61,9 @@ export function graphNodeToBrainNode(
       reinforceCount: node.reinforceCount,
       isDisputed: node.isDisputed ?? false,
       workspaceGlobal: !node.scopeId,
+      // §scope-provenance — which App/Agent/Workflow owns this atom (for labels).
+      scopeKind: node.scopeKind ?? null,
+      scopeLabel: node.scopeLabel ?? null,
       createdAt: node.createdAt,
       updatedAt: node.updatedAt,
     },
@@ -92,6 +95,8 @@ function nodeTypeForAtom(atomKind: BrainGraphNode['atomKind']): BrainNodeType {
     case 'grounding_source': return 'dataset';
     case 'grounding_entity': return 'artifact';
     case 'grounding_claim': return 'decision';
+    case 'scope_owner': return 'scope_owner';
+    default: return 'knowledge_cluster';
   }
 }
 
@@ -109,6 +114,11 @@ function layerForAtom(atomKind: BrainGraphNode['atomKind']): BrainLayer {
     case 'grounding_source':
     case 'grounding_entity': return 'knowledge';
     case 'grounding_claim': return 'judgment';
+    // NOT 'core' — owner hubs must float in the force sim like every other node
+    // (only the single Workspace-brain core is pinned). Their many `owned_by`
+    // links naturally pull them into a hub amid the atoms they own.
+    case 'scope_owner': return 'knowledge';
+    default: return 'knowledge';
   }
 }
 
@@ -119,6 +129,8 @@ function relationToEdgeKind(relation: BrainGraphLink['relation']): BrainEdgeKind
     case 'refines': return 'refines';
     case 'derived_from': return 'derived_from';
     case 'co_observed': return 'co_observed';
+    case 'owned_by': return 'owned_by';
+    default: return 'supports';
   }
 }
 

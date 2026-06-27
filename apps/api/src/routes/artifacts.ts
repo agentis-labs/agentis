@@ -2,26 +2,29 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, artifactTypeSchema, isArtifactType } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
+import { deriveArtifactOrigin } from '../services/artifactService.js';
 
-const ARTIFACT_TYPES = ['html', 'image', 'document', 'code', 'data'] as const;
+const ARTIFACT_ORIGINS = ['agent', 'app', 'workflow', 'channel', 'manual'] as const;
 
 const createArtifactSchema = z.object({
-  type: z.enum(ARTIFACT_TYPES).default('document'),
+  type: artifactTypeSchema.default('document'),
   title: z.string().trim().min(1).max(200),
   content: z.string().max(2_000_000).default(''),
   thumbnailUrl: z.string().url().max(2048).nullable().optional(),
   runId: z.string().uuid().nullable().optional(),
   workflowId: z.string().uuid().nullable().optional(),
   agentId: z.string().uuid().nullable().optional(),
+  appId: z.string().uuid().nullable().optional(),
   conversationId: z.string().uuid().nullable().optional(),
   nodeId: z.string().max(120).nullable().optional(),
+  origin: z.enum(ARTIFACT_ORIGINS).optional(),
   metadata: z.record(z.unknown()).default({}),
 });
 
@@ -35,15 +38,21 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
   app.get('/', (c) => {
     const ws = getWorkspace(c);
     const type = c.req.query('type');
+    const origin = c.req.query('origin');
     const runId = c.req.query('runId');
     const conversationId = c.req.query('conversationId');
     const agentId = c.req.query('agentId');
+    const appId = c.req.query('appId');
+    const workflowId = c.req.query('workflowId');
     const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 100), 1), 500);
     const filters = [eq(schema.artifacts.workspaceId, ws.workspaceId)];
     if (isArtifactType(type)) filters.push(eq(schema.artifacts.type, type));
+    if (isArtifactOrigin(origin)) filters.push(eq(schema.artifacts.origin, origin));
     if (runId) filters.push(eq(schema.artifacts.runId, runId));
     if (conversationId) filters.push(eq(schema.artifacts.conversationId, conversationId));
     if (agentId) filters.push(eq(schema.artifacts.agentId, agentId));
+    if (appId) filters.push(eq(schema.artifacts.appId, appId));
+    if (workflowId) filters.push(eq(schema.artifacts.workflowId, workflowId));
     if (c.req.query('pinned') === 'true') filters.push(eq(schema.artifacts.pinned, true));
     const rows = deps.db.select().from(schema.artifacts)
       .where(and(...filters))
@@ -64,8 +73,10 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
       runId: body.runId ?? null,
       workflowId: body.workflowId ?? null,
       agentId: body.agentId ?? null,
+      appId: body.appId ?? null,
       conversationId: body.conversationId ?? null,
       nodeId: body.nodeId ?? null,
+      origin: deriveArtifactOrigin(body),
       type: body.type,
       title: body.title,
       content: body.content,
@@ -123,8 +134,8 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
   return app;
 }
 
-function isArtifactType(value: string | undefined): value is typeof ARTIFACT_TYPES[number] {
-  return ARTIFACT_TYPES.includes(value as typeof ARTIFACT_TYPES[number]);
+function isArtifactOrigin(value: string | undefined): value is typeof ARTIFACT_ORIGINS[number] {
+  return ARTIFACT_ORIGINS.includes(value as typeof ARTIFACT_ORIGINS[number]);
 }
 
 function loadArtifact(db: AgentisSqliteDb, workspaceId: string, id: string) {

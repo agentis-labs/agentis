@@ -28,7 +28,7 @@ pnpm exec tsx packages/cli/src/index.ts bootstrap --url http://127.0.0.1:3737 --
 
 - Check for an existing orchestrator first with `GET /v1/agents?role=orchestrator`.
 - Only one orchestrator should exist per workspace.
-- If an orchestrator already exists, bootstrap as `--role manager` or `--role worker` instead.
+- If an orchestrator already exists, bootstrap as `--role manager` or `--role specialist` instead.
 - The CLI resolves the first available workspace automatically unless `--workspace-id` is provided.
 - Valid adapter values are `claude_code`, `codex`, `hermes_agent`, `openclaw`, `cursor`, and `http`.
 - Pass channel secrets through environment variables, never hardcode them.

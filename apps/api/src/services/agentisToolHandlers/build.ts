@@ -12,6 +12,7 @@ import {
   REALTIME_EVENTS,
   REALTIME_ROOMS,
   agentSatisfiesRequirements,
+  createAppSchema,
   isAgentRole,
   layoutWorkflowGraph,
   layoutWorkflowGraphByPhases,
@@ -20,6 +21,12 @@ import {
   suggestWorkflowPhases,
 } from '@agentis/core';
 import type { AgentAdapter, AgentRequirements, ExtensionManifest, RealtimeEventName, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
+import { AppStore } from '@agentis/app';
+import { AppStaffingService } from '../appStaffing.js';
+import { WORKFLOW_DESIGN_DOCTRINE } from '../workflowDesignDoctrine.js';
+import { auditWorkflowRobustness } from '../workflowRobustnessAudit.js';
+import { WORKFLOW_PATTERNS, getWorkflowPattern } from '../workflowPatterns.js';
+import { recordWorkflowLesson, recallWorkflowLessons, renderPlaybookLessons } from '../workflowPlaybook.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
@@ -204,7 +211,19 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             updatedAt: now,
           })
           .run();
-        return { workflowId: id, title: String(args.name) };
+        // Anchor to an App-of-one — Agentis delivers Apps, never bare workflows.
+        const store = new AppStore(deps.db);
+        const wrap = store.create(
+          ctx.workspaceId,
+          ctx.userId,
+          createAppSchema.parse({ name: String(args.name), description: args.description ? String(args.description) : '', entryWorkflowId: id }),
+        );
+        // Birth the App's cast (Phase R) — never unowned/unstaffed. Best-effort.
+        if (deps.specialists) {
+          const staffing = new AppStaffingService({ store, specialists: deps.specialists, logger: deps.logger });
+          await staffing.staffApp({ workspaceId: ctx.workspaceId, userId: ctx.userId, appId: wrap.id, name: wrap.name, description: wrap.description ?? '' });
+        }
+        return { workflowId: id, appId: wrap.id, title: String(args.name) };
       },
     },
     {
@@ -460,6 +479,71 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         }
       },
     },
+    {
+      definition: {
+        id: 'agentis.workflow.patterns',
+        family: 'inspect',
+        description:
+          'Retrieve robust workflow design patterns (WORKFLOW-DESIGN-10X) — proven control-flow shapes for the gates, '
+          + 'fallbacks, loops, and rollback the happy path omits: qualify-or-reject-loop, fetch-with-fallback, '
+          + 'approval-before-irreversible, validate-before-transition, bounded-parallel-batch, stateful-cursor-dedup. '
+          + 'Call WITHOUT id to list them with when-to-use; call with id to get the spliceable node+edge fragment '
+          + '(including the reject/fallback/rollback branches) to adapt into your graphDraft. Use these before building '
+          + 'anything that qualifies candidates, makes an irreversible action, processes a batch, or runs on a schedule.',
+        inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Pattern id to expand into a full fragment. Omit to list all patterns.' } } },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args) => {
+        const id = typeof args.id === 'string' && args.id.trim() ? args.id.trim() : null;
+        if (id) {
+          const pattern = getWorkflowPattern(id);
+          if (!pattern) {
+            return { error: `unknown pattern: ${id}`, available: WORKFLOW_PATTERNS.map((p) => p.id) };
+          }
+          return { pattern };
+        }
+        return {
+          patterns: WORKFLOW_PATTERNS.map((p) => ({ id: p.id, title: p.title, doctrine: p.doctrine, when: p.when })),
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.learn',
+        family: 'build',
+        description:
+          'Record a durable WORKFLOW LESSON into the workspace playbook after you diagnose and fix a novel run failure '
+          + '(a flaky source, a missing gate, an encoding gotcha, a rollback you had to add). Future workflow builds '
+          + 'recall these lessons automatically and design around them — this is how the workspace gets smarter over time. '
+          + 'Pass failureMode (what went wrong / the situation) and fix (what to do next time), plus an optional patternId.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            failureMode: { type: 'string', description: 'The situation or failure that occurred.' },
+            fix: { type: 'string', description: 'What to do next time to avoid or handle it.' },
+            patternId: { type: 'string', description: 'Optional robust pattern id that addresses it (see agentis.workflow.patterns).' },
+          },
+          required: ['failureMode', 'fix'],
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const failureMode = String(args.failureMode ?? '').trim();
+        const fix = String(args.fix ?? '').trim();
+        if (!failureMode || !fix) throw new AgentisError('VALIDATION_FAILED', 'failureMode and fix are required');
+        const memoryId = recordWorkflowLesson(
+          deps.memory,
+          ctx.workspaceId,
+          { failureMode, fix, ...(typeof args.patternId === 'string' && args.patternId.trim() ? { patternId: args.patternId.trim() } : {}) },
+          ctx.agentId,
+        );
+        if (!memoryId) throw new AgentisError('VALIDATION_FAILED', 'workspace memory is not available to store the lesson');
+        return { recorded: true, memoryId };
+      },
+    },
   ]);
 }
 
@@ -538,6 +622,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     const graph = existingWorkflow.graph as WorkflowGraph;
     return {
       workflowId,
+      appId: new AppStore(deps.db).appIdForWorkflow(args.workspaceId, workflowId),
       runId: args.runId ?? `build_${workflowId}`,
       title,
       description: persistedDescription,
@@ -758,9 +843,19 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     repairs.push({ rule: 14, kind: 'integration_operation_normalized', nodeId: r.nodeId, message: `Corrected ${r.integration} operation "${r.from}" → "${r.to}".` });
     if (args.stream) phase('repairing', `Corrected ${r.integration} operation → ${r.to}`);
   }
+  // Robustness audit (WORKFLOW-DESIGN-10X Phase 2) — enforce the design doctrine
+  // deterministically: flag missing gates/state/reject-branches/failure-handling
+  // and auto-repair the safe ones (bound an unbounded batch). Warnings ride the
+  // same surface the operator already sees; repairs are narrated like any other.
+  const robustness = auditWorkflowRobustness(opFix.graph, brief.classification);
+  for (const w of robustness.warnings) preflight.warnings.push(w);
+  for (const r of robustness.repairs) {
+    repairs.push({ rule: 6, kind: 'robustness_bound', message: r });
+    if (args.stream) phase('repairing', r);
+  }
   // Tidy the graph with the shared layered layout so it's readable and framable
   // the instant it lands on the canvas — AI models place nodes arbitrarily.
-  const laidOutGraph = layoutBuiltWorkflowGraph(opFix.graph, {
+  const laidOutGraph = layoutBuiltWorkflowGraph(robustness.graph, {
     existingWorkflow: Boolean(existingWorkflow),
     replacePhases: synthesis === 'plan' || wantsPhaseOrganization(description),
   });
@@ -834,6 +929,27 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       updatedAt: now,
     }).run();
   }
+
+  // Agentis ships Agentic Apps, not bare workflows. A workflow is the *logic*
+  // layer of an App — so every newly built workflow is anchored to an App-of-one
+  // immediately, and a naked, ownerless workflow can't exist. An existing
+  // workflow keeps its current owner (which may be null for legacy rows). The
+  // resolved `appId` rides the build result + CANVAS_BUILD_COMPLETE event so the
+  // chat opens the App, never the raw workflow canvas.
+  const appStore = new AppStore(deps.db);
+  let appId: string | null = null;
+  if (existingWorkflow) {
+    appId = appStore.appIdForWorkflow(args.workspaceId, workflowId);
+  } else {
+    const wrap = appStore.create(
+      args.workspaceId,
+      args.userId,
+      createAppSchema.parse({ name: title, description: persistedDescription, entryWorkflowId: workflowId }),
+    );
+    appId = wrap.id;
+    if (args.stream) phase('building', `Wrapped in app "${title}"`);
+  }
+
   // Persist the linked cron trigger row now that the workflow row exists (FK).
   // Idempotent on rebuild: update the existing row in place. Stored UTC, so the
   // trigger config timezone stays UTC (TriggerRuntime's default) — sourceTimezone
@@ -926,7 +1042,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   }
   phase('complete', `${graph.nodes.length} node(s), ${repairs.length} repair(s), ${critiques.length} critique(s)`);
   publishCanvas(deps, pubCtx, REALTIME_EVENTS.CANVAS_BUILD_COMPLETE, {
-    workflowId, runId: streamRunId, agentId: args.agentId ?? null,
+    workflowId, runId: streamRunId, appId, agentId: args.agentId ?? null,
     nodeCount: graph.nodes.length, edgeCount: graph.edges.length,
     warnings: preflight.warnings, estimatedCostCents: preflight.estimatedCostCents,
     archetype: brief.classification.archetype, trace,
@@ -936,6 +1052,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     : '';
   return {
     workflowId,
+    appId,
     runId: streamRunId,
     title,
     description: persistedDescription,
@@ -994,7 +1111,7 @@ function wantsPhaseOrganization(description: string): boolean {
  * linearly: trigger → phase nodes → return_output. Credential binding + the
  * terminal-output guarantee are handled downstream by `preflightAndEnrich`.
  */
-function assembleGraphFromPlan(plan: WorkflowPlan, description: string): WorkflowGraph {
+export function assembleGraphFromPlan(plan: WorkflowPlan, description: string): WorkflowGraph {
   const lower = description.toLowerCase();
   const trigger = inferTriggerConfig(lower);
   const nodes: WorkflowNode[] = [
@@ -1002,6 +1119,9 @@ function assembleGraphFromPlan(plan: WorkflowPlan, description: string): Workflo
   ];
   const edges: WorkflowGraph['edges'] = [];
   const phases: NonNullable<WorkflowGraph['phases']> = [];
+  // Gate/validate phases whose forward edge becomes a PASS branch and that gain a
+  // reject/rollback branch after the linear spine is wired (Phase 3 finish).
+  const branchNodes: Array<{ id: string; kind: 'gate' | 'validate'; name: string }> = [];
   let prev = 'trigger';
   let x = 280;
 
@@ -1009,7 +1129,21 @@ function assembleGraphFromPlan(plan: WorkflowPlan, description: string): Workflo
     const id = `phase_${i + 1}`;
     const prompt = phase.description?.trim() || description;
     let node: WorkflowNode;
-    if (phase.agentRole) {
+    if (phase.kind === 'approval') {
+      // D2 — a real human approval gate before the irreversible step.
+      node = {
+        id, type: 'checkpoint', title: phase.name, position: { x, y: 80 },
+        config: { kind: 'checkpoint', approvalMode: 'manual' },
+      };
+    } else if (phase.kind === 'gate' || phase.kind === 'validate') {
+      // D1/D6 — an evaluator gate that screens (qualify) or verifies (validate)
+      // before the chain continues. The reject/rollback branch is the operator's
+      // to wire on the canvas; the gate node makes the decision point explicit.
+      node = {
+        id, type: 'evaluator', title: phase.name, position: { x, y: 80 },
+        config: { kind: 'evaluator', targetPath: 'result', criteria: prompt, passThreshold: 0.6 },
+      };
+    } else if (phase.agentRole) {
       node = {
         id, type: 'agent_task', title: phase.name, position: { x, y: 80 },
         config: {
@@ -1038,12 +1172,37 @@ function assembleGraphFromPlan(plan: WorkflowPlan, description: string): Workflo
     nodes.push(node);
     edges.push({ id: `edge_${prev}_${id}`, source: prev, target: id });
     phases.push({ id: `grp_${i + 1}`, name: phase.name, color: PHASE_COLORS[i % PHASE_COLORS.length]!, nodeIds: [id] });
+    if (phase.kind === 'gate' || phase.kind === 'validate') branchNodes.push({ id, kind: phase.kind, name: phase.name });
     prev = id;
     x += 280;
   });
 
   nodes.push({ id: 'return_output', type: 'return_output', title: 'Return Output', position: { x, y: 80 }, config: { kind: 'return_output', renderAs: 'markdown' } });
   edges.push({ id: `edge_${prev}_return_output`, source: prev, target: 'return_output' });
+
+  // Wire the real control flow (Phase 3 finish): a gate/validate node's forward
+  // edge becomes the PASS branch (auto-traversed on the evaluator's `passed`), and
+  // it gains a FAIL branch — a clean "rejected" terminal for a gate, or a
+  // rollback→terminal for a validate. All forward + acyclic, so it validates.
+  let bx = x + 280;
+  for (const b of branchNodes) {
+    const forward = edges.find((e) => e.source === b.id);
+    if (forward) forward.type = 'condition'; // PASS: traverses when output.passed is truthy
+    if (b.kind === 'gate') {
+      const rejectId = `reject_${b.id}`;
+      nodes.push({ id: rejectId, type: 'return_output', title: `Rejected — ${b.name}`, position: { x: bx, y: 320 }, config: { kind: 'return_output', renderAs: 'markdown' } });
+      edges.push({ id: `edge_${b.id}_${rejectId}`, source: b.id, target: rejectId, type: 'condition', condition: 'output.passed == false' });
+      bx += 280;
+    } else {
+      const rollbackId = `rollback_${b.id}`;
+      const rolledId = `rolled_back_${b.id}`;
+      nodes.push({ id: rollbackId, type: 'integration', title: 'Rollback / cleanup', position: { x: bx, y: 320 }, config: { kind: 'integration', integrationId: '', operationId: defaultOperationForSlug(''), inputs: {} } });
+      nodes.push({ id: rolledId, type: 'return_output', title: 'Rolled back', position: { x: bx + 280, y: 320 }, config: { kind: 'return_output', renderAs: 'markdown' } });
+      edges.push({ id: `edge_${b.id}_${rollbackId}`, source: b.id, target: rollbackId, type: 'condition', condition: 'output.passed == false' });
+      edges.push({ id: `edge_${rollbackId}_${rolledId}`, source: rollbackId, target: rolledId });
+      bx += 560;
+    }
+  }
 
   return { version: 1, nodes, edges, viewport: { x: 0, y: 0, zoom: 1 }, phases };
 }
@@ -1057,7 +1216,7 @@ const DELIVERY_SLUGS = new Set([
 /** One inspectable structural repair the pipeline applied (10X-CREATION §7 M1). */
 export interface RepairAction {
   rule: number;
-  kind: 'delivery_node_added' | 'recurring_state_added' | 'terminal_added' | 'cycle_broken' | 'dangling_edge_removed' | 'integration_operation_normalized' | 'cron_schedule_defaulted';
+  kind: 'delivery_node_added' | 'recurring_state_added' | 'terminal_added' | 'cycle_broken' | 'dangling_edge_removed' | 'integration_operation_normalized' | 'cron_schedule_defaulted' | 'robustness_bound';
   nodeId?: string;
   message: string;
 }
@@ -1817,14 +1976,22 @@ async function reviewWorkflowGraph(
 ): Promise<{ critiques: BuildCritique[]; repairedGraph: WorkflowGraph | null }> {
   const system = [
     SYNTHESIS_ARCHITECT_PREAMBLE,
-    'You are the REVIEWER. Audit the candidate WorkflowGraph against the IRON RULES above.',
+    'You are the REVIEWER. Audit the candidate WorkflowGraph against BOTH the IRON RULES and the',
+    'WORKFLOW DESIGN DOCTRINE (D1–D7) above. Beyond structure, hunt for missing robustness:',
+    'an irreversible/external action (deploy/send/publish/delete) with NO approval checkpoint or',
+    'evaluator gate before it (D2); an external fetch/scrape with no fallback or result check (D3);',
+    'a cron/listener workflow that accumulates state but has no workflow_store dedup (D4); a batch',
+    'with unbounded fan-out (D5); a qualification/decision step with no reject/fallback branch (D1);',
+    'an irreversible action with no validate-then-rollback after it (D6); an open-ended iterate-until-done',
+    'goal hand-wired as a fixed-N evaluator retry instead of a `converge` node (D7).',
     'Return ONLY a JSON object of shape:',
-    '{ "critiques": [{ "rule": <1-13>, "severity": "info"|"warn"|"error", "nodeId"?: "<id>", "message": "<what is wrong and the fix>" }],',
+    '{ "critiques": [{ "rule": <1-14 or "D1".."D6">, "severity": "info"|"warn"|"error", "nodeId"?: "<id>", "message": "<what is wrong and the fix>" }],',
     '  "repairedGraph"?: { "version": 1, "nodes": [...], "edges": [...], "viewport": { "x":0,"y":0,"zoom":1 } } }',
-    'Rules: If the graph already obeys every rule, return "critiques": [] and OMIT repairedGraph.',
+    'Rules: If the graph already obeys every rule and the doctrine, return "critiques": [] and OMIT repairedGraph.',
     'If you find violations you can fix (lazy agent_task doing fetch/delivery, missing http_request/integration/',
-    'evaluator/terminal, serial work that should be parallel), return the FULL corrected graph in repairedGraph,',
-    'preserving valid nodes and ids where possible. Never collapse the workflow into a single agent_task.',
+    'evaluator/terminal, serial work that should be parallel, a missing gate/fallback/state/rollback), return the',
+    'FULL corrected graph in repairedGraph, preserving valid nodes and ids where possible. Never collapse the',
+    'workflow into a single agent_task.',
   ].join('\n');
   const user = [
     args.brief ? renderCreationBrief(args.brief) : '',
@@ -2132,7 +2299,7 @@ function ownModelCompleter(
  * runtime → the agent's own model (streaming fast-path preferred). Undefined only
  * when nothing at all can build (no configured model AND no chat-capable agent).
  */
-function resolveSynthesisCompleter(deps: ToolHandlerDeps, workspaceId: string, agentId: string | undefined, task: string): StructuredCompleter | undefined {
+export function resolveSynthesisCompleter(deps: ToolHandlerDeps, workspaceId: string, agentId: string | undefined, task: string): StructuredCompleter | undefined {
   if (deps.modelAssistedRuntimeEnabled?.(workspaceId) === false) {
     return ownModelCompleter(deps, workspaceId, agentId, 'synthesis', task);
   }
@@ -2367,6 +2534,9 @@ async function synthesizeWithLlm(
   const userPrompt = [
     workspaceContext ? `${workspaceContext}\n` : '',
     brief ? renderCreationBrief(brief) : '',
+    // Phase 5 — feed the workspace's learned failure-mode lessons back into the
+    // build so each new workflow is designed around mistakes past runs already hit.
+    renderPlaybookLessons(recallWorkflowLessons(deps.memory, workspaceId)),
     `DESCRIPTION:\n${description}`,
     inv && inv.wireableIntegrations.length > 0
       ? `\nWIREABLE INTEGRATIONS (a credential exists — use an integration node with integrationId set to one of these): ${inv.wireableIntegrations.join(', ')}`
@@ -2496,6 +2666,7 @@ const SYNTHESIS_ARCHITECT_PREAMBLE = [
   'Set agent_task.agentRole to the minimum-sufficient specialist by tool need (see SPECIALIST ROLES).',
   'Add a one-sentence `castingReason` to each agent_task config explaining the role choice.',
   '',
+  WORKFLOW_DESIGN_DOCTRINE,
 ].join('\n');
 
 /** Render the creation brief (caller domain + classification) for the user prompt. */
@@ -2509,6 +2680,21 @@ function renderCreationBrief(brief: CreationBrief): string {
   lines.push(`CLASSIFICATION: archetype=${c.archetype}, trigger=${c.triggerType}, est_nodes=${c.estimatedNodeCount}`);
   if (c.requiredIntegrations.length) lines.push(`MENTIONED INTEGRATIONS: ${c.requiredIntegrations.join(', ')}`);
   if (c.missingCredentials.length) lines.push(`MISSING CREDENTIALS (emit pending-config integration nodes, no credentialId): ${c.missingCredentials.join(', ')}`);
+  // ROBUSTNESS REQUIREMENTS (Phase 3) — translate the doctrine into THIS request's
+  // mandatory gates/state, so the model designs for failure, not just the happy path.
+  const rb = c.robustness;
+  const recurring = c.triggerType === 'cron' || c.triggerType === 'persistent_listener';
+  const needs = [
+    rb.qualifies ? 'a qualification gate (router/evaluator) with a REJECT branch that loops back to the source instead of proceeding (D1)' : '',
+    rb.approval ? 'a human approval checkpoint immediately before the irreversible action (D2)' : '',
+    rb.validates && rb.irreversible ? 'a validation step AFTER the irreversible action (evaluator/router) with a rollback branch on failure (D6)' : '',
+    rb.batch ? 'bounded fan-out for the per-item work (loop/parallel with a maxConcurrency cap, joined by merge) (D5)' : '',
+    recurring ? 'workflow_store dedup state (a get near the start, a set near the end) so each run only handles what is new (D4)' : '',
+    rb.iterative ? 'a `converge` node for the open-ended iterate-until-done goal: it re-runs a COHORT sub-workflow each pass, carries state across iterations on the blackboard, and stops on goal/stall/budget — do NOT hand-wire a fixed-N evaluator retry edge. Set continuation (deterministic | judge | signal); for code-fixing cooperation set isolation:"worktree" + preserve:"pr" (D7)' : '',
+  ].filter(Boolean);
+  if (needs.length) {
+    lines.push(`ROBUSTNESS REQUIREMENTS (this request needs these — encode each as real nodes, do not ship the happy path only):\n${needs.map((n) => `- ${n}`).join('\n')}`);
+  }
   return lines.join('\n');
 }
 
@@ -2580,6 +2766,14 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '  evaluator:      { kind: "evaluator", targetPath, criteria, passThreshold? }',
   '  guardrails:     { kind: "guardrails", rules: [], onViolation: "block"|"flag" }',
   '  loop:           { kind: "loop", itemsExpression, maxConcurrency, bodyWorkflowId, outputArrayKey, onIterationError }',
+  '  converge:       { kind: "converge", bodyWorkflowId, continuation, maxIterations?, budget?, stallPolicy?, isolation?, preserve? }',
+  '                  The cooperative LOOP-UNTIL-DONE primitive. `bodyWorkflowId` is a cohort sub-workflow (e.g. research→fix→verify)',
+  '                  re-run each iteration until `continuation` says stop. continuation is ONE of:',
+  '                  { type: "deterministic", expr: "body.openBugCount > 0" } — keep going while true;',
+  '                  { type: "judge", targetPath, criteria, passThreshold? } — keep going while the judge FAILS;',
+  '                  { type: "signal", channel? } — agents call converge_signal when done. State carries across iterations via the',
+  '                  blackboard; stops early on stall (stallPolicy.window) or budget. isolation: "auto"|"worktree"|"shared";',
+  '                  preserve: "discard"|"branch"|"pr" turns a coding loop into a reviewable PR. Use for open-ended goals, not fixed-N work.',
   '  parallel:       { kind: "parallel", waitFor, onBranchError, mergeStrategy }',
   '  agent_swarm:    { kind: "agent_swarm", prompt, inputArrayPath, maxParallel, mergeStrategy, capabilityTags, outputKey }',
   '  artifact_collect: { kind: "artifact_collect", collectionName }',

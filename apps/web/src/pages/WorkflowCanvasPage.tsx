@@ -19,6 +19,7 @@ import {
 } from '@agentis/core';
 import {
   Handle,
+  MarkerType,
   Position,
   useNodesState,
   useEdgesState,
@@ -87,6 +88,7 @@ import {
   type IntegrationManifestLite,
 } from '../components/canvas/nodeConfigRegistry';
 import { CanvasEngine } from '../components/canvas/CanvasEngine';
+import { CanvasBuildComposer } from '../components/canvas/CanvasBuildComposer';
 import { nodeKindMeta, nodeKindColor } from '../components/canvas/nodeKindMeta';
 import { autoLayout } from '../components/canvas/autoLayout';
 import { AgentFocusOverlayManager } from '../components/canvas/AgentFocusOverlayManager';
@@ -102,6 +104,7 @@ import { InsightsTab } from '../components/brain/InsightsTab';
 import { KnowledgeTab } from '../components/knowledge/KnowledgeTab';
 import { ExtensionsModal } from '../components/extensions/ExtensionsModal';
 import { BrainSectionNav, type BrainSection } from '../components/brain/BrainSectionNav';
+import { ScopeVisibilityToggle } from '../components/brain/ScopeVisibilityToggle';
 
 interface WorkflowDetail {
   id: string;
@@ -268,6 +271,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   const [selection, setSelection] = useState<InspectorSelection>({ kind: null });
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [selectedPhaseId, setSelectedPhaseId] = useState<string | null>(null);
+  const [canvasReady, setCanvasReady] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationManifestLite[]>([]);
   const [credentialTypes, setCredentialTypes] = useState<string[]>([]);
@@ -1002,8 +1006,70 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
 
   const clearPhaseFocus = useCallback(() => {
     setSelectedPhaseId(null);
-    flowInstanceRef.current?.fitView({ padding: 0.16, duration: 420, maxZoom: 1 });
+    // Frame the whole flow, but never below a legible floor — a wide multi-phase
+    // graph stays readable (centered, pan for the edges) instead of collapsing to
+    // illegible slivers. The minimap/rail carry the bird's-eye view.
+    flowInstanceRef.current?.fitView({ padding: 0.16, duration: 420, maxZoom: 1, minZoom: 0.5 });
   }, []);
+
+  // ── Initial framing ───────────────────────────────────────────────────
+  // Open framing the WHOLE workflow (every phase) so the operator sees the full
+  // shape at a glance, then zooms in where they want. We still own the framing
+  // (rather than React Flow's auto-fit) because the embedded App facet mounts the
+  // canvas on tab select, and auto-fit runs after node measurement — without this
+  // the first frame lands at the default viewport instead of fit-to-graph.
+  const frameWorkflowEntry = useCallback((animate = true) => {
+    const inst = flowInstanceRef.current;
+    if (!inst) return;
+    if (inst.getNodes().length === 0) return;
+    inst.fitView({ padding: 0.14, duration: animate ? 460 : 0, maxZoom: 1 });
+  }, []);
+
+  // Run the entry framing once per workflow — but only after the canvas is
+  // actually visible (the embedded App facet mounts it on tab select) AND React
+  // Flow has measured node sizes. Framing earlier would either no-op (zero-size
+  // host) or be computed against unmeasured nodes. We mark the workflow framed
+  // only after a real, sized frame so a premature attempt can't lock it out.
+  const framedWorkflowIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!canvasReady || !wf) return;
+    const host = overlayHostRef.current;
+    if (!host) return;
+    const wfId = wf.id;
+    if (framedWorkflowIdRef.current === wfId) return;
+    let raf = 0;
+    let tries = 0;
+    let cancelled = false;
+
+    const attempt = () => {
+      if (cancelled || framedWorkflowIdRef.current === wfId) return;
+      const inst = flowInstanceRef.current;
+      const visible = host.clientWidth > 60 && host.clientHeight > 60;
+      const nodes = inst?.getNodes() ?? [];
+      const measured = nodes.some((node) => (node.measured?.width ?? node.width ?? 0) > 0);
+      if (inst && visible && measured) {
+        framedWorkflowIdRef.current = wfId;
+        frameWorkflowEntry(true);
+        return;
+      }
+      if (tries++ < 90) raf = window.requestAnimationFrame(attempt); // ~1.5s of retries
+    };
+
+    raf = window.requestAnimationFrame(attempt);
+    // A tab reveal resizes the host from 0 → full; retry framing when that happens.
+    const observer = new ResizeObserver(() => {
+      if (cancelled || framedWorkflowIdRef.current === wfId) return;
+      tries = 0;
+      window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(attempt);
+    });
+    observer.observe(host);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [canvasReady, wf, flowNodes.length, frameWorkflowEntry]);
 
   const updatePhases = useCallback((phases: WorkflowPhase[]) => {
     const current = wfRef.current;
@@ -1741,17 +1807,21 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           <CanvasEngine
             nodes={flowNodes}
             edges={flowEdges}
-            fitView
-            // Initial framing must equal what the "fit view" control does: frame
-            // the whole graph. No minZoom floor — the faded phase bands keep the
-            // structure legible when a wide graph fits at a low zoom.
-            fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
+            // Initial framing is owned by frameWorkflowEntry (see the canvasReady
+            // effect), NOT React Flow's auto-fit. Auto-fit frames the whole wide
+            // multi-phase graph at an illegible zoom and — because it runs after
+            // node measurement — would override our readable entry framing.
             minZoom={0.12}
             maxZoom={1.75}
             minimapNodeColor={(n) => nodeKindColor((n.data as { kind?: string } | undefined)?.kind)}
-            onReady={(instance) => { flowInstanceRef.current = instance; }}
+            onReady={(instance) => { flowInstanceRef.current = instance; setCanvasReady(true); }}
             nodeTypes={{ agentis: AgentisNode }}
             edgeTypes={edgeTypes}
+            // Directional arrowheads so the flow reads left-to-right at a glance,
+            // like the reference builder. Color tracks the edge stroke token.
+            defaultEdgeOptions={{
+              markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: 'var(--color-line-strong)' },
+            }}
             dropEffect="copy"
             onDropCanvas={(e, pos) => {
               const raw = e.dataTransfer.getData('application/x-agentis-node');
@@ -1877,6 +1947,11 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
               onDelete={deleteSelection}
             />
           </CanvasEngine>
+          {flowNodes.length === 0 && wf && (
+            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+              <CanvasBuildComposer workflowId={wf.id} workflowTitle={wf.title} variant="empty" />
+            </div>
+          )}
           <div className="pointer-events-none absolute right-4 top-4 z-40 flex flex-col items-end gap-3">
             <div className="pointer-events-auto flex flex-col items-stretch gap-3">
               <WorkflowMonitorCard
@@ -2255,7 +2330,10 @@ export function WorkflowBrainTab({
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-canvas">
       <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-6">
         <span className="text-[12px] font-semibold text-text-muted">{kind === 'app' ? 'App intelligence' : 'Workflow intelligence'}</span>
-        <BrainSectionNav value={view} onChange={setView} />
+        <div className="flex items-center gap-2">
+          <ScopeVisibilityToggle scopeId={workflow.id} />
+          <BrainSectionNav value={view} onChange={setView} />
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
         {view === 'map' ? (
@@ -2263,6 +2341,8 @@ export function WorkflowBrainTab({
             endpoint={endpoint}
             detailEndpoint={detailEndpoint}
             layoutKey={`${kind}-${workflow.id}`}
+            scopeName={workflow.title}
+            scopeId={workflow.id}
             emptyMessage={kind === 'app'
               ? 'This App has not formed Brain knowledge yet. Promote a record to memory (the agent\'s data_promote_memory tool) or have the operator run its logic to build its map.'
               : 'This workflow has not produced scoped Brain knowledge yet. Add knowledge, save memory, or run it once to form its map.'}
@@ -3427,6 +3507,10 @@ function AgentisNode({
 }) {
   const meta = nodeKindMeta(data.kind);
   const glyph = meta.glyph;
+  // Each node carries its category color on the icon tile — the canvas reads as
+  // a set of legible, color-coded cards (like the reference builder) rather than
+  // monochrome boxes that only make sense once you squint at the label.
+  const accentColor = nodeKindColor(data.kind);
   const isTrigger = data.kind === 'trigger';
   const status = data.liveStatus;
   const progress = data.liveExtra?.progress;
@@ -3484,7 +3568,7 @@ function AgentisNode({
   return (
     <div
       className={clsx(
-        'agentis-workflow-node group relative w-[252px] rounded-node border bg-surface-2 shadow-card transition-[border-color,box-shadow,opacity]',
+        'agentis-workflow-node group relative w-[300px] rounded-node border bg-surface-2 shadow-card transition-[border-color,box-shadow,opacity]',
         stateRing,
         isAgentNode && 'bg-[linear-gradient(180deg,rgba(22,28,38,0.98)_0%,rgba(18,22,30,0.98)_100%)] shadow-[inset_0_1px_0_rgba(125,211,252,0.08),0_12px_24px_rgba(0,0,0,0.28)]',
         data.phaseDimmed && 'opacity-30',
@@ -3514,14 +3598,17 @@ function AgentisNode({
       {/* Header — icon + title + status. The single, default reading unit. The
           icon is monochrome (matching the node palette); phase color lives in the
           band behind the card, not on the node. */}
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
+      <div className="flex items-center gap-3 px-4 py-3.5">
         <span
           className={clsx(
-            'flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-lg text-[16px] leading-none',
-            isAgentNode
-              ? 'border border-sky-400/25 bg-sky-400/10 text-sky-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
-              : 'bg-surface text-text-secondary',
+            'flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl text-[20px] leading-none',
+            isAgentNode && 'border border-sky-400/25 bg-sky-400/10 text-sky-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
           )}
+          style={
+            isAgentNode
+              ? undefined
+              : { backgroundColor: `${accentColor}1f`, color: accentColor, boxShadow: `inset 0 0 0 1px ${accentColor}33` }
+          }
           aria-hidden
         >
           {glyph}
@@ -3530,8 +3617,8 @@ function AgentisNode({
           <div
             className="font-medium text-text-primary"
             style={{
-              fontSize: 14,
-              lineHeight: 1.15,
+              fontSize: 16.5,
+              lineHeight: 1.2,
               display: '-webkit-box',
               WebkitLineClamp: 2,
               WebkitBoxOrient: 'vertical',
@@ -3543,7 +3630,7 @@ function AgentisNode({
           {showSubtitle && (
             <div
               className={clsx(
-                'truncate text-[11.5px]',
+                'truncate text-[13px]',
                 isAgentNode
                   ? 'font-medium uppercase tracking-[0.08em] text-sky-300/90'
                   : data.kind === 'extension_task' && data.operationName

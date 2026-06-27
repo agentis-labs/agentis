@@ -31,6 +31,12 @@ export type CollectionField = z.infer<typeof collectionFieldSchema>;
 
 export const collectionSchemaSchema = z.object({
   fields: z.array(collectionFieldSchema).min(1).max(100),
+  /**
+   * When true, writes are CLOSED: unknown keys are rejected instead of stored
+   * untyped. Default (false) keeps the permissive passthrough for compatibility,
+   * but a typed collection can opt into a real guarantee.
+   */
+  strict: z.boolean().optional(),
 });
 export type CollectionSchema = z.infer<typeof collectionSchemaSchema>;
 

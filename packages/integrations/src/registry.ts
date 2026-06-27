@@ -36,3 +36,45 @@ const manifestOnlyConnectors: ConnectorModule[] = builtinIntegrationManifests
 
 export const builtinConnectors: ConnectorModule[] = [...implementedConnectors, ...manifestOnlyConnectors];
 export const defaultConnectorRegistry = new ConnectorRegistry(builtinConnectors);
+
+// ── Honest catalog (masterplan 2.2) ──────────────────────────────────────────
+// The platform advertises ~95 connectors but only the hand-written + templated
+// ones run out of the box; the rest fall back to a generic HTTP connector that
+// THROWS unless the caller supplies a URL. Surfacing that distinction stops the
+// UI from presenting a connector as ready when it would fail on first use.
+
+export type ConnectorReadiness = 'runnable' | 'needs_setup';
+
+const IMPLEMENTED_SERVICES = new Set(implementedConnectors.map((connector) => connector.service));
+
+/**
+ * Whether a connector runs out of the box (hand-written or per-service template)
+ * or needs operator setup first (generic HTTP fallback — requires a URL/baseUrl).
+ */
+export function connectorReadiness(service: string): ConnectorReadiness {
+  if (IMPLEMENTED_SERVICES.has(service) || Boolean(SERVICE_TEMPLATES[service])) return 'runnable';
+  return 'needs_setup';
+}
+
+export interface ConnectorCatalogEntry {
+  service: string;
+  name: string;
+  category: string;
+  description: string;
+  operations: string[];
+  readiness: ConnectorReadiness;
+}
+
+/** Every advertised connector tagged runnable vs needs-setup, sorted by service. */
+export function connectorCatalog(): ConnectorCatalogEntry[] {
+  return builtinIntegrationManifests
+    .map((manifest) => ({
+      service: manifest.service,
+      name: manifest.name,
+      category: manifest.category,
+      description: manifest.description,
+      operations: manifest.operations,
+      readiness: connectorReadiness(manifest.service),
+    }))
+    .sort((a, b) => a.service.localeCompare(b.service));
+}

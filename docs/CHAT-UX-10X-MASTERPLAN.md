@@ -796,3 +796,51 @@ The chat UX refactor is complete when:
 - Mobile, keyboard, and reduced-motion experiences are intentional.
 - The UI feels quieter while showing more truth.
 
+---
+
+## 15. Implementation Log
+
+### 2026-06-25 — Unified agent turn trace (thoughts → one collapsed record)
+
+**Problem.** The "agent working" experience was split across two competing
+collapsibles and threw most of itself away on success:
+
+- `LiveActivityTrace` showed a single truncated line while streaming, then
+  rendered `null` on a clean finish — the work vanished, leaving no record.
+- `ExecutionFeed` showed tool calls separately, but also rendered `null` after a
+  successful turn (only persisted when a tool failed).
+- The task-spine `StepTrack` was pinned `defaultExpanded` at the bottom of the
+  whole thread and never went away.
+
+So a finished turn left no compact, inspectable summary, and an active turn
+showed only one line of narration instead of the agent's thinking as it
+happened.
+
+**Change.** Replaced both components with one cohesive
+`apps/web/src/components/chat/AgentTurnTrace.tsx`:
+
+- **Streaming:** the agent's thoughts (the existing `activity` deltas, which
+  already narrate tool phases as "Using …"/"Running …") are written out as small
+  one-line messages, top-to-bottom. Only the last 4 stay on screen (older ones
+  fade, with a "+N earlier" marker) so the stream never becomes a wall of text —
+  raw chain-of-thought stays private (unchanged executor policy at
+  `chatSessionExecutor.ts:712`); we surface the safe narration projection only.
+- **Settled:** collapses to one minimal pill — `✓ Used 3 tools · 4.2s ›` (or
+  `Done` / `Failed` / `Stopped`) — that expands on click into the full timeline
+  (every thought + each tool's input/result/error, reusing the JSON detail
+  rows). Duration comes from the finalized `turn.durationMs`
+  (`conversations.ts:751`).
+- **Trivial replies stay clean:** framework-setup narration (boot, context load,
+  reply streaming) is excluded from the "worth showing" count, so a plain
+  conversational turn leaves no pill.
+
+`StepTrack` (task-spine X/X) is now a small card below the active turn, collapsed
+by default with hover-to-expand, and only shown while work is in flight
+(`streamingAgentActive || agentTyping`).
+
+**Files.** Added `AgentTurnTrace.tsx` + test; deleted `LiveActivityTrace.tsx`,
+`ExecutionFeed.tsx` and their tests; rewired `ThreadView.tsx`; removed the now
+orphaned `shimmer-sweep` keyframe from `styles.css`. New component test 4/4
+green; the 8 failing component suites are pre-existing (`@xyflow/react` mock
+missing `SelectionMode`, Sidebar title contract, etc.), unrelated to this change.
+

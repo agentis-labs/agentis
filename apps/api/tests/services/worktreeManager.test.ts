@@ -46,7 +46,7 @@ describe('WorktreeManager', () => {
     expect(handle.mode).toBe('none');
     expect(handle.path).toBeUndefined();
     // release is a safe no-op.
-    await expect(handle.release()).resolves.toBeUndefined();
+    await expect(handle.release()).resolves.toEqual({ preserved: false });
   });
 
   it('allocates an isolated temp dir for a non-git base, then removes it on release', async () => {
@@ -81,7 +81,7 @@ describe('WorktreeManager', () => {
     const handle = await mgr.acquire({ baseCwd: scratch, taskId: 'idem' });
     await handle.release();
     // Second release must not throw even though the dir is already gone.
-    await expect(handle.release()).resolves.toBeUndefined();
+    await expect(handle.release()).resolves.toEqual({ preserved: false });
   });
 
   it.skipIf(!HAS_GIT)(
@@ -132,6 +132,54 @@ describe('WorktreeManager', () => {
     },
   );
 
+  it.skipIf(!HAS_GIT)(
+    'preserves the cohort changes onto a durable branch when preserve: "branch"',
+    async () => {
+      const repo = await mkdtemp(join(tmpdir(), 'wtm-preserve-'));
+      try {
+        const git = (...args: string[]) =>
+          execFileSync('git', args, {
+            cwd: repo,
+            stdio: 'ignore',
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t',
+              GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t',
+            },
+          });
+        git('init');
+        await writeFile(join(repo, 'README.md'), '# base\n');
+        git('add', '.');
+        git('commit', '-m', 'init');
+
+        const mgr = new WorktreeManager(logger, { root });
+        const handle = await mgr.acquire({
+          baseCwd: repo,
+          taskId: 'loop-1',
+          preserve: 'branch',
+          branchName: 'agentis/loop-1',
+          commitMessage: 'cooperative loop result',
+        });
+        expect(handle.mode).toBe('git_worktree');
+        // A cohort agent edits a file inside the isolated worktree.
+        await writeFile(join(handle.path!, 'fix.txt'), 'patched by codex\n');
+
+        const result = await handle.release();
+        expect(result.preserved).toBe(true);
+        expect(result.branch).toBe('agentis/loop-1');
+        expect(result.changedFiles).toBeGreaterThan(0);
+
+        // The branch persists in the base repo and carries the change.
+        const branches = execFileSync('git', ['branch', '--list', 'agentis/loop-1'], { cwd: repo }).toString();
+        expect(branches).toContain('agentis/loop-1');
+        const show = execFileSync('git', ['show', 'agentis/loop-1:fix.txt'], { cwd: repo }).toString();
+        expect(show).toContain('patched by codex');
+      } finally {
+        await rm(repo, { recursive: true, force: true }).catch(() => {});
+      }
+    },
+  );
+
   it('degrades to a temp dir when the root cannot be created under a file path', async () => {
     // Point root at a path whose parent is a FILE — mkdir recursive fails, and we
     // must still not throw (isolation is best-effort).
@@ -142,6 +190,6 @@ describe('WorktreeManager', () => {
     const handle = await mgr.acquire({ baseCwd: scratch, taskId: 'degrade' });
     // Either none (mkdtemp failed) — never a throw.
     expect(['none', 'temp_dir']).toContain(handle.mode);
-    await expect(handle.release()).resolves.toBeUndefined();
+    await expect(handle.release()).resolves.toEqual({ preserved: false });
   });
 });

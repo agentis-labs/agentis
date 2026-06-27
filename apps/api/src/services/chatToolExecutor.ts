@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { AgentisToolDefinition, ChatTurnContext } from '@agentis/core';
+import type { AgentisToolDefinition, ChatPermissionMode, ChatTurnContext } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { AgentisToolRegistry } from './agentisToolRegistry.js';
 
@@ -38,7 +38,20 @@ export class ChatToolExecutor {
     return new Set(this.#deps.registry.catalog().tools.map((tool) => tool.id));
   }
 
-  static requiresConfirmation(name: string): boolean {
+  /**
+   * Whether a tool call must pause for operator confirmation before running,
+   * given the conversation's permission mode.
+   *
+   * - `auto` — never confirm (the bypass): the operator opted into free action.
+   * - `plan` — don't confirm; mutating calls are blocked upstream by the tool
+   *   registry (executionMode 'plan'), which returns an error the model adapts to.
+   * - `ask` (default) — confirm workflow runs and mutating tools that are NOT
+   *   `autoExecute`. `autoExecute` tools are operator-*requested* creations (e.g.
+   *   `build_workflow` right after "build me X"), so re-confirming them is just
+   *   friction — use Plan mode to make the agent propose before acting.
+   */
+  static requiresConfirmation(name: string, mode: ChatPermissionMode = 'ask'): boolean {
+    if (mode === 'auto' || mode === 'plan') return false;
     if (name.startsWith('workflow.')) return true;
     const definition = this.definition(name);
     return Boolean(definition?.mutating && !definition.autoExecute);
@@ -85,6 +98,7 @@ export class ChatToolExecutor {
         conversationId: ctx.conversationId,
         executionMode: ctx.executionMode,
         viewport: ctx.viewport ?? null,
+        appId: ctx.appId ?? null,
         caller: 'chat',
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       },

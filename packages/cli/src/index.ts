@@ -75,7 +75,7 @@ Usage:
   agentis app export <app-id> --url <url> --api-key <key> --workspace-id <id> [--out f]
                                           Export an installed App as .agentisapp.
   agentis bootstrap --url <url> --api-key <key> --adapter <adapter>
-                                          Commission an orchestrator, manager, or worker through the API.
+                                          Commission an orchestrator, manager, or specialist through the API.
   agentis bootstrap generate-config --from <claude_code|codex> [--output <file>]
                                           Generate an agentis-config.json scaffold from local context.
   agentis export-config --from <claude_code|codex> [--output <file>]

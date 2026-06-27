@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, LogOut } from 'lucide-react';
+import { Settings as SettingsIcon, LogOut, Package as PackageIcon } from 'lucide-react';
 import clsx from 'clsx';
 import { ThemeToggle } from './ThemeToggle';
 import { useAgentisStore } from '../../store/agentisStore';
@@ -36,6 +36,7 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const nav = useNavigate();
   const { setSettingsOpen } = useAgentisStore();
 
   useEffect(() => {
@@ -122,6 +123,15 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
           </div>
 
           <div className="p-1">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => { setOpen(false); nav('/packages'); }}
+              className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+            >
+              <PackageIcon size={14} />
+              Packages
+            </button>
             <button
               type="button"
               role="menuitem"

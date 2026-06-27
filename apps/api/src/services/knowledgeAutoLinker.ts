@@ -156,10 +156,16 @@ export class KnowledgeAutoLinker {
         scopeId: input.scopeId ?? null,
         limit: MAX_CANDIDATES,
       }).filter((candidate) => !(candidate.kind === input.sourceKind && candidate.id === input.sourceId));
-      const scored = await Promise.all(candidates.map(async (candidate) => ({
-        candidate,
-        score: Math.max(0, cosineSimilarity(sourceVector, await embedText(provider, candidate.text))),
-      })));
+      // §perf — compare against each candidate's STORED vector. Re-embedding every
+      // candidate here (the old behavior) meant N×candidates model calls per
+      // document, bursting on the main thread and freezing the whole API for
+      // minutes. Cosine over stored vectors is microseconds; only the source is
+      // embedded. Candidates without a comparable vector are skipped (score 0).
+      const scored = candidates.map((candidate) => {
+        const vec = candidate.embedding;
+        const score = vec && vec.length === sourceVector.length ? Math.max(0, cosineSimilarity(sourceVector, vec)) : 0;
+        return { candidate, score };
+      });
       let linked = 0;
       for (const entry of scored.filter((candidate) => candidate.score >= MIN_SIMILARITY).sort((a, b) => b.score - a.score).slice(0, TOP_N)) {
         const relation = this.relationClassifier

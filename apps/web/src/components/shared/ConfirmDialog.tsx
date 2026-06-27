@@ -81,9 +81,9 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
                 <Icon size={16} />
               </span>
               <div className="min-w-0 flex-1">
-                <h3 className="text-subheading text-text-primary">{state.title}</h3>
+                <h3 className="text-subheading text-text-primary break-words">{state.title}</h3>
                 {state.body && (
-                  <div className="mt-1.5 text-[13px] leading-relaxed text-text-secondary">{state.body}</div>
+                  <div className="mt-1.5 text-[13px] leading-relaxed text-text-secondary break-words">{state.body}</div>
                 )}
                 {state.typeToConfirm && (
                   <div className="mt-3 space-y-1.5">

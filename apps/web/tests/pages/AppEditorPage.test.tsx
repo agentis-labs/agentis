@@ -209,21 +209,21 @@ describe('<AppEditorPage />', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Approval gate' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Form' }));
 
-    // The approval table renders the collection field and its card inspector.
+    // The create form renders the collection field, and its insert action is declared.
     expect((await screen.findAllByText('Title')).length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => {
-      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Row', children: [{ type: 'Card', title: 'Approval gate' }] }] });
+      expect(JSON.stringify(lastSavedView)).toContain('"type":"Form"');
       expect(lastSavedActions).toEqual(
-        expect.arrayContaining([expect.objectContaining({ name: 'approve_tasks', kind: 'data', target: 'tasks.update' })]),
+        expect.arrayContaining([expect.objectContaining({ name: 'create_tasks', kind: 'data', target: 'tasks.insert' })]),
       );
     });
   });
 
-  it('renders the complete Studio block palette in edit mode', async () => {
+  it('renders the GenUI palette in edit mode', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
@@ -237,7 +237,7 @@ describe('<AppEditorPage />', () => {
     renderEditor('interface');
 
     await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    for (const name of ['Message feed', 'Metrics grid', 'Approval gate', 'Data table', 'Chart', 'Document', 'Map', 'Agent card', 'Status board', 'Web embed', 'Narrative', 'Conversation', 'Code viewer', 'Media gallery']) {
+    for (const name of ['Hero', 'KPI strip', 'Chart', 'Table', 'Board', 'Tabs', 'Split', 'Callout', 'Agent console', 'Code surface']) {
       expect(screen.getByRole('button', { name })).toBeInTheDocument();
     }
   });

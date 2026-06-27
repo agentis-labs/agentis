@@ -19,7 +19,7 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.browser.screenshot',
         family: 'run',
         description:
-          'Open a real headless browser, render a URL (or inline HTML), and capture a PNG screenshot saved as an artifact. Returns { artifactId, ref, url }. Pass `ref` (e.g. "artifact:<id>") to agentis.channel.send `attachments` to deliver the image to Telegram/WhatsApp/Slack/Discord, or surface `url` in chat.',
+          'Open a real headless browser, render a URL (or inline HTML), and capture a PNG screenshot saved as an artifact. Returns { artifactId, ref, url }. Chat automatically renders the saved artifact; to deliver the image to Telegram/WhatsApp/Slack/Discord, pass `ref` (e.g. "artifact:<id>") to agentis.channel.send `attachments`.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -43,6 +43,9 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
         const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
         if (!deps.artifacts) return { saved: false, mimeType: 'image/png', dataUrl };
         const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : 'Screenshot';
+        // When the agent is operating on an App surface, file the screenshot under
+        // that App so it shows in the App's "Data & Assets" library.
+        const appId = ctx.viewport?.resourceKind === 'app' ? ctx.viewport.resourceId ?? null : null;
         const artifact = deps.artifacts.persist({
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
@@ -51,6 +54,7 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
           name: `${slugify(title)}.png`,
           content: dataUrl,
           agentId: ctx.agentId ?? null,
+          appId,
           conversationId: ctx.conversationId ?? null,
           savedBy: 'agentis.browser.screenshot',
         });

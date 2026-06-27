@@ -6,7 +6,7 @@
  * to via `set()` / `append()` / `delete()`.
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -24,9 +24,10 @@ export function buildScratchpadRoutes(deps: {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
-  app.get('/:id/scratchpad', (c) => {
+  const assertRunOwned = (c: Context): string => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
+    if (!id) throw new AgentisError('WORKFLOW_RUN_NOT_FOUND', 'Run not found');
     const run = deps.db
       .select()
       .from(schema.workflowRuns)
@@ -38,7 +39,22 @@ export function buildScratchpadRoutes(deps: {
       )
       .get();
     if (!run) throw new AgentisError('WORKFLOW_RUN_NOT_FOUND', 'Run not found');
+    return id;
+  };
+
+  app.get('/:id/scratchpad', (c) => {
+    const id = assertRunOwned(c);
     return c.json({ scratchpad: deps.scratchpad.snapshotOf(id) });
+  });
+
+  // Durable, identity-tagged blackboard log — the operator Blackboard panel
+  // hydrates from here, then streams live via BLACKBOARD_ENTRY events.
+  // Optional ?namespace= filters to a convergence loop's state. (§Pillar 2/3.)
+  app.get('/:id/blackboard', (c) => {
+    const id = assertRunOwned(c);
+    const namespace = c.req.query('namespace') || undefined;
+    const entries = deps.scratchpad.listEntries(id, { namespace });
+    return c.json({ entries });
   });
 
   return app;

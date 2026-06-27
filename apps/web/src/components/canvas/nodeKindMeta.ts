@@ -53,6 +53,7 @@ export const NODE_KIND_META: Record<string, NodeKindMeta> = {
   subflow: { label: 'Subflow', glyph: '⊞', category: 'control' },
   wait: { label: 'Wait', glyph: '◷', category: 'control' },
   loop: { label: 'Loop', glyph: '↻', category: 'control' },
+  converge: { label: 'Converge', glyph: '⟳', category: 'control' },
   parallel: { label: 'Parallel', glyph: '⇉', category: 'control' },
   // Data & logic — deterministic, zero LLM tokens
   transform: { label: 'Transform', glyph: 'ƒ', category: 'data' },

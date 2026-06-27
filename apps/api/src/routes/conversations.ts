@@ -26,6 +26,7 @@ import {
   REALTIME_ROOMS,
   type ChatDelta,
   type ChatFinishReason,
+  type ChatPermissionMode,
   type ChatTurnContext,
   type ChatTurnTrace,
   type ViewportContext,
@@ -34,6 +35,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { ConversationStore } from '../services/conversationStore.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from '../services/chatPermissionMode.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
 import { ChatSessionExecutor } from '../services/chatSessionExecutor.js';
@@ -48,6 +50,8 @@ const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
   clientTurnId: z.string().min(1).max(120).optional(),
   useViewportContext: z.boolean().optional().default(true),
+  /** Composer toggle: persist the sticky permission mode alongside this turn. */
+  permissionMode: z.enum(['ask', 'plan', 'auto']).optional(),
   viewportOverride: z.object({
     surface: z.string().min(1),
     route: z.string().optional(),
@@ -76,15 +80,6 @@ const editSchema = z.object({ text: z.string().min(1).max(CONSTANTS.CONVERSATION
 const rewriteSchema = sendSchema.omit({ body: true }).extend({
   text: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
 });
-const PLAN_MODE_SYSTEM_ADDENDUM = [
-  'PLAN MODE',
-  'The operator explicitly asked you to plan. You are the selected agent for this conversation; answer in your own role and expertise.',
-  'Do not mutate workspace state in this turn. You may inspect existing state with read-only tools, but do not build, save, run, delete, patch, or otherwise change resources.',
-  'Produce an intelligent, concrete plan for the requested outcome. Avoid generic placeholders. Use domain-specific phases, dependencies, risks, open questions, and verification criteria.',
-  'When useful, wrap the final plan in <proposed_plan>...</proposed_plan>. Keep it readable markdown; the UI will render it as a lightweight canvas.',
-  'If the user asks for workflow design, describe the actual workflow architecture: trigger, data sources, specialist/agent steps, integrations, guardrails, outputs, and verification.',
-].join('\n');
-
 type ConversationRouteDeps = {
   db: AgentisSqliteDb;
   auth: AuthService;
@@ -365,6 +360,28 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
 
     const conversation = deps.conversations.updateSession(ws.workspaceId, conversationId, parsed);
     return c.json({ ok: true, conversation });
+  });
+
+  // Composer toggle: set the conversation's sticky permission mode (ask | plan |
+  // auto) without sending a message. Channels do the same via slash commands.
+  app.post('/session/:conversationId/mode', async (c) => {
+    const ws = getWorkspace(c);
+    const conversationId = c.req.param('conversationId');
+    const { mode } = z.object({ mode: z.enum(['ask', 'plan', 'auto']) }).parse(await c.req.json());
+    // Reuse the existing executionMode='plan' enforcement (registry-level mutation
+    // block) so Plan mode behaves identically whether set here or via /plan.
+    deps.db.update(schema.conversations)
+      .set({
+        permissionMode: mode,
+        executionMode: mode === 'plan' ? 'plan' : 'chat',
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(
+        eq(schema.conversations.id, conversationId),
+        eq(schema.conversations.workspaceId, ws.workspaceId),
+      ))
+      .run();
+    return c.json({ ok: true, permissionMode: mode });
   });
 
   app.delete('/session/:conversationId', (c) => {
@@ -656,10 +673,27 @@ function streamConversationTurnReply(
       ? args.viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
       : args.viewportOverride ?? null;
     const viewportWorkflowId = workflowIdFromViewport(activeViewport);
-    const requestedPlan = /^\/plan(?:\s|$)/i.test(args.userMessage);
-    const requestedChat = /^\/(?:act|chat)(?:\s|$)/i.test(args.userMessage);
-    const runtimeUserMessage = requestedPlan
-      ? args.userMessage.replace(/^\/plan\b/i, '').trim() || 'Plan the requested work.'
+    // Resolve the sticky permission mode for this turn. A leading slash command
+    // (/ask /plan /auto) overrides AND persists the conversation mode; otherwise
+    // the conversation's stored mode applies (default ask).
+    const modeCommand = parseModeCommand(args.userMessage);
+    const storedMode = ((args.conversation.permissionMode as ChatPermissionMode | null) ?? 'ask');
+    const permissionMode: ChatPermissionMode = modeCommand?.mode ?? storedMode;
+    if (modeCommand) {
+      deps.db.update(schema.conversations)
+        .set({
+          permissionMode: modeCommand.mode,
+          executionMode: modeCommand.mode === 'plan' ? 'plan' : 'chat',
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.conversations.id, args.conversation.id))
+        .run();
+    }
+    // A bare mode command (no task) just switches mode and acknowledges — no model
+    // turn. With a task ("/plan build X") it switches AND runs the remaining text.
+    const bareModeSwitch = Boolean(modeCommand) && !modeCommand!.rest;
+    const runtimeUserMessage = modeCommand
+      ? (modeCommand.rest || defaultTaskForMode(permissionMode))
       : args.userMessage;
 
     await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, createChatActivity({
@@ -673,12 +707,8 @@ function streamConversationTurnReply(
       startedAt: turnStartedAt,
     }), streamedMetadata);
 
-    if (requestedChat) {
-      deps.db.update(schema.conversations)
-        .set({ executionMode: 'chat', updatedAt: new Date().toISOString() })
-        .where(eq(schema.conversations.id, args.conversation.id))
-        .run();
-      finalText = 'Plan mode closed. Chat can use workspace tools normally again.';
+    if (bareModeSwitch) {
+      finalText = MODE_SWITCH_ACK[permissionMode];
       await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
         type: 'text',
         delta: finalText,
@@ -692,14 +722,15 @@ function streamConversationTurnReply(
         userId: ws.user.id,
         conversationId: args.conversation.id,
         clientTurnId: args.clientTurnId,
-        executionMode: requestedPlan ? 'plan' : 'chat',
+        executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
+        permissionMode,
         maxTurns: 8,
         viewport: activeViewport,
         signal: c.req.raw.signal,
       };
       for await (const delta of withChatHeartbeats(
         ChatSessionExecutor.turn(reg.adapter, history, runtimeUserMessage, turnContext, {
-          ...(requestedPlan ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM } : {}),
+          ...(permissionMode === 'plan' ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM } : {}),
         }),
         { clientTurnId: args.clientTurnId, agentId: args.agentId, workflowId: viewportWorkflowId },
       )) {
@@ -858,6 +889,20 @@ async function sendConversationMessage(
         userId: ws.user.id,
         agentId,
       });
+  // Composer toggle: persist the sticky permission mode with this turn so the
+  // executor (and the next turn) honor it. The conversation row is read again in
+  // streamConversationTurnReply, so update the in-memory copy too.
+  if (body.permissionMode && body.permissionMode !== conversation.permissionMode) {
+    deps.db.update(schema.conversations)
+      .set({
+        permissionMode: body.permissionMode,
+        executionMode: body.permissionMode === 'plan' ? 'plan' : 'chat',
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.conversations.id, conversation.id))
+      .run();
+    conversation.permissionMode = body.permissionMode;
+  }
   const message = deps.conversations.appendOutbound({
     workspaceId: ws.workspaceId,
     conversationId: conversation.id,

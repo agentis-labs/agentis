@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import type { AppInstallPreview, AppManifestEnvelope, AppRecord, AppSurface } from '@agentis/core';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
+import { APP_TEMPLATES } from '../lib/appTemplates';
 import { api, apiErrorMessage } from '../lib/api';
 import { AppEngineModal, type AppEngineAgent, type AppEngineDomain } from '../components/apps/AppEngineModal';
 import { DomainToolbar, type DomainToolbarSelection } from '../components/shared/DomainToolbar';
@@ -34,6 +35,7 @@ interface WorkflowRow {
   status?: string;
   appId?: string | null;
   spaceId?: string | null;
+  ownerAgentId?: string | null;
 }
 
 interface DomainRow {
@@ -48,6 +50,7 @@ interface AgentRow {
   id: string;
   name: string;
   role?: string | null;
+  spaceId?: string | null;
 }
 
 type AppIndexItem =
@@ -64,6 +67,7 @@ export function AppsPage() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [templateId, setTemplateId] = useState('blank');
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [query, setQuery] = useState('');
@@ -107,6 +111,15 @@ export function AppsPage() {
 
   useEffect(() => { void refresh(); }, []);
 
+  const resolveDomainId = (itemDomainId: string | null | undefined, ownerAgentId: string | null | undefined) => {
+    if (itemDomainId) return itemDomainId;
+    if (!ownerAgentId) return null;
+    const managedDomain = domains.find((d) => d.managerId === ownerAgentId);
+    if (managedDomain) return managedDomain.id;
+    const ownerAgent = agents.find((a) => a.id === ownerAgentId);
+    return ownerAgent?.spaceId ?? null;
+  };
+
   const appIds = new Set(apps.map((a) => a.id));
   const items: AppIndexItem[] = [
     ...apps.map((app): AppIndexItem => ({
@@ -117,11 +130,11 @@ export function AppsPage() {
       version: app.version,
       status: app.status,
       icon: app.icon,
-      domainId: app.domainId ?? null,
+      domainId: resolveDomainId(app.domainId, app.ownerAgentId),
     })),
     ...workflows
       .filter((wf) => !wf.appId || !appIds.has(wf.appId))
-      .map((wf): AppIndexItem => ({ kind: 'logic', id: wf.id, name: wf.title, status: wf.status ?? 'idle', domainId: wf.spaceId ?? null })),
+      .map((wf): AppIndexItem => ({ kind: 'logic', id: wf.id, name: wf.title, status: wf.status ?? 'idle', domainId: resolveDomainId(wf.spaceId, wf.ownerAgentId) })),
   ].sort((a, b) => a.name.localeCompare(b.name));
 
   const q = query.trim().toLowerCase();
@@ -150,8 +163,14 @@ export function AppsPage() {
     setCreating(true);
     setError(null);
     try {
-      const app = await appsApi.create({ name: trimmed, createEntryWorkflow: true });
+      const template = APP_TEMPLATES.find((t) => t.id === templateId);
+      const app = await appsApi.create({
+        name: trimmed,
+        createEntryWorkflow: true,
+        ...(template?.graph ? { entryWorkflowGraph: template.graph } : {}),
+      });
       setName('');
+      setTemplateId('blank');
       setCreateOpen(false);
       navigate(`/apps/${app.id}?facet=workflow`);
     } catch (e) {
@@ -356,6 +375,8 @@ export function AppsPage() {
         <CreateAppDialog
           name={name}
           busy={creating}
+          templateId={templateId}
+          onTemplateChange={setTemplateId}
           onNameChange={setName}
           onCreate={() => void createApp()}
           onClose={() => { if (!creating) setCreateOpen(false); }}
@@ -487,12 +508,16 @@ function AppCard({
 function CreateAppDialog({
   name,
   busy,
+  templateId,
+  onTemplateChange,
   onNameChange,
   onCreate,
   onClose,
 }: {
   name: string;
   busy: boolean;
+  templateId: string;
+  onTemplateChange: (id: string) => void;
   onNameChange: (name: string) => void;
   onCreate: () => void;
   onClose: () => void;
@@ -520,6 +545,23 @@ function CreateAppDialog({
             placeholder="Store outreach"
             className="mt-1.5 h-9 w-full rounded-input border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent"
           />
+          <div className="mt-4 text-[12px] font-medium text-text-secondary">Start from</div>
+          <div className="mt-1.5 grid grid-cols-1 gap-1.5">
+            {APP_TEMPLATES.map((template) => (
+              <button
+                key={template.id}
+                type="button"
+                onClick={() => onTemplateChange(template.id)}
+                className={clsx(
+                  'rounded-btn border px-3 py-2 text-left transition-colors',
+                  templateId === template.id ? 'border-accent bg-accent/5' : 'border-line hover:bg-canvas',
+                )}
+              >
+                <div className="text-[12px] font-medium text-text-primary">{template.name}</div>
+                <div className="mt-0.5 text-[11px] leading-snug text-text-muted">{template.description}</div>
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" onClick={onClose} className="h-8 rounded-btn px-3 text-[12px] text-text-muted hover:bg-canvas hover:text-text-primary">Cancel</button>

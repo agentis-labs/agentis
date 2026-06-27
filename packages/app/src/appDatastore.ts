@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import {
   AgentisError,
   collectionSchemaSchema,
@@ -161,28 +161,74 @@ export class AppDatastore {
     for (const [key, raw] of Object.entries(query.filter ?? {})) {
       conditions.push(this.filterCondition(key, raw));
     }
-    const offset = this.decodeCursor(query.cursor);
-    let builder = this.db
+    // Keyset pagination (masterplan 4.1): order by the requested sort (or
+    // updatedAt desc) plus a stable `id asc` tiebreaker, and seek past the
+    // cursor's row values. Unlike the old offset cursor this is O(log n) and
+    // never skips/duplicates rows when the collection is written concurrently.
+    const sortKeys = this.#sortKeys(query.sort);
+    const cursorValues = this.#decodeKeysetCursor(query.cursor);
+    if (cursorValues && cursorValues.length === sortKeys.length) {
+      conditions.push(this.#keysetPredicate(sortKeys, cursorValues));
+    }
+    const orderExprs = sortKeys.map((k) => (k.dir === 'desc' ? desc(k.expr) : asc(k.expr)));
+    const rows = this.db
       .select()
       .from(schema.appRecords)
       .where(and(...conditions))
-      .$dynamic();
-    if (query.sort && query.sort.length > 0) {
-      const orderExprs = query.sort.map((s) => {
-        const path = this.jsonPath(s.field);
-        return s.dir === 'desc' ? desc(path) : asc(path);
-      });
-      builder = builder.orderBy(...orderExprs);
-    } else {
-      builder = builder.orderBy(desc(schema.appRecords.updatedAt));
-    }
-    const rows = builder.limit(query.limit + 1).offset(offset).all();
+      .orderBy(...orderExprs)
+      .limit(query.limit + 1)
+      .all();
     const hasMore = rows.length > query.limit;
     const page = hasMore ? rows.slice(0, query.limit) : rows;
+    let nextCursor: string | undefined;
+    if (hasMore && page.length > 0) {
+      const last = page[page.length - 1]!;
+      nextCursor = this.#encodeKeysetCursor(sortKeys.map((k) => k.read(last)));
+    }
     return {
       rows: page.map((r) => this.toRecord(r, col.name)),
-      ...(hasMore ? { nextCursor: this.encodeCursor(offset + query.limit) } : {}),
+      ...(nextCursor ? { nextCursor } : {}),
     };
+  }
+
+  /** Sort keys for keyset pagination: requested fields (or updatedAt desc) + id asc tiebreaker. */
+  #sortKeys(sort: DataQuery['sort']): Array<{ expr: SQLWrapper; dir: 'asc' | 'desc'; read: (row: RecordRow) => unknown }> {
+    const keys: Array<{ expr: SQLWrapper; dir: 'asc' | 'desc'; read: (row: RecordRow) => unknown }> = [];
+    if (sort && sort.length > 0) {
+      for (const s of sort) {
+        keys.push({ expr: this.jsonPath(s.field), dir: s.dir, read: (row) => (row.dataJson as Record<string, unknown> | null)?.[s.field] ?? null });
+      }
+    } else {
+      keys.push({ expr: schema.appRecords.updatedAt, dir: 'desc', read: (row) => row.updatedAt });
+    }
+    keys.push({ expr: schema.appRecords.id, dir: 'asc', read: (row) => row.id });
+    return keys;
+  }
+
+  /** Lexicographic keyset predicate: rows strictly after the cursor in sort order. */
+  #keysetPredicate(keys: Array<{ expr: SQLWrapper; dir: 'asc' | 'desc' }>, values: unknown[]): SQL {
+    const build = (i: number): SQL => {
+      const key = keys[i]!;
+      const value = this.scalar(values[i]);
+      const cmp = key.dir === 'asc' ? sql`${key.expr} > ${value}` : sql`${key.expr} < ${value}`;
+      if (i === keys.length - 1) return cmp;
+      return sql`(${cmp} OR (${key.expr} = ${value} AND ${build(i + 1)}))`;
+    };
+    return build(0);
+  }
+
+  #encodeKeysetCursor(values: unknown[]): string {
+    return Buffer.from(JSON.stringify(values), 'utf8').toString('base64url');
+  }
+
+  #decodeKeysetCursor(cursor: string | undefined): unknown[] | null {
+    if (!cursor) return null;
+    try {
+      const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown;
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -279,7 +325,8 @@ export class AppDatastore {
       }
       shape[field.key] = field.required ? base : base.optional();
     }
-    return z.object(shape).passthrough() as unknown as z.ZodType<Record<string, unknown>>;
+    const object = collectionSchema.strict ? z.object(shape).strict() : z.object(shape).passthrough();
+    return object as unknown as z.ZodType<Record<string, unknown>>;
   }
 
   private jsonPath(field: CollectionField['key']): SQL<unknown> {
@@ -341,16 +388,6 @@ export class AppDatastore {
     if (typeof value === 'boolean') return value ? 1 : 0;
     if (typeof value === 'number') return value;
     return String(value);
-  }
-
-  private encodeCursor(offset: number): string {
-    return Buffer.from(String(offset), 'utf8').toString('base64');
-  }
-
-  private decodeCursor(cursor: string | undefined): number {
-    if (!cursor) return 0;
-    const n = Number.parseInt(Buffer.from(cursor, 'base64').toString('utf8'), 10);
-    return Number.isFinite(n) && n >= 0 ? n : 0;
   }
 
   private toCollectionInfo(row: CollectionRow): CollectionInfo {

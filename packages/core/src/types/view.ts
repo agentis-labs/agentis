@@ -1,15 +1,16 @@
 /**
- * AG-UI — the agent-authored UI protocol (AGENTIC-APPS-10X-MASTERPLAN §4).
+ * AG-UI — the agent-authored UI protocol (AGENTIC-APPS-10X-MASTERPLAN §4,
+ * extended by GENUI-RENAISSANCE-MASTERPLAN).
  *
  * An agent authors a typed `ViewNode` tree (the "cards" tier) instead of pushing
- * data into fixed blocks. Nodes can bind to App Datastore queries (`bind`) and
- * declare user actions (`action`) that resolve to a workflow, tool, or data op.
- * The renderer (`AppRuntime`) maps nodes to the Agentis Design System, so agents
- * emit *intent*, not pixels.
+ * data into fixed blocks. Nodes can bind to App Datastore queries (`bind`),
+ * declare user actions (`action`) that resolve to a workflow/tool/data op, and
+ * carry **bounded style intent** (`style`) that the renderer maps to the Agentis
+ * Design System — never raw CSS. Agents emit *intent*, not pixels.
  *
  * Shared by the backend (persistence + validation) and the web renderer. Kept
  * dependency-light: zod schemas validate agent output; the TS types drive the
- * renderer.
+ * renderer. Every field added here is OPTIONAL — old trees stay byte-valid.
  */
 
 import { z } from 'zod';
@@ -45,6 +46,47 @@ export const actionRefSchema = z.object({
 });
 export type ActionRef = z.infer<typeof actionRefSchema>;
 
+// ── Style intent (bounded → Design System, never raw CSS) ───
+
+/** Semantic tone — maps to the accent/success/warn/danger/info token families. */
+export const toneSchema = z.enum(['neutral', 'accent', 'success', 'warning', 'danger', 'info']);
+export type Tone = z.infer<typeof toneSchema>;
+
+/** Named accent palette an agent may pick from (token-backed, no arbitrary hex). */
+export const accentSchema = z.enum([
+  'accent', 'info', 'success', 'warning', 'danger',
+  'orange', 'blue', 'purple', 'teal', 'rose', 'lime',
+]);
+export type AccentName = z.infer<typeof accentSchema>;
+
+/** Per-surface look preset (read from the ROOT node's style). */
+export const surfaceThemeSchema = z.enum(['console', 'analytics', 'product', 'editorial']);
+export type SurfaceTheme = z.infer<typeof surfaceThemeSchema>;
+
+/**
+ * Optional, enum-bounded visual intent attachable to any node. The renderer
+ * lowers these to existing token classes — agents never write CSS. `theme` and
+ * `density` are read only from the surface's root node.
+ */
+export const styleIntentSchema = z.object({
+  tone: toneSchema.optional(),
+  emphasis: z.enum(['muted', 'normal', 'strong']).optional(),
+  elevation: z.enum(['flat', 'raised', 'inset', 'outline']).optional(),
+  pad: z.enum(['none', 'sm', 'md', 'lg', 'xl']).optional(),
+  align: z.enum(['start', 'center', 'end', 'between']).optional(),
+  /** Grid column span (1–12). */
+  span: z.number().int().positive().max(12).optional(),
+  size: z.enum(['sm', 'md', 'lg', 'xl']).optional(),
+  accent: accentSchema.optional(),
+  sticky: z.boolean().optional(),
+  scroll: z.boolean().optional(),
+  /** Root-only: the surface look preset. */
+  theme: surfaceThemeSchema.optional(),
+  /** Root-only: information density. */
+  density: z.enum(['comfortable', 'compact']).optional(),
+});
+export type StyleIntent = z.infer<typeof styleIntentSchema>;
+
 // ── Field / column descriptors ──────────────────────────────
 
 export const columnSchema = z.object({
@@ -65,27 +107,62 @@ export const fieldSchema = z.object({
 
 // ── ViewNode (recursive) ────────────────────────────────────
 
-export type ViewNode =
+/** A simple timeline / status item used by the new composite nodes. */
+interface TimelineItem { title: string; detail?: string; at?: string; tone?: Tone }
+interface KpiItem { label: string; value: Bindable; delta?: Bindable; tone?: Tone; spark?: number[] }
+
+type ViewNodeBase =
+  // ── layout ──
   | { type: 'Stack'; gap?: number; children: ViewNode[] }
-  | { type: 'Row' | 'Grid'; gap?: number; widths?: number[]; children: ViewNode[] }
+  | { type: 'Row' | 'Grid'; gap?: number; widths?: number[]; columns?: number; children: ViewNode[] }
   | { type: 'Card' | 'Section'; title?: string; children: ViewNode[] }
+  // master/detail or sidebar shell
+  | { type: 'Split'; left: ViewNode; right: ViewNode; ratio?: number }
+  // progressive disclosure — the "toggles" instead of one giant scroll
+  | { type: 'Tabs'; tabs: Array<{ label: string; children: ViewNode[] }> }
+  | { type: 'Accordion'; sections: Array<{ title: string; defaultOpen?: boolean; children: ViewNode[] }> }
+  // a horizontal control/header bar
+  | { type: 'Toolbar'; title?: string; children: ViewNode[] }
+  // a prominent header band
+  | { type: 'Hero'; title: string; subtitle?: string; eyebrow?: string; media?: Bindable; actions?: ActionRef[] }
+  // ── content ──
   | { type: 'Text' | 'Heading' | 'Markdown'; value: string }
   | { type: 'Metric'; label: string; value: Bindable; delta?: Bindable }
+  // a row of polished KPI cards (optionally with sparklines)
+  | { type: 'KPIStrip'; items: KpiItem[] }
   | { type: 'Image'; src: Bindable; alt?: string }
+  | { type: 'Avatar'; name?: Bindable; src?: Bindable; size?: 'sm' | 'md' | 'lg' }
+  | { type: 'Callout'; title?: string; value: string }
+  | { type: 'ProgressBar'; value: Bindable; max?: number; label?: string }
+  // tiny inline trend — static points or bound to a collection
+  | { type: 'Sparkline'; points?: number[]; bind?: DataBind; y?: string }
+  // ── data-bound ──
   | { type: 'Table'; bind: DataBind; columns: z.infer<typeof columnSchema>[]; rowActions?: ActionRef[] }
   | { type: 'List'; bind: DataBind; item: ViewNode }
-  | { type: 'Chart'; bind: DataBind; chartType: 'line' | 'bar' | 'pie'; x: string; y: string }
+  | {
+      type: 'Chart';
+      bind: DataBind;
+      chartType: 'line' | 'bar' | 'pie' | 'area' | 'donut';
+      x: string;
+      y: string;
+      series?: Array<{ y: string; label?: string; color?: AccentName }>;
+      stacked?: boolean;
+      area?: boolean;
+      height?: number;
+      legend?: boolean;
+      curve?: 'linear' | 'smooth';
+    }
+  // ── interactive ──
   | { type: 'Form'; fields: z.infer<typeof fieldSchema>[]; submit: ActionRef; submitLabel?: string }
   | { type: 'Button'; label: string; action: ActionRef; variant?: 'primary' | 'secondary' | 'danger' }
   | { type: 'Badge'; value: Bindable; tone?: 'neutral' | 'success' | 'warning' | 'danger' }
   | { type: 'Divider' }
   // ── Agent-native composites — what makes a surface an *Agentic* App ──
-  // The operator agent's presence + a command line to direct it.
   | { type: 'AgentConsole'; title?: string; prompt?: string }
-  // A live feed of the operator's work (runs, tool calls, decisions), streamed over realtime.
   | { type: 'ActivityStream'; title?: string; limit?: number }
-  // A kanban board over a collection, grouped by a status/stage field — apps, not dashboards.
   | { type: 'DataBoard'; bind: DataBind; groupBy: string; titleField?: string }
+  // chronological events — static items or bound to a collection
+  | { type: 'Timeline'; title?: string; items?: TimelineItem[]; bind?: DataBind; titleField?: string; detailField?: string; atField?: string }
   | { type: 'DocumentViewer'; title?: string; content: string; format?: 'markdown' | 'plain' | 'json'; downloadName?: string }
   | { type: 'MapView'; title?: string; region?: string; pins?: Array<{ label: string; lat?: number; lng?: number; value?: Bindable }> }
   | { type: 'StatusBoard'; title?: string; items: Array<{ label: string; status: Bindable; detail?: Bindable }> }
@@ -95,49 +172,122 @@ export type ViewNode =
   | { type: 'CodeViewer'; title?: string; code: string; language?: string; diff?: boolean }
   | { type: 'MediaGallery'; title?: string; items: Array<{ src: Bindable; alt?: string; caption?: string; kind?: 'image' | 'file' | 'video' }> }
   /**
+   * Performed-surface zone (LIVING-APPS Phase M3 / G12). A STABLE frame slot the
+   * operator places once; the agent then PERFORMS a transient region into it live
+   * over the realtime bus (`SURFACE_RENDER` with a `region` payload) — e.g. a
+   * "churn risk" panel that appears unprompted when 40 threads share a signal.
+   * The surface tree only stores the empty slot (identity + optional placeholder);
+   * the performed child is ephemeral unless the operator PINS it. DNA guardrail:
+   * every performed region is `reason`-explainable and operator-dismissable;
+   * `pinned` freezes the current content into the stored tree so it never flickers.
+   */
+  | { type: 'AgentRegion'; region: string; title?: string; reason?: string; pinned?: boolean; placeholder?: string; child?: ViewNode }
+  // ── Domain composites — the breadth of agentic apps ──
+  // Interactive conversation (sales outbound, support, CRM). Bound or static; the composer fires `send`.
+  | { type: 'ChatThread'; title?: string; source?: 'collection' | 'conversations'; bind?: DataBind; roleField?: string; contentField?: string; atField?: string; messages?: Array<{ role: 'user' | 'agent' | 'system'; content: string; at?: string }>; channel?: string; send?: ActionRef; placeholder?: string }
+  // Multi-conversation inbox with channels — selecting a conversation shows its thread.
+  | { type: 'Inbox'; source?: 'collection' | 'conversations'; bind?: DataBind; titleField?: string; subtitleField?: string; channelField?: string; messagesBind?: DataBind; messageRoleField?: string; messageContentField?: string; matchField?: string; send?: ActionRef }
+  // Media / image generation — a prompt that fires `generate`, over a gallery of results.
+  | { type: 'MediaGen'; title?: string; bind?: DataBind; srcField?: string; captionField?: string; generate?: ActionRef; placeholder?: string }
+  // Conversion funnel (marketing / sales).
+  | { type: 'Funnel'; title?: string; stages?: Array<{ label: string; value: number }>; bind?: DataBind; labelField?: string; valueField?: string }
+  // Calendar / schedule of events.
+  | { type: 'Calendar'; title?: string; bind?: DataBind; dateField?: string; labelField?: string; events?: Array<{ date: string; label: string; tone?: Tone }> }
+  // Radial gauge for a single metric.
+  | { type: 'Gauge'; label?: string; value: Bindable; max?: number; tone?: Tone }
+  /**
    * Escape hatch (§4.5/§4.6) — agent-written HTML/JS rendered in a hardened,
    * null-origin sandboxed iframe. NO network egress (CSP connect-src 'none');
    * data + actions flow only through the postMessage bridge, which the parent
    * authz-checks against app policy server-side. `html` is the agent's markup.
    */
-  | { type: 'CustomView'; html: string; collections?: string[]; height?: number };
+  | { type: 'CustomView'; html: string; collections?: string[]; height?: number }
+  /**
+   * Code surface (GENUI-RENAISSANCE Pillar 4) — the full-power tier. The agent
+   * writes plain JS (`code`) that runs in the SAME hardened, null-origin,
+   * zero-egress sandbox as CustomView, but with the Agentis design tokens + a
+   * component/chart kit (`ui`) and the data/action bridge (`agentis`) injected.
+   * So the agent can build *anything* the typed grammar can't express — on-brand,
+   * live, and safe. `collections` is the read allowlist (same as CustomView).
+   */
+  | { type: 'CodeSurface'; code: string; collections?: string[]; height?: number };
+
+/** Any node, plus optional bounded visual intent. */
+export type ViewNode = ViewNodeBase & { style?: StyleIntent };
+
+// Spread into every object so `style` is accepted on any node without
+// changing the discriminated-union shape the renderer switches on.
+const styled = { style: styleIntentSchema.optional() } as const;
 
 export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
   z.union([
-    z.object({ type: z.literal('Stack'), gap: z.number().optional(), children: z.array(viewNodeSchema) }),
-    z.object({ type: z.enum(['Row', 'Grid']), gap: z.number().optional(), widths: z.array(z.number().positive()).optional(), children: z.array(viewNodeSchema) }),
-    z.object({ type: z.enum(['Card', 'Section']), title: z.string().optional(), children: z.array(viewNodeSchema) }),
-    z.object({ type: z.enum(['Text', 'Heading', 'Markdown']), value: z.string() }),
-    z.object({ type: z.literal('Metric'), label: z.string(), value: bindableSchema, delta: bindableSchema.optional() }),
-    z.object({ type: z.literal('Image'), src: bindableSchema, alt: z.string().optional() }),
-    z.object({ type: z.literal('Table'), bind: dataBindSchema, columns: z.array(columnSchema), rowActions: z.array(actionRefSchema).optional() }),
-    z.object({ type: z.literal('List'), bind: dataBindSchema, item: viewNodeSchema }),
-    z.object({ type: z.literal('Chart'), bind: dataBindSchema, chartType: z.enum(['line', 'bar', 'pie']), x: z.string(), y: z.string() }),
-    z.object({ type: z.literal('Form'), fields: z.array(fieldSchema), submit: actionRefSchema, submitLabel: z.string().optional() }),
-    z.object({ type: z.literal('Button'), label: z.string(), action: actionRefSchema, variant: z.enum(['primary', 'secondary', 'danger']).optional() }),
-    z.object({ type: z.literal('Badge'), value: bindableSchema, tone: z.enum(['neutral', 'success', 'warning', 'danger']).optional() }),
-    z.object({ type: z.literal('Divider') }),
-    z.object({ type: z.literal('AgentConsole'), title: z.string().optional(), prompt: z.string().optional() }),
-    z.object({ type: z.literal('ActivityStream'), title: z.string().optional(), limit: z.number().int().positive().max(100).optional() }),
-    z.object({ type: z.literal('DataBoard'), bind: dataBindSchema, groupBy: z.string().min(1), titleField: z.string().optional() }),
-    z.object({ type: z.literal('DocumentViewer'), title: z.string().optional(), content: z.string(), format: z.enum(['markdown', 'plain', 'json']).optional(), downloadName: z.string().optional() }),
-    z.object({ type: z.literal('MapView'), title: z.string().optional(), region: z.string().optional(), pins: z.array(z.object({ label: z.string(), lat: z.number().optional(), lng: z.number().optional(), value: bindableSchema.optional() })).optional() }),
-    z.object({ type: z.literal('StatusBoard'), title: z.string().optional(), items: z.array(z.object({ label: z.string(), status: bindableSchema, detail: bindableSchema.optional() })) }),
-    z.object({ type: z.literal('WebEmbed'), title: z.string().optional(), url: z.string().url().refine((url) => url.startsWith('https://'), 'Web embeds require an HTTPS URL'), height: z.number().int().positive().max(2000).optional() }),
-    z.object({ type: z.literal('Narrative'), title: z.string().optional(), value: z.string(), tone: z.enum(['brief', 'detailed', 'executive']).optional() }),
-    z.object({ type: z.literal('ConversationThread'), title: z.string().optional(), messages: z.array(z.object({ role: z.enum(['user', 'assistant', 'agent', 'system']), content: z.string() })).optional() }),
-    z.object({ type: z.literal('CodeViewer'), title: z.string().optional(), code: z.string(), language: z.string().optional(), diff: z.boolean().optional() }),
-    z.object({ type: z.literal('MediaGallery'), title: z.string().optional(), items: z.array(z.object({ src: bindableSchema, alt: z.string().optional(), caption: z.string().optional(), kind: z.enum(['image', 'file', 'video']).optional() })) }),
-    z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional() }),
+    z.object({ type: z.literal('Stack'), gap: z.number().optional(), children: z.array(viewNodeSchema), ...styled }),
+    z.object({ type: z.enum(['Row', 'Grid']), gap: z.number().optional(), widths: z.array(z.number().positive()).optional(), columns: z.number().int().positive().max(12).optional(), children: z.array(viewNodeSchema), ...styled }),
+    z.object({ type: z.enum(['Card', 'Section']), title: z.string().optional(), children: z.array(viewNodeSchema), ...styled }),
+    z.object({ type: z.literal('Split'), left: viewNodeSchema, right: viewNodeSchema, ratio: z.number().positive().optional(), ...styled }),
+    z.object({ type: z.literal('Tabs'), tabs: z.array(z.object({ label: z.string(), children: z.array(viewNodeSchema) })).min(1), ...styled }),
+    z.object({ type: z.literal('Accordion'), sections: z.array(z.object({ title: z.string(), defaultOpen: z.boolean().optional(), children: z.array(viewNodeSchema) })).min(1), ...styled }),
+    z.object({ type: z.literal('Toolbar'), title: z.string().optional(), children: z.array(viewNodeSchema), ...styled }),
+    z.object({ type: z.literal('Hero'), title: z.string(), subtitle: z.string().optional(), eyebrow: z.string().optional(), media: bindableSchema.optional(), actions: z.array(actionRefSchema).optional(), ...styled }),
+    z.object({ type: z.enum(['Text', 'Heading', 'Markdown']), value: z.string(), ...styled }),
+    z.object({ type: z.literal('Metric'), label: z.string(), value: bindableSchema, delta: bindableSchema.optional(), ...styled }),
+    z.object({ type: z.literal('KPIStrip'), items: z.array(z.object({ label: z.string(), value: bindableSchema, delta: bindableSchema.optional(), tone: toneSchema.optional(), spark: z.array(z.number()).optional() })).min(1), ...styled }),
+    z.object({ type: z.literal('Image'), src: bindableSchema, alt: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Avatar'), name: bindableSchema.optional(), src: bindableSchema.optional(), size: z.enum(['sm', 'md', 'lg']).optional(), ...styled }),
+    z.object({ type: z.literal('Callout'), title: z.string().optional(), value: z.string(), ...styled }),
+    z.object({ type: z.literal('ProgressBar'), value: bindableSchema, max: z.number().positive().optional(), label: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Sparkline'), points: z.array(z.number()).optional(), bind: dataBindSchema.optional(), y: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Table'), bind: dataBindSchema, columns: z.array(columnSchema), rowActions: z.array(actionRefSchema).optional(), ...styled }),
+    z.object({ type: z.literal('List'), bind: dataBindSchema, item: viewNodeSchema, ...styled }),
+    z.object({
+      type: z.literal('Chart'),
+      bind: dataBindSchema,
+      chartType: z.enum(['line', 'bar', 'pie', 'area', 'donut']),
+      x: z.string(),
+      y: z.string(),
+      series: z.array(z.object({ y: z.string(), label: z.string().optional(), color: accentSchema.optional() })).optional(),
+      stacked: z.boolean().optional(),
+      area: z.boolean().optional(),
+      height: z.number().int().positive().max(2000).optional(),
+      legend: z.boolean().optional(),
+      curve: z.enum(['linear', 'smooth']).optional(),
+      ...styled,
+    }),
+    z.object({ type: z.literal('Form'), fields: z.array(fieldSchema), submit: actionRefSchema, submitLabel: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Button'), label: z.string(), action: actionRefSchema, variant: z.enum(['primary', 'secondary', 'danger']).optional(), ...styled }),
+    z.object({ type: z.literal('Badge'), value: bindableSchema, tone: z.enum(['neutral', 'success', 'warning', 'danger']).optional(), ...styled }),
+    z.object({ type: z.literal('Divider'), ...styled }),
+    z.object({ type: z.literal('AgentConsole'), title: z.string().optional(), prompt: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('ActivityStream'), title: z.string().optional(), limit: z.number().int().positive().max(100).optional(), ...styled }),
+    z.object({ type: z.literal('DataBoard'), bind: dataBindSchema, groupBy: z.string().min(1), titleField: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Timeline'), title: z.string().optional(), items: z.array(z.object({ title: z.string(), detail: z.string().optional(), at: z.string().optional(), tone: toneSchema.optional() })).optional(), bind: dataBindSchema.optional(), titleField: z.string().optional(), detailField: z.string().optional(), atField: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('DocumentViewer'), title: z.string().optional(), content: z.string(), format: z.enum(['markdown', 'plain', 'json']).optional(), downloadName: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('MapView'), title: z.string().optional(), region: z.string().optional(), pins: z.array(z.object({ label: z.string(), lat: z.number().optional(), lng: z.number().optional(), value: bindableSchema.optional() })).optional(), ...styled }),
+    z.object({ type: z.literal('StatusBoard'), title: z.string().optional(), items: z.array(z.object({ label: z.string(), status: bindableSchema, detail: bindableSchema.optional() })), ...styled }),
+    z.object({ type: z.literal('WebEmbed'), title: z.string().optional(), url: z.string().url().refine((url) => url.startsWith('https://'), 'Web embeds require an HTTPS URL'), height: z.number().int().positive().max(2000).optional(), ...styled }),
+    z.object({ type: z.literal('Narrative'), title: z.string().optional(), value: z.string(), tone: z.enum(['brief', 'detailed', 'executive']).optional(), ...styled }),
+    z.object({ type: z.literal('ConversationThread'), title: z.string().optional(), messages: z.array(z.object({ role: z.enum(['user', 'assistant', 'agent', 'system']), content: z.string() })).optional(), ...styled }),
+    z.object({ type: z.literal('CodeViewer'), title: z.string().optional(), code: z.string(), language: z.string().optional(), diff: z.boolean().optional(), ...styled }),
+    z.object({ type: z.literal('MediaGallery'), title: z.string().optional(), items: z.array(z.object({ src: bindableSchema, alt: z.string().optional(), caption: z.string().optional(), kind: z.enum(['image', 'file', 'video']).optional() })), ...styled }),
+    z.object({ type: z.literal('AgentRegion'), region: z.string().min(1), title: z.string().optional(), reason: z.string().optional(), pinned: z.boolean().optional(), placeholder: z.string().optional(), child: viewNodeSchema.optional(), ...styled }),
+    z.object({ type: z.literal('ChatThread'), title: z.string().optional(), source: z.enum(['collection', 'conversations']).optional(), bind: dataBindSchema.optional(), roleField: z.string().optional(), contentField: z.string().optional(), atField: z.string().optional(), messages: z.array(z.object({ role: z.enum(['user', 'agent', 'system']), content: z.string(), at: z.string().optional() })).optional(), channel: z.string().optional(), send: actionRefSchema.optional(), placeholder: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Inbox'), source: z.enum(['collection', 'conversations']).optional(), bind: dataBindSchema.optional(), titleField: z.string().optional(), subtitleField: z.string().optional(), channelField: z.string().optional(), messagesBind: dataBindSchema.optional(), messageRoleField: z.string().optional(), messageContentField: z.string().optional(), matchField: z.string().optional(), send: actionRefSchema.optional(), ...styled }),
+    z.object({ type: z.literal('MediaGen'), title: z.string().optional(), bind: dataBindSchema.optional(), srcField: z.string().optional(), captionField: z.string().optional(), generate: actionRefSchema.optional(), placeholder: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Funnel'), title: z.string().optional(), stages: z.array(z.object({ label: z.string(), value: z.number() })).optional(), bind: dataBindSchema.optional(), labelField: z.string().optional(), valueField: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('Calendar'), title: z.string().optional(), bind: dataBindSchema.optional(), dateField: z.string().optional(), labelField: z.string().optional(), events: z.array(z.object({ date: z.string(), label: z.string(), tone: toneSchema.optional() })).optional(), ...styled }),
+    z.object({ type: z.literal('Gauge'), label: z.string().optional(), value: bindableSchema, max: z.number().positive().optional(), tone: toneSchema.optional(), ...styled }),
+    z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
+    z.object({ type: z.literal('CodeSurface'), code: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
   ]) as z.ZodType<ViewNode>,
 );
 
 /**
  * Every datastore collection a surface's view tree legitimately reads, gathered
- * from data-bound nodes (`Table`/`List`/`Chart`/`DataBoard` `bind.collection`)
- * and `CustomView` `collections`. This is the authorization allowlist for
- * reading a surface's data: a public/shared surface must only expose the
- * collections it actually displays — never sibling collections it never binds.
+ * from data-bound nodes (`Table`/`List`/`Chart`/`DataBoard`/`Timeline`/`Sparkline`
+ * `bind.collection`) and `CustomView` `collections`. This is the authorization
+ * allowlist for reading a surface's data: a public/shared surface must only
+ * expose the collections it actually displays — never sibling collections it
+ * never binds.
  */
 export function collectionsInView(view: ViewNode | null | undefined): Set<string> {
   const out = new Set<string>();
@@ -153,7 +303,20 @@ export function collectionsInView(view: ViewNode | null | undefined): Set<string
         out.add(n.bind.collection);
         walk(n.item);
         return;
+      case 'Timeline':
+      case 'Sparkline':
+      case 'ChatThread':
+      case 'MediaGen':
+      case 'Funnel':
+      case 'Calendar':
+        if (n.bind) out.add(n.bind.collection);
+        return;
+      case 'Inbox':
+        if (n.bind) out.add(n.bind.collection);
+        if (n.messagesBind) out.add(n.messagesBind.collection);
+        return;
       case 'CustomView':
+      case 'CodeSurface':
         for (const c of n.collections ?? []) out.add(c);
         return;
       case 'Stack':
@@ -161,7 +324,21 @@ export function collectionsInView(view: ViewNode | null | undefined): Set<string
       case 'Grid':
       case 'Card':
       case 'Section':
+      case 'Toolbar':
         for (const child of n.children) walk(child);
+        return;
+      case 'Split':
+        walk(n.left);
+        walk(n.right);
+        return;
+      case 'AgentRegion':
+        walk(n.child);
+        return;
+      case 'Tabs':
+        for (const tab of n.tabs) for (const child of tab.children) walk(child);
+        return;
+      case 'Accordion':
+        for (const section of n.sections) for (const child of section.children) walk(child);
         return;
       default:
         return;
@@ -199,6 +376,11 @@ export interface AppSurface {
   updatedAt: string;
 }
 
+/** The surface look preset, read from the root node's style (no DB column). */
+export function surfaceThemeOf(view: ViewNode | null | undefined): SurfaceTheme | undefined {
+  return view?.style?.theme;
+}
+
 // ── ui_render / ui_patch tool payloads ──────────────────────
 
 export const uiRenderSchema = z.object({
@@ -222,6 +404,34 @@ export const uiActionSchemaSchema = z.object({
   surface: z.string().min(1),
   actions: z.array(surfaceActionSchema),
 });
+
+// ── Performed regions (Phase M3 / G12) ──────────────────────
+// An agent performs a transient ViewNode into a stable AgentRegion slot, live
+// over the realtime bus. The child is ephemeral (never persisted) unless
+// `pin:true` — then it freezes into the stored surface tree. `clear:true` (no
+// view) dismisses the region. Every push carries an explainable `reason`.
+export const uiPerformRegionSchema = z.object({
+  surface: z.string().min(1),
+  region: z.string().min(1),
+  view: viewNodeSchema.optional(),
+  reason: z.string().max(400).optional(),
+  pin: z.boolean().optional(),
+  clear: z.boolean().optional(),
+});
+export type UiPerformRegion = z.infer<typeof uiPerformRegionSchema>;
+
+/** Realtime payload broadcast on SURFACE_RENDER when an agent performs a region. */
+export interface SurfaceRegionPush {
+  appId: string;
+  surfaceId: string;
+  surface: string;
+  /** Marks this as a region push (vs a full-surface render) so the renderer routes it. */
+  region: string;
+  view: ViewNode | null;
+  reason?: string;
+  pinned: boolean;
+  at: string;
+}
 
 export const upsertSurfaceSchema = z.object({
   name: z.string().min(1).max(120),

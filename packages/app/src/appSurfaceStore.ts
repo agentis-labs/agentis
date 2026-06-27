@@ -13,12 +13,14 @@ import { and, asc, eq } from 'drizzle-orm';
 import {
   AgentisError,
   appPolicySchema,
+  repairSurface,
   viewNodeSchema,
   surfaceActionSchema,
   upsertSurfaceSchema,
   type AppSurface,
   type SurfaceAction,
   type SurfaceKind,
+  type SurfaceRegionPush,
   type UiPatchOp,
   type ViewNode,
 } from '@agentis/core';
@@ -83,6 +85,16 @@ export class AppSurfaceStore {
       .from(schema.appSurfaces)
       .where(and(eq(schema.appSurfaces.appId, appId), eq(schema.appSurfaces.name, name)))
       .get();
+  }
+
+  /** The app's real collection names — used by the layout auditor to drop dead binds. */
+  private collectionNames(appId: string): string[] {
+    return this.db
+      .select({ name: schema.appCollections.name })
+      .from(schema.appCollections)
+      .where(eq(schema.appCollections.appId, appId))
+      .all()
+      .map((r) => r.name);
   }
 
   list(workspaceId: string, appId: string): AppSurface[] {
@@ -192,15 +204,17 @@ export class AppSurfaceStore {
   render(workspaceId: string, appId: string, name: string, view: unknown): AppSurface {
     this.requireApp(workspaceId, appId);
     const parsed = viewNodeSchema.parse(view);
-    this.requireCustomCodeAllowed(workspaceId, appId, parsed);
+    // Layout floor: auto-repair agent-authored trees before they ship.
+    const repaired = repairSurface(parsed, { collections: this.collectionNames(appId) }).view;
+    this.requireCustomCodeAllowed(workspaceId, appId, repaired);
     const existing = this.rowByName(appId, name);
     const now = new Date().toISOString();
     if (!existing) {
-      this.upsert(workspaceId, appId, { name, kind: 'page', view: parsed });
+      this.upsert(workspaceId, appId, { name, kind: 'page', view: repaired });
     } else {
       this.db
         .update(schema.appSurfaces)
-        .set({ viewJson: parsed, revision: existing.revision + 1, updatedAt: now })
+        .set({ viewJson: repaired, revision: existing.revision + 1, updatedAt: now })
         .where(eq(schema.appSurfaces.id, existing.id))
         .run();
     }
@@ -216,16 +230,73 @@ export class AppSurfaceStore {
     let tree = structuredClone(current.view) as unknown;
     for (const op of ops) tree = applyPatchOp(tree, op);
     const parsed = viewNodeSchema.parse(tree);
-    this.requireCustomCodeAllowed(workspaceId, appId, parsed);
+    const repaired = repairSurface(parsed, { collections: this.collectionNames(appId) }).view;
+    this.requireCustomCodeAllowed(workspaceId, appId, repaired);
     const now = new Date().toISOString();
     this.db
       .update(schema.appSurfaces)
-      .set({ viewJson: parsed, revision: current.revision + 1, updatedAt: now })
+      .set({ viewJson: repaired, revision: current.revision + 1, updatedAt: now })
       .where(and(eq(schema.appSurfaces.appId, appId), eq(schema.appSurfaces.name, name)))
       .run();
     const surface = this.get(workspaceId, appId, name);
     this.deps.emit?.({ appId, workspaceId, event: 'patch', surfaceId: surface.id, revision: surface.revision, payload: { ops } });
     return surface;
+  }
+
+  /**
+   * ui_perform_region (Phase M3 / G12) — the agent PERFORMS a transient region
+   * into a stable `AgentRegion` slot, live. The performed child is ephemeral: it
+   * is broadcast over the realtime bus (SURFACE_RENDER carrying `region`) and the
+   * renderer drops it into the matching slot WITHOUT it being stored — so the
+   * stable frame never drifts. Only when `pin:true` is the child frozen into the
+   * persisted tree (so a reload keeps it). `clear:true` dismisses the region
+   * (and un-pins the stored slot). Every push carries an explainable `reason`.
+   */
+  performRegion(
+    workspaceId: string,
+    appId: string,
+    name: string,
+    args: { region: string; view?: ViewNode | null; reason?: string; pin?: boolean; clear?: boolean },
+  ): AppSurface {
+    const current = this.get(workspaceId, appId, name);
+    if (current.view == null) throw new AgentisError('VALIDATION_FAILED', `surface ${name} has no view; render the frame (with an AgentRegion) first`);
+    if (!findRegion(current.view, args.region)) {
+      throw new AgentisError('VALIDATION_FAILED', `surface ${name} has no AgentRegion "${args.region}"; add one to the frame first`);
+    }
+    const child = args.clear ? null : (args.view ?? null);
+    const repairedChild = child ? repairSurface(child, { collections: this.collectionNames(appId) }).view : null;
+    if (repairedChild) this.requireCustomCodeAllowed(workspaceId, appId, repairedChild);
+
+    let revision = current.revision;
+    // Pinned (or cleared) regions mutate the stored tree so a reload is stable;
+    // an un-pinned performance leaves the persisted slot empty (it's transient).
+    if (args.pin || args.clear) {
+      const nextTree = setRegion(current.view, args.region, {
+        child: args.pin ? repairedChild : undefined,
+        pinned: args.pin === true,
+        reason: args.clear ? undefined : args.reason,
+      });
+      const now = new Date().toISOString();
+      this.db
+        .update(schema.appSurfaces)
+        .set({ viewJson: nextTree, revision: current.revision + 1, updatedAt: now })
+        .where(and(eq(schema.appSurfaces.appId, appId), eq(schema.appSurfaces.name, name)))
+        .run();
+      revision = current.revision + 1;
+    }
+
+    const payload: SurfaceRegionPush = {
+      appId,
+      surfaceId: current.id,
+      surface: name,
+      region: args.region,
+      view: repairedChild,
+      ...(args.reason ? { reason: args.reason } : {}),
+      pinned: args.pin === true,
+      at: new Date().toISOString(),
+    };
+    this.deps.emit?.({ appId, workspaceId, event: 'render', surfaceId: current.id, revision, payload });
+    return this.get(workspaceId, appId, name);
   }
 
   /** ui_action_schema — declare the actions a surface may invoke. */
@@ -313,9 +384,47 @@ function removeAtPath(root: unknown, segments: Array<string | number>): unknown 
   return clone;
 }
 
+/** Find an `AgentRegion` slot by its region id anywhere in the tree. */
+function findRegion(node: ViewNode, region: string): boolean {
+  if (node.type === 'AgentRegion') {
+    if (node.region === region) return true;
+    return node.child ? findRegion(node.child, region) : false;
+  }
+  if (node.type === 'Split') return findRegion(node.left, region) || findRegion(node.right, region);
+  if (node.type === 'List') return findRegion(node.item, region);
+  if (node.type === 'Tabs') return node.tabs.some((t) => t.children.some((c) => findRegion(c, region)));
+  if (node.type === 'Accordion') return node.sections.some((s) => s.children.some((c) => findRegion(c, region)));
+  if ('children' in node && Array.isArray((node as { children?: unknown }).children)) {
+    return (node as { children: ViewNode[] }).children.some((c) => findRegion(c, region));
+  }
+  return false;
+}
+
+/** Return a copy of the tree with the matching `AgentRegion` slot's fields updated. */
+function setRegion(node: ViewNode, region: string, patch: { child?: ViewNode | null; pinned?: boolean; reason?: string }): ViewNode {
+  if (node.type === 'AgentRegion' && node.region === region) {
+    const next = { ...node } as Extract<ViewNode, { type: 'AgentRegion' }>;
+    if ('child' in patch) next.child = patch.child ?? undefined;
+    if (patch.pinned !== undefined) next.pinned = patch.pinned;
+    if ('reason' in patch) next.reason = patch.reason;
+    return next;
+  }
+  if (node.type === 'AgentRegion' && node.child) return { ...node, child: setRegion(node.child, region, patch) };
+  if (node.type === 'Split') return { ...node, left: setRegion(node.left, region, patch), right: setRegion(node.right, region, patch) };
+  if (node.type === 'List') return { ...node, item: setRegion(node.item, region, patch) };
+  if (node.type === 'Tabs') return { ...node, tabs: node.tabs.map((t) => ({ ...t, children: t.children.map((c) => setRegion(c, region, patch)) })) };
+  if (node.type === 'Accordion') return { ...node, sections: node.sections.map((s) => ({ ...s, children: s.children.map((c) => setRegion(c, region, patch)) })) };
+  if ('children' in node && Array.isArray((node as { children?: unknown }).children)) {
+    return { ...node, children: (node as { children: ViewNode[] }).children.map((c) => setRegion(c, region, patch)) } as ViewNode;
+  }
+  return node;
+}
+
 function containsCustomView(node: ViewNode): boolean {
   if (node.type === 'CustomView') return true;
   if ('children' in node) return node.children.some(containsCustomView);
   if (node.type === 'List') return containsCustomView(node.item);
+  if (node.type === 'Split') return containsCustomView(node.left) || containsCustomView(node.right);
+  if (node.type === 'AgentRegion') return node.child ? containsCustomView(node.child) : false;
   return false;
 }

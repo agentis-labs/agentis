@@ -8,12 +8,14 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS, type AgentAdapter, type ChatDelta, type ChatMessage } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { ConversationStore } from '../../src/services/conversationStore.js';
 import { ChannelBridge } from '../../src/services/channelBridge.js';
 import { ChannelTurnDispatcher, interpretConfirmation } from '../../src/services/channelTurnDispatcher.js';
+import { AppStore } from '@agentis/app';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
 
@@ -275,6 +277,82 @@ describe('ChannelTurnDispatcher', () => {
     expect(result.replied).toBe(false);
     expect(result.reason).toBe('no_chat_adapter');
     expect(delivered[0]).toMatch(/not connected to an interactive runtime/);
+  });
+
+  it('stays quiet when an operator has taken over the thread (Living Apps Phase 2)', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    // Operator took over: park the agent.
+    ctx.db.update(schema.conversations).set({ handoffState: 'human' }).where(eq(schema.conversations.id, conv.id)).run();
+
+    let turnRan = false;
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('should not run'),
+      runTurn: async function* () { turnRan = true; yield { type: 'done', finishReason: 'stop' } as ChatDelta; } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    const result = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'c', kind: 'telegram', chatId: '1', text: 'hi',
+    });
+
+    expect(turnRan).toBe(false);
+    expect(result).toEqual({ replied: false, reason: 'human_handling' });
+  });
+
+  it('runs an App-bound channel turn in App context (Living Apps Phase 0)', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' });
+
+    // A channel connection bound to the App.
+    const connId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+      appId: app.id,
+      kind: 'telegram',
+      name: 'Acme line',
+      tokenEncrypted: 'x',
+    }).run();
+
+    // The channel-bound conversation adopts the App.
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connId, channelChatId: '42', appId: app.id,
+    });
+    expect((conv as { appId?: string | null }).appId).toBe(app.id);
+
+    let capturedCtx: { appId?: string | null } | null = null;
+    let capturedOptions: { systemAddendum?: string } | null = null;
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      runTurn: async function* (_a, _h, _t, c, o) {
+        capturedCtx = c as { appId?: string | null };
+        capturedOptions = (o ?? null) as { systemAddendum?: string } | null;
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '42', text: 'hi',
+    });
+
+    // The turn carries the App in context (so data_insert resolves to it)…
+    expect(capturedCtx?.appId).toBe(app.id);
+    // …and the resident-agent operating doctrine is injected, naming the App.
+    expect(capturedOptions?.systemAddendum ?? '').toMatch(/Acme Sales/);
+    expect(capturedOptions?.systemAddendum ?? '').toMatch(/data_insert|datastore/);
   });
 
   it('channel-delivered confirmation: prompts yes/no, then resolves on the next reply', async () => {
