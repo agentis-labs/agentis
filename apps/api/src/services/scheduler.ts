@@ -54,8 +54,20 @@ interface QueuedWorkflowRun {
 export class SchedulerService {
   #timer: ReturnType<typeof setInterval> | undefined;
   #running = false;
+  // Throttled background sweeps registered by other subsystems (Living Apps
+  // proactivity / abandonment). Each runs at most once per `everyMs`.
+  readonly #appSweeps: Array<{ name: string; everyMs: number; lastRun: number; run: (now: Date) => Promise<number> }> = [];
 
   constructor(private readonly deps: SchedulerDeps) {}
+
+  /**
+   * Register a throttled background sweep (Living Apps §4.5 / M2). Runs inside the
+   * existing tick loop, isolated so a failure never starves the others. `everyMs`
+   * caps frequency (the tick fires every ~1s; a due/abandon sweep needn't).
+   */
+  registerSweep(name: string, everyMs: number, run: (now: Date) => Promise<number>): void {
+    this.#appSweeps.push({ name, everyMs, lastRun: 0, run });
+  }
 
   start(intervalMs = 1_000): void {
     if (this.#timer) return;
@@ -91,6 +103,15 @@ export class SchedulerService {
       if (this.deps.issues) {
         try { issues = await this.deps.issues.sweepDue(now); } catch (err) {
           this.deps.logger.warn('scheduler.issue_sweep_failed', { err: (err as Error).message });
+        }
+      }
+      // Throttled Living Apps sweeps (proactive follow-ups, abandoned contacts).
+      const nowMs = now.getTime();
+      for (const sweep of this.#appSweeps) {
+        if (nowMs - sweep.lastRun < sweep.everyMs) continue;
+        sweep.lastRun = nowMs;
+        try { await sweep.run(now); } catch (err) {
+          this.deps.logger.warn(`scheduler.${sweep.name}_failed`, { err: (err as Error).message });
         }
       }
       return { schedules, queues, issues };

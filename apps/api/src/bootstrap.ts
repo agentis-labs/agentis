@@ -107,6 +107,7 @@ import { buildAppStores } from '@agentis/app';
 import { AppStaffingService } from './services/appStaffing.js';
 import { AppPresenceService } from './services/appPresence.js';
 import { AppContactService } from './services/appContacts.js';
+import { ProactiveFollowupService } from './services/proactiveFollowups.js';
 import { AppLearningService } from './services/appLearning.js';
 import { ConversationParticipantService } from './services/conversationParticipants.js';
 import { buildScratchpadRoutes } from './routes/scratchpad.js';
@@ -1211,6 +1212,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     debounceMs: 900,
   });
   channelBridge.setTurnDispatcher(channelTurnDispatcher);
+
+  // Living Apps proactivity (Phase 3 §4.5 + M2) — fire due follow-ups and sweep
+  // abandoned relationships on the existing scheduler tick (throttled, isolated).
+  const proactiveFollowups = new ProactiveFollowupService({ db: sqlite, contacts: appContacts, dispatcher: channelTurnDispatcher, logger });
+  scheduler.registerSweep('proactive_followup', 60_000, async (now) => (await proactiveFollowups.sweep(now.toISOString())).fired);
+  scheduler.registerSweep('abandoned_contacts', 3_600_000, async (now) => (await appLearning.sweepAbandoned(now.toISOString())).swept);
 
   // Durable channel turns (Living Apps Phase 5 / G2). When enabled, an inbound
   // turn is enqueued (durable, at-least-once, resumable on restart) and drained
