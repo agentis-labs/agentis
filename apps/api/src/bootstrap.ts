@@ -203,6 +203,8 @@ import { buildGovernanceRoutes } from './routes/governance.js';
 import { buildWorkflowIoRoutes } from './routes/workflowIo.js';
 import { EvaluatorRuntime } from './services/evaluatorRuntime.js';
 import type { StructuredCompleter } from './services/structuredCompleter.js';
+import { AdapterStructuredCompleter } from './services/structuredCompleter.js';
+import { ConversationSimulatorService } from './services/conversationSimulator.js';
 import { buildTerminalRoutes } from './routes/terminal.js';
 import { buildCredentialRoutes } from './routes/credentials.js';
 import { buildIntegrationRoutes } from './routes/integrations.js';
@@ -1172,6 +1174,24 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // reflection pass fires the existing SkillProposer → ability draft).
   const appLearning = new AppLearningService({ db: sqlite, shared: SharedIntelligence, logger, reflection: memoryReflection });
 
+  // Conversation rehearsal (Phase 5 · G8) — drive a synthetic customer through a
+  // scenario against the REAL resident-agent path (ChatSessionExecutor.turn) in a
+  // sandboxed conversation (no channel send), then score the transcript. The
+  // synthetic customer + holistic judge use the agent's own adapter when it can
+  // chat, else the orchestrator runtime — the same fallback the dispatcher uses.
+  const conversationSimulator = new ConversationSimulatorService({
+    db: sqlite,
+    adapters,
+    logger,
+    completer: (workspaceId, agentId) => {
+      const own = adapters.get(agentId)?.adapter;
+      const adapter = (own?.chat && own.capabilities?.().interactiveChat !== false)
+        ? own
+        : ChatSessionExecutor.orchestratorAdapter(workspaceId);
+      return adapter?.chat ? new AdapterStructuredCompleter(adapter, `simulator:${agentId}`) : undefined;
+    },
+  });
+
   // Close the channel loop: inbound channel messages now run a real orchestrator
   // turn and the reply is delivered back to the origin chat.
   const channelTurnDispatcher = new ChannelTurnDispatcher({
@@ -1433,7 +1453,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
   app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
   const appStaffing = new AppStaffingService({ store: appStores.store, specialists: specialistAgents, loadouts: specialistLoadouts, logger });
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning }));
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }));
   const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }, bus, logger);

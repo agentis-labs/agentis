@@ -16,6 +16,9 @@ import { AppLearningService } from '../../src/services/appLearning.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
+import { ConversationSimulatorService } from '../../src/services/conversationSimulator.js';
+import { AdapterManager } from '../../src/adapters/AdapterManager.js';
+import type { AgentAdapter, ChatDelta } from '@agentis/core';
 
 let ctx: TestContext;
 
@@ -267,6 +270,61 @@ describe('/v1/apps learning loop (Phase M2)', () => {
     const res = await routed.request(`/v1/apps/${appId}/contacts/${contactId}/outcome`, {
       method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ outcome: 'maybe' }),
     });
+    expect(res.status).toBe(422);
+  });
+});
+
+describe('/v1/apps conversation simulator (G8)', () => {
+  function chatStub(): AgentAdapter {
+    return { capabilities: () => ({ interactiveChat: true }), async *chat(): AsyncIterable<ChatDelta> { yield { type: 'done', finishReason: 'stop' }; } } as unknown as AgentAdapter;
+  }
+
+  it('runs a scripted scenario against the resident agent and returns a scored transcript', async () => {
+    const store = new AppStore(ctx.db);
+    const agentId = seedAgentRow();
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales', ownerAgentId: agentId }).id;
+    let turn = 0;
+    const simulator = new ConversationSimulatorService({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      logger: ctx.logger,
+      fallbackAdapter: () => chatStub(),
+      runTurn: (async function* () {
+        const reply = turn === 0 ? 'Sure! I can offer you a discount of 10% off.' : 'See you Saturday.';
+        turn += 1;
+        yield { type: 'text', delta: reply } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, simulator }) }]);
+
+    const res = await routed.request(`/v1/apps/${appId}/simulate`, {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({
+        scenario: {
+          name: 'Discount pressure',
+          persona: { name: 'Maria', prompt: 'pushes for a discount' },
+          goal: 'Book a viewing',
+          customerTurns: ['Can I get a discount?', 'Ok, can I see it Saturday?'],
+          guardrails: [{ id: 'no_discounts', label: 'never promise a discount', pattern: 'discount of' }],
+          expectations: [{ id: 'ask_budget', label: 'ask for budget', pattern: 'budget' }],
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { agentId: string; transcript: unknown[]; score: { guardrailViolations: unknown[]; missedExpectations: unknown[]; score: number } } };
+    expect(body.data.agentId).toBe(agentId);
+    expect(body.data.transcript).toHaveLength(2);
+    expect(body.data.score.guardrailViolations).toHaveLength(1);
+    expect(body.data.score.missedExpectations.length).toBeGreaterThanOrEqual(1);
+    expect(body.data.score.score).toBeLessThan(1);
+  });
+
+  it('rejects an invalid scenario', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'X' }).id;
+    const simulator = new ConversationSimulatorService({ db: ctx.db, adapters: new AdapterManager(ctx.logger), logger: ctx.logger, fallbackAdapter: () => chatStub() });
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, simulator }) }]);
+    const res = await routed.request(`/v1/apps/${appId}/simulate`, { method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ scenario: { name: '' } }) });
     expect(res.status).toBe(422);
   });
 });
