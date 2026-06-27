@@ -127,6 +127,37 @@ VALUES ('conv-bare', 'ws-1', 'user-1', 'agent-2');
     }
   });
 
+  it('v100 creates the durable channel_turn_queue with a unique dedup index', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const v100 = SQLITE_MIGRATIONS.find((m) => m.version === 100);
+      expect(v100?.name).toBe('living_apps_channel_turn_queue');
+
+      // Table + key columns exist.
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='channel_turn_queue'").get()).toBeDefined();
+      const cols = sqlite.prepare("PRAGMA table_info('channel_turn_queue')").all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toEqual(
+        expect.arrayContaining(['id', 'workspace_id', 'conversation_id', 'app_id', 'dedup_key', 'payload', 'status', 'attempts', 'leased_at', 'scheduled_for', 'fail_reason']),
+      );
+
+      // The dedup index is UNIQUE — a redelivered inbound never enqueues twice.
+      sqlite.pragma('foreign_keys = OFF');
+      sqlite.exec(`
+INSERT INTO channel_turn_queue (id, workspace_id, conversation_id, dedup_key, status)
+VALUES ('q1', 'ws-1', 'conv-1', 'msg-1', 'pending');
+`);
+      expect(() =>
+        sqlite.exec(`
+INSERT INTO channel_turn_queue (id, workspace_id, conversation_id, dedup_key, status)
+VALUES ('q2', 'ws-1', 'conv-1', 'msg-1', 'pending');
+`),
+      ).toThrow(/UNIQUE/i);
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('applies all registered migrations on a fresh database', () => {
     const path = tempDbPath();
     const sqlite = new Database(path);

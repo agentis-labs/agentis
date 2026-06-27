@@ -59,6 +59,7 @@ import { WorktreeManager } from './services/worktreeManager.js';
 import { OrchestratorModelRouter, type ModelProfile } from './services/orchestratorModelRouter.js';
 import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from './services/workspaceHarnessRuntime.js';
 import { ChannelTurnDispatcher } from './services/channelTurnDispatcher.js';
+import { ChannelTurnQueue } from './services/channelTurnQueue.js';
 import { ChannelConnectionSupervisor } from './services/channelConnectionSupervisor.js';
 import { WorkspaceAwarenessService } from './services/workspaceAwarenessService.js';
 import { TranscriptionService } from './services/transcriptionService.js';
@@ -1190,6 +1191,21 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   });
   channelBridge.setTurnDispatcher(channelTurnDispatcher);
 
+  // Durable channel turns (Living Apps Phase 5 / G2). When enabled, an inbound
+  // turn is enqueued (durable, at-least-once, resumable on restart) and drained
+  // by this worker instead of running fire-and-forget in-process. Off by default
+  // → today's in-process path, byte-identical. Opt-in via AGENTIS_DURABLE_CHANNEL_TURNS.
+  const durableChannelTurns = String(process.env.AGENTIS_DURABLE_CHANNEL_TURNS ?? '').toLowerCase() === 'true';
+  const channelTurnQueue = new ChannelTurnQueue({
+    db: sqlite,
+    logger,
+    runner: channelTurnDispatcher,
+  });
+  if (durableChannelTurns) {
+    // Wire both directions: dispatch() enqueues; the worker calls runQueued().
+    channelTurnDispatcher.setQueue(channelTurnQueue);
+  }
+
   // Voice-note transcription (WhatsApp) — uses the model router's transcription
   // role. No-op when no transcription model is configured.
   const transcription = new TranscriptionService({
@@ -1544,6 +1560,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       eventChain.start();
       scheduler.start();
       jobQueue.start();
+      // G2 — drain durable channel turns + resume any left in-flight by a crash.
+      if (durableChannelTurns) channelTurnQueue.start();
       groundingRuntime.start();
       runCompaction.start();
       brainQueue.start(); // ability compile pipeline + brain promotions
@@ -1596,6 +1614,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       logger.info('agentis.shutdown');
       runCompaction.stop();
       jobQueue.stop();
+      channelTurnQueue.stop();
       harnessImportSync.stop();
       groundingRuntime.stop();
       brainQueue.stop();

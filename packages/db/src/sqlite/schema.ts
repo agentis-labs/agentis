@@ -1103,6 +1103,46 @@ export const channelDeliveries = sqliteTable('channel_deliveries', {
 });
 
 /**
+ * Durable channel-turn queue (Living Apps Phase 5 / G2, migration v100).
+ *
+ * The inbound dispatcher was fire-and-forget, in-process: a 24/7 desk dropped
+ * turns on restart with no backpressure or resumption. This table makes a
+ * channel turn a durable, at-least-once job. The `ChannelTurnInput` payload is
+ * stored verbatim; a polling worker claims `pending` rows, runs the turn, and
+ * marks them `done`. A crash mid-flight (lease expiry) re-picks the row;
+ * `dedup_key` (the inbound conversation-message id) makes enqueue idempotent so
+ * a redelivered webhook never doubles a turn. Mirrored in migrations.ts (v100)
+ * — new table, so inline FKs are fine (conversations/workspaces exist by v100).
+ */
+export const channelTurnQueue = sqliteTable('channel_turn_queue', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Concurrency + ordering bucket: turns for one conversation run serially, in arrival order. */
+  conversationId: text('conversation_id')
+    .notNull()
+    .references(() => conversations.id, { onDelete: 'cascade' }),
+  /** App bucket (when the channel belongs to an App) for per-App concurrency fairness. NULL = bare agent. */
+  appId: text('app_id'),
+  /** Idempotency key — the inbound conversation-message id. Unique so a redelivered turn never re-runs. */
+  dedupKey: text('dedup_key'),
+  /** The full ChannelTurnInput, stored verbatim so the worker can resume after a crash. */
+  payload: text('payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** pending | processing | done | failed. */
+  status: text('status').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  /** Set while a worker holds the row; cleared on terminal/retry. Expiry → reclaim (crash resume). */
+  leasedAt: text('leased_at'),
+  lastAttemptAt: text('last_attempt_at'),
+  /** Backoff clock — the row is invisible to the poller until now passes scheduledFor. */
+  scheduledFor: text('scheduled_for').notNull().default(isoNow() as unknown as string),
+  failReason: text('fail_reason'),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
  * Cross-surface peer identity (OMNICHANNEL §5.2). One row per
  * (workspace, channelKind, handle). `userId` + `peerKey` are opt-in: linking a
  * handle to a workspace user assigns a stable `peerKey` so the same human is

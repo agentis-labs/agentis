@@ -2322,4 +2322,41 @@ ALTER TABLE app_contacts ADD COLUMN outcome TEXT;
 ALTER TABLE app_contacts ADD COLUMN outcome_at TEXT;
 `,
   },
+  {
+    version: 100,
+    name: 'living_apps_channel_turn_queue',
+    sql: `
+-- Living Apps Phase 5 (G2) — durable channel turns at scale. The inbound
+-- dispatcher was fire-and-forget, in-process: a 24/7 desk dropped turns on
+-- restart with no backpressure or resumption. This table makes a channel turn a
+-- durable, at-least-once job: the ChannelTurnInput payload is stored verbatim, a
+-- polling worker claims pending rows, runs the turn, and marks them done. A crash
+-- mid-flight (lease expiry) re-picks the row; dedup_key (the inbound
+-- conversation-message id) makes enqueue idempotent so a redelivered webhook
+-- never doubles a turn. New table → inline FKs are fine (conversations/workspaces
+-- exist by v100). Mirrored in src/sqlite/schema.ts (channelTurnQueue).
+CREATE TABLE IF NOT EXISTS channel_turn_queue (
+  id               TEXT PRIMARY KEY,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  app_id           TEXT,
+  dedup_key        TEXT,
+  payload          TEXT NOT NULL DEFAULT '{}',
+  status           TEXT NOT NULL DEFAULT 'pending',
+  attempts         INTEGER NOT NULL DEFAULT 0,
+  leased_at        TEXT,
+  last_attempt_at  TEXT,
+  scheduled_for    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  fail_reason      TEXT,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+-- Idempotency: a given inbound message enqueues at most one turn.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_turn_dedup ON channel_turn_queue(dedup_key);
+-- Poller scan: pending rows whose backoff has elapsed, oldest first.
+CREATE INDEX IF NOT EXISTS idx_channel_turn_poll ON channel_turn_queue(status, scheduled_for);
+-- Per-conversation serialization bucket.
+CREATE INDEX IF NOT EXISTS idx_channel_turn_conversation ON channel_turn_queue(conversation_id, status);
+`,
+  },
 ];
