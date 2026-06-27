@@ -29,6 +29,8 @@ import { ChatSessionExecutor } from './chatSessionExecutor.js';
 import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from './chatPermissionMode.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
 import type { AppContactService } from './appContacts.js';
+import type { ConversationSummaryService } from './conversationSummaryService.js';
+import { AdapterStructuredCompleter } from './structuredCompleter.js';
 import type { ConversationParticipantService } from './conversationParticipants.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
@@ -59,6 +61,13 @@ export interface ChannelTurnDispatcherDeps {
   identity?: ChannelIdentityService;
   /** App relationship entity — upserts/touches a contact for App-bound turns (Phase 3). */
   contacts?: AppContactService;
+  /**
+   * Long-horizon per-conversation memory (G4). When wired, the dispatcher folds
+   * turns that scroll out of the live window into a rolling "state of this
+   * relationship" summary and injects it into each turn. Absent → today's
+   * window-only context (no summary), byte-identical.
+   */
+  summaries?: ConversationSummaryService;
   /** Multi-party threads (G1) — resolve the active responder (specialist warm handoff) + seed the primary. */
   participants?: ConversationParticipantService;
   /**
@@ -125,6 +134,8 @@ export interface ChannelTurnInput {
 }
 
 const HISTORY_LIMIT = 20;
+/** How many turn-windows of history the summary maintainer reads (G4). */
+const SUMMARY_LOOKBACK_WINDOWS = 8;
 const NOT_CONNECTED =
   'This agent is not connected to an interactive runtime yet, so it cannot reply over this channel. ' +
   'Connect a chat-capable harness (or configure the orchestrator runtime) and try again.';
@@ -246,7 +257,8 @@ export class ChannelTurnDispatcher {
     try {
       // App relationship (Phase 3): record/refresh the contact for this inbound,
       // so the App's pipeline + lastTouch clock stay current with zero agent effort.
-      this.#touchContact(input);
+      // The contact id also scopes this turn's brain recall to THIS customer (G11).
+      const contactId = this.#touchContact(input);
       // Operator takeover (Living Apps Phase 2): a human is driving this thread, so
       // the resident agent stays quiet. The inbound message is already mirrored for
       // the operator to answer; do not auto-reply.
@@ -308,6 +320,13 @@ export class ChannelTurnDispatcher {
         });
       } else {
         const runTurn = this.deps.runTurn ?? ChatSessionExecutor.turn.bind(ChatSessionExecutor);
+        // §G11 — scope this turn's brain recall to the App + this contact + the
+        // operating agent (the union), so the agent recalls THIS customer's history
+        // and the App's relationships, not the workspace at large. Falls back to the
+        // agent's own scope for a non-App turn.
+        const recallScopeIds = input.appId
+          ? [...new Set([input.appId, ...(contactId ? [contactId] : []), responderAgentId])]
+          : undefined;
         const ctx: ChatTurnContext = {
           workspaceId: input.workspaceId,
           ambientId: input.ambientId,
@@ -315,6 +334,7 @@ export class ChannelTurnDispatcher {
           userId: input.userId,
           conversationId: input.conversationId,
           ...(input.appId ? { appId: input.appId } : {}),
+          ...(recallScopeIds ? { recallScopeIds } : {}),
           clientTurnId,
           executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
           permissionMode,
@@ -322,10 +342,14 @@ export class ChannelTurnDispatcher {
           viewport: null,
         };
         const senderSummary = this.#recordIdentity(input);
+        // §G4 — long-horizon memory: fold turns that scrolled out of the live
+        // window into a rolling per-conversation summary, then inject it. Bounded,
+        // throttled, and non-throwing — never breaks the turn.
+        const conversationSummary = await this.#updateAndRenderSummary(input, adapter);
         // App-scoped addendum: tell the resident agent which App it operates and to
         // persist what it learns where the App's surfaces read it (Living Apps §4.2).
         const appAddendum = input.appId ? this.#appOperatingAddendum(input.appId) : null;
-        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, appAddendum]
+        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, conversationSummary, appAddendum]
           .filter((s): s is string => Boolean(s))
           .join('\n\n');
         stream = runTurn(adapter, this.#buildHistory(input, excludeMessageIds), runtimeText, ctx, {
@@ -434,13 +458,16 @@ export class ChannelTurnDispatcher {
     }
   }
 
-  /** Upsert/touch the App contact for an App-bound inbound turn (Phase 3). Never throws. */
-  #touchContact(input: ChannelTurnInput): void {
-    if (!input.appId || !this.deps.contacts) return;
+  /**
+   * Upsert/touch the App contact for an App-bound inbound turn (Phase 3). Returns
+   * the contact id (for contact-scoped recall, G11) or null. Never throws.
+   */
+  #touchContact(input: ChannelTurnInput): string | null {
+    if (!input.appId || !this.deps.contacts) return null;
     try {
       // The most stable per-channel handle: sender id for Slack/Discord, chat address for DMs.
       const handle = (input.kind === 'slack' || input.kind === 'discord') ? (input.from ?? input.chatId) : input.chatId;
-      this.deps.contacts.touch({
+      return this.deps.contacts.touch({
         workspaceId: input.workspaceId,
         appId: input.appId,
         channelKind: input.kind,
@@ -449,6 +476,7 @@ export class ChannelTurnDispatcher {
       });
     } catch (err) {
       this.deps.logger.warn('channel.turn.contact_touch_failed', { appId: input.appId, err: (err as Error).message });
+      return null;
     }
   }
 
@@ -653,6 +681,51 @@ export class ChannelTurnDispatcher {
           row.authorType === 'operator' || meta.channelInbound ? 'user' : 'assistant';
         return { role, content: row.body };
       });
+  }
+
+  /**
+   * Long-horizon per-conversation memory (G4). Folds turns that have scrolled out
+   * of the live window into a rolling "state of this relationship" summary and
+   * returns the injectable block. Reads a wider slice than the turn window so the
+   * summarizer can see what scrolled out; bounded + throttled inside the service.
+   * Non-throwing — degrades to no summary, never breaks the turn.
+   */
+  async #updateAndRenderSummary(input: ChannelTurnInput, adapter: AgentAdapter): Promise<string | null> {
+    const summaries = this.deps.summaries;
+    if (!summaries) return null;
+    try {
+      // Read several windows of history so the service can fold everything older
+      // than the live window into the summary (bounded — top-K by recency).
+      const rows = this.deps.conversations.messages(input.conversationId, HISTORY_LIMIT * SUMMARY_LOOKBACK_WINDOWS);
+      const messages = rows
+        .filter((row) => {
+          const meta = (row.metadata ?? {}) as { channelInbound?: boolean };
+          // Same shaping as #buildHistory: drop bare platform system notices.
+          return !(row.authorType === 'system' && meta.channelInbound !== true);
+        })
+        .map((row) => {
+          const meta = (row.metadata ?? {}) as { channelInbound?: boolean };
+          const role: 'user' | 'assistant' = row.authorType === 'operator' || meta.channelInbound ? 'user' : 'assistant';
+          return { role, content: row.body };
+        });
+      // A chat-capable adapter drives a model-agnostic summary; absent → deterministic.
+      const completer = adapter.chat ? new AdapterStructuredCompleter(adapter, 'conversation summary') : null;
+      await summaries.maybeUpdate({
+        conversationId: input.conversationId,
+        workspaceId: input.workspaceId,
+        appId: input.appId ?? null,
+        messages,
+        windowSize: HISTORY_LIMIT,
+        completer,
+      });
+      return summaries.injectionBlock(input.conversationId);
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.summary_failed', {
+        conversationId: input.conversationId,
+        err: (err as Error).message,
+      });
+      return null;
+    }
   }
 
   async #safeDeliver(input: ChannelTurnInput, body: string): Promise<void> {

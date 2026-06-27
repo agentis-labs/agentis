@@ -2359,4 +2359,32 @@ CREATE INDEX IF NOT EXISTS idx_channel_turn_poll ON channel_turn_queue(status, s
 CREATE INDEX IF NOT EXISTS idx_channel_turn_conversation ON channel_turn_queue(conversation_id, status);
 `,
   },
+  {
+    version: 103,
+    name: 'living_apps_conversation_summaries',
+    sql: `
+-- Living Apps Phase 6 (G4) — long-horizon per-conversation memory. The channel
+-- turn only sees a 20-message window (HISTORY_LIMIT), so the agent forgets the
+-- middle of a month-long thread. This table holds ONE rolling "state of this
+-- relationship" summary per conversation, refreshed as messages accrue past the
+-- window and injected into every turn's context. ADDITIVE: a new table (nothing
+-- references it until present); no existing row/path changes. New table → inline
+-- FK to conversations is fine (it exists by v103). Mirrored in
+-- src/sqlite/schema.ts (conversationSummaries).
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+  conversation_id   TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  workspace_id      TEXT NOT NULL,
+  app_id            TEXT,
+  -- The rolling narrative summary injected into the turn ("state of this relationship").
+  summary           TEXT NOT NULL DEFAULT '',
+  -- How many messages have been folded into the summary so far (the high-water mark).
+  covered_count     INTEGER NOT NULL DEFAULT 0,
+  -- 'model' (StructuredCompleter) or 'deterministic' (last-N + counts fallback).
+  source            TEXT NOT NULL DEFAULT 'deterministic',
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_summaries_workspace ON conversation_summaries(workspace_id);
+`,
+  },
 ];

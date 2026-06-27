@@ -529,6 +529,10 @@ export class ChatSessionExecutor {
               const brain = await sharedIntelligence.buildDispatchContext({
                 workspaceId: ctx.workspaceId,
                 scopeId: ctx.agentId,
+                // §G11 — a resident App turn recalls the UNION of [appId, agentId]
+                // (the App's relationship brain + the agent's own memory), not the
+                // workspace at large. Falls back to the agent's scope when unset.
+                ...(ctx.recallScopeIds && ctx.recallScopeIds.length > 0 ? { scopeIds: ctx.recallScopeIds } : {}),
                 agentId: ctx.agentId,
                 taskDescription: userMessage,
                 limit: 8,

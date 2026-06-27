@@ -147,6 +147,14 @@ export interface ChatTurnContext {
    * the agent persists what it learns where the App's surfaces read it.
    */
   appId?: string | null;
+  /**
+   * Brain-recall scope union for this turn (LIVING-APPS-10X · G11). When set, the
+   * turn's `buildDispatchContext` recalls the UNION of these scopes instead of the
+   * agent's scope alone — e.g. `[appId, agentId]` so a resident App turn sees both
+   * the App's relationship brain and the operating agent's own memory. Omitted →
+   * the agent's own scope (back-compat).
+   */
+  recallScopeIds?: string[];
   clientTurnId?: string;
   executionMode?: 'chat' | 'plan';
   /** Optional operation/run correlation id for direct tool turns. */

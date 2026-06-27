@@ -2863,6 +2863,36 @@ export const conversationParticipants = sqliteTable(
   }),
 );
 
+/**
+ * Long-horizon per-conversation memory (LIVING-APPS-10X Phase 6 · G4, migration v103).
+ *
+ * The channel turn only sees a 20-message window (HISTORY_LIMIT), so the agent
+ * forgets the middle of a month-long thread. This holds ONE rolling "state of
+ * this relationship" summary per conversation — refreshed as messages accrue past
+ * the window (via the workspace StructuredCompleter, with a deterministic
+ * last-N + counts fallback) and injected into every turn's context.
+ */
+export const conversationSummaries = sqliteTable(
+  'conversation_summaries',
+  {
+    conversationId: text('conversation_id')
+      .primaryKey()
+      .references((): AnySQLiteColumn => conversations.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id').notNull(),
+    appId: text('app_id'),
+    /** The rolling narrative summary injected into the turn ("state of this relationship"). */
+    summary: text('summary').notNull().default(''),
+    /** High-water mark — how many messages have been folded into the summary so far. */
+    coveredCount: integer('covered_count').notNull().default(0),
+    /** 'model' (StructuredCompleter) or 'deterministic' (last-N + counts fallback). */
+    source: text('source').notNull().default('deterministic'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byWorkspace: index('idx_conversation_summaries_workspace').on(table.workspaceId),
+  }),
+);
+
 // App Datastore (§5) — typed collections + schema-validated records. Migration v83.
 export const appCollections = sqliteTable(
   'app_collections',
