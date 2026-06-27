@@ -22,6 +22,7 @@ describe('unauthenticated route allow-list', () => {
       '/v1/openapi.json',
       '/v1/webhooks/channel/',
       '/v1/webhooks/trigger/',
+      '/v1/webhooks/voice/',
     ]);
   });
 

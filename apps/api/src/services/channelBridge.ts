@@ -163,6 +163,7 @@ export class ChannelBridge {
     if (deps.adapters?.telegram) this.#adapters.set('telegram', deps.adapters.telegram);
     if (deps.adapters?.discord) this.#adapters.set('discord', deps.adapters.discord);
     if (deps.adapters?.slack) this.#adapters.set('slack', deps.adapters.slack);
+    if (deps.adapters?.voice) this.#adapters.set('voice', deps.adapters.voice);
   }
 
   registerAdapter(adapter: ChannelAdapter) {
@@ -235,6 +236,29 @@ export class ChannelBridge {
     return this.#adapters.has(kind);
   }
 
+  /**
+   * Constant-time check of a presented voice secret against a voice connection's
+   * shared secret (G6). Used by the voice reply-retrieval route so a provider can
+   * authenticate when fetching the buffered reply. Returns false for a missing
+   * connection or a non-voice kind.
+   */
+  verifyVoiceSecret(connectionId: string, presented: string): boolean {
+    const row = this.deps.db
+      .select({ kind: schema.channelConnections.kind, webhookSecret: schema.channelConnections.webhookSecret })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId))
+      .get();
+    if (!row || row.kind !== 'voice' || !row.webhookSecret) return false;
+    const a = Buffer.from(presented);
+    const b = Buffer.from(row.webhookSecret);
+    if (a.length !== b.length) return false;
+    try {
+      return timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
+  }
+
   shutdown() {}
 
   // ── CRUD ────────────────────────────────────────────────
@@ -276,7 +300,9 @@ export class ChannelBridge {
     if (input.verifyToken) settings.verifyTokenEncrypted = this.deps.vault.encrypt(input.verifyToken);
     settings.health = this.#initialHealth(input.kind, settings);
     const ref = { id, kind: input.kind, settings };
-    const noToken = this.#persistent?.requiresNoToken(input.kind, settings) ?? false;
+    // Voice (G6) authenticates inbound webhooks with its auto-generated per-
+    // connection webhookSecret — there is no external bot token to require.
+    const noToken = input.kind === 'voice' || (this.#persistent?.requiresNoToken(input.kind, settings) ?? false);
     const persistent = this.#persistent?.handles(ref) ?? false;
     // A connection must be deliverable: either via a live persistent session, a
     // registered webhook adapter, or QR auth (which needs no token at all).

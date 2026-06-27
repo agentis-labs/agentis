@@ -3,7 +3,7 @@ import type { ChannelKind, OutboundAttachmentRef } from '../../adapters/channels
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 
-const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp']);
+const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
 export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([

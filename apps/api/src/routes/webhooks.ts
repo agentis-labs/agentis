@@ -22,8 +22,18 @@ import { Hono } from 'hono';
 import { AgentisError } from '@agentis/core';
 import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
 import type { ChannelBridge } from '../services/channelBridge.js';
+import type { VoiceChannelAdapter } from '../adapters/channels/voice.js';
 
-export function buildWebhookRoutes(deps: { runtime: TriggerRuntime; bridge?: ChannelBridge }) {
+export function buildWebhookRoutes(deps: {
+  runtime: TriggerRuntime;
+  bridge?: ChannelBridge;
+  /**
+   * Voice channel (G6): exposes the buffered agent reply so a voice provider can
+   * retrieve + vocalize it after posting a transcript. Optional — absent leaves
+   * the reply-retrieval route off (inbound still works via the channel webhook).
+   */
+  voice?: VoiceChannelAdapter;
+}) {
   const app = new Hono();
   app.post('/trigger/:triggerId', async (c) => {
     const triggerId = c.req.param('triggerId');
@@ -74,6 +84,28 @@ export function buildWebhookRoutes(deps: { runtime: TriggerRuntime; bridge?: Cha
       return c.json(result.responseBody as Record<string, unknown>, 200);
     }
     return c.json(result, result.idempotent ? 200 : 202);
+  });
+
+  // Voice reply retrieval (G6): after POSTing a transcript to /channel/:id, a
+  // voice provider fetches the agent's spoken answer here. The reply is buffered
+  // by the VoiceChannelAdapter keyed by callId; this GET consumes it. Auth reuses
+  // the same per-connection shared secret (x-agentis-voice-secret header), so an
+  // unauthenticated caller cannot drain another line's replies.
+  app.get('/voice/:connectionId/reply/:callId', (c) => {
+    if (!deps.bridge || !deps.voice) {
+      throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'voice channel not configured');
+    }
+    const connectionId = c.req.param('connectionId');
+    const presented = c.req.header('x-agentis-voice-secret') ?? '';
+    if (!deps.bridge.verifyVoiceSecret(connectionId, presented)) {
+      throw new AgentisError('CHANNEL_SIGNATURE_INVALID', 'voice reply secret did not match');
+    }
+    const callId = c.req.param('callId');
+    const reply = deps.voice.takeReply(callId);
+    if (!reply) return c.json({ pending: true }, 200);
+    // `speak` is the provider-facing field: the text to vocalize, plus an
+    // optional pre-synthesized audio URL (null → provider does its own TTS).
+    return c.json({ pending: false, speak: reply.text, ttsUrl: reply.ttsUrl, at: reply.at }, 200);
   });
 
   app.get('/channel/:connectionId', (c) => {
