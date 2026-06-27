@@ -3,6 +3,7 @@
  * `/v1/apps` routes used by the Apps pages and the AppRuntime renderer.
  */
 import type {
+  AppPresenceViewer,
   AppEnvironment,
   AppManifest,
   AppRecord,
@@ -144,6 +145,13 @@ export const appsApi = {
     api<Wrapped<{ conversationId: string; delivered: boolean }>>(`/v1/apps/${id}/conversations/${conversationId}/send`, {
       method: 'POST', body: JSON.stringify({ body }),
     }).then((r) => r.data),
+  // Live co-presence (G9) — heartbeat while viewing; leave on unmount. Ephemeral.
+  presence: (id: string, conversationId?: string | null) =>
+    api<Wrapped<{ viewers: AppPresenceViewer[] }>>(`/v1/apps/${id}/presence`, {
+      method: 'POST', body: JSON.stringify({ conversationId: conversationId ?? null }),
+    }).then((r) => r.data.viewers),
+  leavePresence: (id: string) =>
+    api<Wrapped<{ viewers: AppPresenceViewer[] }>>(`/v1/apps/${id}/presence`, { method: 'DELETE' }).then((r) => r.data.viewers),
   runOperatorCommand: (id: string, command: string) =>
     api<Wrapped<unknown>>(`/v1/apps/${id}/operator/command`, { method: 'POST', body: JSON.stringify({ command }) }).then((r) => r.data),
   exportApp: (id: string) => api<Wrapped<AppManifestEnvelope>>(`/v1/apps/${id}/export`).then((r) => r.data),

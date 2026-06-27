@@ -49,6 +49,7 @@ import type { AppStaffingService } from '../services/appStaffing.js';
 import type { ConversationStore } from '../services/conversationStore.js';
 import type { AppContactService } from '../services/appContacts.js';
 import type { ConversationParticipantService } from '../services/conversationParticipants.js';
+import type { AppPresenceService } from '../services/appPresence.js';
 import type { AppLearningService } from '../services/appLearning.js';
 import { AppLearningService as AppLearningStatic } from '../services/appLearning.js';
 
@@ -74,6 +75,8 @@ export interface AppRoutesDeps {
   participants?: ConversationParticipantService;
   /** Conversational learning loop (Phase M2) — record outcomes, surface learnings. */
   learning?: AppLearningService;
+  /** Live co-presence (G9) — ephemeral operator presence roster over the realtime bus. */
+  presence?: AppPresenceService;
 }
 
 const addMemberSchema = z.object({
@@ -102,6 +105,9 @@ const contactPatchSchema = z.object({
   displayName: z.string().trim().max(255).nullable().optional(),
   nextTouchAt: z.string().datetime().nullable().optional(),
   data: z.record(z.unknown()).optional(),
+});
+const presenceHeartbeatSchema = z.object({
+  conversationId: z.string().trim().min(1).max(255).nullable().optional(),
 });
 const contactOutcomeSchema = z.object({
   outcome: z.enum(['won', 'lost', 'abandoned']),
@@ -628,6 +634,43 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       metadata: { operatorTakeover: true, channelReply: true, ...(conv.channelChatId ? { channelChatId: conv.channelChatId } : {}) },
     });
     return c.json({ data: { conversationId, delivered } });
+  });
+
+  // ── Live co-presence (Living Apps G9 · ephemeral) ──────────
+  // The operator's console heartbeats POST /presence while open (and which thread
+  // it has focused); the server keeps an in-memory roster (never persisted) and
+  // broadcasts APP_PRESENCE_UPDATED so other viewers see who's present. DELETE on
+  // unmount drops the viewer. Best-effort — a missing presence service is a no-op.
+  app.post('/:id/presence', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId); // 404s if the App is not in this workspace
+    if (!deps.presence) return c.json({ data: { viewers: [] } });
+    const parsed = presenceHeartbeatSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid presence input');
+    const profile = deps.db
+      .select({ displayName: schema.users.displayName, username: schema.users.username })
+      .from(schema.users)
+      .where(eq(schema.users.id, user.id))
+      .get();
+    const viewers = deps.presence.join({
+      workspaceId: ws.workspaceId,
+      appId,
+      userId: user.id,
+      name: profile?.displayName || profile?.username || 'Operator',
+      ...(parsed.data.conversationId !== undefined ? { conversationId: parsed.data.conversationId } : {}),
+    });
+    return c.json({ data: { viewers } });
+  });
+
+  app.delete('/:id/presence', (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    if (!deps.presence) return c.json({ data: { viewers: [] } });
+    return c.json({ data: { viewers: deps.presence.leave(appId, user.id) } });
   });
 
   // ── Multi-party participants (Living Apps Phase 2 · G1) ─────

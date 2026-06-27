@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { REALTIME_EVENTS, type AgentAdapter, type ChatDelta, type ChatMessage } from '@agentis/core';
+import { REALTIME_EVENTS, REALTIME_ROOMS, type AgentAdapter, type ChatDelta, type ChatMessage } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { ConversationStore } from '../../src/services/conversationStore.js';
 import { ChannelBridge } from '../../src/services/channelBridge.js';
@@ -353,6 +353,86 @@ describe('ChannelTurnDispatcher', () => {
     // …and the resident-agent operating doctrine is injected, naming the App.
     expect(capturedOptions?.systemAddendum ?? '').toMatch(/Acme Sales/);
     expect(capturedOptions?.systemAddendum ?? '').toMatch(/data_insert|datastore/);
+  });
+
+  it('surfaces resident-agent activity in the App console on an App-bound turn (G9 co-presence)', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' });
+    const connId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, kind: 'telegram', name: 'Acme line', tokenEncrypted: 'x',
+    }).run();
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connId, channelChatId: '42', appId: app.id,
+    });
+
+    const activity: Array<{ room: string; payload: { state?: string; conversationId?: string; appId?: string } }> = [];
+    const unsub = ctx.bus.subscribe(({ room, envelope }) => {
+      if (envelope.event === REALTIME_EVENTS.APP_AGENT_ACTIVITY) {
+        activity.push({ room, payload: envelope.payload as { state?: string } });
+      }
+    });
+
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger, bus: ctx.bus,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      runTurn: async function* () {
+        yield { type: 'thinking', delta: 'weighing the discount' } as ChatDelta;
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '42', text: 'hi',
+    });
+    unsub();
+
+    const states = activity.map((a) => a.payload.state);
+    // thinking → typing while the turn runs, then idle to clear the indicator.
+    expect(states).toContain('thinking');
+    expect(states).toContain('typing');
+    expect(states[states.length - 1]).toBe('idle');
+    // Every activity event is scoped to this App + thread and dual-published to the App room.
+    expect(activity.every((a) => a.payload.appId === app.id && a.payload.conversationId === conv.id)).toBe(true);
+    expect(activity.some((a) => a.room === REALTIME_ROOMS.app(app.id))).toBe(true);
+  });
+
+  it('does NOT emit App console activity for a non-App channel turn', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const connId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, kind: 'telegram', name: 'Plain line', tokenEncrypted: 'x',
+    }).run();
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connId, channelChatId: '43',
+    });
+    let activityCount = 0;
+    const unsub = ctx.bus.subscribe(({ envelope }) => {
+      if (envelope.event === REALTIME_EVENTS.APP_AGENT_ACTIVITY) activityCount += 1;
+    });
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger, bus: ctx.bus,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      runTurn: async function* () {
+        yield { type: 'thinking', delta: 'hmm' } as ChatDelta;
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '43', text: 'hi',
+    });
+    unsub();
+    expect(activityCount).toBe(0);
   });
 
   it('channel-delivered confirmation: prompts yes/no, then resolves on the next reply', async () => {
