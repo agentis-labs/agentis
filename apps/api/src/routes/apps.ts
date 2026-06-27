@@ -51,6 +51,7 @@ import type { AppContactService } from '../services/appContacts.js';
 import type { ConversationParticipantService } from '../services/conversationParticipants.js';
 import type { AppLearningService } from '../services/appLearning.js';
 import { AppLearningService as AppLearningStatic } from '../services/appLearning.js';
+import type { ConversationSimulatorService } from '../services/conversationSimulator.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -74,6 +75,8 @@ export interface AppRoutesDeps {
   participants?: ConversationParticipantService;
   /** Conversational learning loop (Phase M2) — record outcomes, surface learnings. */
   learning?: AppLearningService;
+  /** Conversation rehearsal (Phase 5 · G8) — drive a synthetic customer + score the run. */
+  simulator?: ConversationSimulatorService;
 }
 
 const addMemberSchema = z.object({
@@ -107,6 +110,34 @@ const contactOutcomeSchema = z.object({
   outcome: z.enum(['won', 'lost', 'abandoned']),
   note: z.string().trim().max(2000).nullable().optional(),
   setStage: z.string().trim().max(64).nullable().optional(),
+});
+
+// Conversation rehearsal (Phase 5 · G8). A scenario drives a synthetic customer
+// against the resident agent and scores the transcript. Patterns are plain
+// substrings (case-insensitive); guardrails/expectations are matched against agent replies.
+const simulatePatternSchema = z.string().trim().min(1).max(400);
+const simulateGuardrailSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  label: z.string().trim().min(1).max(200),
+  pattern: simulatePatternSchema,
+});
+const simulateExpectationSchema = simulateGuardrailSchema;
+const simulateScenarioSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  persona: z.object({
+    name: z.string().trim().min(1).max(200),
+    prompt: z.string().trim().min(1).max(4000),
+  }),
+  goal: z.string().trim().min(1).max(2000),
+  customerTurns: z.array(z.string().trim().min(1).max(4000)).max(12).optional(),
+  maxTurns: z.number().int().min(1).max(12).optional(),
+  goalSignals: z.array(simulatePatternSchema).max(20).optional(),
+  guardrails: z.array(simulateGuardrailSchema).max(20).optional(),
+  expectations: z.array(simulateExpectationSchema).max(20).optional(),
+});
+const simulateRequestSchema = z.object({
+  scenario: simulateScenarioSchema,
+  agentId: z.string().trim().min(1).max(255).optional(),
 });
 
 const createAppRequestSchema = createAppSchema.extend({
@@ -766,6 +797,28 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId);
     if (!deps.learning) return c.json({ data: { appId, ownerAgentId: null, lessons: [], abilities: [] } });
     return c.json({ data: deps.learning.recentLearnings(ws.workspaceId, appId) });
+  });
+
+  // ── Conversation rehearsal (Phase 5 · G8) ───────────────────
+  // Drive a synthetic customer through a scenario against the resident agent and
+  // score the run BEFORE it talks to real money. Sandboxed — no real channel send,
+  // the live thread is untouched. Deterministic when the scenario is scripted.
+  app.post('/:id/simulate', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId); // authorize + 404 in-workspace
+    if (!deps.simulator) throw new AgentisError('INTERNAL_ERROR', 'conversation simulator not available');
+    const parsed = simulateRequestSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid simulation scenario');
+    const result = await deps.simulator.runScenario({
+      workspaceId: ws.workspaceId,
+      userId: user.id,
+      appId,
+      scenario: parsed.data.scenario,
+      ...(parsed.data.agentId ? { agentId: parsed.data.agentId } : {}),
+    });
+    return c.json({ data: result });
   });
 
   // ── Workflow adoption ───────────────────────────────────────
