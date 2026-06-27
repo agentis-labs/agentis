@@ -2387,4 +2387,26 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
 CREATE INDEX IF NOT EXISTS idx_conversation_summaries_workspace ON conversation_summaries(workspace_id);
 `,
   },
+  {
+    version: 101,
+    name: 'living_apps_outbound_log',
+    sql: `
+-- Living Apps Phase 5 (G7) — the per-App outbound safety envelope. A resident
+-- agent runs 24/7; without a rate limit it can over-message a contact. This
+-- append-only counter table records each agent-initiated outbound send so the
+-- OutboundPolicyService enforces a durable per-App rolling-hour rate limit
+-- (survives restart, unlike an in-memory window). Operator manual sends are
+-- recorded too (source='operator') — exempt from the limit but kept in the
+-- window. New table → no inline FK needed (app_id is a plain TEXT bucket, like
+-- channel_turn_queue.app_id). Mirrored in src/sqlite/schema.ts (appOutboundLog).
+CREATE TABLE IF NOT EXISTS app_outbound_log (
+  id       TEXT PRIMARY KEY,
+  app_id   TEXT NOT NULL,
+  source   TEXT NOT NULL DEFAULT 'agent',
+  sent_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+-- Rolling-window count: rows for one App within a time range.
+CREATE INDEX IF NOT EXISTS idx_app_outbound_log_app_time ON app_outbound_log(app_id, sent_at);
+`,
+  },
 ];

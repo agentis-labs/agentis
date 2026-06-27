@@ -357,6 +357,75 @@ describe('ChannelTurnDispatcher', () => {
     expect(capturedOptions?.systemAddendum ?? '').toMatch(/data_insert|datastore/);
   });
 
+  it('withholds an App-bound reply that hits a blocked claim, and holds an approval-gated reply (G7)', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' });
+    // Policy: never promise a refund; price talk needs approval.
+    ctx.db.update(schema.apps).set({
+      policyJson: { audience: [], shareable: false, customCode: 'disabled', grants: [], outbound: { blockedClaims: ['refund'], requireApprovalFor: ['discount'] } },
+    }).where(eq(schema.apps.id, app.id)).run();
+
+    const connId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, kind: 'telegram', name: 'Acme line', tokenEncrypted: 'x',
+    }).run();
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connId, channelChatId: '42', appId: app.id,
+    });
+
+    const { OutboundPolicyService } = await import('../../src/services/outboundPolicy.js');
+    const outboundPolicy = new OutboundPolicyService({ db: ctx.db, logger: ctx.logger });
+    const delivered: string[] = [];
+    const approvals: Array<{ body: string; reason: string }> = [];
+    let replyText = '';
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async (a) => { delivered.push(a.body); },
+      fallbackAdapter: () => chatStub('placeholder'),
+      outboundPolicy,
+      requestOutboundApproval: async (a) => { approvals.push({ body: a.body, reason: a.reason }); return true; },
+      runTurn: async function* () {
+        yield { type: 'text', delta: replyText } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    // 1) A blocked-claim reply is WITHHELD — nothing reaches the channel.
+    replyText = 'Yes, we offer a full refund anytime.';
+    const blocked = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '42', text: 'can I get a refund?',
+    });
+    expect(blocked).toMatchObject({ replied: false, reason: 'blocked_claim' });
+    expect(delivered).toHaveLength(0);
+    expect(approvals).toHaveLength(0);
+
+    // 2) An approval-gated reply is HELD for the operator, not delivered.
+    replyText = 'I can offer you a 10% discount.';
+    const held = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '42', text: 'any deal?',
+    });
+    expect(held).toMatchObject({ replied: false, reason: 'held_for_approval' });
+    expect(delivered).toHaveLength(0);
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.body).toMatch(/discount/);
+
+    // 3) A clean reply goes out normally + is recorded against the counter.
+    replyText = 'Sure, here is the brochure.';
+    const ok = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '42', text: 'tell me more',
+    });
+    expect(ok.replied).toBe(true);
+    expect(delivered).toEqual(['Sure, here is the brochure.']);
+    const rows = ctx.db.select().from(schema.appOutboundLog).where(eq(schema.appOutboundLog.appId, app.id)).all();
+    expect(rows).toHaveLength(1); // only the delivered reply counted
+  });
+
   it('surfaces resident-agent activity in the App console on an App-bound turn (G9 co-presence)', async () => {
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
     const agentId = seedAgent(ctx);

@@ -32,6 +32,7 @@ import type { AppContactService } from './appContacts.js';
 import type { ConversationSummaryService } from './conversationSummaryService.js';
 import { AdapterStructuredCompleter } from './structuredCompleter.js';
 import type { ConversationParticipantService } from './conversationParticipants.js';
+import type { OutboundPolicyService } from './outboundPolicy.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from './agentWorkProgress.js';
@@ -70,6 +71,28 @@ export interface ChannelTurnDispatcherDeps {
   summaries?: ConversationSummaryService;
   /** Multi-party threads (G1) — resolve the active responder (specialist warm handoff) + seed the primary. */
   participants?: ConversationParticipantService;
+  /**
+   * Outbound safety envelope (G7). When wired and the turn is App-bound, the
+   * agent's final reply is checked against the App's outbound policy: a blocked
+   * claim is withheld (a safe notice replaces it) and a require-approval match is
+   * held for the operator (`requestOutboundApproval`) instead of delivered.
+   */
+  outboundPolicy?: OutboundPolicyService;
+  /**
+   * Surface a held App reply to the operator for in-thread approval (G7). Called
+   * with the full message + context; returns true when an approval was created.
+   * Absent → a needs-approval reply is withheld (never sent unapproved).
+   */
+  requestOutboundApproval?: (args: {
+    workspaceId: string;
+    appId: string;
+    conversationId: string;
+    connectionId: string;
+    chatId: string;
+    threadId?: string | null;
+    body: string;
+    reason: string;
+  }) => Promise<boolean> | boolean;
   /**
    * Durable turn queue (Living Apps Phase 5 / G2). When wired, an inbound turn
    * is ENQUEUED (durable, at-least-once, resumable) instead of run in-process;
@@ -404,7 +427,19 @@ export class ChannelTurnDispatcher {
         return { replied: false, reason: 'empty_reply' };
       }
 
+      // Outbound safety envelope (G7): an App-bound reply that crosses a claim or
+      // approval line is withheld/held rather than delivered. Rate + quiet limits
+      // do NOT gate a direct reply to a human's message (that would silence the
+      // desk mid-conversation); they govern the *unsupervised* proactive path. The
+      // claim/approval guard applies to every outbound, including replies.
+      const gate = this.#gateAppReply(input, body);
+      if (gate.action !== 'send') {
+        return gate.result;
+      }
+
       await this.#persistAndDeliver(input, body);
+      // Record the agent-initiated outbound against the App's rolling window (G7).
+      if (input.appId) this.deps.outboundPolicy?.record(input.appId, 'agent');
       this.deps.logger.info('channel.turn.replied', {
         connectionId: input.connectionId,
         conversationId: input.conversationId,
@@ -456,6 +491,64 @@ export class ChannelTurnDispatcher {
       this.deps.logger.warn('channel.turn.app_addendum_failed', { appId, err: (err as Error).message });
       return null;
     }
+  }
+
+  /**
+   * Gate an App-bound reply through the outbound safety envelope (G7). Only the
+   * claim/approval guards apply to a direct reply (a blocked claim is withheld and
+   * replaced with a safe notice; a require-approval match is held for the operator
+   * via `requestOutboundApproval`). Rate/quiet limits are intentionally NOT applied
+   * to a live reply. Non-App turns and an absent policy always 'send'. Non-throwing
+   * — any failure degrades to 'send' so the desk is never silently muted.
+   */
+  #gateAppReply(
+    input: ChannelTurnInput,
+    body: string,
+  ): { action: 'send' } | { action: 'withheld' | 'held'; result: { replied: boolean; reason?: string } } {
+    if (!input.appId || !this.deps.outboundPolicy) return { action: 'send' };
+    let decision: { allow: boolean; needsApproval: boolean; reason?: string };
+    try {
+      decision = this.deps.outboundPolicy.evaluate(input.appId, { body, source: 'agent' });
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.outbound_gate_failed', { appId: input.appId, err: (err as Error).message });
+      return { action: 'send' };
+    }
+    // A live reply is governed only by the claim/approval guards. A rate/quiet
+    // denial (no approval needed) is a proactive-path concern — let the reply through.
+    if (decision.allow || (!decision.needsApproval && !this.#isClaimDenial(decision.reason))) {
+      return { action: 'send' };
+    }
+    if (decision.needsApproval) {
+      // Hold the reply for operator approval (in-thread approval, Phase 2 / G7).
+      void Promise.resolve(
+        this.deps.requestOutboundApproval?.({
+          workspaceId: input.workspaceId,
+          appId: input.appId,
+          conversationId: input.conversationId,
+          connectionId: input.connectionId,
+          chatId: input.chatId,
+          threadId: input.threadId ?? null,
+          body,
+          reason: decision.reason ?? 'requires approval',
+        }),
+      ).catch((err) => this.deps.logger.warn('channel.turn.outbound_approval_failed', { appId: input.appId, err: (err as Error).message }));
+      this.deps.logger.info('channel.turn.reply_held_for_approval', {
+        conversationId: input.conversationId,
+        reason: decision.reason,
+      });
+      return { action: 'held', result: { replied: false, reason: 'held_for_approval' } };
+    }
+    // A blocked claim — withhold the reply and tell the operator (not the customer).
+    this.deps.logger.info('channel.turn.reply_withheld', {
+      conversationId: input.conversationId,
+      reason: decision.reason,
+    });
+    return { action: 'withheld', result: { replied: false, reason: 'blocked_claim' } };
+  }
+
+  /** A claim-denial reason comes from the blockedClaims guard (vs rate/quiet). */
+  #isClaimDenial(reason: string | undefined): boolean {
+    return typeof reason === 'string' && reason.startsWith('blocked claim');
   }
 
   /**

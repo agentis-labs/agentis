@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { AppStore } from '@agentis/app';
+import { eq } from 'drizzle-orm';
 import { AppContactService } from '../../src/services/appContacts.js';
 import { ProactiveFollowupService } from '../../src/services/proactiveFollowups.js';
+import { OutboundPolicyService } from '../../src/services/outboundPolicy.js';
 import type { ChannelTurnInput } from '../../src/services/channelTurnDispatcher.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -105,5 +107,68 @@ describe('ProactiveFollowupService.sweep', () => {
     expect(dispatched).toHaveLength(0);
     // Clock still cleared (we don't retry a parked thread on the next sweep).
     expect(svc.dueForFollowUp(new Date().toISOString())).toHaveLength(0);
+  });
+
+  function setOutboundPolicy(appId: string, outbound: Record<string, unknown>): void {
+    ctx.db
+      .update(schema.apps)
+      .set({ policyJson: { audience: [], shareable: false, customCode: 'disabled', grants: [], outbound } })
+      .where(eq(schema.apps.id, appId))
+      .run();
+  }
+
+  it('blocks the follow-up when the App is over its rate limit (G7)', async () => {
+    const { svc, appId } = seedDueContactWithThread();
+    setOutboundPolicy(appId, { maxPerHour: 1 });
+    const policy = new OutboundPolicyService({ db: ctx.db, logger: ctx.logger });
+    policy.record(appId, 'agent'); // already at the cap this hour
+    const dispatched: ChannelTurnInput[] = [];
+    const proactive = new ProactiveFollowupService({
+      db: ctx.db, contacts: svc, logger: ctx.logger, policy,
+      dispatcher: { dispatch: async (input) => { dispatched.push(input); return { replied: true }; } },
+    });
+
+    const result = await proactive.sweep();
+    expect(result.fired).toBe(0);
+    expect(dispatched).toHaveLength(0); // gated, not dispatched
+    expect(svc.dueForFollowUp(new Date().toISOString())).toHaveLength(0); // clock still cleared
+  });
+
+  it('holds the follow-up for approval when the goal crosses an approval line (G7)', async () => {
+    const { svc, appId } = seedDueContactWithThread(); // goal = 'reserve the unit'
+    setOutboundPolicy(appId, { requireApprovalFor: ['reserve'] });
+    const policy = new OutboundPolicyService({ db: ctx.db, logger: ctx.logger });
+    const dispatched: ChannelTurnInput[] = [];
+    const approvals: Array<{ appId: string; reason: string }> = [];
+    const proactive = new ProactiveFollowupService({
+      db: ctx.db, contacts: svc, logger: ctx.logger, policy,
+      dispatcher: { dispatch: async (input) => { dispatched.push(input); return { replied: true }; } },
+      requestApproval: async (a) => { approvals.push({ appId: a.appId, reason: a.reason }); return true; },
+    });
+
+    const result = await proactive.sweep();
+    expect(result.fired).toBe(0); // held, not sent
+    expect(dispatched).toHaveLength(0);
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.reason).toMatch(/approval/i);
+  });
+
+  it('fires normally when the policy permits (records against the counter)', async () => {
+    const { svc, appId } = seedDueContactWithThread();
+    setOutboundPolicy(appId, { maxPerHour: 10 });
+    const policy = new OutboundPolicyService({ db: ctx.db, logger: ctx.logger });
+    const dispatched: ChannelTurnInput[] = [];
+    const proactive = new ProactiveFollowupService({
+      db: ctx.db, contacts: svc, logger: ctx.logger, policy,
+      dispatcher: { dispatch: async (input) => { dispatched.push(input); return { replied: true }; } },
+    });
+
+    const result = await proactive.sweep();
+    expect(result.fired).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    // The send was recorded — a second App over the cap would now be gated.
+    const rows = ctx.db.select().from(schema.appOutboundLog).where(eq(schema.appOutboundLog.appId, appId)).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.source).toBe('agent');
   });
 });

@@ -158,6 +158,30 @@ VALUES ('q2', 'ws-1', 'conv-1', 'msg-1', 'pending');
     }
   });
 
+  it('v101 creates the app_outbound_log counter (the outbound safety envelope · G7)', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const v101 = SQLITE_MIGRATIONS.find((m) => m.version === 101);
+      expect(v101?.name).toBe('living_apps_outbound_log');
+
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_outbound_log'").get()).toBeDefined();
+      const cols = sqlite.prepare("PRAGMA table_info('app_outbound_log')").all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toEqual(expect.arrayContaining(['id', 'app_id', 'source', 'sent_at']));
+
+      // The rolling-window index exists.
+      const idx = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_app_outbound_log_app_time'").get();
+      expect(idx).toBeDefined();
+
+      // A send is recordable (counter row inserts cleanly).
+      sqlite.exec(`INSERT INTO app_outbound_log (id, app_id, source) VALUES ('o1', 'app-1', 'agent');`);
+      const row = sqlite.prepare("SELECT source FROM app_outbound_log WHERE id='o1'").get() as { source: string };
+      expect(row.source).toBe('agent');
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('applies all registered migrations on a fresh database', () => {
     const path = tempDbPath();
     const sqlite = new Database(path);

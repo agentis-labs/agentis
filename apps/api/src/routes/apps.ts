@@ -53,6 +53,7 @@ import type { AppPresenceService } from '../services/appPresence.js';
 import type { AppLearningService } from '../services/appLearning.js';
 import { AppLearningService as AppLearningStatic } from '../services/appLearning.js';
 import type { ConversationSimulatorService } from '../services/conversationSimulator.js';
+import type { OutboundPolicyService } from '../services/outboundPolicy.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -80,6 +81,8 @@ export interface AppRoutesDeps {
   simulator?: ConversationSimulatorService;
   /** Live co-presence (G9) — ephemeral operator presence roster over the realtime bus. */
   presence?: AppPresenceService;
+  /** Outbound safety envelope (G7) — records operator sends against the App's rolling counter. */
+  outboundPolicy?: OutboundPolicyService;
 }
 
 const addMemberSchema = z.object({
@@ -664,6 +667,9 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       deliveryStatus: delivered ? 'delivered' : 'failed',
       metadata: { operatorTakeover: true, channelReply: true, ...(conv.channelChatId ? { channelChatId: conv.channelChatId } : {}) },
     });
+    // Operator sends are exempt from rate/quiet limits (a human action) but still
+    // recorded against the App's rolling window so the counter stays honest (G7).
+    if (delivered) deps.outboundPolicy?.record(appId, 'operator');
     return c.json({ data: { conversationId, delivered } });
   });
 

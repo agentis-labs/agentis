@@ -26,7 +26,7 @@ export interface ApprovalCreateArgs {
   taskId: string | null;
   targetId?: string | null;
   gatewayId: string | null;
-  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit';
+  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit' | 'outbound';
   title: string;
   summary: string;
   confidence: number | null;
@@ -47,8 +47,20 @@ export type CheckpointResumeHandler = (args: {
   data?: Record<string, unknown>;
 }) => Promise<void>;
 
+/**
+ * Invoked when an `outbound` approval (an App's held outbound message — G7) is
+ * resolved. On approve the held message is delivered; on reject it is dropped.
+ * The payload carries the App/conversation/channel context needed to deliver.
+ */
+export type OutboundApprovalHandler = (args: {
+  approvalId: string;
+  decision: 'approve' | 'reject';
+  payload: Record<string, unknown>;
+}) => Promise<void>;
+
 export class ApprovalInboxService {
   #onCheckpointResolved: CheckpointResumeHandler | null = null;
+  #onOutboundResolved: OutboundApprovalHandler | null = null;
 
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -57,6 +69,11 @@ export class ApprovalInboxService {
 
   bindCheckpointHandler(handler: CheckpointResumeHandler): void {
     this.#onCheckpointResolved = handler;
+  }
+
+  /** Bind the deliver-on-approve hook for App outbound approvals (G7). */
+  bindOutboundHandler(handler: OutboundApprovalHandler): void {
+    this.#onOutboundResolved = handler;
   }
 
   async create(args: ApprovalCreateArgs) {
@@ -146,6 +163,13 @@ export class ApprovalInboxService {
         targetId: row.targetId ?? row.taskId ?? null,
         decision: args.decision,
         ...(args.data ? { data: args.data } : {}),
+      });
+    } else if (row.source === 'outbound' && this.#onOutboundResolved) {
+      // App outbound approval (G7): deliver the held message on approve, drop on reject.
+      await this.#onOutboundResolved({
+        approvalId: row.id,
+        decision: args.decision,
+        payload: (row.payload ?? {}) as Record<string, unknown>,
       });
     }
     return { ...row, status: next, resolvedAt, resolutionReason: args.reason ?? null };

@@ -322,6 +322,18 @@ CREATE INDEX IF NOT EXISTS idx_channel_peer_user ON channel_peer_identities(work
 CREATE INDEX IF NOT EXISTS idx_channel_peer_key ON channel_peer_identities(workspace_id, peer_key);
 `);
 
+  // Per-App outbound safety envelope counter (LIVING-APPS §7 · G7, v101). Append-only
+  // row per agent-initiated outbound send; powers the durable rolling-hour rate limit.
+  sqlite.exec(`
+CREATE TABLE IF NOT EXISTS app_outbound_log (
+  id       TEXT PRIMARY KEY,
+  app_id   TEXT NOT NULL,
+  source   TEXT NOT NULL DEFAULT 'agent',
+  sent_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_app_outbound_log_app_time ON app_outbound_log(app_id, sent_at);
+`);
+
   // Per-workspace orchestrator model-role overrides (OMNICHANNEL §4.4). One row
   // per (workspace, role); api_key is vault-encrypted. Absent rows fall back to
   // the env-configured default model.

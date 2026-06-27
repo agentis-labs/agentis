@@ -107,6 +107,31 @@ describe('ApprovalInboxService', () => {
     expect(handlerCalled).toMatchObject({ source: 'self_heal', targetId: 'node-a', decision: 'approve' });
   });
 
+  it('fires the outbound handler on an outbound approval (G7 deliver-on-approve)', async () => {
+    const calls: Array<{ decision: string; payload: Record<string, unknown> }> = [];
+    svc.bindOutboundHandler(async (a) => { calls.push({ decision: a.decision, payload: a.payload }); });
+    const created = await svc.create({
+      ...baseArgs,
+      runId: null,
+      taskId: null,
+      source: 'outbound',
+      title: 'Approve outbound to Maria',
+      summary: 'The resident agent wants to send: "10% discount".',
+      payload: { appId: 'app-1', conversationId: 'conv-1', connectionId: 'conn-1', chatId: '42', body: '10% discount' },
+    });
+    await svc.resolve({ workspaceId: 'ws1', approvalId: created.id, decision: 'approve' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ decision: 'approve', payload: { appId: 'app-1', body: '10% discount' } });
+  });
+
+  it('fires the outbound handler on reject too (so the held message is dropped)', async () => {
+    const calls: string[] = [];
+    svc.bindOutboundHandler(async (a) => { calls.push(a.decision); });
+    const created = await svc.create({ ...baseArgs, runId: null, taskId: null, source: 'outbound', payload: { body: 'x' } });
+    await svc.resolve({ workspaceId: 'ws1', approvalId: created.id, decision: 'reject' });
+    expect(calls).toEqual(['reject']);
+  });
+
   it('throws RESOURCE_CONFLICT when resolving an already-resolved approval', async () => {
     const created = await svc.create(baseArgs);
     await svc.resolve({ workspaceId: 'ws1', approvalId: created.id, decision: 'approve' });

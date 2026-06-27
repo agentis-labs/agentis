@@ -59,6 +59,32 @@ export type AppIdentity = z.infer<typeof appIdentitySchema>;
  * resolver (§4.4) and the custom-code bridge (§4.6). Intentionally permissive in
  * V1; the shape is stable so enforcement can tighten without a migration.
  */
+/**
+ * Outbound safety envelope (LIVING-APPS-10X §7 · G7). Gates an App's
+ * *unsupervised* 24/7 outbound so a resident agent can't over-message a contact,
+ * message in the dead of night, or promise something it must not. ALL fields are
+ * optional and additive: an absent `outbound` block (or an absent field) means
+ * today's unrestricted behavior. Enforced by `OutboundPolicyService.evaluate`.
+ */
+export const appOutboundPolicySchema = z.object({
+  /** Cap on agent-initiated outbound messages per App per rolling hour. Absent = no cap. */
+  maxPerHour: z.number().int().positive().optional(),
+  /**
+   * No unsupervised outbound during these local hours (24h clock). When
+   * `start <= end` the window is `[start, end)`; when `start > end` it wraps past
+   * midnight (e.g. `{start:22,end:7}` = 22:00–07:00). Inclusive of `start`,
+   * exclusive of `end`.
+   */
+  quietHours: z
+    .object({ start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(23) })
+    .optional(),
+  /** Substrings/patterns that must NEVER appear in outbound — a match denies the send outright. */
+  blockedClaims: z.array(z.string().min(1)).default([]).optional(),
+  /** Substrings/patterns that require operator approval before the send goes out. */
+  requireApprovalFor: z.array(z.string().min(1)).default([]).optional(),
+});
+export type AppOutboundPolicy = z.infer<typeof appOutboundPolicySchema>;
+
 export const appPolicySchema = z.object({
   /** Who may open the App's surfaces. Empty = workspace members only. */
   audience: z.array(z.enum(['operator', 'executive', 'customer', 'public'])).default([]),
@@ -72,6 +98,8 @@ export const appPolicySchema = z.object({
     source: z.enum(['native', 'app', 'plugin']).optional(),
     scopes: z.array(z.string()).default([]),
   })).default([]),
+  /** Outbound safety envelope (G7) — rate/quiet-hours/claim limits on unsupervised sends. Absent = unrestricted. */
+  outbound: appOutboundPolicySchema.optional(),
 });
 export type AppPolicy = z.infer<typeof appPolicySchema>;
 

@@ -112,6 +112,7 @@ import { AppContactService } from './services/appContacts.js';
 import { ProactiveFollowupService } from './services/proactiveFollowups.js';
 import { AppLearningService } from './services/appLearning.js';
 import { ConversationParticipantService } from './services/conversationParticipants.js';
+import { OutboundPolicyService } from './services/outboundPolicy.js';
 import { buildScratchpadRoutes } from './routes/scratchpad.js';
 import { buildTaskRoutes } from './routes/tasks.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
@@ -1178,6 +1179,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Cross-surface peer identity — recognizes the same human across channels.
   const channelIdentity = new ChannelIdentityService({ db: sqlite, logger });
   const appContacts = new AppContactService(sqlite);
+  // Outbound safety envelope (G7): per-App rate limit + quiet hours + claim guard
+  // over apps.policyJson.outbound. Gates the *unsupervised* outbound paths.
+  const outboundPolicy = new OutboundPolicyService({ db: sqlite, logger });
   // Multi-party threads (G1): customer + resident agent + escalation specialist +
   // human operator in one thread, with warm handoff via active 'specialist' routing.
   const conversationParticipants = new ConversationParticipantService(sqlite, logger);
@@ -1204,6 +1208,83 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     },
   });
 
+  // In-thread outbound approval (G7 / Phase 2): when an App-bound outbound crosses
+  // the policy's `requireApprovalFor` line, surface a one-line approval to the
+  // operator (the existing approval inbox, source 'outbound') with the held message
+  // + channel context in the payload — delivered on approve (handler bound below).
+  const requestOutboundApproval = async (args: {
+    workspaceId: string;
+    appId: string;
+    conversationId: string;
+    connectionId?: string | null;
+    chatId?: string | null;
+    threadId?: string | null;
+    body?: string;
+    contactName?: string;
+    reason: string;
+  }): Promise<boolean> => {
+    try {
+      const conv = sqlite
+        .select({ userId: schema.conversations.userId, connectionId: schema.conversations.channelConnectionId, chatId: schema.conversations.channelChatId })
+        .from(schema.conversations)
+        .where(eq(schema.conversations.id, args.conversationId))
+        .get();
+      const who = args.contactName ?? 'a contact';
+      await approvals.create({
+        workspaceId: args.workspaceId,
+        ambientId: null,
+        userId: conv?.userId ?? 'system',
+        runId: null,
+        taskId: null,
+        gatewayId: null,
+        source: 'outbound',
+        title: `Approve outbound to ${who}`,
+        summary: args.body
+          ? `The resident agent wants to send: "${args.body.slice(0, 280)}". Reason: ${args.reason}.`
+          : `The resident agent wants to follow up with ${who}. Reason: ${args.reason}.`,
+        confidence: null,
+        payload: {
+          workspaceId: args.workspaceId,
+          appId: args.appId,
+          conversationId: args.conversationId,
+          connectionId: args.connectionId ?? conv?.connectionId ?? null,
+          chatId: args.chatId ?? conv?.chatId ?? null,
+          threadId: args.threadId ?? null,
+          ...(args.body ? { body: args.body } : {}),
+        },
+      });
+      return true;
+    } catch (err) {
+      logger.warn('outbound.approval.create_failed', { appId: args.appId, err: (err as Error).message });
+      return false;
+    }
+  };
+
+  // Deliver a held outbound message once the operator approves (drop on reject).
+  approvals.bindOutboundHandler(async ({ decision, payload }) => {
+    if (decision !== 'approve') return;
+    const appId = typeof payload.appId === 'string' ? payload.appId : null;
+    const conversationId = typeof payload.conversationId === 'string' ? payload.conversationId : null;
+    const connectionId = typeof payload.connectionId === 'string' ? payload.connectionId : null;
+    const chatId = typeof payload.chatId === 'string' ? payload.chatId : null;
+    const body = typeof payload.body === 'string' ? payload.body : null;
+    if (!body || !connectionId || !chatId || !conversationId) return;
+    try {
+      await channelBridge.deliverToConnection({ connectionId, chatId, body });
+      conversations.appendOutbound({
+        workspaceId: typeof payload.workspaceId === 'string' ? payload.workspaceId : '',
+        conversationId,
+        operatorId: 'system',
+        body,
+        deliveryStatus: 'delivered',
+        metadata: { channelReply: true, outboundApproved: true, channelChatId: chatId },
+      });
+      if (appId) outboundPolicy.record(appId, 'agent');
+    } catch (err) {
+      logger.warn('outbound.approval.deliver_failed', { appId, err: (err as Error).message });
+    }
+  });
+
   // Close the channel loop: inbound channel messages now run a real orchestrator
   // turn and the reply is delivered back to the origin chat.
   const channelTurnDispatcher = new ChannelTurnDispatcher({
@@ -1218,6 +1299,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     contacts: appContacts,
     summaries: new ConversationSummaryService({ db: sqlite, logger }),
     participants: conversationParticipants,
+    outboundPolicy,
+    requestOutboundApproval: (a) => requestOutboundApproval(a),
     // Coalesce rapid-fire messages from the same chat into one turn.
     debounceMs: 900,
   });
@@ -1225,7 +1308,15 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 
   // Living Apps proactivity (Phase 3 §4.5 + M2) — fire due follow-ups and sweep
   // abandoned relationships on the existing scheduler tick (throttled, isolated).
-  const proactiveFollowups = new ProactiveFollowupService({ db: sqlite, contacts: appContacts, dispatcher: channelTurnDispatcher, logger });
+  // The G7 outbound envelope gates the unsupervised follow-up (rate/quiet/claim).
+  const proactiveFollowups = new ProactiveFollowupService({
+    db: sqlite,
+    contacts: appContacts,
+    dispatcher: channelTurnDispatcher,
+    logger,
+    policy: outboundPolicy,
+    requestApproval: (a) => requestOutboundApproval(a),
+  });
   scheduler.registerSweep('proactive_followup', 60_000, async (now) => (await proactiveFollowups.sweep(now.toISOString())).fired);
   scheduler.registerSweep('abandoned_contacts', 3_600_000, async (now) => (await appLearning.sweepAbandoned(now.toISOString())).swept);
 
@@ -1490,7 +1581,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
   const appPresence = new AppPresenceService({ bus, logger });
   appPresence.start();
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence }));
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }));
   const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }, bus, logger);
