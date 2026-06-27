@@ -167,6 +167,41 @@ describe('/v1/apps live conversations (Phase 1)', () => {
     expect((await backRes.json() as { data: { handoffState: string | null } }).data.handoffState).toBeNull();
   });
 
+  it('flags a thread as needing the operator and surfaces it in the conversations list (Phase 2)', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' }).id;
+    const agentId = seedAgent();
+    const now = new Date().toISOString();
+    const convId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: convId, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId, appId,
+      channelChatId: '42', title: 'Ana', lastMessageAt: now, createdAt: now, updatedAt: now,
+    }).run();
+
+    // Set the flag with a reason.
+    const flagRes = await app().request(`/v1/apps/${appId}/conversations/${convId}/needs-attention`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ active: true, reason: 'wants a discount I can\'t approve' }),
+    });
+    expect(flagRes.status).toBe(200);
+    expect((await flagRes.json() as { data: { needsAttention: boolean } }).data.needsAttention).toBe(true);
+
+    // It shows in the list.
+    const listRes = await app().request(`/v1/apps/${appId}/conversations`, { headers: ctx.authHeaders });
+    const flagged = (await listRes.json() as { data: Array<{ id: string; needsAttention: boolean; needsAttentionReason: string | null }> }).data.find((x) => x.id === convId);
+    expect(flagged?.needsAttention).toBe(true);
+    expect(flagged?.needsAttentionReason).toBe('wants a discount I can\'t approve');
+
+    // Operator clears it (steps in).
+    const clearRes = await app().request(`/v1/apps/${appId}/conversations/${convId}/needs-attention`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ active: false }),
+    });
+    expect(clearRes.status).toBe(200);
+    const after = ctx.db.select({ n: schema.conversations.needsAttention, r: schema.conversations.needsAttentionReason })
+      .from(schema.conversations).where(eq(schema.conversations.id, convId)).get();
+    expect(after?.n).toBe(0);
+    expect(after?.r).toBeNull();
+  });
+
   it('lists/adds/removes conversation participants (multi-party · G1)', async () => {
     const store = new AppStore(ctx.db);
     const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' }).id;

@@ -155,6 +155,10 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   addColumn('conversations', 'app_id', 'TEXT');
   // Living Apps Phase 2 (migration v96) — operator takeover state.
   addColumn('conversations', 'handoff_state', 'TEXT');
+  // Living Apps Phase 2 (migration v104) — "needs-you" flags. Both columns are on
+  // the embedded baseline conversations table; plain INTEGER/TEXT, no FK.
+  addColumn('conversations', 'needs_attention', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('conversations', 'needs_attention_reason', 'TEXT');
   // Living Apps Phase M2 (migration v99) — terminal relationship outcome (the
   // learning loop). Plain TEXT, no FK. app_contacts is post-baseline so this is a
   // no-op until the versioned runner creates it; kept for drift safety.
