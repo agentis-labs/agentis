@@ -15,6 +15,8 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 import { ConversationStore } from '../../src/services/conversationStore.js';
 import { ChannelBridge } from '../../src/services/channelBridge.js';
 import { ChannelTurnDispatcher, interpretConfirmation } from '../../src/services/channelTurnDispatcher.js';
+import { ConversationSummaryService } from '../../src/services/conversationSummaryService.js';
+import { AppContactService } from '../../src/services/appContacts.js';
 import { AppStore } from '@agentis/app';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
@@ -565,5 +567,95 @@ describe('ChannelTurnDispatcher', () => {
     // inbound (system) + reply (agent)
     expect(messages.some((m) => m.authorType === 'system' && m.body.includes('ping'))).toBe(true);
     expect(messages.some((m) => m.authorType === 'agent' && m.body === 'pong')).toBe(true);
+  });
+
+  it('G4: a long thread produces a rolling per-conversation summary that is injected', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+
+    // Seed a long thread: 40 alternating inbound/agent turns (well beyond the
+    // 20-message window) with a distinctive early fact that scrolls out.
+    conversations.appendMirrored({
+      workspaceId: ctx.workspace.id, conversationId: conv.id, sessionMessageId: 'early',
+      authorType: 'system', body: 'My budget ceiling is exactly 7500 dollars.', metadata: { channelInbound: true },
+    });
+    for (let i = 0; i < 40; i += 1) {
+      conversations.appendMirrored({
+        workspaceId: ctx.workspace.id, conversationId: conv.id, sessionMessageId: `u${i}`,
+        authorType: 'system', body: `customer message number ${i}`, metadata: { channelInbound: true },
+      });
+      conversations.appendMirrored({
+        workspaceId: ctx.workspace.id, conversationId: conv.id, sessionMessageId: `a${i}`,
+        authorType: 'agent', body: `agent reply number ${i}`,
+      });
+    }
+
+    let capturedAddendum = '';
+    const summaries = new ConversationSummaryService({ db: ctx.db, logger: ctx.logger });
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'), summaries,
+      runTurn: async function* (_a, _h, _t, _c, o) {
+        capturedAddendum = (o as { systemAddendum?: string } | undefined)?.systemAddendum ?? '';
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'c', kind: 'telegram', chatId: '1', text: 'where were we',
+    });
+
+    // A summary row exists, covers the out-of-window turns, and was injected.
+    const stored = summaries.current(conv.id);
+    expect(stored).not.toBeNull();
+    expect(stored!.coveredCount).toBeGreaterThan(20);
+    // The fallback chatStub is not JSON-structured, so the deterministic path runs.
+    expect(stored!.source).toBe('deterministic');
+    expect(capturedAddendum).toMatch(/CONVERSATION MEMORY/);
+    expect(capturedAddendum).toMatch(/beyond the recent window/);
+  });
+
+  it('G11: an App-bound turn scopes brain recall to the App + contact + agent', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Acme Sales' });
+    const connId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, kind: 'telegram', name: 'Acme line', tokenEncrypted: 'x',
+    }).run();
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connId, channelChatId: '42', appId: app.id,
+    });
+
+    const contacts = new AppContactService(ctx.db);
+    let capturedCtx: { recallScopeIds?: string[] } | null = null;
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'), contacts,
+      runTurn: async function* (_a, _h, _t, c) {
+        capturedCtx = c as { recallScopeIds?: string[] };
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, appId: app.id, conversationId: conv.id, connectionId: connId, kind: 'telegram', chatId: '42', text: 'hi',
+    });
+
+    // The contact was upserted, and recall is scoped to [appId, contactId, agentId].
+    const contact = contacts.list(ctx.workspace.id, app.id)[0]!;
+    expect(capturedCtx?.recallScopeIds).toEqual(
+      expect.arrayContaining([app.id, contact.id, agentId]),
+    );
+    // A non-App turn carries no recall scope override (back-compat).
   });
 });

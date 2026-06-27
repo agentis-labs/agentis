@@ -35,6 +35,7 @@ import { ApprovalInboxService } from './services/approvalInbox.js';
 import { ExtensionRuntime } from './services/extensionRuntime.js';
 import { SubflowExecutor } from './services/subflowExecutor.js';
 import { ConversationStore } from './services/conversationStore.js';
+import { ConversationSummaryService } from './services/conversationSummaryService.js';
 import { SessionMirror } from './services/sessionMirror.js';
 import { RegistryClient } from './services/registryClient.js';
 import { ChannelBridge } from './services/channelBridge.js';
@@ -1215,6 +1216,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     setTyping: (connectionId, chatId, on) => channelBridge.setTyping(connectionId, chatId, on),
     identity: channelIdentity,
     contacts: appContacts,
+    summaries: new ConversationSummaryService({ db: sqlite, logger }),
     participants: conversationParticipants,
     // Coalesce rapid-fire messages from the same chat into one turn.
     debounceMs: 900,
