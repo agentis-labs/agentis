@@ -1,4 +1,4 @@
-import { REALTIME_EVENTS, REALTIME_ROOMS, type ChatDelta } from '@agentis/core';
+import { REALTIME_EVENTS, REALTIME_ROOMS, type AppAgentActivity, type ChatDelta } from '@agentis/core';
 import type { EventBus } from '../event-bus.js';
 
 type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
@@ -112,6 +112,29 @@ export function publishToolResultProgress(bus: EventBus, ctx: AgentWorkContext, 
     step: delta.name,
     description: delta.error ? `${delta.name} failed: ${delta.error}` : `${delta.name} completed`,
   });
+}
+
+/**
+ * Publish the resident agent's live activity on an App thread to the App console
+ * (LIVING-APPS-10X G9 — co-presence). Dual-published to the App room + the
+ * workspace room (the same pattern as DATA_CHANGED) so the live inbox — which
+ * subscribes via the workspace room — sees "agent is thinking/typing…". Ephemeral;
+ * `state:'idle'` clears the indicator. Best-effort: never throws.
+ */
+export function publishAppAgentActivity(
+  bus: EventBus,
+  input: { workspaceId: string; appId: string; conversationId: string; agentId?: string; state: AppAgentActivity['state']; label?: string },
+): void {
+  const payload: AppAgentActivity = {
+    appId: input.appId,
+    conversationId: input.conversationId,
+    ...(input.agentId ? { agentId: input.agentId } : {}),
+    state: input.state,
+    ...(input.label ? { label: clipRealtimeText(input.label, 160) } : {}),
+    at: new Date().toISOString(),
+  };
+  bus.publish(REALTIME_ROOMS.app(input.appId), REALTIME_EVENTS.APP_AGENT_ACTIVITY, payload);
+  bus.publish(REALTIME_ROOMS.workspace(input.workspaceId), REALTIME_EVENTS.APP_AGENT_ACTIVITY, payload);
 }
 
 export function workCorrelationId(ctx: AgentWorkContext): string | undefined {

@@ -142,6 +142,14 @@ export const REALTIME_EVENTS = {
   // App Datastore (§5) — a record changed; bound views refetch. { appId, collection, op, id }.
   DATA_CHANGED: 'app.data_changed',
 
+  // Live co-presence (LIVING-APPS-10X §6/G9) — EPHEMERAL, never persisted.
+  // APP_PRESENCE_UPDATED: the current roster of operators viewing an App/thread,
+  //   broadcast on heartbeat + on join/leave. Payload: AppPresenceUpdate.
+  // APP_AGENT_ACTIVITY: the resident agent's live thinking/typing on a thread
+  //   while a turn runs, surfaced in the App console. Payload: AppAgentActivity.
+  APP_PRESENCE_UPDATED: 'app.presence.updated',
+  APP_AGENT_ACTIVITY: 'app.agent.activity',
+
   // Spaces
   SPACE_CREATED: 'space.created',
   SPACE_UPDATED: 'space.updated',
@@ -252,4 +260,39 @@ export interface RealtimeEnvelope<TName extends RealtimeEventName = RealtimeEven
   emittedAt: string;
   /** Optional correlation id for tracing client → server → adapter chains. */
   correlationId?: string;
+}
+
+// ── Live co-presence payloads (LIVING-APPS-10X §6/G9 · ephemeral) ──────────────
+
+/** One operator viewing an App (and optionally a specific thread). Ephemeral. */
+export interface AppPresenceViewer {
+  /** Stable per-viewer id (the operator's userId). */
+  userId: string;
+  /** Human-readable label for the presence row. */
+  name: string;
+  /** The thread the viewer currently has open, if any. */
+  conversationId?: string | null;
+  /** ISO-8601 of the last heartbeat — the client can dim stale rows. */
+  at: string;
+}
+
+/** The full live roster for an App, re-broadcast on every change. Ephemeral. */
+export interface AppPresenceUpdate {
+  appId: string;
+  viewers: AppPresenceViewer[];
+}
+
+/**
+ * The resident agent's live activity on a thread while a turn runs, surfaced in
+ * the App console (G9 — "agent is thinking…"). Ephemeral; `state:'idle'` clears.
+ */
+export interface AppAgentActivity {
+  appId: string;
+  conversationId: string;
+  agentId?: string;
+  /** thinking → the agent is reasoning; typing → composing a reply; idle → done. */
+  state: 'thinking' | 'typing' | 'idle';
+  /** A short, calm label for the indicator line (e.g. a clipped reasoning snippet). */
+  label?: string;
+  at: string;
 }

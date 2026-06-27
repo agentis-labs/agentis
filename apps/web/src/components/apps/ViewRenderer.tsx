@@ -22,9 +22,10 @@ import {
   type AppClientMessage,
   type AppClientResponse,
 } from '@agentis/app-client';
-import type { AccentName, ActionRef, DataBind, SurfaceAction, Tone, ViewNode } from '@agentis/core';
+import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPresenceViewer, DataBind, SurfaceAction, Tone, ViewNode } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
+import { tokens } from '../../lib/api';
 import { appsApi, type AppOperator, type AppConversation, type AppConversationMessage } from '../../lib/appsApi';
 import { pathsEqual } from './viewTree';
 import { ThemeProvider, accentColor, resolveTheme, useTheme } from './theme';
@@ -1654,14 +1655,108 @@ function useLiveMessages(appId: string, conversationId: string | null) {
   return { messages, loading };
 }
 
+// ── Live co-presence (Living Apps G9) ───────────────────────────
+// Ephemeral, over the EXISTING realtime bus. `usePresence` heartbeats while the
+// console is open (and which thread it focuses) and listens for the broadcast
+// roster; `useAgentActivity` surfaces the resident agent's live thinking/typing.
+
+/** Decode the operator's own userId from the access JWT, to filter self out of the roster. */
+function selfUserId(): string | null {
+  try {
+    const token = tokens.access();
+    if (!token) return null;
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const json = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof json.sub === 'string' ? json.sub : null;
+  } catch {
+    return null;
+  }
+}
+
+const PRESENCE_HEARTBEAT_MS = 8_000;
+
+function usePresence(appId: string, conversationId: string | null): AppPresenceViewer[] {
+  const [viewers, setViewers] = useState<AppPresenceViewer[]>([]);
+  const editing = useContext(EditCtx);
+  const meId = useMemo(() => selfUserId(), []);
+  useEffect(() => {
+    // Presence is for the live operator console, not the edit-mode preview.
+    if (editing) return;
+    let active = true;
+    const beat = () => { void appsApi.presence(appId, conversationId).then((v) => { if (active) setViewers(v); }).catch(() => {}); };
+    beat();
+    const timer = window.setInterval(beat, PRESENCE_HEARTBEAT_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      void appsApi.leavePresence(appId).catch(() => {});
+    };
+  }, [appId, conversationId, editing]);
+  const onUpdate = useCallback((env: RealtimeEnvelope) => {
+    const payload = env.payload as AppPresenceUpdate | undefined;
+    if (!payload || payload.appId !== appId) return;
+    setViewers(payload.viewers ?? []);
+  }, [appId]);
+  useRealtime(useMemo(() => [REALTIME_EVENTS.APP_PRESENCE_UPDATED], []), onUpdate);
+  // Filter self out so the row reads "who ELSE is here".
+  return viewers.filter((v) => v.userId !== meId);
+}
+
+/** The resident agent's live state for one thread (thinking/typing), or null when idle. */
+function useAgentActivity(appId: string, conversationId: string | null): AppAgentActivity['state'] | null {
+  const [state, setState] = useState<AppAgentActivity['state'] | null>(null);
+  useEffect(() => { setState(null); }, [conversationId]);
+  const onActivity = useCallback((env: RealtimeEnvelope) => {
+    const payload = env.payload as AppAgentActivity | undefined;
+    if (!payload || payload.appId !== appId || !conversationId || payload.conversationId !== conversationId) return;
+    setState(payload.state === 'idle' ? null : payload.state);
+  }, [appId, conversationId]);
+  useRealtime(useMemo(() => [REALTIME_EVENTS.APP_AGENT_ACTIVITY], []), onActivity);
+  return state;
+}
+
+/** A subtle "N viewing" row — calm co-presence, not a dashboard. */
+function PresenceRow({ viewers }: { viewers: AppPresenceViewer[] }) {
+  if (viewers.length === 0) return null;
+  const label = viewers.length === 1
+    ? `${viewers[0]!.name} is also viewing`
+    : `${viewers.length} others viewing`;
+  return (
+    <div className="flex items-center gap-1.5 text-[10px] text-text-muted" title={viewers.map((v) => v.name).join(', ')}>
+      <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+      <span className="truncate">{label}</span>
+    </div>
+  );
+}
+
+/** A calm "agent is thinking/typing…" line, shown only while a turn runs. */
+function AgentActivityLine({ state }: { state: AppAgentActivity['state'] | null }) {
+  if (!state) return null;
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1 text-[11px] italic text-accent">
+      <Loader2 size={11} className="animate-spin" />
+      <span>{state === 'thinking' ? 'Agent is thinking…' : 'Agent is typing…'}</span>
+    </div>
+  );
+}
+
 function LiveChatThread({ node }: { node: Extract<ViewNode, { type: 'ChatThread' }> }) {
   const { appId } = useRuntime();
   const { rows } = useLiveConversations(appId);
   const convId = rows[0]?.id ?? null;
   const { messages, loading } = useLiveMessages(appId, convId);
+  const presence = usePresence(appId, convId);
+  const activity = useAgentActivity(appId, convId);
   if (loading && !convId) return <SkeletonRows />;
   const msgs: ChatMsg[] = messages.map((m) => ({ role: m.role === 'user' ? 'user' : m.role, content: m.content, ...(m.at ? { at: m.at } : {}) }));
-  return <ChatShell title={node.title ?? rows[0]?.title} channel={node.channel ?? rows[0]?.channel ?? undefined} messages={msgs} placeholder={node.placeholder} />;
+  return (
+    <div className="flex flex-col gap-1">
+      {presence.length > 0 ? <div className="px-1"><PresenceRow viewers={presence} /></div> : null}
+      <ChatShell title={node.title ?? rows[0]?.title} channel={node.channel ?? rows[0]?.channel ?? undefined} messages={msgs} placeholder={node.placeholder} />
+      <AgentActivityLine state={activity} />
+    </div>
+  );
 }
 
 function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
@@ -1672,6 +1767,8 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
   const selConv = rows.find((r) => r.id === selId) ?? null;
   const driving = selConv?.handoffState === 'human';
   const { messages, loading: msgLoading } = useLiveMessages(appId, selId);
+  const presence = usePresence(appId, selId);
+  const activity = useAgentActivity(appId, selId);
   const [busy, setBusy] = useState(false);
   const editing = useContext(EditCtx);
 
@@ -1715,6 +1812,7 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
           <div className="flex h-full flex-col">
             <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
               <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-primary">{selConv?.title ?? 'Conversation'}</span>
+              {presence.length > 0 ? <PresenceRow viewers={presence} /> : null}
               {driving ? <span className="shrink-0 rounded-full bg-warn/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warn">You're driving</span> : null}
               <button
                 type="button"
@@ -1732,6 +1830,7 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
                 <ChatBubble key={m.id} role={m.role} content={m.content} />
               ))}
             </div>
+            <AgentActivityLine state={activity} />
             {driving ? <Composer label="Send" onSend={sendOperator} /> : null}
           </div>
         ) : (

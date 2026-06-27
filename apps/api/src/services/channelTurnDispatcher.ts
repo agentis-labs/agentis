@@ -32,7 +32,7 @@ import type { AppContactService } from './appContacts.js';
 import type { ConversationParticipantService } from './conversationParticipants.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
-import { publishAgentWorkStep, publishChatDeltaProgress } from './agentWorkProgress.js';
+import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from './agentWorkProgress.js';
 
 export interface ChannelTurnDeliver {
   (args: { connectionId: string; chatId: string; body: string }): Promise<void>;
@@ -405,6 +405,8 @@ export class ChannelTurnDispatcher {
       return { replied: true, reason: 'error_notified' };
     } finally {
       void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
+      // Clear the App console's live "agent is thinking/typing…" indicator (G9).
+      this.#publishAppActivity(input, 'idle');
     }
   }
 
@@ -527,9 +529,27 @@ export class ChannelTurnDispatcher {
     await this.#safeDeliver(input, body);
   }
 
+  /**
+   * Surface the resident agent's live activity in the App console (G9 co-presence):
+   * thinking deltas → "agent is thinking…", text deltas → "agent is typing…". Only
+   * fires for App-bound turns; ephemeral and best-effort.
+   */
+  #publishAppActivity(input: ChannelTurnInput, state: 'thinking' | 'typing' | 'idle', label?: string): void {
+    if (!this.deps.bus || !input.appId) return;
+    publishAppAgentActivity(this.deps.bus, {
+      workspaceId: input.workspaceId,
+      appId: input.appId,
+      conversationId: input.conversationId,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+      state,
+      ...(label ? { label } : {}),
+    });
+  }
+
   #publishDelta(input: ChannelTurnInput, clientTurnId: string, delta: ChatDelta): void {
     if (!this.deps.bus) return;
     if (delta.type === 'thinking') {
+      this.#publishAppActivity(input, 'thinking', delta.delta);
       publishAgentWorkStep(this.deps.bus, {
         workspaceId: input.workspaceId,
         ambientId: input.ambientId,
@@ -542,6 +562,7 @@ export class ChannelTurnDispatcher {
       });
       return;
     }
+    if (delta.type === 'text') this.#publishAppActivity(input, 'typing');
     publishChatDeltaProgress(this.deps.bus, {
       workspaceId: input.workspaceId,
       ambientId: input.ambientId,

@@ -105,6 +105,7 @@ import { buildAppRoutes } from './routes/apps.js';
 import { buildCapabilityRoutes } from './routes/capabilities.js';
 import { buildAppStores } from '@agentis/app';
 import { AppStaffingService } from './services/appStaffing.js';
+import { AppPresenceService } from './services/appPresence.js';
 import { AppContactService } from './services/appContacts.js';
 import { AppLearningService } from './services/appLearning.js';
 import { ConversationParticipantService } from './services/conversationParticipants.js';
@@ -1469,7 +1470,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
   app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
   const appStaffing = new AppStaffingService({ store: appStores.store, specialists: specialistAgents, loadouts: specialistLoadouts, logger });
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator }));
+  // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
+  const appPresence = new AppPresenceService({ bus, logger });
+  appPresence.start();
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }));
   const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, abilityCreation, abilities: abilityService }, bus, logger);
