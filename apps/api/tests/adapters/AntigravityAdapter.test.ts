@@ -35,19 +35,18 @@ describe('AntigravityAdapter', () => {
     spawnMock.mockReset();
   });
 
-  it('spawns the agy CLI and normalizes stream-json message, tool_use and result events', async () => {
+  it('runs agy with the verified flags and completes the task with its answer', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test', cwd: 'C:/repo', model: 'Gemini 3.5 Flash (High)' });
     const events: NormalizedAgentEvent[] = [];
     adapter.onEvent((event) => events.push(event));
 
-    await adapter.dispatchTask(task);
-    child.stdout.write('{"type":"init","session_id":"s1","model":"Gemini 3.5 Flash (High)"}\n');
+    // dispatchTask awaits the run; emit the child's output + exit while it's pending.
+    const done = adapter.dispatchTask(task);
     child.stdout.write('{"type":"message","role":"assistant","content":"Working"}\n');
-    child.stdout.write('{"type":"tool_use","tool_name":"shell","tool_id":"t1","parameters":{"cmd":"pnpm test"}}\n');
-    child.stdout.write('{"type":"result","status":"success"}\n');
     child.emit('exit', 0);
+    await done;
 
     const args = spawnMock.mock.calls[0]![1] as string[];
     expect(spawnMock.mock.calls[0]![0]).toBe('agy-test');
@@ -58,22 +57,22 @@ describe('AntigravityAdapter', () => {
     expect(args).not.toContain('--output-format');
     expect(args).not.toContain('--session-id');
     expect(args).not.toContain('--yolo');
-    expect(events.map((event) => event.eventType)).toEqual(['task.started', 'task.progress', 'agent.tool_call', 'task.completed']);
+    expect(events.map((event) => event.eventType)).toEqual(['task.started', 'task.completed']);
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.completed', output: { text: 'Working' } }));
   });
 
-  it('tolerates plain-text agy output (no JSON) by surfacing it as progress and the answer', async () => {
+  it('tolerates plain-text agy output (no JSON) as the task answer', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test' });
     const events: NormalizedAgentEvent[] = [];
     adapter.onEvent((event) => events.push(event));
 
-    await adapter.dispatchTask(task);
+    const done = adapter.dispatchTask(task);
     child.stdout.write('Here is the plain text answer from agy.\n');
     child.emit('exit', 0);
+    await done;
 
-    expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Here is the plain text answer from agy.' }));
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.completed', output: { text: 'Here is the plain text answer from agy.' } }));
   });
 

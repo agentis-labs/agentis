@@ -25,6 +25,11 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type {
   AgentAdapter,
   AdapterCapabilities,
@@ -41,13 +46,12 @@ import type {
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
-import { buildMarkerToolPrompt, formatToolManifestAwareness, stripProcessNoise } from './markerToolProtocol.js';
+import { buildMarkerToolPrompt, extractMarkerToolCalls, formatToolManifestAwareness, stripProcessNoise } from './markerToolProtocol.js';
 import { linkAbortSignal } from './abort.js';
 import {
   chatHardCeilingMs,
   clampChatTimeout,
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
-  runCliChatTurn,
   type CliChatPart,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
@@ -185,36 +189,6 @@ export class AntigravityAdapter implements AgentAdapter {
     const controller = new AbortController();
     const unlinkAbort = linkAbortSignal(task.signal, controller);
     this.#inFlight.set(task.taskId, controller);
-    const binary = this.opts.binaryPath || 'agy';
-    // A workflow task is a fresh, single-shot conversation — the prompt carries
-    // everything it needs, so no `--conversation` resume id.
-    const args = buildAntigravityArgs(this.opts, task.preferredModel);
-    let childProcess: ReturnType<typeof spawn>;
-    let terminalEventEmitted = false;
-    let timeout: NodeJS.Timeout | undefined;
-    try {
-      const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
-      const spawnCwd = task.workdir ?? this.opts.cwd;
-      const target = resolveSpawnTarget(binary, args, spawnCwd ?? process.cwd(), env);
-      childProcess = spawn(target.command, target.args, {
-        cwd: spawnCwd,
-        env,
-        windowsHide: true,
-        signal: controller.signal,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      this.#emitFailure(task, `antigravity_spawn_failed: ${(err as Error).message}`);
-      unlinkAbort();
-      this.#inFlight.delete(task.taskId);
-      return;
-    }
-
-    if (this.opts.timeoutSec && this.opts.timeoutSec > 0) {
-      timeout = setTimeout(() => controller.abort(), this.opts.timeoutSec * 1000);
-      timeout.unref?.();
-    }
-
     const timestamp = () => new Date().toISOString();
     this.#emit({
       eventType: 'task.started',
@@ -224,73 +198,106 @@ export class AntigravityAdapter implements AgentAdapter {
       workflowId: task.workflowId,
       timestamp: timestamp(),
     });
-
-    childProcess.on('error', (err) => {
-      if (terminalEventEmitted) return;
-      terminalEventEmitted = true;
-      this.#emitFailure(task, `antigravity_error: ${err.message}`);
-      unlinkAbort();
-      this.#inFlight.delete(task.taskId);
-      if (timeout) clearTimeout(timeout);
+    // A workflow task is a fresh, single-shot conversation — the prompt carries
+    // everything it needs, so no `--conversation` resume id.
+    const args = buildAntigravityArgs(this.opts, task.preferredModel);
+    const result = await this.#runAgy({
+      args,
+      stdin: buildAntigravityPrompt(task),
+      cwd: task.workdir ?? this.opts.cwd,
+      env: task.abilityEnv,
+      signal: controller.signal,
+      timeoutMs: this.opts.timeoutSec && this.opts.timeoutSec > 0 ? this.opts.timeoutSec * 1000 : undefined,
     });
-    let stderrText = '';
-    childProcess.stderr?.on('data', (data) => {
-      const chunk = String(data);
-      stderrText = `${stderrText}${chunk}`.slice(-4096);
-      this.opts.logger.warn('antigravity.stderr', { data: chunk.slice(0, 512) });
+    unlinkAbort();
+    this.#inFlight.delete(task.taskId);
+    if (result.error) {
+      this.#emitFailure(task, result.error);
+      return;
+    }
+    this.#emit({
+      eventType: 'task.completed',
+      agentId: this.opts.agentId,
+      runId: task.runId,
+      workflowId: task.workflowId,
+      taskId: task.taskId,
+      output: { text: result.text },
+      timestamp: timestamp(),
     });
+  }
 
-    let buffer = '';
-    let transcript = '';
-    let stdoutError = '';
-    let lastOutput: Record<string, unknown> | undefined;
-    childProcess.stdout?.on('data', (chunk) => {
-      buffer += String(chunk);
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-        if (!line) continue;
-        let event: AntigravityJsonEvent | null = null;
-        try {
-          event = JSON.parse(line) as AntigravityJsonEvent;
-        } catch {
-          // `agy` may emit plain text rather than JSON — surface it as progress
-          // (and as the answer transcript) instead of dropping it.
-          if (!isNoiseLine(line)) {
-            transcript += `${line}\n`;
-            this.#emit({ eventType: 'task.progress', agentId: this.opts.agentId, runId: task.runId, workflowId: task.workflowId, taskId: task.taskId, message: line, timestamp: timestamp() });
-          }
-          continue;
-        }
-        stdoutError = extractAntigravityError(event) ?? stdoutError;
-        const text = extractAssistantText(event);
-        if (text) {
-          transcript += text;
-          this.#emit({ eventType: 'task.progress', agentId: this.opts.agentId, runId: task.runId, workflowId: task.workflowId, taskId: task.taskId, message: text, timestamp: timestamp() });
-        }
-        const toolCall = extractToolUse(event);
-        if (toolCall) {
-          this.#emit({ eventType: 'agent.tool_call', agentId: this.opts.agentId, runId: task.runId, workflowId: task.workflowId, taskId: task.taskId, tool: toolCall.tool, input: toolCall.input, timestamp: timestamp() });
-        }
-        if (isCompletionEvent(event)) lastOutput = { text: transcript.trim() };
+  /**
+   * Run one `agy --print` turn and return its answer. Because agy v1.0.13 does
+   * not emit the response to a piped stdout, the answer is read back from the
+   * conversation transcript agy writes under its brain dir
+   * (`<brain>/<conversation-id>/.system_generated/logs/transcript_full.jsonl`) —
+   * the last `source: "MODEL"` content. A forward-compatible stdout answer (if a
+   * future agy emits one) takes precedence. This is the only way to capture agy
+   * output today without a PTY; it tolerates the file being flushed slightly
+   * after exit by retrying briefly.
+   */
+  async #runAgy(input: {
+    args: string[];
+    stdin: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): Promise<{ text: string; error?: string }> {
+    const binary = this.opts.binaryPath || 'agy';
+    const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(input.env ?? {}) });
+    const brainDir = agyBrainDir(this.opts.env, input.env);
+    const before = listConversationDirs(brainDir);
+    const controller = new AbortController();
+    const unlink = linkAbortSignal(input.signal, controller);
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    return new Promise((resolve) => {
+      let child: ReturnType<typeof spawn>;
+      try {
+        const target = resolveSpawnTarget(binary, input.args, input.cwd ?? process.cwd(), env);
+        child = spawn(target.command, target.args, {
+          cwd: input.cwd, env, windowsHide: true, signal: controller.signal, stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        unlink();
+        resolve({ text: '', error: `antigravity_spawn_failed: ${(err as Error).message}` });
+        return;
       }
-    });
-
-    childProcess.on('exit', (code) => {
-      unlinkAbort();
-      this.#inFlight.delete(task.taskId);
-      if (timeout) clearTimeout(timeout);
-      if (terminalEventEmitted) return;
-      terminalEventEmitted = true;
-      if (code === 0) {
-        this.#emit({ eventType: 'task.completed', agentId: this.opts.agentId, runId: task.runId, workflowId: task.workflowId, taskId: task.taskId, output: lastOutput ?? { text: transcript.trim() }, timestamp: timestamp() });
-      } else {
-        this.#emitFailure(task, formatAntigravityExitError(code, stderrText, stdoutError));
+      if (input.timeoutMs && input.timeoutMs > 0) {
+        timer = setTimeout(() => { timedOut = true; controller.abort(); }, input.timeoutMs);
+        timer.unref?.();
       }
+      let stderrText = '';
+      let stdoutText = '';
+      child.stderr?.on('data', (d) => {
+        const chunk = String(d);
+        stderrText = `${stderrText}${chunk}`.slice(-4096);
+        this.opts.logger.warn('antigravity.stderr', { data: chunk.slice(0, 256) });
+      });
+      child.stdout?.on('data', (d) => { stdoutText = `${stdoutText}${String(d)}`.slice(-65536); });
+      child.on('error', (err) => {
+        unlink(); if (timer) clearTimeout(timer);
+        resolve({ text: '', error: timedOut ? `Antigravity (agy) timed out` : `antigravity_error: ${err.message}` });
+      });
+      child.on('exit', (code) => {
+        unlink(); if (timer) clearTimeout(timer);
+        // Read stdout synchronously (it's fully delivered by exit time).
+        const parsed = extractStdoutAnswer(stdoutText);
+        if (code !== 0) {
+          resolve({ text: '', error: formatAntigravityExitError(code, stderrText, parsed.error ?? '') });
+          return;
+        }
+        // Forward-compat: if a future agy prints the answer to stdout, use it.
+        if (parsed.text) { resolve({ text: parsed.text }); return; }
+        // Otherwise read it back from the on-disk conversation transcript (async).
+        void readNewConversationAnswer(brainDir, before).then((text) => {
+          if (!text) this.opts.logger.warn('antigravity.no_transcript_answer', { brainDir });
+          resolve({ text });
+        });
+      });
+      child.stdin?.end(input.stdin);
     });
-
-    childProcess.stdin?.end(buildAntigravityPrompt(task));
   }
 
   async cancelTask(taskId: string): Promise<void> {
@@ -303,64 +310,47 @@ export class AntigravityAdapter implements AgentAdapter {
     tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
-    const sessionKey = options?.sessionKey?.trim() || 'default';
-    // agy assigns its OWN conversation id (it has no `--session-id`). We can only
-    // resume one we previously captured; if none, the turn is fresh and the full
-    // history travels in the stdin prompt anyway.
-    const conversationId = this.#sessions.get(sessionKey)
-      ?? (this.opts.sessionStore && this.opts.workspaceId
-        ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
-        : undefined);
-    const interactive = options?.latencyClass === 'interactive';
-    const structured = options?.latencyClass === 'structured';
-    const args = buildAntigravityArgs(this.opts, options?.preferredModel, conversationId ? { conversationId } : {});
+    // agy is NOT a streaming-to-stdout CLI (see #runAgy / the file header): we run
+    // one `--print` turn and read the answer back from its conversation transcript,
+    // then yield it as a single text delta (plus any Agentis marker tool calls).
+    // Non-streaming, but it actually returns the answer — the honest best for agy
+    // v1.0.13 without a PTY. The full history travels in the stdin prompt, so a
+    // fresh conversation per turn is fine.
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
-      : interactive
+      : options?.latencyClass === 'interactive'
         ? DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS
-        : structured
+        : options?.latencyClass === 'structured'
           ? DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS
           : DEFAULT_CHAT_TURN_TIMEOUT_MS;
-    const idleTimeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
+    const timeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
+    const hardCeilingMs = chatHardCeilingMs(timeoutMs, 'AGENTIS_ANTIGRAVITY_CHAT_HARD_CEILING_MS');
 
-    const seenTypes = new Set<string>();
-    const interpret = (event: unknown): CliChatPart => {
-      const ev = event as AntigravityJsonEvent;
-      seenTypes.add(String(ev.type ?? '').toLowerCase() || '(none)');
-      const runtimeSessionId = firstString(ev.session_id, ev.sessionId);
-      if (runtimeSessionId) {
-        this.#sessions.set(sessionKey, runtimeSessionId);
-        if (this.opts.sessionStore && this.opts.workspaceId) {
-          this.opts.sessionStore.upsert({
-            workspaceId: this.opts.workspaceId,
-            agentId: this.opts.agentId,
-            conversationId: sessionKey,
-            sessionKey,
-            runtimeSessionId,
-            selectedModel: options?.preferredModel ?? this.opts.model ?? null,
-            status: 'idle',
-          });
-        }
-      }
-      return antigravityJsonEventToChatPart(ev);
-    };
-
-    yield* runCliChatTurn({
-      binary: this.opts.binaryPath || 'agy',
-      args,
-      cwd: this.opts.cwd,
-      env: this.opts.env,
+    const result = await this.#runAgy({
+      args: buildAntigravityArgs(this.opts, options?.preferredModel),
       stdin: buildAntigravityChatPrompt(messages, tools),
-      displayName: 'Antigravity CLI',
-      logTag: 'antigravity.chat',
-      logger: this.opts.logger,
+      cwd: this.opts.cwd,
       signal: options?.signal,
-      idleTimeoutMs,
-      hardCeilingMs: chatHardCeilingMs(idleTimeoutMs, 'AGENTIS_ANTIGRAVITY_CHAT_HARD_CEILING_MS'),
-      interpret,
-      formatExitError: (code, stderr, stdoutError) => formatAntigravityExitError(code, stderr, stdoutError),
-      onEmptyResult: () => this.opts.logger.warn('antigravity.chat.no_output_parsed', { types: [...seenTypes].slice(0, 40) }),
+      timeoutMs: hardCeilingMs > 0 ? hardCeilingMs : timeoutMs,
     });
+
+    if (result.error) {
+      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: result.error };
+      yield { type: 'done', finishReason: 'error' };
+      return;
+    }
+    // The agent may have answered with Agentis tool-call markers — split them out
+    // so the platform executes them, exactly like the other CLI adapters.
+    const { cleaned, calls } = extractMarkerToolCalls(result.text);
+    const body = (cleaned || result.text).trim();
+    if (body) yield { type: 'text', delta: body };
+    for (const call of calls) {
+      yield { type: 'tool_call', id: randomUUID(), name: call.name, args: call.args };
+    }
+    if (!body && calls.length === 0) {
+      this.opts.logger.warn('antigravity.chat.empty_answer', {});
+    }
+    yield { type: 'done', finishReason: calls.length > 0 ? 'tool_calls' : 'stop' };
   }
 
   #emit(event: NormalizedAgentEvent): void {
@@ -507,16 +497,97 @@ function extractAssistantText(event: AntigravityJsonEvent): string {
   return firstString(event.content, event.text, event.delta, message?.content, message?.text) ?? '';
 }
 
-function extractToolUse(event: AntigravityJsonEvent): { tool: string; input: unknown } | null {
-  const type = String(event.type ?? '').toLowerCase();
-  if (!type.includes('tool_use')) return null;
-  const tool = firstString(event.tool_name, event.name) ?? 'tool';
-  return { tool: prettyToolName(tool), input: event.parameters ?? event.arguments ?? event.input ?? {} };
+/**
+ * Forward-compatible stdout reader: if a future agy prints the answer/JSON to a
+ * pipe, capture it. Today agy emits nothing to a pipe, so this returns empty and
+ * the transcript path takes over.
+ */
+function extractStdoutAnswer(stdout: string): { text: string; error?: string } {
+  let text = '';
+  let error: string | undefined;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed) as AntigravityJsonEvent;
+      error = extractAntigravityError(event) ?? error;
+      const answer = extractAssistantText(event);
+      if (answer) text += answer;
+    } catch {
+      if (stripProcessNoise(trimmed).trim()) text += `${trimmed}\n`;
+    }
+  }
+  return { text: text.trim(), error };
 }
 
-function isCompletionEvent(event: AntigravityJsonEvent): boolean {
-  const type = String(event.type ?? '').toLowerCase();
-  return type === 'result' || type === 'done' || type.includes('completed') || type.includes('finished');
+const AGY_CONVERSATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The Antigravity CLI brain root (`<home>/brain`), respecting ANTIGRAVITY_HOME. */
+function agyBrainDir(optsEnv?: Record<string, string>, callEnv?: Record<string, string>): string {
+  const read = (key: string) => callEnv?.[key]?.trim() || optsEnv?.[key]?.trim() || process.env[key]?.trim();
+  const home = read('ANTIGRAVITY_HOME')
+    || join(read('GEMINI_HOME') || join(homedir(), '.gemini'), 'antigravity-cli');
+  return join(home, 'brain');
+}
+
+function listConversationDirs(brainDir: string): Set<string> {
+  const out = new Set<string>();
+  try {
+    for (const name of readdirSync(brainDir)) {
+      if (AGY_CONVERSATION_RE.test(name)) out.add(name);
+    }
+  } catch { /* brain dir may not exist yet */ }
+  return out;
+}
+
+/** The newest conversation dir that did not exist before this turn started. */
+function newestNewConversation(brainDir: string, before: Set<string>): string | null {
+  let best: { id: string; mtime: number } | null = null;
+  try {
+    for (const name of readdirSync(brainDir)) {
+      if (!AGY_CONVERSATION_RE.test(name) || before.has(name)) continue;
+      let mtime = 0;
+      try { mtime = statSync(join(brainDir, name)).mtimeMs; } catch { continue; }
+      if (!best || mtime > best.mtime) best = { id: name, mtime };
+    }
+  } catch { /* ignore */ }
+  return best?.id ?? null;
+}
+
+/** The final model answer from a conversation's full transcript. */
+function readTranscriptFinalModelText(convDir: string): string {
+  const file = join(convDir, '.system_generated', 'logs', 'transcript_full.jsonl');
+  let raw: string;
+  try { raw = readFileSync(file, 'utf8'); } catch { return ''; }
+  let answer = '';
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(trimmed) as Record<string, unknown>; } catch { continue; }
+    if (String(event.source ?? '').toUpperCase() !== 'MODEL') continue;
+    const status = String(event.status ?? '').toUpperCase();
+    if (status && status !== 'DONE') continue;
+    const content = firstString(event.content, event.text, event.message);
+    if (content) answer = content; // the last completed MODEL message is the answer
+  }
+  return answer.trim();
+}
+
+/**
+ * Read the answer agy wrote to the conversation transcript for the turn we just
+ * ran. agy flushes the transcript slightly after exit, so retry briefly.
+ */
+async function readNewConversationAnswer(brainDir: string, before: Set<string>): Promise<string> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const convId = newestNewConversation(brainDir, before);
+    if (convId) {
+      const text = readTranscriptFinalModelText(join(brainDir, convId));
+      if (text) return text;
+    }
+    await delay(250);
+  }
+  return '';
 }
 
 function antigravityToolActivity(
@@ -563,10 +634,6 @@ function formatAntigravityExitError(code: number | null, stderrText: string, std
   const exit = code === null ? 'signal' : `code ${code}`;
   if (detail) return `Antigravity (agy) exited with ${exit}: ${detail}`;
   return `Antigravity (agy) exited with ${exit}`;
-}
-
-function isNoiseLine(line: string): boolean {
-  return stripProcessNoise(line).trim().length === 0;
 }
 
 function objectOf(value: unknown): Record<string, unknown> | null {
