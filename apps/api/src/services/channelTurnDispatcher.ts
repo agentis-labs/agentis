@@ -62,10 +62,23 @@ export interface ChannelTurnDispatcherDeps {
   /** Multi-party threads (G1) — resolve the active responder (specialist warm handoff) + seed the primary. */
   participants?: ConversationParticipantService;
   /**
+   * Durable turn queue (Living Apps Phase 5 / G2). When wired, an inbound turn
+   * is ENQUEUED (durable, at-least-once, resumable) instead of run in-process;
+   * the queue's worker calls back into `runQueued`. Absent → today's
+   * fire-and-forget in-process path, byte-identical. Set after construction
+   * (the queue and dispatcher reference each other).
+   */
+  queue?: ChannelTurnEnqueuer;
+  /**
    * Batch rapid-fire inbound messages within this window (ms) into a single
    * turn (OMNICHANNEL §3.3). 0 (default) runs each message immediately.
    */
   debounceMs?: number;
+}
+
+/** The durable-queue sink. `enqueue` returns the queue id, or null on failure. */
+export interface ChannelTurnEnqueuer {
+  enqueue(input: ChannelTurnInput): string | null;
 }
 
 interface PendingChannelConfirmation {
@@ -102,6 +115,13 @@ export interface ChannelTurnInput {
   from?: string;
   /** Conversation message id of the inbound mirror, excluded from history. */
   inboundMessageId?: string;
+  /**
+   * All inbound mirror ids this turn answers, excluded from history. Set when a
+   * debounce batch coalesced several messages — carried on the durable queue
+   * payload so the worker rebuilds the same exclusion set after a crash. When
+   * absent, falls back to `inboundMessageId`.
+   */
+  excludeMessageIds?: string[];
 }
 
 const HISTORY_LIMIT = 20;
@@ -117,12 +137,28 @@ export class ChannelTurnDispatcher {
   // Per-(connection,chat) batches of rapid-fire messages awaiting a debounce flush.
   readonly #batches = new Map<string, PendingBatch>();
 
-  constructor(private readonly deps: ChannelTurnDispatcherDeps) {}
+  #queue: ChannelTurnEnqueuer | undefined;
+
+  constructor(private readonly deps: ChannelTurnDispatcherDeps) {
+    this.#queue = deps.queue;
+  }
+
+  /**
+   * Wire the durable turn queue after construction (G2). The queue and the
+   * dispatcher reference each other — the queue's worker calls `runQueued`, and
+   * `dispatch` enqueues onto the queue. Wired in bootstrap when the durable path
+   * is enabled; absent → today's in-process path.
+   */
+  setQueue(queue: ChannelTurnEnqueuer): void {
+    this.#queue = queue;
+  }
 
   /**
    * Handle an inbound channel message. With `debounceMs > 0`, rapid-fire
    * messages from the same chat are coalesced into one turn; otherwise the turn
-   * runs immediately. Fire-and-forget safe — never throws.
+   * runs immediately. When a durable queue is wired the coalesced turn is
+   * ENQUEUED (durable, resumable) rather than run in-process; otherwise it runs
+   * fire-and-forget exactly as before. Fire-and-forget safe — never throws.
    */
   async dispatch(input: ChannelTurnInput): Promise<{ replied: boolean; reason?: string }> {
     this.#publishWorkStep(input, null, {
@@ -133,7 +169,7 @@ export class ChannelTurnDispatcher {
     });
     const windowMs = this.deps.debounceMs ?? 0;
     if (windowMs <= 0) {
-      return this.#executeTurn(input, input.inboundMessageId ? [input.inboundMessageId] : []);
+      return this.#commitTurn(input, input.inboundMessageId ? [input.inboundMessageId] : []);
     }
     const key = `${input.connectionId}:${input.chatId}`;
     const existing = this.#batches.get(key);
@@ -161,9 +197,43 @@ export class ChannelTurnDispatcher {
     if (!batch) return;
     this.#batches.delete(key);
     const combined: ChannelTurnInput = { ...batch.latest, text: batch.texts.join('\n') };
-    void this.#executeTurn(combined, [...batch.ids]).catch((err) => {
+    void Promise.resolve(this.#commitTurn(combined, [...batch.ids])).catch((err) => {
       this.deps.logger.error('channel.turn.batch_failed', { key, err: (err as Error).message });
     });
+  }
+
+  /**
+   * The terminal sink for a (possibly coalesced) inbound turn. When a durable
+   * queue is wired, enqueue it (durable + at-least-once + resumable) and return
+   * immediately; the worker runs it via `runQueued`. Otherwise run it in-process
+   * (today's behavior). On an enqueue failure the turn is NOT lost — it falls
+   * back to the in-process path so a message is never dropped silently.
+   */
+  async #commitTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
+    if (this.#queue) {
+      const queued: ChannelTurnInput = excludeMessageIds.length > 1
+        ? { ...input, excludeMessageIds }
+        : input;
+      const id = this.#queue.enqueue(queued);
+      if (id) return { replied: false, reason: 'queued' };
+      // Enqueue failed — never drop the turn; run it inline as the fallback.
+      this.deps.logger.warn('channel.turn.enqueue_fallback_inline', { conversationId: input.conversationId });
+    }
+    return this.#executeTurn(input, excludeMessageIds);
+  }
+
+  /**
+   * Run one queued turn to completion (durable-queue worker entry point, G2).
+   * Rebuilds the exclusion set from the durable payload so a turn resumed after
+   * a crash drops the same inbound mirrors from history. Re-throws so the queue
+   * can record the failure and retry — `#executeTurn` already converts a turn
+   * failure into a user-facing reply, so a thrown error here is an
+   * infrastructure fault (the rare case the queue should retry).
+   */
+  async runQueued(input: ChannelTurnInput): Promise<{ replied: boolean; reason?: string }> {
+    const excludeMessageIds = input.excludeMessageIds
+      ?? (input.inboundMessageId ? [input.inboundMessageId] : []);
+    return this.#executeTurn(input, excludeMessageIds);
   }
 
   /**
