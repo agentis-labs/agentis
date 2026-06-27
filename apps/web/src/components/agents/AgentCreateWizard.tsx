@@ -75,7 +75,7 @@ interface AgentCreateWizardProps {
 }
 
 // Auto-pick order for zero-config runtime selection (most capable / most common first).
-const ADAPTER_PRIORITY: AdapterType[] = ['claude_code', 'codex', 'cursor', 'antigravity', 'gemini', 'hermes_agent', 'openclaw'];
+const ADAPTER_PRIORITY: AdapterType[] = ['claude_code', 'codex', 'cursor', 'antigravity', 'hermes_agent', 'openclaw'];
 
 const EMPTY_DETECTIONS: HarnessDetectionResult[] = [];
 const EMPTY_PLAYBOOKS: PlaybookEntry[] = [];
@@ -181,7 +181,6 @@ function runtimeLabel(adapterType: AdapterType): string {
   if (adapterType === 'claude_code') return 'Claude Code';
   if (adapterType === 'codex') return 'Codex';
   if (adapterType === 'cursor') return 'Cursor';
-  if (adapterType === 'gemini') return 'Gemini CLI';
   if (adapterType === 'antigravity') return 'Antigravity CLI';
   if (adapterType === 'hermes_agent') return 'Hermes Agent';
   if (adapterType === 'openclaw') return 'OpenClaw';

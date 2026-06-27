@@ -10,7 +10,7 @@ import type { McpHarnessSessionService } from './mcpHarnessSession.js';
 import { cliCommandFromConfig, isCliHarnessAdapter, repairCliHarnessConfig } from './harnessConfigRepair.js';
 import { detectHarnesses, type HarnessDetectionResult, type V1HarnessAdapterType } from './harnessProbe.js';
 
-const ADAPTER_TYPES = new Set<V1HarnessAdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'antigravity', 'http']);
+const ADAPTER_TYPES = new Set<V1HarnessAdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
 
 export interface AgentRuntimeHydratorDeps {
   db: AgentisSqliteDb;

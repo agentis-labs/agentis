@@ -9,18 +9,22 @@
  * (config under `~/.gemini/antigravity-cli/`) and is a multi-vendor harness
  * (Gemini, Claude, GPT-OSS models).
  *
- * Like the Gemini/Codex/Cursor adapters this is a streaming CLI adapter: spawn
- * `agy -p … --output-format stream-json`, normalize to the same
- * NormalizedAgentEvent / ChatDelta streams as every other adapter. Because `agy`
- * is young and its headless output format is still settling, parsing is
- * deliberately schema-tolerant (event-type substring matching + `firstString`
- * candidate fields) AND tolerates plain-text output: a non-JSON line is surfaced
- * as progress/answer text rather than dropped. The argv mirrors the Gemini CLI
- * (shared lineage) and is fully overridable via `extraArgs` / `binaryPath`.
+ * Like the Codex/Cursor adapters this is a streaming CLI adapter: spawn
+ * `agy --print --dangerously-skip-permissions` (the prompt is piped on stdin) and
+ * normalize to the same NormalizedAgentEvent / ChatDelta streams as every other
+ * adapter. Flags verified against agy v1.0.13.
+ *
+ * ⚠️ KNOWN agy v1.0.13 LIMITATION: `--print` runs the turn and exits 0, but writes
+ * the model response only to an interactive TTY renderer — it emits NOTHING to a
+ * piped stdout (and `--log-file` holds only glog debug output, not the answer).
+ * So spawned headlessly it currently produces no capturable output. Capturing it
+ * needs a pseudo-terminal (ConPTY / node-pty) wrapper, or an upstream fix to
+ * `--print`. Parsing here is schema-tolerant (handles plain text AND, forward-
+ * compatibly, JSON lines) so the moment agy emits to the pipe — or a PTY is added
+ * — output flows through unchanged. Args are overridable via `extraArgs`.
  */
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import type {
   AgentAdapter,
   AdapterCapabilities,
@@ -182,7 +186,9 @@ export class AntigravityAdapter implements AgentAdapter {
     const unlinkAbort = linkAbortSignal(task.signal, controller);
     this.#inFlight.set(task.taskId, controller);
     const binary = this.opts.binaryPath || 'agy';
-    const args = buildAntigravityArgs(this.opts, task.preferredModel, { sessionId: randomUUID() });
+    // A workflow task is a fresh, single-shot conversation — the prompt carries
+    // everything it needs, so no `--conversation` resume id.
+    const args = buildAntigravityArgs(this.opts, task.preferredModel);
     let childProcess: ReturnType<typeof spawn>;
     let terminalEventEmitted = false;
     let timeout: NodeJS.Timeout | undefined;
@@ -298,17 +304,16 @@ export class AntigravityAdapter implements AgentAdapter {
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
     const sessionKey = options?.sessionKey?.trim() || 'default';
-    let sessionId = this.#sessions.get(sessionKey)
+    // agy assigns its OWN conversation id (it has no `--session-id`). We can only
+    // resume one we previously captured; if none, the turn is fresh and the full
+    // history travels in the stdin prompt anyway.
+    const conversationId = this.#sessions.get(sessionKey)
       ?? (this.opts.sessionStore && this.opts.workspaceId
         ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
         : undefined);
-    if (!sessionId) {
-      sessionId = randomUUID();
-      this.#sessions.set(sessionKey, sessionId);
-    }
     const interactive = options?.latencyClass === 'interactive';
     const structured = options?.latencyClass === 'structured';
-    const args = buildAntigravityArgs(this.opts, options?.preferredModel, { sessionId });
+    const args = buildAntigravityArgs(this.opts, options?.preferredModel, conversationId ? { conversationId } : {});
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
       : interactive
@@ -404,26 +409,27 @@ type AntigravityJsonEvent = {
 };
 
 /**
- * Build the headless `agy` argv. The argv mirrors the Gemini CLI it descends from
- * (verified there); flags are inherited assumptions for `agy` pending a probe of
- * the real binary, and are overridable via `extraArgs`. The prompt is piped on
- * stdin (so large conversations never hit the Windows command-line length limit).
+ * Build the headless `agy` argv. Verified against agy v1.0.13 (`agy --help`):
+ * `--print` runs a single prompt non-interactively (the prompt is read from
+ * stdin), `--dangerously-skip-permissions` auto-approves tools (there is no human
+ * to answer prompts), `--model` selects the model, and `--conversation <id>`
+ * resumes a prior conversation. There is NO `--output-format` flag — agy v1.0.13
+ * emits plain text (and, per the known non-TTY limitation, only to a terminal —
+ * see the file header). All flags are overridable via `extraArgs`.
  */
 function buildAntigravityArgs(
   opts: AntigravityAdapterOptions,
   preferredModel?: string | null,
-  options: { sessionId?: string } = {},
+  options: { conversationId?: string } = {},
 ): string[] {
   const model = (preferredModel || opts.model || '').trim();
-  const yolo = opts.yolo !== false; // default ON — no human is present to approve
+  const skipPermissions = opts.yolo !== false; // default ON — no human is present to approve
   return [
-    '-p',
-    '',
-    '--output-format',
-    'stream-json',
-    ...(yolo ? ['--yolo'] : []),
-    ...(model ? ['-m', model] : []),
-    ...(options.sessionId ? ['--session-id', options.sessionId] : []),
+    '--print',
+    ...(skipPermissions ? ['--dangerously-skip-permissions'] : []),
+    ...(model ? ['--model', model] : []),
+    ...(options.conversationId ? ['--conversation', options.conversationId] : []),
+    ...(opts.timeoutSec && opts.timeoutSec > 0 ? ['--print-timeout', `${opts.timeoutSec}s`] : []),
     ...(opts.extraArgs ?? []),
   ];
 }

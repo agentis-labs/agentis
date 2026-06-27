@@ -119,12 +119,6 @@ function instructionCandidates(agent: AgentInstructionOwner): InstructionCandida
     addDirectory(candidates, path.join(home, '.cursor', 'rules'), 'runtime', 'Cursor user rule');
   }
 
-  if (adapterType === 'gemini') {
-    const geminiHome = firstString(process.env.GEMINI_HOME) ?? path.join(home, '.gemini');
-    addFile(candidates, path.join(geminiHome, 'GEMINI.md'), 'runtime', 'Gemini CLI home instructions', { primary: true });
-    addFile(candidates, path.join(geminiHome, 'AGENTS.md'), 'runtime', 'Gemini CLI shared agent instructions');
-  }
-
   if (adapterType === 'antigravity') {
     const agyHome = firstString(process.env.ANTIGRAVITY_HOME) ?? path.join(home, '.gemini', 'antigravity-cli');
     addFile(candidates, path.join(agyHome, 'GEMINI.md'), 'runtime', 'Antigravity CLI home instructions', { primary: true });

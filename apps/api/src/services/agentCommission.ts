@@ -13,7 +13,6 @@ import { ClaudeCodeAdapter } from '../adapters/ClaudeCodeAdapter.js';
 import { CodexAdapter } from '../adapters/CodexAdapter.js';
 import { CursorAdapter } from '../adapters/CursorAdapter.js';
 import { HermesAgentAdapter } from '../adapters/HermesAgentAdapter.js';
-import { GeminiAdapter } from '../adapters/GeminiAdapter.js';
 import { AntigravityAdapter } from '../adapters/AntigravityAdapter.js';
 import { assertSafeUrl } from './safeUrl.js';
 import { joinUrl, testHarnessConfig, type V1HarnessAdapterType } from './harnessProbe.js';
@@ -319,25 +318,6 @@ export async function registerAdapter(
     deps.adapters.register(agentId, adapter);
     return;
   }
-  if (adapterType === 'gemini') {
-    if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
-    const adapter = new GeminiAdapter({
-      agentId,
-      workspaceId,
-      sessionStore: new RuntimeSessionStore(deps.db),
-      binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
-      model: stringOf(config.model) ?? undefined,
-      yolo: booleanOf(config.yolo),
-      extraArgs: stringArrayOf(config.extraArgs),
-      env: recordStringOf(config.env),
-      timeoutSec: numberOf(config.timeoutSec),
-      logger: deps.logger,
-    });
-    await adapter.connect();
-    deps.adapters.register(agentId, adapter);
-    return;
-  }
   if (adapterType === 'antigravity') {
     if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
     const adapter = new AntigravityAdapter({
@@ -378,7 +358,7 @@ export async function registerAdapter(
   deps.adapters.register(agentId, adapter);
 }
 
-async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'gemini' | 'antigravity'>, config: Record<string, unknown>) {
+async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'antigravity'>, config: Record<string, unknown>) {
   const result = await testHarnessConfig(adapterType, config);
   if (result.status !== 'fail') return;
   const firstError = result.checks.find((check) => check.level === 'error') ?? result.checks[0];

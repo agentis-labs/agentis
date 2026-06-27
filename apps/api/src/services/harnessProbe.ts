@@ -8,7 +8,7 @@ import { resolveCommandPath, resolveSpawnTarget, withExpandedPath } from './path
 
 const execFileAsync = promisify(execFile);
 
-export type V1HarnessAdapterType = Extract<AdapterType, 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'gemini' | 'antigravity' | 'http'>;
+export type V1HarnessAdapterType = Extract<AdapterType, 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'antigravity' | 'http'>;
 
 export interface HarnessDetectionResult {
   adapterType: V1HarnessAdapterType;
@@ -66,7 +66,7 @@ export interface HarnessTestOptions {
 }
 
 const CLI_HARNESSES: Array<{
-  adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'gemini' | 'antigravity'>;
+  adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'antigravity'>;
   harness: string;
   binaries: string[];
   installCommand: string;
@@ -77,7 +77,6 @@ const CLI_HARNESSES: Array<{
   { adapterType: 'hermes_agent', harness: 'Hermes Agent', binaries: ['hermes', 'hermes-agent'], installCommand: 'Install the Hermes Agent CLI' },
   // Google's Gemini CLI (the runtime Google is rebranding to "Antigravity"); the
   // `antigravity`/`agy` binaries are accepted as forward-looking fallbacks.
-  { adapterType: 'gemini', harness: 'Gemini CLI', binaries: ['gemini'], installCommand: 'npm install -g @google/gemini-cli' },
   // Google's Antigravity CLI — the terminal harness Google is migrating
   // Gemini-CLI users to (OAuth / Google Cloud project auth that still works on
   // paid accounts). Installed via the antigravity.google script, binary `agy`.
@@ -90,7 +89,9 @@ export async function detectHarnesses(env: NodeJS.ProcessEnv = process.env): Pro
     CLI_HARNESSES.map(async (item) => {
       const candidates = item.adapterType === 'claude_code'
         ? claudeBinaryCandidates(envWithPath, item.binaries)
-        : item.binaries;
+        : item.adapterType === 'antigravity'
+          ? agyBinaryCandidates(envWithPath, item.binaries)
+          : item.binaries;
       const probe = await probeBinaryCandidates(candidates, envWithPath);
       const detectedModel = detectModel(item.adapterType, probe.detail);
       const auth = authDetectionFor(item.adapterType, envWithPath);
@@ -168,16 +169,6 @@ export async function testHarnessConfig(
     checks.push(codexAuthCheck(env));
     if (binary.level !== 'error' && options.deep) {
       checks.push(await liveProbe('codex', command, env));
-    }
-    return resultFromChecks(checks);
-  }
-  if (adapterType === 'gemini') {
-    const command = cliCommandFromConfig(config, 'gemini');
-    const binary = await binaryCheck(command, 'Gemini CLI binary', 'binary', env);
-    checks.push(binary);
-    checks.push(geminiAuthCheck(env));
-    if (binary.level !== 'error' && options.deep) {
-      checks.push(await liveProbe('gemini', command, env));
     }
     return resultFromChecks(checks);
   }
@@ -305,20 +296,6 @@ function antigravityAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
   };
 }
 
-function geminiAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
-  const auth = detectGeminiAuth(env);
-  if (auth.status === 'authenticated') {
-    return { code: 'auth', level: 'info', message: `Auth: ${auth.source ?? 'Gemini API key'}`, detail: auth.detail };
-  }
-  return {
-    code: 'auth',
-    level: 'warn',
-    message: 'Gemini auth was not detected (or the free tier is ineligible)',
-    detail: auth.detail,
-    hint: 'Set GEMINI_API_KEY (or GOOGLE_API_KEY), or sign in with a paid/Workspace/Antigravity account. The free Code Assist tier is no longer eligible for CLI use.',
-  };
-}
-
 function runtimeProbeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const next: NodeJS.ProcessEnv = { ...env };
   for (const key of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_PARENT_SESSION']) {
@@ -330,7 +307,6 @@ function runtimeProbeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
 function authDetectionFor(adapterType: V1HarnessAdapterType, env: NodeJS.ProcessEnv): AuthDetection | undefined {
   if (adapterType === 'claude_code') return detectClaudeAuth(env);
   if (adapterType === 'codex') return detectCodexAuth(env);
-  if (adapterType === 'gemini') return detectGeminiAuth(env);
   if (adapterType === 'antigravity') return detectAntigravityAuth(env);
   return undefined;
 }
@@ -348,6 +324,34 @@ function claudeBinaryCandidates(env: NodeJS.ProcessEnv, fallbacks: string[]): st
         candidates.push(path.join(root, version, process.platform === 'win32' ? 'claude.exe' : 'claude'));
       }
     }
+  }
+  candidates.push(...fallbacks);
+  return [...new Set(candidates)];
+}
+
+/**
+ * The Antigravity CLI installer drops `agy` at `%LOCALAPPDATA%\agy\bin\agy.exe`
+ * (Windows) / `~/.local/bin/agy` (Unix) and adds that dir to the USER PATH — but
+ * a server process started before the install won't have the refreshed PATH, so
+ * `agy` is "installed but not detected". Probe the known install locations
+ * directly (highest priority), then fall back to PATH lookups. Mirrors
+ * {@link claudeBinaryCandidates}.
+ */
+function agyBinaryCandidates(env: NodeJS.ProcessEnv, fallbacks: string[]): string[] {
+  const candidates: string[] = [];
+  const win = process.platform === 'win32';
+  const exe = win ? 'agy.exe' : 'agy';
+  const home = homeDirFromEnv(env);
+  const localAppData = firstNonEmpty(env.LOCALAPPDATA, win ? path.join(home, 'AppData', 'Local') : undefined);
+  for (const dir of [
+    localAppData ? path.join(localAppData, 'agy', 'bin') : undefined,
+    localAppData ? path.join(localAppData, 'Antigravity') : undefined,
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.agy', 'bin'),
+  ]) {
+    if (!dir) continue;
+    const candidate = path.join(dir, exe);
+    if (existsSync(candidate)) candidates.push(candidate);
   }
   candidates.push(...fallbacks);
   return [...new Set(candidates)];
@@ -453,26 +457,6 @@ function detectCodexAuth(env: NodeJS.ProcessEnv): AuthDetection {
  * "Code Assist for individuals" tier is now refused at runtime, so a login alone
  * is reported as `unknown` with a pointer to set an API key.
  */
-function detectGeminiAuth(env: NodeJS.ProcessEnv): AuthDetection {
-  if (firstNonEmpty(env.GEMINI_API_KEY, env.GOOGLE_API_KEY, env.GOOGLE_GENAI_API_KEY)) {
-    return { status: 'authenticated', source: 'Gemini API key', detail: 'GEMINI_API_KEY or GOOGLE_API_KEY is set.' };
-  }
-  const home = homeDirFromEnv(env);
-  const geminiHome = firstNonEmpty(env.GEMINI_HOME) ?? path.join(home, '.gemini');
-  const accounts = readJsonObject(path.join(geminiHome, 'google_accounts.json'));
-  const active = accounts ? nestedString(accounts, ['active']) : undefined;
-  if (active) {
-    return {
-      status: 'unknown',
-      detail: `Signed in as ${active}, but the free Gemini Code Assist tier is no longer eligible for CLI use. Set GEMINI_API_KEY or use a paid/Workspace/Antigravity account.`,
-    };
-  }
-  return {
-    status: 'unknown',
-    detail: `No Gemini API key or Google login was found under ${geminiHome}.`,
-  };
-}
-
 /**
  * Inspect for an Antigravity CLI (`agy`) sign-in. `agy` authenticates via Google
  * OAuth / a Google Cloud project, caching the session in the system keyring with
@@ -553,16 +537,14 @@ function objectOf(value: unknown): Record<string, unknown> | undefined {
  * timeout, and unexpected output — each with an actionable hint.
  */
 async function liveProbe(
-  adapterType: 'claude_code' | 'codex' | 'gemini',
+  adapterType: 'claude_code' | 'codex',
   command: string,
   env: NodeJS.ProcessEnv,
 ): Promise<HarnessCheck> {
-  const label = adapterType === 'claude_code' ? 'Claude Code' : adapterType === 'gemini' ? 'Gemini CLI' : 'Codex';
+  const label = adapterType === 'claude_code' ? 'Claude Code' : 'Codex';
   const args = adapterType === 'claude_code'
     ? ['--print', '--output-format=stream-json', '--verbose', '--include-partial-messages', '--max-turns=4']
-    : adapterType === 'gemini'
-      ? ['-p', 'Respond with the single word: hello.', '-o', 'text', '-y', '--skip-trust']
-      : ['exec', '--skip-git-repo-check', 'Respond with the single word: hello.'];
+    : ['exec', '--skip-git-repo-check', 'Respond with the single word: hello.'];
   const prompt = 'Respond with the single word: hello.';
   const cwd = process.cwd();
 
@@ -602,9 +584,7 @@ async function liveProbe(
         detail: firstLine(outcome.stderr || outcome.stdout),
         hint: adapterType === 'claude_code'
           ? 'Run `claude login`, or set ANTHROPIC_API_KEY in this environment.'
-          : adapterType === 'gemini'
-            ? 'Set GEMINI_API_KEY (or GOOGLE_API_KEY). The free Gemini Code Assist tier is no longer eligible for CLI use — use a paid/Workspace/Antigravity account.'
-            : 'Run `codex login`, or set OPENAI_API_KEY in this environment.',
+          : 'Run `codex login`, or set OPENAI_API_KEY in this environment.',
       };
     }
 

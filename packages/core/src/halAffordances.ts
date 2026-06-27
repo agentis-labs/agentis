@@ -96,8 +96,6 @@ export function configuredAffordances(
       return { codebaseIndex: true, fileSystem: true, terminal: true };
     case 'hermes_agent':
       return { fileSystem: true, terminal: true };
-    case 'gemini':
-      return { fileSystem: true, terminal: true, nativeMcp: true };
     case 'antigravity':
       return { fileSystem: true, terminal: true, nativeMcp: true };
     default:

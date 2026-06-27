@@ -34,7 +34,7 @@ export interface HarnessRoutesDeps {
 }
 
 const HARNESS_ADAPTER_TYPES = new Set<string>([
-  'openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'antigravity', 'http',
+  'openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http',
 ]);
 
 // In-memory rate limiter — 2 install attempts per workspace per minute.
@@ -152,7 +152,7 @@ export function buildHarnessRoutes(deps: HarnessRoutesDeps) {
     return streamSSE(c, async (stream) => {
       try {
         const result = await installHarness({
-          adapterType: adapterType as 'claude_code' | 'codex' | 'gemini',
+          adapterType: adapterType as 'claude_code' | 'codex',
           onStep: async (step) => {
             await stream.writeSSE({ event: 'step', data: JSON.stringify(step) });
           },

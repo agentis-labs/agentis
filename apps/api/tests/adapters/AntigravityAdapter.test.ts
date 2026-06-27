@@ -51,10 +51,13 @@ describe('AntigravityAdapter', () => {
 
     const args = spawnMock.mock.calls[0]![1] as string[];
     expect(spawnMock.mock.calls[0]![0]).toBe('agy-test');
-    expect(args.slice(0, 5)).toEqual(['-p', '', '--output-format', 'stream-json', '--yolo']);
-    expect(args).toContain('-m');
+    // Verified agy v1.0.13 flags: --print (prompt on stdin) + skip-permissions + model.
+    expect(args.slice(0, 2)).toEqual(['--print', '--dangerously-skip-permissions']);
+    expect(args).toContain('--model');
     expect(args).toContain('Gemini 3.5 Flash (High)');
-    expect(args).toContain('--session-id');
+    expect(args).not.toContain('--output-format');
+    expect(args).not.toContain('--session-id');
+    expect(args).not.toContain('--yolo');
     expect(events.map((event) => event.eventType)).toEqual(['task.started', 'task.progress', 'agent.tool_call', 'task.completed']);
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.completed', output: { text: 'Working' } }));
   });

@@ -5,7 +5,6 @@ const CLI_DEFAULT_COMMAND: Partial<Record<V1HarnessAdapterType, string>> = {
   codex: 'codex',
   cursor: 'agent',
   hermes_agent: 'hermes',
-  gemini: 'gemini',
   antigravity: 'agy',
 };
 
@@ -15,8 +14,8 @@ export interface HarnessConfigRepairResult {
   detection?: HarnessDetectionResult;
 }
 
-export function isCliHarnessAdapter(adapterType: V1HarnessAdapterType): adapterType is Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'gemini' | 'antigravity'> {
-  return adapterType === 'claude_code' || adapterType === 'codex' || adapterType === 'cursor' || adapterType === 'hermes_agent' || adapterType === 'gemini' || adapterType === 'antigravity';
+export function isCliHarnessAdapter(adapterType: V1HarnessAdapterType): adapterType is Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'antigravity'> {
+  return adapterType === 'claude_code' || adapterType === 'codex' || adapterType === 'cursor' || adapterType === 'hermes_agent' || adapterType === 'antigravity';
 }
 
 export function cliCommandFromConfig(config: Record<string, unknown>, fallback?: string): string | null {

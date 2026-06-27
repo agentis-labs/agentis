@@ -14,7 +14,6 @@ import { claudeCodeSource } from './sources/claudeCode.js';
 import { hermesSource } from './sources/hermes.js';
 import { codexSource } from './sources/codex.js';
 import { cursorSource } from './sources/cursor.js';
-import { geminiSource } from './sources/gemini.js';
 import { antigravitySource } from './sources/antigravity.js';
 
 export const HARNESS_IMPORT_SOURCES: HarnessImportSource[] = [
@@ -22,7 +21,6 @@ export const HARNESS_IMPORT_SOURCES: HarnessImportSource[] = [
   hermesSource,
   codexSource,
   cursorSource,
-  geminiSource,
   antigravitySource,
 ];
 

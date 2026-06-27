@@ -1,5 +1,5 @@
 import type { ComponentType, SVGProps } from 'react';
-import { AntigravityIcon, ClaudeIcon, CodexIcon, CursorIcon, GeminiIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
+import { AntigravityIcon, ClaudeIcon, CodexIcon, CursorIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
 
 export type HarnessIcon = ComponentType<SVGProps<SVGSVGElement>>;
 
@@ -12,7 +12,6 @@ export const HARNESS: Record<string, { label: string; Icon: HarnessIcon }> = {
   claude_code: { label: 'Claude Code', Icon: ClaudeIcon },
   codex: { label: 'Codex', Icon: CodexIcon },
   cursor: { label: 'Cursor', Icon: CursorIcon },
-  gemini: { label: 'Gemini CLI', Icon: GeminiIcon },
   antigravity: { label: 'Antigravity CLI', Icon: AntigravityIcon },
   hermes_agent: { label: 'Hermes', Icon: HermesIcon },
   openclaw: { label: 'OpenClaw', Icon: OpenClawIcon },

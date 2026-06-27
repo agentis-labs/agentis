@@ -484,15 +484,14 @@ function runtimeRepairState(status: CommandAgent['status'], adapterType: Adapter
   return { phase: 'idle' };
 }
 
-function isAutoInstallableAdapter(adapterType: AdapterType): adapterType is 'claude_code' | 'codex' | 'gemini' {
-  return adapterType === 'claude_code' || adapterType === 'codex' || adapterType === 'gemini';
+function isAutoInstallableAdapter(adapterType: AdapterType): adapterType is 'claude_code' | 'codex' {
+  return adapterType === 'claude_code' || adapterType === 'codex';
 }
 
 function runtimeDisplayName(adapterType: AdapterType): string {
   if (adapterType === 'codex') return 'Codex';
   if (adapterType === 'claude_code') return 'Claude Code';
   if (adapterType === 'cursor') return 'Cursor';
-  if (adapterType === 'gemini') return 'Gemini CLI';
   if (adapterType === 'antigravity') return 'Antigravity CLI';
   if (adapterType === 'hermes_agent') return 'Hermes Agent';
   if (adapterType === 'openclaw') return 'OpenClaw';
@@ -525,7 +524,6 @@ function setRuntimeBinaryPath(config: RuntimeConfig, adapterType: AdapterType, b
   if (adapterType === 'claude_code') return { ...config, claudeBinaryPath: binaryPath };
   if (adapterType === 'codex') return { ...config, codexBinaryPath: binaryPath };
   if (adapterType === 'cursor') return { ...config, cursorBinaryPath: binaryPath };
-  if (adapterType === 'gemini') return { ...config, geminiBinaryPath: binaryPath };
   if (adapterType === 'antigravity') return { ...config, antigravityBinaryPath: binaryPath };
   if (adapterType === 'hermes_agent') return { ...config, hermesBinaryPath: binaryPath };
   return config;
@@ -536,7 +534,6 @@ function setRuntimeModel(config: RuntimeConfig, adapterType: AdapterType, model:
   if (adapterType === 'claude_code') return { ...config, claudeModel: config.claudeModel || model };
   if (adapterType === 'codex') return { ...config, codexModel: config.codexModel || model };
   if (adapterType === 'cursor') return { ...config, cursorModel: config.cursorModel || model };
-  if (adapterType === 'gemini') return { ...config, geminiModel: config.geminiModel || model };
   if (adapterType === 'antigravity') return { ...config, antigravityModel: config.antigravityModel || model };
   if (adapterType === 'hermes_agent') return { ...config, hermesModel: config.hermesModel || model };
   if (adapterType === 'http') return { ...config, httpModel: config.httpModel || model };
@@ -568,7 +565,6 @@ function hasConnectableRuntimeConfig(adapterType: AdapterType, config: RuntimeCo
   if (adapterType === 'claude_code') return Boolean(config.claudeBinaryPath.trim());
   if (adapterType === 'codex') return Boolean(config.codexBinaryPath.trim());
   if (adapterType === 'cursor') return Boolean(config.cursorBinaryPath.trim());
-  if (adapterType === 'gemini') return Boolean(config.geminiBinaryPath.trim());
   if (adapterType === 'antigravity') return Boolean(config.antigravityBinaryPath.trim());
   if (adapterType === 'hermes_agent') return Boolean(config.hermesBinaryPath.trim());
   return false;

@@ -8,7 +8,7 @@ import type { ToolHandlerDeps } from './deps.js';
 import { modelConfiguredOnAgent } from '../runtimeModels.js';
 import { renderRuntimeRoutingIntelligence, routeModelForTask } from '../modelRoutingPolicy.js';
 
-const V1_ADAPTERS = new Set<AdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'antigravity', 'http']);
+const V1_ADAPTERS = new Set<AdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
 
 export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
