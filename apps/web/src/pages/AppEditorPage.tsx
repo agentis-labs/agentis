@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
+  AlertTriangle,
   ArrowLeft,
   BrainCircuit,
   Boxes,
@@ -27,6 +28,7 @@ import {
   MoreVertical,
   Pencil,
   Plus,
+  Radio,
   Save,
   Settings,
   Sparkles,
@@ -44,6 +46,7 @@ import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
 import { AppTeamStrip } from '../components/apps/AppTeamStrip';
+import { PipelinePanel, LearningsPanel, RehearsalPanel } from '../components/apps/AppConsolePanels';
 import { AppEngineModal, type AppEngineDomain, type AppEngineAgent } from '../components/apps/AppEngineModal';
 import { SurfaceCanvas } from '../components/apps/SurfaceCanvas';
 import {
@@ -70,7 +73,7 @@ import { WorkflowCanvasPage, WorkflowBrainTab } from './WorkflowCanvasPage';
 import { SegmentedControl, type SegmentDef } from '../components/shared/SegmentedControl';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 
-type AppFacet = 'interface' | 'workflow' | 'data' | 'brain';
+type AppFacet = 'console' | 'interface' | 'workflow' | 'data' | 'brain';
 
 interface WorkflowRef {
   id: string;
@@ -82,6 +85,7 @@ function workflowFilename(title: string): string {
 }
 
 const FACETS: ReadonlyArray<SegmentDef<AppFacet>> = [
+  { value: 'console', label: 'Console', icon: <Radio size={13} /> },
   { value: 'interface', label: 'Interface', icon: <LayoutGrid size={13} /> },
   { value: 'workflow', label: 'Workflow', icon: <WorkflowIcon size={13} /> },
   { value: 'data', label: 'Data', icon: <Database size={13} /> },
@@ -544,6 +548,7 @@ export function AppEditorPage() {
         <span className="text-[11px] text-text-muted">v{app.version} · {app.status}</span>
         <div className="mx-1 h-4 w-px bg-line" />
         <AppTeamStrip appId={app.id} />
+        <NeedsYouBadge appId={app.id} onClick={() => setFacet('console')} />
 
         <div className="ml-auto flex items-center gap-2">
           {status ? <span className="max-w-[180px] truncate text-[11px] text-text-muted">{status}</span> : null}
@@ -560,6 +565,7 @@ export function AppEditorPage() {
 
       {/* Facet body — each fills the remaining height. */}
       <div className="min-h-0 flex-1 overflow-hidden">
+        {facet === 'console' && <ConsoleFacet appId={id} />}
         {facet === 'workflow' && (
           <WorkflowFacet
             workflows={workflows}
@@ -610,6 +616,63 @@ export function AppEditorPage() {
         onClose={() => setEngineOpen(false)}
         onSave={saveAppSettings}
       />
+    </div>
+  );
+}
+
+// ── Needs-you badge (Living Apps Phase 2) ────────────────────
+// A calm count of threads the resident agent flagged for the operator. Clicking it
+// opens the Console facet. Renders nothing when no thread needs attention.
+
+function NeedsYouBadge({ appId, onClick }: { appId: string; onClick: () => void }) {
+  const [count, setCount] = useState(0);
+  const [reason, setReason] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      appsApi.conversations(appId).then((rows) => {
+        if (cancelled) return;
+        const flagged = rows.filter((r) => r.needsAttention);
+        setCount(flagged.length);
+        setReason(flagged[0]?.needsAttentionReason ?? null);
+      }).catch(() => {});
+    };
+    load();
+    // Light poll so a freshly-flagged thread surfaces without a manual reload.
+    const timer = window.setInterval(load, 20000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [appId]);
+
+  if (count === 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={reason ? `Needs you: ${reason}` : `${count} ${count === 1 ? 'thread needs' : 'threads need'} you`}
+      className="inline-flex h-6 items-center gap-1 rounded-full border border-warn/30 bg-warn-soft px-2 text-[11px] font-medium text-warn transition-colors hover:bg-warn/20"
+    >
+      <AlertTriangle size={11} />
+      {count} need{count === 1 ? 's' : ''} you
+    </button>
+  );
+}
+
+// ── Console facet (Living Apps §6) — the operator's glanceable lenses ─────────
+// Pipeline (the relationship), Learnings (what the agent learned), Rehearsal
+// (drive a scenario against the resident agent before it talks to real money).
+// All three bind shipped APIs; calm, minimal, no forty knobs.
+
+function ConsoleFacet({ appId }: { appId: string }) {
+  return (
+    <div className="h-full overflow-y-auto p-4">
+      <div className="mx-auto grid max-w-[1100px] grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="flex flex-col gap-4">
+          <PipelinePanel appId={appId} />
+          <LearningsPanel appId={appId} />
+        </div>
+        <RehearsalPanel appId={appId} />
+      </div>
     </div>
   );
 }

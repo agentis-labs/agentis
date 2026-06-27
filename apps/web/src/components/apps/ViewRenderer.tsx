@@ -1799,6 +1799,9 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
               className={clsx('flex w-full flex-col gap-0.5 border-b border-line px-3 py-2 text-left', active ? 'bg-accent-soft' : 'hover:bg-surface-2')}
             >
               <div className="flex items-center gap-2">
+                {row.needsAttention ? (
+                  <span className="shrink-0 text-warn" title={row.needsAttentionReason ?? 'Needs you'}>◆</span>
+                ) : null}
                 <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-primary">{row.title}</span>
                 {row.channel ? <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[9px] capitalize text-text-muted">{row.channel}</span> : null}
                 {row.unread > 0 ? <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-semibold text-white">{row.unread}</span> : null}

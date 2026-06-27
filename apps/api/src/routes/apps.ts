@@ -99,6 +99,12 @@ const generateSurfaceRequestSchema = z.object({
 const operatorCommandSchema = z.object({ command: z.string().trim().min(1).max(4000) });
 const takeoverSchema = z.object({ active: z.boolean() });
 const operatorSendSchema = z.object({ body: z.string().trim().min(1).max(8000) });
+// Living Apps Phase 2 — needs-you flag. `active:false` clears it (the operator has
+// stepped in); a reason explains why the resident agent needs the human.
+const needsAttentionSchema = z.object({
+  active: z.boolean().default(true),
+  reason: z.string().trim().max(500).nullable().optional(),
+});
 const addParticipantSchema = z.object({
   participantType: z.enum(['agent', 'human', 'contact']),
   participantId: z.string().trim().min(1).max(255).nullable().optional(),
@@ -555,6 +561,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         lastMessageAt: schema.conversations.lastMessageAt,
         unreadCount: schema.conversations.unreadCount,
         handoffState: schema.conversations.handoffState,
+        needsAttention: schema.conversations.needsAttention,
+        needsAttentionReason: schema.conversations.needsAttentionReason,
         kind: schema.channelConnections.kind,
       })
       .from(schema.conversations)
@@ -570,6 +578,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       lastMessageAt: r.lastMessageAt,
       unread: r.unreadCount ?? 0,
       handoffState: r.handoffState ?? null,
+      needsAttention: Boolean(r.needsAttention),
+      needsAttentionReason: r.needsAttentionReason ?? null,
     })) });
   });
 
@@ -671,6 +681,32 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     // recorded against the App's rolling window so the counter stays honest (G7).
     if (delivered) deps.outboundPolicy?.record(appId, 'operator');
     return c.json({ data: { conversationId, delivered } });
+  });
+
+  // Needs-you flag (Phase 2): the operator clears (or sets) the "needs attention"
+  // marker on a thread. The resident agent sets it via the agentis.conversation
+  // .flag_needs_attention tool; clearing it here (active:false) is the operator
+  // acknowledging — "I've got this". The console counts flagged threads.
+  app.post('/:id/conversations/:conversationId/needs-attention', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const conversationId = c.req.param('conversationId');
+    const parsed = needsAttentionSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid needs-attention input');
+    const conv = deps.db
+      .select({ id: schema.conversations.id })
+      .from(schema.conversations)
+      .where(and(eq(schema.conversations.id, conversationId), eq(schema.conversations.workspaceId, ws.workspaceId), eq(schema.conversations.appId, appId)))
+      .get();
+    if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
+    const active = parsed.data.active;
+    deps.db.update(schema.conversations).set({
+      needsAttention: active ? 1 : 0,
+      needsAttentionReason: active ? (parsed.data.reason ?? null) : null,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(schema.conversations.id, conversationId)).run();
+    return c.json({ data: { conversationId, needsAttention: active, needsAttentionReason: active ? (parsed.data.reason ?? null) : null } });
   });
 
   // ── Live co-presence (Living Apps G9 · ephemeral) ──────────

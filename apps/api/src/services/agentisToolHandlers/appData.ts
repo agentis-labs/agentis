@@ -24,6 +24,8 @@ import {
   type AgentisToolContext,
 } from '@agentis/core';
 import { z } from 'zod';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { buildAppStores, type AppStores } from '@agentis/app';
@@ -475,6 +477,46 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const actions = z.array(surfaceActionSchema).parse(args.actions);
         surfaces.setActions(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), actions);
         return { ok: true, actions: actions.length };
+      },
+    },
+    {
+      // Living Apps Phase 2 — the resident agent FLAGS a thread for the operator
+      // instead of interrupting. Use when you hit something only a human can decide
+      // ("the customer wants a discount I'm not authorized to give", "this looks
+      // like a complaint that needs a manager"). The App console shows a count + a
+      // ◆ marker on the thread; the operator clears it by stepping in. Pass clear:true
+      // to withdraw the flag once it's resolved. Targets the current thread.
+      definition: {
+        id: 'agentis.conversation.flag_needs_attention',
+        family: 'app',
+        description: 'Flag the CURRENT conversation as needing the human operator (you do not interrupt — you raise a hand). Use when a decision is above your authority or a situation needs a person ("wants a discount I can\'t approve", "angry customer asking for a manager"). The App console surfaces it as a count + a marker. Pass clear:true to withdraw the flag once resolved.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: 'One line on WHY a human is needed (shown to the operator).' },
+            clear: { type: 'boolean', description: 'Withdraw an existing flag (the situation is resolved).' },
+          },
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: (args, ctx) => {
+        const conversationId = ctx.conversationId;
+        if (!conversationId) throw new AgentisError('VALIDATION_FAILED', 'no conversation in context — flag_needs_attention runs inside a live thread');
+        const clear = args.clear === true;
+        const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 500) : null;
+        const conv = deps.db
+          .select({ id: schema.conversations.id })
+          .from(schema.conversations)
+          .where(and(eq(schema.conversations.id, conversationId), eq(schema.conversations.workspaceId, ctx.workspaceId)))
+          .get();
+        if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found`);
+        deps.db.update(schema.conversations).set({
+          needsAttention: clear ? 0 : 1,
+          needsAttentionReason: clear ? null : reason,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(schema.conversations.id, conversationId)).run();
+        return { conversationId, needsAttention: !clear, reason: clear ? null : reason };
       },
     },
   ]);

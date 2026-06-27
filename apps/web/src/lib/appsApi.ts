@@ -62,6 +62,10 @@ export interface AppConversation {
   unread: number;
   /** 'human' when an operator has taken over the thread (Phase 2). */
   handoffState: 'human' | null;
+  /** True when the resident agent has flagged this thread for the operator (Phase 2). */
+  needsAttention?: boolean;
+  /** Why a human is needed ("wants a discount I can't approve"). */
+  needsAttentionReason?: string | null;
 }
 
 export interface AppConversationMessage {
@@ -69,6 +73,88 @@ export interface AppConversationMessage {
   role: 'user' | 'agent' | 'system';
   content: string;
   at: string;
+}
+
+/** A contact in the App's pipeline (Phase 3 — the relationship entity). */
+export interface AppContact {
+  id: string;
+  appId: string;
+  channelKind: string | null;
+  handle: string | null;
+  displayName: string | null;
+  stage: string | null;
+  goal: string | null;
+  outcome: string | null;
+  lastTouchAt: string | null;
+  nextTouchAt: string | null;
+}
+
+/** A graded lesson the resident agent banked from a won/lost relationship (Phase M2). */
+export interface AppLearnedLesson {
+  id: string;
+  title: string;
+  summary: string;
+  outcome: string | null;
+  createdAt: string;
+}
+
+/** An ability that graduated from recurring winning patterns (Phase M2). */
+export interface AppLearnedAbility {
+  id: string;
+  name: string;
+  domainTag: string | null;
+  compileStatus: string;
+  createdAt: string;
+}
+
+export interface AppLearnings {
+  appId: string;
+  ownerAgentId: string | null;
+  lessons: AppLearnedLesson[];
+  abilities: AppLearnedAbility[];
+}
+
+/** A rehearsal guardrail/expectation the operator declares for a scenario (G8). */
+export interface SimulatorCheck {
+  id: string;
+  label: string;
+  pattern: string;
+}
+
+export interface SimulatorScenario {
+  name: string;
+  persona: { name: string; prompt: string };
+  goal: string;
+  customerTurns?: string[];
+  maxTurns?: number;
+  goalSignals?: string[];
+  guardrails?: SimulatorCheck[];
+  expectations?: SimulatorCheck[];
+}
+
+export interface SimulatedTurn {
+  index: number;
+  customer: string;
+  agent: string;
+  toolCalls: string[];
+  error?: string;
+}
+
+export interface SimulationResult {
+  appId: string;
+  agentId: string;
+  scenario: { name: string; persona: string; goal: string };
+  transcript: SimulatedTurn[];
+  score: {
+    score: number;
+    goalReached: boolean;
+    guardrailViolations: Array<{ id: string; label: string; turnIndex: number; excerpt: string }>;
+    missedExpectations: Array<{ id: string; label: string }>;
+    checks: Array<{ id: string; label: string; passed: boolean; detail?: string }>;
+    findings: string[];
+    judge: { score: number; verdict: string; reasoning: string } | null;
+  };
+  generated: boolean;
 }
 
 interface Wrapped<T> {
@@ -144,6 +230,22 @@ export const appsApi = {
   sendToConversation: (id: string, conversationId: string, body: string) =>
     api<Wrapped<{ conversationId: string; delivered: boolean }>>(`/v1/apps/${id}/conversations/${conversationId}/send`, {
       method: 'POST', body: JSON.stringify({ body }),
+    }).then((r) => r.data),
+  // Needs-you flag (Phase 2) — the operator acknowledges (active:false) or re-raises a flag.
+  flagNeedsAttention: (id: string, conversationId: string, active: boolean, reason?: string | null) =>
+    api<Wrapped<{ conversationId: string; needsAttention: boolean; needsAttentionReason: string | null }>>(
+      `/v1/apps/${id}/conversations/${conversationId}/needs-attention`,
+      { method: 'POST', body: JSON.stringify({ active, reason: reason ?? null }) },
+    ).then((r) => r.data),
+
+  // Relationship pipeline (Phase 3) — contacts grouped by stage, each with a goal + next-touch.
+  contacts: (id: string) => api<Wrapped<AppContact[]>>(`/v1/apps/${id}/contacts`).then((r) => r.data),
+  // Learnings (Phase M2) — recent graded lessons + graduated abilities.
+  learnings: (id: string) => api<Wrapped<AppLearnings>>(`/v1/apps/${id}/learnings`).then((r) => r.data),
+  // Rehearsal (G8) — drive a synthetic customer through a scenario and score the run.
+  simulate: (id: string, scenario: SimulatorScenario, agentId?: string) =>
+    api<Wrapped<SimulationResult>>(`/v1/apps/${id}/simulate`, {
+      method: 'POST', body: JSON.stringify({ scenario, ...(agentId ? { agentId } : {}) }),
     }).then((r) => r.data),
   // Live co-presence (G9) — heartbeat while viewing; leave on unmount. Ephemeral.
   presence: (id: string, conversationId?: string | null) =>

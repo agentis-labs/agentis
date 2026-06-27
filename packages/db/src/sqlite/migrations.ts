@@ -2409,4 +2409,19 @@ CREATE TABLE IF NOT EXISTS app_outbound_log (
 CREATE INDEX IF NOT EXISTS idx_app_outbound_log_app_time ON app_outbound_log(app_id, sent_at);
 `,
   },
+  {
+    version: 104,
+    name: 'living_apps_conversation_needs_attention',
+    sql: `
+-- Living Apps Phase 2 — "needs-you" flags. A resident agent FLAGS (it does not
+-- interrupt) when a thread needs the operator — "Ana's ready to buy, wants a
+-- discount I can't approve" — and the App console surfaces a count + a ◆ marker.
+-- ADDITIVE: plain INTEGER/TEXT on conversations (no inline FK — both columns are
+-- on the embedded baseline table; 0 = not flagged, every existing row unchanged).
+-- Mirrored in src/sqlite/schema.ts (conversations.needsAttention/needsAttentionReason)
+-- + index.ts drift. v101/v102/v103 reserved for parallel agents.
+ALTER TABLE conversations ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversations ADD COLUMN needs_attention_reason TEXT;
+`,
+  },
 ];

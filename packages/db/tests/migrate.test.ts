@@ -182,6 +182,24 @@ VALUES ('q2', 'ws-1', 'conv-1', 'msg-1', 'pending');
     }
   });
 
+  it('v104 adds needs_attention flag columns to conversations', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const v104 = SQLITE_MIGRATIONS.find((m) => m.version === 104);
+      expect(v104?.name).toBe('living_apps_conversation_needs_attention');
+
+      const cols = sqlite.prepare("PRAGMA table_info('conversations')").all() as Array<{ name: string; dflt_value: string | null }>;
+      const byName = new Map(cols.map((c) => [c.name, c]));
+      expect(byName.has('needs_attention')).toBe(true);
+      expect(byName.has('needs_attention_reason')).toBe(true);
+      // Defaults to not-flagged so every existing row is unchanged.
+      expect(byName.get('needs_attention')?.dflt_value).toBe('0');
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('applies all registered migrations on a fresh database', () => {
     const path = tempDbPath();
     const sqlite = new Database(path);

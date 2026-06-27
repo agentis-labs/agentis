@@ -871,6 +871,10 @@ export const conversations = sqliteTable('conversations', {
   appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'set null' }),
   /** Living Apps Phase 2 — 'human' when an operator has taken over (the resident agent stays quiet); null/'agent' = the agent drives. */
   handoffState: text('handoff_state'),
+  /** Living Apps Phase 2 (needs-you flags, migration v104) — 1 when the resident agent has flagged this thread for the operator. */
+  needsAttention: integer('needs_attention').notNull().default(0),
+  /** Why the thread needs the operator ("wants a discount I can't approve") — set alongside needsAttention. */
+  needsAttentionReason: text('needs_attention_reason'),
   title: text('title'),
   /** chat | plan */
   executionMode: text('execution_mode').notNull().default('chat'),
