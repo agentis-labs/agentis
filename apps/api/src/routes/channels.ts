@@ -25,7 +25,7 @@ import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 const createSchema = z
   .object({
     // WhatsApp QR is tokenless; WhatsApp Cloud and the others are token/API based.
-    kind: z.enum(['telegram', 'discord', 'slack', 'whatsapp']),
+    kind: z.enum(['telegram', 'discord', 'slack', 'whatsapp', 'voice']),
     name: z.string().min(1).max(120),
     agentId: z.string().min(1),
     token: z.string().min(8).max(4096).optional(),
@@ -42,7 +42,7 @@ const createSchema = z
     transport: z.enum(['polling', 'webhook', 'gateway']).optional(),
     ambientId: z.string().nullish(),
   })
-  .refine((v) => (v.kind === 'whatsapp' && v.mode !== 'cloud') || Boolean(v.token), {
+  .refine((v) => (v.kind === 'whatsapp' && v.mode !== 'cloud') || v.kind === 'voice' || Boolean(v.token), {
     message: 'token is required for this channel kind',
     path: ['token'],
   })

@@ -41,6 +41,7 @@ import { ChannelBridge } from './services/channelBridge.js';
 import { TelegramChannelAdapter } from './adapters/channels/telegram.js';
 import { DiscordChannelAdapter } from './adapters/channels/discord.js';
 import { SlackChannelAdapter } from './adapters/channels/slack.js';
+import { VoiceChannelAdapter } from './adapters/channels/voice.js';
 import { PartialReplayService } from './services/partialReplay.js';
 import { CommandIndex } from './services/commandIndex.js';
 import { KnowledgeBaseService } from './services/knowledgeBase.js';
@@ -612,6 +613,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Channel bridge (Batch 4 + OMNICHANNEL-ORCHESTRATOR-10X §3): Telegram,
   // Discord, and Slack. Inbound messages run a real orchestrator turn via the
   // ChannelTurnDispatcher wired below (after the chat executor is configured).
+  // Voice channel (Living Apps G6 foundation): a webhook-transcription voice line.
+  // A provider POSTs a transcribed utterance; it flows through the SAME dispatcher
+  // as a text channel, and the agent's reply is buffered for the provider to
+  // vocalize (default no-op TTS — the provider speaks the text). Held as a named
+  // ref so the voice reply-retrieval route can read its pending-reply buffer.
+  const voiceChannelAdapter = new VoiceChannelAdapter();
   const channelBridge = new ChannelBridge({
     db: sqlite,
     vault: credentialVault,
@@ -622,6 +629,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       telegram: new TelegramChannelAdapter(),
       discord: new DiscordChannelAdapter(),
       slack: new SlackChannelAdapter(),
+      voice: voiceChannelAdapter,
     },
     artifacts: artifactService,
   });
@@ -1494,7 +1502,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/scheduler', buildSchedulerRoutes({ db: sqlite, auth }));
   app.route('/v1/triggers', buildTriggerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
   app.route('/v1/listeners', buildListenerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
-  app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge }));
+  app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge, voice: voiceChannelAdapter }));
   app.route('/v1/credentials', buildCredentialRoutes({ db: sqlite, auth, vault: credentialVault }));
   app.route('/v1/oauth', buildOAuthRoutes({ db: sqlite, auth, vault: credentialVault, oauth: oauthService, allowedOrigins }));
   app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));

@@ -44,5 +44,11 @@ export const UNAUTH_ALLOW_LIST: ReadonlyArray<UnauthEntry> = [
     prefix: true,
     reason: 'Channel-bridge ingress (Telegram/Discord) is authenticated by adapter-specific shared secret in ChannelBridge.handleInbound.',
   },
+  {
+    path: '/v1/webhooks/voice/',
+    methods: ['GET'],
+    prefix: true,
+    reason: 'Voice reply retrieval (G6): a voice provider fetches the buffered agent reply, authenticated by the per-connection x-agentis-voice-secret (ChannelBridge.verifyVoiceSecret), not JWT.',
+  },
   { path: '/v1/_test/reset', methods: ['POST'], reason: 'Playwright harness — gated by AGENTIS_TEST_MODE && NODE_ENV!==production (D29/D31).' },
 ];

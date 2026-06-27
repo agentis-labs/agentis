@@ -8,7 +8,7 @@
  * posts in the in-app conversation.
  */
 
-export type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp';
+export type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp' | 'voice';
 export type ChannelStatus = 'needs_action' | 'verifying' | 'active' | 'degraded' | 'error' | 'paused';
 export type ChannelHealthCheckName = 'credential' | 'transport' | 'outbound' | 'inbound' | 'runtime';
 
