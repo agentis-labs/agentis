@@ -145,7 +145,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
         <div className="rounded-lg border border-line bg-surface p-6 text-center">
           <FolderTree size={28} className="mx-auto text-text-muted" />
           <p className="mt-2 text-subheading text-text-primary">No external agents found</p>
-          <p className="mt-1 text-[12px] text-text-muted">We looked for Claude Code, Hermes, Codex and Cursor agents (and their memory + skills) on this machine.</p>
+          <p className="mt-1 text-[12px] text-text-muted">We looked for Claude Code, Hermes, Codex, Cursor and Gemini CLI agents (and their memory + skills) on this machine.</p>
         </div>
       )}
 

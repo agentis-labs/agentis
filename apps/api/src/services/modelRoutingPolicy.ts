@@ -339,6 +339,13 @@ function fallbackCandidatesFor(runtime: string | null, currentModel: string | nu
       fallbackCandidate('gpt-5.2-codex', runtime, 'balanced'),
     ];
   }
+  if (lower.includes('gemini') || lower.includes('antigravity') || lower.includes('google')) {
+    return [
+      fallbackCandidate('gemini-2.5-flash', runtime, 'fast'),
+      fallbackCandidate('gemini-2.5-pro', runtime, 'flagship'),
+      fallbackCandidate('gemini-2.0-flash', runtime, 'balanced'),
+    ];
+  }
   if (lower.includes('hermes')) return [fallbackCandidate('hermes-auto', runtime, 'auto')];
   return [];
 }

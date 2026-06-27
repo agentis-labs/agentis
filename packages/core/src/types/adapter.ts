@@ -8,7 +8,7 @@
 
 import type { ChatDelta, ChatMessage, ToolDefinition } from './chat.js';
 
-export type AdapterType = 'openclaw' | 'claude_code' | 'http' | 'codex' | 'cursor' | 'hermes_agent' | 'local_llm';
+export type AdapterType = 'openclaw' | 'claude_code' | 'http' | 'codex' | 'cursor' | 'hermes_agent' | 'gemini' | 'local_llm';
 
 export interface RuntimeContext {
   provider: string;
@@ -256,6 +256,7 @@ export type AgentAdapterConfig =
   | CodexAdapterConfig
   | CursorAdapterConfig
   | HermesAgentAdapterConfig
+  | GeminiAdapterConfig
   | HttpAdapterConfig;
 
 export interface OpenClawAdapterConfig {
@@ -317,6 +318,19 @@ export interface CursorAdapterConfig {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
+}
+
+export interface GeminiAdapterConfig {
+  adapterType: 'gemini';
+  binaryPath?: string;
+  cwd?: string;
+  model?: string;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  timeoutSec?: number;
+  /** Auto-approve all tool calls (`--yolo`). Agentis drives the CLI headlessly,
+   *  so there is never a human to answer an approval prompt — on by default. */
+  yolo?: boolean;
 }
 
 export interface HermesAgentAdapterConfig {

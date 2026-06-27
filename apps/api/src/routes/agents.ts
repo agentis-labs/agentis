@@ -763,6 +763,7 @@ function normalizeRuntimeAdapterType(value: unknown): V1HarnessAdapterType | nul
     || value === 'claude_code'
     || value === 'codex'
     || value === 'cursor'
+    || value === 'gemini'
     || value === 'http'
   ) {
     return value;

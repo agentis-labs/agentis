@@ -141,6 +141,7 @@ export function defaultModelFor(adapterType: V1HarnessAdapterType): string | nul
   if (adapterType === 'claude_code') return 'claude-sonnet-4-6';
   if (adapterType === 'cursor') return 'auto';
   if (adapterType === 'hermes_agent') return 'hermes-auto';
+  if (adapterType === 'gemini') return 'gemini-2.5-pro';
   if (adapterType === 'openclaw') return 'gateway-default';
   return 'provider-default';
 }
@@ -195,6 +196,7 @@ function providerLabelFor(adapterType: V1HarnessAdapterType): string {
   if (adapterType === 'claude_code') return 'Anthropic';
   if (adapterType === 'cursor') return 'Cursor';
   if (adapterType === 'hermes_agent') return 'Hermes';
+  if (adapterType === 'gemini') return 'Google';
   if (adapterType === 'openclaw') return 'OpenClaw';
   return 'HTTP';
 }
@@ -226,6 +228,19 @@ export function detectRuntimeState(adapterType: V1HarnessAdapterType): DetectedR
       ),
       reasoningEffort: reasoningEffortValue(config.model_reasoning_effort),
       fastMode: codexFastModeValue(config.service_tier),
+    };
+  }
+  if (adapterType === 'gemini') {
+    const geminiHome = process.env.GEMINI_HOME?.trim() || path.join(homePath(), '.gemini');
+    return {
+      model: firstConfiguredEnv(
+        process.env.GEMINI_MODEL,
+        readConfiguredModel([
+          path.resolve(process.cwd(), '.gemini', 'config', 'config.json'),
+          path.join(geminiHome, 'config', 'config.json'),
+          path.join(geminiHome, 'settings.json'),
+        ]),
+      ),
     };
   }
   return { model: null };
@@ -371,6 +386,14 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
       option('claude-opus-4-7', 'Anthropic'),
     ];
   }
+  if (adapterType === 'gemini') {
+    return [
+      option('gemini-2.5-pro', 'Google', true),
+      option('gemini-2.5-flash', 'Google'),
+      option('gemini-2.5-flash-lite', 'Google'),
+      option('gemini-2.0-flash', 'Google'),
+    ];
+  }
   return [];
 }
 
@@ -403,6 +426,7 @@ function routingOptionMetadata(id: string): Pick<RuntimeModelOption, 'capability
 function isRelevantModelForAdapter(adapterType: V1HarnessAdapterType | 'http', id: string): boolean {
   const lower = id.toLowerCase();
   if (adapterType === 'claude_code') return lower.startsWith('claude-');
+  if (adapterType === 'gemini') return lower.startsWith('gemini-') || lower.startsWith('gemma-');
   if (adapterType === 'codex' || adapterType === 'cursor') {
     if (
       lower.includes('embedding')

@@ -34,6 +34,11 @@ export const HARNESS_INSTALL_OPTIONS: HarnessInstallOption[] = [
     installCommand: 'npm install -g @openai/codex',
   },
   {
+    adapterType: 'gemini',
+    canAutoInstall: true,
+    installCommand: 'npm install -g @google/gemini-cli',
+  },
+  {
     adapterType: 'hermes_agent',
     canAutoInstall: false,
     manualInstructions: 'Install the Hermes Agent CLI, then return and re-run detection.',
@@ -56,7 +61,7 @@ export const HARNESS_INSTALL_OPTIONS: HarnessInstallOption[] = [
   },
 ];
 
-const AUTO_INSTALL_PLAN: Record<Extract<V1HarnessAdapterType, 'claude_code' | 'codex'>, {
+const AUTO_INSTALL_PLAN: Record<Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'gemini'>, {
   label: string;
   packageName: string;
 }> = {
@@ -67,6 +72,10 @@ const AUTO_INSTALL_PLAN: Record<Extract<V1HarnessAdapterType, 'claude_code' | 'c
   codex: {
     label: 'Codex',
     packageName: '@openai/codex',
+  },
+  gemini: {
+    label: 'Gemini CLI',
+    packageName: '@google/gemini-cli',
   },
 };
 
@@ -82,12 +91,12 @@ export function getHarnessInstallOption(adapterType: V1HarnessAdapterType): Harn
   };
 }
 
-export function isAutoInstallableAdapter(adapterType: V1HarnessAdapterType): adapterType is Extract<V1HarnessAdapterType, 'claude_code' | 'codex'> {
-  return adapterType === 'claude_code' || adapterType === 'codex';
+export function isAutoInstallableAdapter(adapterType: V1HarnessAdapterType): adapterType is Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'gemini'> {
+  return adapterType === 'claude_code' || adapterType === 'codex' || adapterType === 'gemini';
 }
 
 export async function installHarness(opts: {
-  adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex'>;
+  adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'gemini'>;
   env?: NodeJS.ProcessEnv;
   onStep: (step: { index: number; label: string; status: 'running' | 'done' | 'error'; detail?: string }) => Promise<void> | void;
   onLog?: (line: string) => Promise<void> | void;

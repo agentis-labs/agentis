@@ -92,7 +92,7 @@ function emitInstallLifecycle(agentId: string, phase: InstallPhase) {
 export interface StartBackgroundInstallOpts {
   agentId: string;
   agentName: string;
-  adapterType: 'claude_code' | 'codex';
+  adapterType: 'claude_code' | 'codex' | 'gemini';
   adapterConfig: Record<string, unknown>;
   runtimeModel?: string | null;
 }

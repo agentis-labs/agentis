@@ -135,6 +135,7 @@ function harnessLabel(adapterType: string) {
     case 'claude_code': return 'Claude Code';
     case 'codex': return 'Codex';
     case 'cursor': return 'Cursor';
+    case 'gemini': return 'Gemini CLI';
     case 'http': return 'HTTP';
     default: return 'Harness';
   }

@@ -14,12 +14,14 @@ import { claudeCodeSource } from './sources/claudeCode.js';
 import { hermesSource } from './sources/hermes.js';
 import { codexSource } from './sources/codex.js';
 import { cursorSource } from './sources/cursor.js';
+import { geminiSource } from './sources/gemini.js';
 
 export const HARNESS_IMPORT_SOURCES: HarnessImportSource[] = [
   claudeCodeSource,
   hermesSource,
   codexSource,
   cursorSource,
+  geminiSource,
 ];
 
 export interface DiscoverAgentsOptions {

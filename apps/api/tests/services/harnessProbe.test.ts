@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { detectHarnesses } from '../../src/services/harnessProbe.js';
+import { detectHarnesses, testHarnessConfig } from '../../src/services/harnessProbe.js';
 import { resolveCommandPath, resolveSpawnTarget } from '../../src/services/pathExpander.js';
 
 describe('runtime command resolution', () => {
@@ -36,6 +36,33 @@ describe('runtime command resolution', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('enumerates the Gemini CLI harness in detection results', async () => {
+    const detections = await detectHarnesses(process.env);
+    const gemini = detections.find((entry) => entry.adapterType === 'gemini');
+    expect(gemini).toBeDefined();
+    expect(gemini?.harness).toBe('Gemini CLI');
+    expect(gemini?.installCommand).toContain('@google/gemini-cli');
+  });
+
+  it('warns that the free Gemini tier is ineligible when no API key is configured', async () => {
+    const env = { ...process.env };
+    delete env.GEMINI_API_KEY;
+    delete env.GOOGLE_API_KEY;
+    delete env.GOOGLE_GENAI_API_KEY;
+    const result = await testHarnessConfig('gemini', { binaryPath: 'gemini' }, { env });
+    const auth = result.checks.find((check) => check.code === 'auth');
+    expect(auth?.level).toBe('warn');
+    expect(`${auth?.hint ?? ''}`).toContain('GEMINI_API_KEY');
+  });
+
+  it('reports a configured Gemini API key as authenticated', async () => {
+    const env = { ...process.env, GEMINI_API_KEY: 'test-key' };
+    const result = await testHarnessConfig('gemini', { binaryPath: 'gemini' }, { env });
+    const auth = result.checks.find((check) => check.code === 'auth');
+    expect(auth?.level).toBe('info');
+    expect(auth?.message).toContain('Gemini API key');
   });
 
   it.runIf(process.platform === 'win32')('prefers the stable Codex Desktop CLI over versioned WindowsApps paths', () => {
