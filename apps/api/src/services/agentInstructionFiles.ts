@@ -125,6 +125,12 @@ function instructionCandidates(agent: AgentInstructionOwner): InstructionCandida
     addFile(candidates, path.join(geminiHome, 'AGENTS.md'), 'runtime', 'Gemini CLI shared agent instructions');
   }
 
+  if (adapterType === 'antigravity') {
+    const agyHome = firstString(process.env.ANTIGRAVITY_HOME) ?? path.join(home, '.gemini', 'antigravity-cli');
+    addFile(candidates, path.join(agyHome, 'GEMINI.md'), 'runtime', 'Antigravity CLI home instructions', { primary: true });
+    addFile(candidates, path.join(agyHome, 'AGENTS.md'), 'runtime', 'Antigravity CLI shared agent instructions');
+  }
+
   if (adapterType === 'hermes_agent') {
     // The agent's NATIVE instruction file: Agentis writes the agent's persona to
     // this per-agent `AGENTS.md` and runs the Hermes session there, so the harness

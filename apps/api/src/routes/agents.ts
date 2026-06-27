@@ -764,6 +764,7 @@ function normalizeRuntimeAdapterType(value: unknown): V1HarnessAdapterType | nul
     || value === 'codex'
     || value === 'cursor'
     || value === 'gemini'
+    || value === 'antigravity'
     || value === 'http'
   ) {
     return value;

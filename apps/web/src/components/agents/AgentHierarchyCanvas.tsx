@@ -943,6 +943,7 @@ function harnessLabel(adapterType?: string | null) {
     case 'codex': return 'Codex';
     case 'cursor': return 'Cursor';
     case 'gemini': return 'Gemini CLI';
+    case 'antigravity': return 'Antigravity CLI';
     case 'http': return 'HTTP';
     default: return 'runtime';
   }

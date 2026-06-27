@@ -98,6 +98,8 @@ export function configuredAffordances(
       return { fileSystem: true, terminal: true };
     case 'gemini':
       return { fileSystem: true, terminal: true, nativeMcp: true };
+    case 'antigravity':
+      return { fileSystem: true, terminal: true, nativeMcp: true };
     default:
       return {};
   }

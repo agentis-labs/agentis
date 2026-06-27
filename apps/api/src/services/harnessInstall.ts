@@ -39,6 +39,12 @@ export const HARNESS_INSTALL_OPTIONS: HarnessInstallOption[] = [
     installCommand: 'npm install -g @google/gemini-cli',
   },
   {
+    adapterType: 'antigravity',
+    canAutoInstall: false,
+    manualUrl: 'https://antigravity.google/product/antigravity-cli',
+    manualInstructions: 'Install the Antigravity CLI: PowerShell `irm https://antigravity.google/cli/install.ps1 | iex` (macOS/Linux `curl -fsSL https://antigravity.google/cli/install.sh | bash`), then run `agy` once to sign in.',
+  },
+  {
     adapterType: 'hermes_agent',
     canAutoInstall: false,
     manualInstructions: 'Install the Hermes Agent CLI, then return and re-run detection.',

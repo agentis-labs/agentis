@@ -7,6 +7,7 @@ export type RuntimeModelField =
   | 'codexModel'
   | 'cursorModel'
   | 'geminiModel'
+  | 'antigravityModel'
   | 'httpModel';
 
 const RUNTIME_MODEL_FIELDS: Record<AdapterType, RuntimeModelField> = {
@@ -16,6 +17,7 @@ const RUNTIME_MODEL_FIELDS: Record<AdapterType, RuntimeModelField> = {
   codex: 'codexModel',
   cursor: 'cursorModel',
   gemini: 'geminiModel',
+  antigravity: 'antigravityModel',
   http: 'httpModel',
 };
 

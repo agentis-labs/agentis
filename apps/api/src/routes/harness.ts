@@ -34,7 +34,7 @@ export interface HarnessRoutesDeps {
 }
 
 const HARNESS_ADAPTER_TYPES = new Set<string>([
-  'openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'http',
+  'openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'antigravity', 'http',
 ]);
 
 // In-memory rate limiter — 2 install attempts per workspace per minute.

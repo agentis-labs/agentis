@@ -15,6 +15,7 @@ import { hermesSource } from './sources/hermes.js';
 import { codexSource } from './sources/codex.js';
 import { cursorSource } from './sources/cursor.js';
 import { geminiSource } from './sources/gemini.js';
+import { antigravitySource } from './sources/antigravity.js';
 
 export const HARNESS_IMPORT_SOURCES: HarnessImportSource[] = [
   claudeCodeSource,
@@ -22,6 +23,7 @@ export const HARNESS_IMPORT_SOURCES: HarnessImportSource[] = [
   codexSource,
   cursorSource,
   geminiSource,
+  antigravitySource,
 ];
 
 export interface DiscoverAgentsOptions {

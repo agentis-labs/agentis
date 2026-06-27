@@ -142,6 +142,7 @@ export function defaultModelFor(adapterType: V1HarnessAdapterType): string | nul
   if (adapterType === 'cursor') return 'auto';
   if (adapterType === 'hermes_agent') return 'hermes-auto';
   if (adapterType === 'gemini') return 'gemini-2.5-pro';
+  if (adapterType === 'antigravity') return null;
   if (adapterType === 'openclaw') return 'gateway-default';
   return 'provider-default';
 }
@@ -197,6 +198,7 @@ function providerLabelFor(adapterType: V1HarnessAdapterType): string {
   if (adapterType === 'cursor') return 'Cursor';
   if (adapterType === 'hermes_agent') return 'Hermes';
   if (adapterType === 'gemini') return 'Google';
+  if (adapterType === 'antigravity') return 'Google Antigravity';
   if (adapterType === 'openclaw') return 'OpenClaw';
   return 'HTTP';
 }
@@ -242,6 +244,10 @@ export function detectRuntimeState(adapterType: V1HarnessAdapterType): DetectedR
         ]),
       ),
     };
+  }
+  if (adapterType === 'antigravity') {
+    const agyHome = process.env.ANTIGRAVITY_HOME?.trim() || path.join(homePath(), '.gemini', 'antigravity-cli');
+    return { model: readConfiguredModel([path.join(agyHome, 'settings.json')]) };
   }
   return { model: null };
 }
@@ -394,6 +400,17 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
       option('gemini-2.0-flash', 'Google'),
     ];
   }
+  if (adapterType === 'antigravity') {
+    // Antigravity's `agy models` uses display-name strings; these are the known
+    // selectable models (Gemini + Claude + GPT-OSS) passed verbatim to `-m`.
+    return [
+      option('Gemini 3.5 Flash (High)', 'Google Antigravity', true),
+      option('Gemini 3.1 Pro (High)', 'Google Antigravity'),
+      option('Claude Opus 4.6 (Thinking)', 'Google Antigravity'),
+      option('Claude Sonnet 4.6 (Thinking)', 'Google Antigravity'),
+      option('GPT-OSS 120B (Medium)', 'Google Antigravity'),
+    ];
+  }
   return [];
 }
 
@@ -427,6 +444,9 @@ function isRelevantModelForAdapter(adapterType: V1HarnessAdapterType | 'http', i
   const lower = id.toLowerCase();
   if (adapterType === 'claude_code') return lower.startsWith('claude-');
   if (adapterType === 'gemini') return lower.startsWith('gemini-') || lower.startsWith('gemma-');
+  // Antigravity is multi-vendor (Gemini / Claude / GPT-OSS) and uses display-name
+  // model strings, so it can't be filtered by a simple prefix — accept all.
+  if (adapterType === 'antigravity') return true;
   if (adapterType === 'codex' || adapterType === 'cursor') {
     if (
       lower.includes('embedding')

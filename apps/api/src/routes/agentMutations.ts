@@ -28,7 +28,7 @@ import { repairCliHarnessConfig } from '../services/harnessConfigRepair.js';
 import type { McpHarnessSessionService } from '../services/mcpHarnessSession.js';
 import { registerAdapter, runtimeModelFromConfig, switchRuntime } from '../services/agentCommission.js';
 
-const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'http']);
+const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'gemini', 'antigravity', 'http']);
 const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
 
 const createSchema = z.object({

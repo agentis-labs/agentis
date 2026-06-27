@@ -8,7 +8,7 @@ import { resolveCommandPath, resolveSpawnTarget, withExpandedPath } from './path
 
 const execFileAsync = promisify(execFile);
 
-export type V1HarnessAdapterType = Extract<AdapterType, 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'gemini' | 'http'>;
+export type V1HarnessAdapterType = Extract<AdapterType, 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'gemini' | 'antigravity' | 'http'>;
 
 export interface HarnessDetectionResult {
   adapterType: V1HarnessAdapterType;
@@ -66,7 +66,7 @@ export interface HarnessTestOptions {
 }
 
 const CLI_HARNESSES: Array<{
-  adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'gemini'>;
+  adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'gemini' | 'antigravity'>;
   harness: string;
   binaries: string[];
   installCommand: string;
@@ -77,7 +77,11 @@ const CLI_HARNESSES: Array<{
   { adapterType: 'hermes_agent', harness: 'Hermes Agent', binaries: ['hermes', 'hermes-agent'], installCommand: 'Install the Hermes Agent CLI' },
   // Google's Gemini CLI (the runtime Google is rebranding to "Antigravity"); the
   // `antigravity`/`agy` binaries are accepted as forward-looking fallbacks.
-  { adapterType: 'gemini', harness: 'Gemini CLI', binaries: ['gemini', 'antigravity', 'agy'], installCommand: 'npm install -g @google/gemini-cli' },
+  { adapterType: 'gemini', harness: 'Gemini CLI', binaries: ['gemini'], installCommand: 'npm install -g @google/gemini-cli' },
+  // Google's Antigravity CLI — the terminal harness Google is migrating
+  // Gemini-CLI users to (OAuth / Google Cloud project auth that still works on
+  // paid accounts). Installed via the antigravity.google script, binary `agy`.
+  { adapterType: 'antigravity', harness: 'Antigravity CLI', binaries: ['agy', 'antigravity'], installCommand: 'irm https://antigravity.google/cli/install.ps1 | iex   (macOS/Linux: curl -fsSL https://antigravity.google/cli/install.sh | bash)' },
 ];
 
 export async function detectHarnesses(env: NodeJS.ProcessEnv = process.env): Promise<HarnessDetectionResult[]> {
@@ -175,6 +179,11 @@ export async function testHarnessConfig(
     if (binary.level !== 'error' && options.deep) {
       checks.push(await liveProbe('gemini', command, env));
     }
+    return resultFromChecks(checks);
+  }
+  if (adapterType === 'antigravity') {
+    checks.push(await binaryCheck(cliCommandFromConfig(config, 'agy'), 'Antigravity CLI binary', 'binary', env));
+    checks.push(antigravityAuthCheck(env));
     return resultFromChecks(checks);
   }
   if (adapterType === 'cursor') {
@@ -282,6 +291,20 @@ function codexAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
   };
 }
 
+function antigravityAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
+  const auth = detectAntigravityAuth(env);
+  if (auth.status === 'authenticated') {
+    return { code: 'auth', level: 'info', message: `Auth: ${auth.source ?? 'Antigravity sign-in'}`, detail: auth.detail };
+  }
+  return {
+    code: 'auth',
+    level: 'warn',
+    message: 'Antigravity sign-in was not detected',
+    detail: auth.detail,
+    hint: 'Run `agy` once and complete the Google sign-in (use a Google Cloud project for paid accounts). The session is cached in the system keyring.',
+  };
+}
+
 function geminiAuthCheck(env: NodeJS.ProcessEnv): HarnessCheck {
   const auth = detectGeminiAuth(env);
   if (auth.status === 'authenticated') {
@@ -308,6 +331,7 @@ function authDetectionFor(adapterType: V1HarnessAdapterType, env: NodeJS.Process
   if (adapterType === 'claude_code') return detectClaudeAuth(env);
   if (adapterType === 'codex') return detectCodexAuth(env);
   if (adapterType === 'gemini') return detectGeminiAuth(env);
+  if (adapterType === 'antigravity') return detectAntigravityAuth(env);
   return undefined;
 }
 
@@ -446,6 +470,27 @@ function detectGeminiAuth(env: NodeJS.ProcessEnv): AuthDetection {
   return {
     status: 'unknown',
     detail: `No Gemini API key or Google login was found under ${geminiHome}.`,
+  };
+}
+
+/**
+ * Inspect for an Antigravity CLI (`agy`) sign-in. `agy` authenticates via Google
+ * OAuth / a Google Cloud project, caching the session in the system keyring with
+ * config under `~/.gemini/antigravity-cli/`. We can't read the keyring, so a
+ * populated antigravity-cli home (settings/credentials) is treated as "signed in";
+ * otherwise we report `unknown` with a pointer to the one-time `agy` sign-in.
+ */
+function detectAntigravityAuth(env: NodeJS.ProcessEnv): AuthDetection {
+  const home = homeDirFromEnv(env);
+  const agyHome = firstNonEmpty(env.ANTIGRAVITY_HOME) ?? path.join(home, '.gemini', 'antigravity-cli');
+  for (const file of ['oauth_creds.json', 'credentials.json', 'auth.json', 'settings.json']) {
+    if (existsSync(path.join(agyHome, file))) {
+      return { status: 'authenticated', source: 'Antigravity sign-in', detail: `Antigravity session found under ${agyHome}.` };
+    }
+  }
+  return {
+    status: 'unknown',
+    detail: `No Antigravity sign-in was found under ${agyHome}. Run \`agy\` once and sign in (use a Google Cloud project for paid accounts).`,
   };
 }
 

@@ -3,11 +3,11 @@ import clsx from 'clsx';
 import type { ComponentType } from 'react';
 import { AlertTriangle, Check, ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../../lib/api';
-import { ClaudeIcon, CodexIcon, CursorIcon, GeminiIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
+import { AntigravityIcon, ClaudeIcon, CodexIcon, CursorIcon, GeminiIcon, HermesIcon, HttpIcon, OpenClawIcon } from '../icons';
 import { ModelChooser } from './ModelChooser';
 import { runtimeModelValue, withRuntimeModel } from './runtimeModelField';
 
-export type AdapterType = 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'gemini' | 'http';
+export type AdapterType = 'openclaw' | 'hermes_agent' | 'claude_code' | 'codex' | 'cursor' | 'gemini' | 'antigravity' | 'http';
 
 export interface AdapterModelOption {
   id: string;
@@ -67,6 +67,13 @@ export interface RuntimeConfig {
   geminiExtraArgs: string;
   geminiEnv: string;
   geminiTimeoutSec: string;
+  antigravityBinaryPath: string;
+  antigravityCwd: string;
+  antigravityModel: string;
+  antigravityYolo: string;
+  antigravityExtraArgs: string;
+  antigravityEnv: string;
+  antigravityTimeoutSec: string;
   httpBaseUrl: string;
   httpAuthCredentialId: string;
   httpSharedSecretCredentialId: string;
@@ -131,6 +138,13 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   geminiExtraArgs: '',
   geminiEnv: '',
   geminiTimeoutSec: '',
+  antigravityBinaryPath: '',
+  antigravityCwd: '',
+  antigravityModel: '',
+  antigravityYolo: 'true',
+  antigravityExtraArgs: '',
+  antigravityEnv: '',
+  antigravityTimeoutSec: '',
   httpBaseUrl: '',
   httpAuthCredentialId: '',
   httpSharedSecretCredentialId: '',
@@ -170,6 +184,7 @@ const ADAPTERS: Array<{
   { id: 'codex', title: 'Codex', icon: CodexIcon, recommended: true },
   { id: 'cursor', title: 'Cursor', icon: CursorIcon },
   { id: 'gemini', title: 'Gemini CLI', icon: GeminiIcon },
+  { id: 'antigravity', title: 'Antigravity', icon: AntigravityIcon, recommended: true },
   { id: 'http', title: 'HTTP', icon: HttpIcon },
 ];
 
@@ -363,7 +378,7 @@ export function RuntimePicker({
             adapterType={adapterType}
             config={runtimeConfig}
             setConfig={setConfig}
-            defaultOpen={activeDetection?.status !== 'found' && adapterType !== 'claude_code' && adapterType !== 'codex' && adapterType !== 'gemini'}
+            defaultOpen={activeDetection?.status !== 'found' && adapterType !== 'claude_code' && adapterType !== 'codex' && adapterType !== 'gemini' && adapterType !== 'antigravity'}
           />
         </div>
       )}
@@ -483,6 +498,12 @@ function ConnectionDetailsAccordion({
               <Field label="Binary path"><input value={config.geminiBinaryPath} onChange={(event) => setConfig('geminiBinaryPath', event.target.value)} placeholder="gemini" className={inputCls} /></Field>
               <Field label="Working directory"><input value={config.geminiCwd} onChange={(event) => setConfig('geminiCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
               <Field label="Timeout (s)"><input value={config.geminiTimeoutSec} onChange={(event) => setConfig('geminiTimeoutSec', event.target.value)} inputMode="numeric" placeholder="120" className={inputCls} /></Field>
+            </div>
+          ) : adapterType === 'antigravity' ? (
+            <div className="grid gap-3 md:grid-cols-3">
+              <Field label="Binary path"><input value={config.antigravityBinaryPath} onChange={(event) => setConfig('antigravityBinaryPath', event.target.value)} placeholder="agy" className={inputCls} /></Field>
+              <Field label="Working directory"><input value={config.antigravityCwd} onChange={(event) => setConfig('antigravityCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
+              <Field label="Timeout (s)"><input value={config.antigravityTimeoutSec} onChange={(event) => setConfig('antigravityTimeoutSec', event.target.value)} inputMode="numeric" placeholder="120" className={inputCls} /></Field>
             </div>
           ) : null}
         </div>
@@ -604,6 +625,15 @@ function prefillConfigFromDetection(config: RuntimeConfig, adapterType: AdapterT
       geminiModel: config.geminiModel || detection.detectedModel || '',
     };
   }
+  if (adapterType === 'antigravity') {
+    const command = detectionCommand(detection);
+    if (!command && !detection.detectedModel) return config;
+    return {
+      ...config,
+      antigravityBinaryPath: config.antigravityBinaryPath || command,
+      antigravityModel: config.antigravityModel || detection.detectedModel || '',
+    };
+  }
   if (adapterType === 'hermes_agent') {
     const command = detectionCommand(detection);
     if (!command && !detection.detectedModel) return config;
@@ -718,6 +748,22 @@ function AdapterConfigFields({
       </div>
     );
   }
+  if (adapterType === 'antigravity') {
+    return (
+      <div className="grid gap-3 md:grid-cols-4">
+        <Field label="Binary path" hint="Antigravity CLI (`agy`). Install from antigravity.google, then run `agy` once to sign in.">
+          <input value={config.antigravityBinaryPath} onChange={(event) => setConfig('antigravityBinaryPath', event.target.value)} placeholder="agy" className={inputCls} />
+        </Field>
+        <Field label="Working directory"><input value={config.antigravityCwd} onChange={(event) => setConfig('antigravityCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
+        <Field label="Auto-approve tools" hint="Runs the CLI in YOLO mode so it never blocks on an approval prompt. Recommended for headless use.">
+          <select value={config.antigravityYolo} onChange={(event) => setConfig('antigravityYolo', event.target.value)} className={inputCls}><option value="true">On</option><option value="false">Off</option></select>
+        </Field>
+        <Field label="Extra args"><input value={config.antigravityExtraArgs} onChange={(event) => setConfig('antigravityExtraArgs', event.target.value)} placeholder="--flag value" className={inputCls} /></Field>
+        <Field label="Env"><textarea value={config.antigravityEnv} onChange={(event) => setConfig('antigravityEnv', event.target.value)} placeholder="{}" className={textareaCls} /></Field>
+        <Field label="Timeout"><input value={config.antigravityTimeoutSec} onChange={(event) => setConfig('antigravityTimeoutSec', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
+      </div>
+    );
+  }
   return (
     <div className="grid gap-3 md:grid-cols-3">
       <Field label="Base URL"><input value={config.httpBaseUrl} onChange={(event) => setConfig('httpBaseUrl', event.target.value)} placeholder="https://agent.example.com" className={inputCls} /></Field>
@@ -746,6 +792,7 @@ export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<s
   if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBrowser: boolText(stored.browser, DEFAULT_RUNTIME_CONFIG.codexBrowser), codexBypassApprovalsAndSandbox: 'true', codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'cursor') return { ...base, cursorBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), cursorCwd: stringOf(stored.cwd), cursorModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.cursorModel), cursorExtraArgs: arrayText(stored.extraArgs), cursorEnv: jsonText(stored.env), cursorTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'gemini') return { ...base, geminiBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), geminiCwd: stringOf(stored.cwd), geminiModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.geminiModel), geminiYolo: boolText(stored.yolo, DEFAULT_RUNTIME_CONFIG.geminiYolo), geminiExtraArgs: arrayText(stored.extraArgs), geminiEnv: jsonText(stored.env), geminiTimeoutSec: stringOf(stored.timeoutSec) };
+  if (adapterType === 'antigravity') return { ...base, antigravityBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), antigravityCwd: stringOf(stored.cwd), antigravityModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.antigravityModel), antigravityYolo: boolText(stored.yolo, DEFAULT_RUNTIME_CONFIG.antigravityYolo), antigravityExtraArgs: arrayText(stored.extraArgs), antigravityEnv: jsonText(stored.env), antigravityTimeoutSec: stringOf(stored.timeoutSec) };
   return { ...base, httpBaseUrl: stringOf(stored.baseUrl), httpAuthCredentialId: stringOf(stored.authCredentialId), httpSharedSecretCredentialId: stringOf(stored.sharedSecretCredentialId), httpDispatchPath: stringOf(stored.dispatchPath, DEFAULT_RUNTIME_CONFIG.httpDispatchPath), httpCancelPath: stringOf(stored.cancelPath), httpHealthPath: stringOf(stored.healthPath, DEFAULT_RUNTIME_CONFIG.httpHealthPath), httpMethod: stringOf(stored.method, DEFAULT_RUNTIME_CONFIG.httpMethod).toUpperCase(), httpHeaders: jsonText(stored.headers), httpPayloadTemplate: jsonText(stored.payloadTemplate), httpDispatchTimeoutMs: stringOf(stored.dispatchTimeoutMs, DEFAULT_RUNTIME_CONFIG.httpDispatchTimeoutMs), httpModel: stringOf(stored.model) };
 }
 
@@ -756,6 +803,7 @@ export function runtimeConfigToAdapterConfig(adapterType: AdapterType, config: R
   if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), browser: boolValue(config.codexBrowser), dangerouslyBypassApprovalsAndSandbox: true, extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
   if (adapterType === 'cursor') return compact({ binaryPath: config.cursorBinaryPath, command: config.cursorBinaryPath, cwd: config.cursorCwd, model: config.cursorModel, extraArgs: splitArgs(config.cursorExtraArgs), env: jsonStringRecord(config.cursorEnv), timeoutSec: positiveNumber(config.cursorTimeoutSec) });
   if (adapterType === 'gemini') return compact({ binaryPath: config.geminiBinaryPath, command: config.geminiBinaryPath, cwd: config.geminiCwd, model: config.geminiModel, yolo: boolValue(config.geminiYolo), extraArgs: splitArgs(config.geminiExtraArgs), env: jsonStringRecord(config.geminiEnv), timeoutSec: positiveNumber(config.geminiTimeoutSec) });
+  if (adapterType === 'antigravity') return compact({ binaryPath: config.antigravityBinaryPath, command: config.antigravityBinaryPath, cwd: config.antigravityCwd, model: config.antigravityModel, yolo: boolValue(config.antigravityYolo), extraArgs: splitArgs(config.antigravityExtraArgs), env: jsonStringRecord(config.antigravityEnv), timeoutSec: positiveNumber(config.antigravityTimeoutSec) });
   return compact({ baseUrl: config.httpBaseUrl, authCredentialId: config.httpAuthCredentialId, sharedSecretCredentialId: config.httpSharedSecretCredentialId, dispatchPath: config.httpDispatchPath, cancelPath: config.httpCancelPath, healthPath: config.httpHealthPath, method: config.httpMethod, headers: jsonStringRecord(config.httpHeaders), payloadTemplate: jsonObject(config.httpPayloadTemplate), dispatchTimeoutMs: positiveNumber(config.httpDispatchTimeoutMs), model: config.httpModel });
 }
 
@@ -767,6 +815,7 @@ export function runtimeModelFor(adapterType: AdapterType, config: RuntimeConfig)
   if (adapterType === 'codex') return config.codexModel || DEFAULT_RUNTIME_CONFIG.codexModel;
   if (adapterType === 'cursor') return config.cursorModel || DEFAULT_RUNTIME_CONFIG.cursorModel;
   if (adapterType === 'gemini') return config.geminiModel || null;
+  if (adapterType === 'antigravity') return config.antigravityModel || null;
   return config.cursorModel || DEFAULT_RUNTIME_CONFIG.cursorModel;
 }
 
@@ -777,6 +826,7 @@ export function runtimeLabelFor(adapterType: AdapterType, config: RuntimeConfig)
   if (adapterType === 'codex') return config.codexModel || DEFAULT_RUNTIME_CONFIG.codexModel;
   if (adapterType === 'cursor') return config.cursorModel || DEFAULT_RUNTIME_CONFIG.cursorModel;
   if (adapterType === 'gemini') return config.geminiModel || 'Gemini CLI';
+  if (adapterType === 'antigravity') return config.antigravityModel || 'Antigravity CLI';
   return config.httpModel || 'HTTP / Webhook';
 }
 

@@ -363,6 +363,19 @@ function discoverHomeResources(adapterType: AdapterType, home: string): RuntimeR
     });
     addSecretReference(resources, path.join(home, 'google_accounts.json'), 'Gemini CLI Google account state');
     addSkillTree(resources, path.join(home, 'skills'), 'profile');
+  } else if (adapterType === 'antigravity') {
+    addFile(resources, path.join(home, 'GEMINI.md'), {
+      kind: 'instructions', scope: 'profile', description: 'Antigravity CLI home instructions.', primary: true,
+    });
+    addFile(resources, path.join(home, 'AGENTS.md'), {
+      kind: 'instructions', scope: 'profile', description: 'Antigravity CLI shared agent instructions.',
+    });
+    addFile(resources, path.join(home, 'settings.json'), {
+      kind: 'config', scope: 'profile', description: 'Antigravity CLI settings.', editable: false,
+      loadPolicy: 'startup', reloadPolicy: 'restart_required',
+    });
+    addSecretReference(resources, path.join(home, 'oauth_creds.json'), 'Antigravity CLI Google sign-in state');
+    addSkillTree(resources, path.join(home, 'skills'), 'profile');
   } else if (adapterType === 'openclaw') {
     addFile(resources, path.join(home, 'AGENTS.md'), {
       kind: 'instructions', scope: 'profile', description: 'OpenClaw profile instructions.', primary: true,
@@ -389,9 +402,9 @@ function discoverProjectResources(adapterType: AdapterType, cwd: string): Runtim
       kind: 'instructions', scope: 'project', description: 'Project agent instructions.',
     });
   }
-  if (adapterType === 'gemini') {
+  if (adapterType === 'gemini' || adapterType === 'antigravity') {
     addFile(resources, path.join(cwd, 'GEMINI.md'), {
-      kind: 'instructions', scope: 'project', description: 'Project Gemini instructions.',
+      kind: 'instructions', scope: 'project', description: 'Project Gemini/Antigravity instructions.',
     });
     addFile(resources, path.join(cwd, 'AGENTS.md'), {
       kind: 'instructions', scope: 'project', description: 'Project agent instructions.',
@@ -614,6 +627,9 @@ function runtimeHome(adapterType: AdapterType, config: Record<string, unknown>):
   if (adapterType === 'gemini') {
     return firstString(env.GEMINI_HOME, process.env.GEMINI_HOME, path.join(os.homedir(), '.gemini'));
   }
+  if (adapterType === 'antigravity') {
+    return firstString(env.ANTIGRAVITY_HOME, process.env.ANTIGRAVITY_HOME, path.join(os.homedir(), '.gemini', 'antigravity-cli'));
+  }
   if (adapterType === 'openclaw') {
     return firstString(env.OPENCLAW_HOME, process.env.OPENCLAW_HOME, path.join(os.homedir(), '.openclaw'));
   }
@@ -642,7 +658,7 @@ function detectProfileModel(adapterType: AdapterType, home: string | null): stri
       const match = readFileSync(configPath, 'utf8').match(/^\s*model\s*=\s*["']([^"']+)["']/m);
       return match?.[1]?.trim() || null;
     }
-    if (adapterType === 'gemini') {
+    if (adapterType === 'gemini' || adapterType === 'antigravity') {
       for (const candidate of [path.join(home, 'config', 'config.json'), path.join(home, 'settings.json')]) {
         if (!existsSync(candidate)) continue;
         const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as Record<string, unknown>;
@@ -711,6 +727,7 @@ function runtimeDisplayName(adapterType: AdapterType): string {
   if (adapterType === 'codex') return 'Codex';
   if (adapterType === 'cursor') return 'Cursor';
   if (adapterType === 'gemini') return 'Gemini CLI';
+  if (adapterType === 'antigravity') return 'Antigravity CLI';
   if (adapterType === 'openclaw') return 'OpenClaw';
   if (adapterType === 'local_llm') return 'Local LLM';
   return 'HTTP Runtime';
@@ -722,6 +739,7 @@ function defaultBinary(adapterType: AdapterType): string {
   if (adapterType === 'codex') return 'codex';
   if (adapterType === 'cursor') return 'agent';
   if (adapterType === 'gemini') return 'gemini';
+  if (adapterType === 'antigravity') return 'agy';
   return adapterType;
 }
 

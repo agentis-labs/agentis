@@ -65,6 +65,36 @@ describe('runtime command resolution', () => {
     expect(auth?.message).toContain('Gemini API key');
   });
 
+  it('enumerates the Antigravity CLI harness in detection results', async () => {
+    const detections = await detectHarnesses(process.env);
+    const agy = detections.find((entry) => entry.adapterType === 'antigravity');
+    expect(agy).toBeDefined();
+    expect(agy?.harness).toBe('Antigravity CLI');
+    expect(agy?.installCommand).toContain('antigravity.google');
+  });
+
+  it('warns that Antigravity is not signed in when no antigravity-cli home exists', async () => {
+    const env = { ...process.env, ANTIGRAVITY_HOME: join(tmpdir(), 'agentis-no-agy-' + Date.now()) };
+    const result = await testHarnessConfig('antigravity', { binaryPath: 'agy' }, { env });
+    const auth = result.checks.find((check) => check.code === 'auth');
+    expect(auth?.level).toBe('warn');
+    expect(`${auth?.hint ?? ''}`).toContain('agy');
+  });
+
+  it('reports Antigravity as authenticated when a signed-in home exists', async () => {
+    const agyHome = mkdtempSync(join(tmpdir(), 'agentis-agy-'));
+    try {
+      writeFileSync(join(agyHome, 'oauth_creds.json'), '{"token":"x"}', 'utf8');
+      const env = { ...process.env, ANTIGRAVITY_HOME: agyHome };
+      const result = await testHarnessConfig('antigravity', { binaryPath: 'agy' }, { env });
+      const auth = result.checks.find((check) => check.code === 'auth');
+      expect(auth?.level).toBe('info');
+      expect(auth?.message).toContain('Antigravity');
+    } finally {
+      rmSync(agyHome, { recursive: true, force: true });
+    }
+  });
+
   it.runIf(process.platform === 'win32')('prefers the stable Codex Desktop CLI over versioned WindowsApps paths', () => {
     const root = mkdtempSync(join(tmpdir(), 'agentis codex path '));
     try {
