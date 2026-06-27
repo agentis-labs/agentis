@@ -2827,6 +2827,29 @@ export const appContacts = sqliteTable(
 );
 
 /**
+ * Outbound safety envelope counter (LIVING-APPS-10X §7 · G7, migration v101).
+ *
+ * One append-only row per agent-initiated outbound send the App makes, so the
+ * `OutboundPolicyService` can enforce a per-App rolling-hour rate limit durably
+ * (survives restart, unlike an in-memory window). The operator's manual sends are
+ * recorded too (they don't count against quiet/rate limits but keep the window
+ * honest). Pruned opportunistically — only the last hour matters for the limit.
+ */
+export const appOutboundLog = sqliteTable(
+  'app_outbound_log',
+  {
+    id: text('id').primaryKey(),
+    appId: text('app_id').notNull(),
+    /** 'agent' (counts toward the rate limit) | 'operator' (recorded, exempt). */
+    source: text('source').notNull().default('agent'),
+    sentAt: text('sent_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    byAppTime: index('idx_app_outbound_log_app_time').on(table.appId, table.sentAt),
+  }),
+);
+
+/**
  * Multi-party conversation threads (LIVING-APPS-10X Phase 2 · G1, migration v98).
  *
  * `conversations.agentId` stays the singular PRIMARY participant (many readers).
