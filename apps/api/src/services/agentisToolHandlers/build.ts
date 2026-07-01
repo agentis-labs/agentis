@@ -33,6 +33,7 @@ import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
 import { evalCondition } from '../../engine/SafeConditionParser.js';
 import { repairGraphExpressions, dryRunGraphExpressions, analyzeInputReachability, analyzeEdgeCouplings } from '../../engine/validateExpressions.js';
+import { deriveIntentManifest, checkIntentIntegrity, type IntentManifest } from '../intentContract.js';
 import { PackagerService } from '../packager.js';
 import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan } from '../creationPipeline.js';
 import { AdapterStructuredCompleter, type StructuredCompleter } from '../structuredCompleter.js';
@@ -1012,6 +1013,16 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   const approvalRequired = hasManualApprovalBeforeDelivery(graph);
   validateWorkflowGraph(graph, { strict: false });
 
+  // Organ 2 — Intent Contract (anti-green-washing): flag the `|| true` approval
+  // bypass, and — vs the capability manifest stored at the last build — any edit
+  // that hollows out the workflow's load-bearing work (removed agent workers /
+  // fetch steps / integrations / persistence). Then record the current signature.
+  const priorIntent = (existingWorkflow?.settings as { intentManifest?: IntentManifest } | null)?.intentManifest ?? null;
+  for (const v of checkIntentIntegrity(graph, priorIntent)) {
+    preflight.warnings.push({ code: v.code, ...(v.nodeId ? { nodeId: v.nodeId } : {}), message: v.message });
+  }
+  const intentManifest = deriveIntentManifest(graph, description);
+
   // Translate a natural-language schedule ("every day at 15:05 Brasília") into a
   // correct UTC cron on a REAL, linked trigger row — instead of leaving the cron
   // wrong and the trigger an inert visual. Created paused (no silent autonomous
@@ -1070,7 +1081,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       title,
       description: persistedDescription,
       graph: initialGraph,
-      settings: {},
+      settings: { intentManifest },
       concurrencyOverflow: 'queue',
       createdAt: now,
       updatedAt: now,
@@ -1182,6 +1193,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
         title,
         description: persistedDescription,
         graph,
+        settings: { ...((existingWorkflow?.settings as Record<string, unknown>) ?? {}), intentManifest },
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflows.id, workflowId))

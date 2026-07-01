@@ -565,6 +565,7 @@ export interface PreflightWarning {
     | 'BODY_REQUIRED'
     | 'CAPABILITY_MISMATCH'
     | 'GRAMMAR_VIOLATION'
+    | 'INVALID_EXPRESSION'
     | 'SCHEDULE_INACTIVE'
     // ── Robustness audit (WORKFLOW-DESIGN-10X Phase 2, doctrine D1–D7) ──
     | 'MISSING_STATE'
@@ -572,7 +573,10 @@ export interface PreflightWarning {
     | 'MISSING_DELIVERY_GUARD'
     | 'SINGLE_BRANCH_ROUTER'
     | 'NO_FAILURE_HANDLING'
-    | 'MISSING_CONVERGENCE';
+    | 'MISSING_CONVERGENCE'
+    // ── Intent Contract (Organ 2, anti-green-washing) ──
+    | 'AUTO_APPROVAL_BYPASS'
+    | 'CAPABILITY_REMOVED';
   nodeId?: string;
   message: string;
 }
