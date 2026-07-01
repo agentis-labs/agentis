@@ -1023,6 +1023,30 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   }
   const intentManifest = deriveIntentManifest(graph, description);
 
+  // Organ 3 — Atomic Evolution (green ratchet): reject an EDIT that INTRODUCES a
+  // critical regression the prior graph did not have (a new shape-mismatch coupling
+  // error, or an approval bypass). The workflow never persists a regression — this
+  // kills the whack-a-mole where "fix A" silently breaks B. New workflows are exempt.
+  if (existingWorkflow) {
+    const criticalKeys = (g: WorkflowGraph): Map<string, string> => {
+      const m = new Map<string, string>();
+      for (const i of analyzeEdgeCouplings(g)) m.set(`couple:${i.nodeId}:${i.identifier ?? i.message}`, `${i.nodeTitle ?? i.nodeId}: ${i.message}`);
+      for (const v of checkIntentIntegrity(g)) if (v.code === 'AUTO_APPROVAL_BYPASS') m.set(`approval:${v.nodeId ?? ''}`, v.message);
+      return m;
+    };
+    const prior = criticalKeys(existingWorkflow.graph as WorkflowGraph);
+    const introduced: string[] = [];
+    for (const [k, msg] of criticalKeys(graph)) if (!prior.has(k)) introduced.push(msg);
+    if (introduced.length > 0) {
+      phase('blocked', `Edit rejected — introduced ${introduced.length} regression(s)`);
+      throw new AgentisError(
+        'WORKFLOW_DRAFT_INVALID',
+        `This edit would REGRESS the workflow (Organ 3 keeps it green): it introduces ${introduced.length} critical issue(s) the prior graph did not have — `
+        + `${introduced.slice(0, 3).join(' | ')}. The workflow was NOT changed; fix the edit and retry.`,
+      );
+    }
+  }
+
   // Translate a natural-language schedule ("every day at 15:05 Brasília") into a
   // correct UTC cron on a REAL, linked trigger row — instead of leaving the cron
   // wrong and the trigger an inert visual. Created paused (no silent autonomous
