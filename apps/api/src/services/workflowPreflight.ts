@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type {
   ExtensionManifest,
   ExtensionTaskNodeConfig,
@@ -20,6 +20,7 @@ import { validateGraphReferences } from '../engine/validateGraphReferences.js';
 import { buildTemplateContext, resolveTemplateDeep } from '../engine/templateResolver.js';
 import { NodeHandlerRegistry } from '../engine/handlers/NodeHandler.js';
 import { registerPureNodeHandlers } from '../engine/handlers/pureHandlers.js';
+import { registerUtilityNodeHandlers } from '../engine/handlers/utilityHandlers.js';
 import { analyzeWorkflowReadiness } from './workflowReadiness.js';
 import { hashWorkflowGraph } from './graphHash.js';
 
@@ -51,6 +52,9 @@ export interface NodeHealthResult {
   kind: string;
   status: 'passed' | 'mocked' | 'unverified' | 'failed';
   durationMs: number;
+  /** P2.3: the resolved input this node received (compacted). The I/O trace pairs
+   *  it with `output` so a lost/empty payload is visible node-by-node. */
+  input?: Record<string, unknown>;
   output?: Record<string, unknown>;
   error?: string;
 }
@@ -70,6 +74,11 @@ export interface WorkflowHealthReport {
 
 const handlers = new NodeHandlerRegistry();
 registerPureNodeHandlers(handlers);
+// P2.2 (WORKFLOW-BUILD-LOOP): also execute the DETERMINISTIC utility kinds for
+// real in the dry-run (datetime/crypto/xml/markdown/json-schema/html/sticky) —
+// they were silently mocked before, masking real shape errors. Pure handlers
+// ((config, {inputData, tctx})) only, so they stay side-effect-free here too.
+registerUtilityNodeHandlers(handlers);
 
 const CACHE_TTL_MS = 5 * 60_000;
 const MAX_CACHE_ENTRIES = 500;
@@ -131,6 +140,7 @@ export function preflightWorkflow(args: {
     }
   }
   validateContractInput(args.graph.inputContract, scenario.input, issues);
+  checkAgentBindings(args.graph, { db: args.db, workspaceId: args.workspaceId }, issues);
 
   if (!issues.some((issue) => issue.severity === 'error')) {
     simulateGraph(args.graph, scenario.input, nodes, issues, { db: args.db, workspaceId: args.workspaceId });
@@ -241,6 +251,7 @@ function simulateGraph(
         kind: node.config.kind,
         status,
         durationMs: roundMs(performance.now() - nodeStarted),
+        input: compactOutput(effectiveInput),
         output: compactOutput(output),
       };
     } catch (error) {
@@ -252,6 +263,7 @@ function simulateGraph(
         kind: node.config.kind,
         status: 'failed',
         durationMs: roundMs(performance.now() - nodeStarted),
+        input: compactOutput(effectiveInput),
         error: message,
       };
       issues.push({
@@ -467,6 +479,68 @@ function validateContractInput(
   }
 }
 
+/**
+ * Surface fragile agent bindings BEFORE a run. A node explicitly pinned to an
+ * agent that no longer exists, or to a non-functional placeholder (an `http` stub
+ * with no model/runtime), would have produced empty output at run time — the most
+ * common real-world failure. The engine now falls back to the workspace model, but
+ * the operator should still see the misconfig and fix it. Warning, not error:
+ * role-resolved nodes (no explicit agentId) and agents with a model are left alone.
+ */
+function checkAgentBindings(
+  graph: WorkflowGraph,
+  deps: { db: AgentisSqliteDb; workspaceId: string },
+  issues: WorkflowHealthIssue[],
+): void {
+  for (const node of graph.nodes) {
+    if (node.config.kind !== 'agent_task' && node.config.kind !== 'agent_session') continue;
+    const agentId = (node.config as { agentId?: unknown }).agentId;
+    if (typeof agentId !== 'string' || !agentId.trim()) continue; // role-resolved → engine picks a runtime
+    const agent = deps.db
+      .select({ name: schema.agents.name, adapterType: schema.agents.adapterType, runtimeModel: schema.agents.runtimeModel, config: schema.agents.config, isPaused: schema.agents.isPaused })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, deps.workspaceId)))
+      .get();
+    if (!agent) {
+      issues.push({
+        code: 'AGENT_NOT_FOUND',
+        severity: 'warning',
+        nodeId: node.id,
+        nodeTitle: node.title,
+        message: 'This step is pinned to an agent that no longer exists in this workspace.',
+        remediation: 'Re-bind the step to an existing agent, or set a role so the engine resolves one.',
+        autoRepairable: false,
+      });
+      continue;
+    }
+    const hasModel = Boolean(stringValueOf(agent.runtimeModel) || configuredModelOf(agent.config));
+    if (!hasModel && agent.adapterType === 'http') {
+      issues.push({
+        code: 'AGENT_NO_RUNTIME',
+        severity: 'warning',
+        nodeId: node.id,
+        nodeTitle: node.title,
+        message: `Agent "${agent.name}" has no connected runtime or model; this step would produce no output and will fall back to the workspace model at run time.`,
+        remediation: 'Connect a model/runtime to this agent so the step runs as intended.',
+        autoRepairable: false,
+      });
+    }
+  }
+}
+
+function stringValueOf(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function configuredModelOf(raw: unknown): string | null {
+  try {
+    const config = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return isRecord(config) ? stringValueOf((config as { model?: unknown }).model) : null;
+  } catch {
+    return null;
+  }
+}
+
 function isPassthrough(node: WorkflowNode): boolean {
   return ['trigger', 'merge', 'parallel', 'wait', 'return_output'].includes(node.config.kind);
 }
@@ -483,12 +557,24 @@ function needsReadinessLookup(graph: WorkflowGraph): boolean {
   ));
 }
 
+/** P2.4: synthesize a TYPED mock value from an output-key name so a mocked
+ *  side-effecting node hands downstream DETERMINISTIC nodes realistic shapes
+ *  (arrays/numbers/booleans) instead of `sample_<key>` strings — otherwise a
+ *  downstream .map()/.length/numeric op silently mis-behaves in the dry-run. */
+function mockValueForKey(key: string): unknown {
+  const k = key.toLowerCase();
+  if (/^(is|has|should|can|did|are|was|allow)/.test(k) || /(pass|passed|ok|approved|valid|found|done|enabled|success|active|selected)$/.test(k)) return true;
+  if (/(count|total|score|num|amount|qty|quantity|size|length|index|rank|priority|threshold|min|max|sum|avg|age|price|rate)$/.test(k) || /^(count|total|score|num)/.test(k)) return 1;
+  if (/(candidates|items|results|records|entries|matches|rows|leads|posts|stores|messages|events|files|urls|links|ids|list|array|batch|queue|hits|documents|docs|contacts|orders|tickets|tasks)$/.test(k)) return [{}];
+  return `sample_${key}`;
+}
+
 function mockOutput(node: WorkflowNode, input: Record<string, unknown>): Record<string, unknown> {
   const config = node.config as unknown as Record<string, unknown>;
   const outputKeys = Array.isArray(config.outputKeys) ? config.outputKeys.filter((key): key is string => typeof key === 'string') : [];
   if (outputKeys.length > 0) {
     return {
-      ...Object.fromEntries(outputKeys.map((key) => [key, `sample_${key}`])),
+      ...Object.fromEntries(outputKeys.map((key) => [key, mockValueForKey(key)])),
       _preflight: {
         nodeId: node.id,
         kind: node.config.kind,

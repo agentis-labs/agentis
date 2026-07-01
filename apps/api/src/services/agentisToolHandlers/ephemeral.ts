@@ -9,6 +9,7 @@ const ephemeralRunArgsSchema = z.object({
   graph: schemas.workflowGraphSchema,
   inputs: z.record(z.string(), z.unknown()).default({}),
   maxDurationMs: z.number().int().positive().max(300_000).optional(),
+  debugRun: z.boolean().optional(),
 });
 
 export function registerEphemeralTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -16,8 +17,11 @@ export function registerEphemeralTools(registry: AgentisToolRegistry, deps: Tool
     {
       id: 'agentis.ephemeral.run',
       family: 'run',
+      mcpExposed: true,
       description:
-        'Run a transient workflow graph once without saving it to the workflow library. The graph is stored only as a run snapshot and can be promoted later if the operator wants to keep it.',
+        'Run a transient workflow graph once WITHOUT saving it — the ideal way to TEST a draft while building. '
+        + 'Set debugRun:true to disable self-heal + fallback so you observe the RAW per-node failure. '
+        + 'The graph is stored only as a run snapshot and can be promoted later if the operator wants to keep it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -25,6 +29,7 @@ export function registerEphemeralTools(registry: AgentisToolRegistry, deps: Tool
           graph: { type: 'object', description: 'Agentis WorkflowGraph JSON to execute once.' },
           inputs: { type: 'object', description: 'Initial input object for root nodes.' },
           maxDurationMs: { type: 'number', description: 'Execution cap in milliseconds, max 300000.' },
+          debugRun: { type: 'boolean', description: 'Test run: disable self-heal + fallback so raw per-node failures surface.' },
         },
         required: ['graph'],
       },
@@ -41,6 +46,7 @@ export function registerEphemeralTools(registry: AgentisToolRegistry, deps: Tool
         graph: body.graph as WorkflowGraph,
         inputs: body.inputs,
         maxDurationMs: body.maxDurationMs,
+        debugRun: body.debugRun,
       });
     },
   );

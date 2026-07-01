@@ -14,6 +14,7 @@ import {
   agentSatisfiesRequirements,
   createAppSchema,
   isAgentRole,
+  isSpecialistRole,
   layoutWorkflowGraph,
   layoutWorkflowGraphByPhases,
   normalizeAgentRequirements,
@@ -30,6 +31,8 @@ import { recordWorkflowLesson, recallWorkflowLessons, renderPlaybookLessons } fr
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
+import { evalCondition } from '../../engine/SafeConditionParser.js';
+import { repairGraphExpressions, dryRunGraphExpressions, analyzeInputReachability } from '../../engine/validateExpressions.js';
 import { PackagerService } from '../packager.js';
 import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan } from '../creationPipeline.js';
 import { AdapterStructuredCompleter, type StructuredCompleter } from '../structuredCompleter.js';
@@ -230,7 +233,9 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       definition: {
         id: 'agentis.workflow.patch',
         family: 'build',
-        description: 'Patch a workflow graph (replaces the graph atomically).',
+        description:
+          'Replace a workflow graph ATOMICALLY — pass workflowId + the COMPLETE graph (or runId + patch for a live run). ' +
+          'This is NOT a partial editor: for a SCOPED edit (add/update/remove a few nodes or edges) use agentis.build_workflow with workflowId + patchDraft instead — it validates, repairs, re-lays-out, and re-enriches, so you never have to resend the whole graph.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -259,7 +264,12 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         }
 
         if (!args.workflowId || !args.graph) {
-          throw new Error('workflow.patch requires either runId+patch or workflowId+graph');
+          throw new AgentisError(
+            'VALIDATION_FAILED',
+            'workflow.patch replaces the WHOLE graph: pass workflowId + the complete graph (or runId + patch for a live run). ' +
+            'For a SCOPED edit — add/update/remove a few nodes or edges — call agentis.build_workflow with workflowId + patchDraft ' +
+            '(addNodes / updateNodes / removeNodeIds / addEdges / removeEdgeIds) instead; Agentis validates, repairs, re-lays-out, and re-enriches the result.',
+          );
         }
         const wf = deps.db
           .select()
@@ -275,13 +285,14 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           .set({ graph, updatedAt: new Date().toISOString() })
           .where(eq(schema.workflows.id, wf.id))
           .run();
-        return { workflowId: wf.id, patched: true };
+        return { workflowId: wf.id, patched: true, selfHealInFlight: deps.engine.isSelfHealInFlight(wf.id) };
       },
     },
     {
       definition: {
         id: 'agentis.workflow.cancel',
         family: 'run',
+        mcpExposed: true,
         description: 'Cancel a running workflow run.',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: true,
@@ -477,6 +488,113 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           const message = err instanceof Error ? err.message : 'invalid graph';
           return { valid: false, errorMessage: message };
         }
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.dry_run',
+        family: 'build',
+        description:
+          'Deterministically DRY-RUN a workflow WITHOUT calling any AI, integration, or agent node: '
+          + 'execute the pure/deterministic nodes for real, MOCK the side-effecting ones, and thread real '
+          + 'sample I/O through the whole graph so you can SEE what each node receives and produces before a '
+          + 'real run. Pass a `graph` draft OR a `workflowId`, plus optional sample `inputs` (omitted → '
+          + 'synthesized from the input contract). Returns a per-node I/O trace (input, output, '
+          + 'status: passed|mocked|failed) + blocking issues. Use this to catch a lost/empty payload '
+          + '(e.g. a scorer receiving zero candidates) at BUILD time — no cost, no external calls.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string', description: 'Dry-run a saved workflow by id.' },
+            graph: { type: 'object', description: 'Or dry-run an unsaved WorkflowGraph draft directly.' },
+            inputs: { type: 'object', description: 'Optional sample trigger inputs.' },
+            assertions: { type: 'array', description: 'TDD contracts checked against the trace: [{ nodeId, expr, message }] where expr is a safe condition over that node\'s output/input (e.g. "output.candidates.length > 0"), plus nodes["id"].field for any node. Any failing assertion makes ok:false.', items: { type: 'object' } },
+            pin: { type: 'boolean', description: 'Persist these inputs+assertions as the workflow\'s pinned test — reused when dry_run is later called with just the workflowId.' },
+          },
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        let graph: WorkflowGraph;
+        let workflowId = 'dry-run';
+        let wf: { id: string; workspaceId: string; graph: unknown; settings: unknown } | null = null;
+        if (args.graph !== undefined) {
+          graph = parseAgentGraphDraft(args.graph);
+        } else if (args.workflowId) {
+          wf = deps.db
+            .select()
+            .from(schema.workflows)
+            .where(eq(schema.workflows.id, String(args.workflowId)))
+            .get() ?? null;
+          if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
+          graph = wf.graph as WorkflowGraph;
+          workflowId = wf.id;
+        } else {
+          throw new AgentisError('VALIDATION_FAILED', 'agentis.workflow.dry_run requires a graph draft or a workflowId.');
+        }
+        let inputs = args.inputs && typeof args.inputs === 'object' ? (args.inputs as Record<string, unknown>) : undefined;
+        let assertionSpecs = Array.isArray(args.assertions) ? (args.assertions as Array<Record<string, unknown>>) : undefined;
+        // P3.1 — pinned fixtures: reuse a saved { inputs, assertions } when the caller
+        // passes neither, so `dry_run(workflowId)` is a reproducible regression test.
+        const pinnedTest = wf ? (wf.settings as { workflowTest?: { inputs?: Record<string, unknown>; assertions?: Array<Record<string, unknown>> } } | null)?.workflowTest : undefined;
+        if (!inputs && !assertionSpecs && pinnedTest) {
+          inputs = pinnedTest.inputs;
+          assertionSpecs = pinnedTest.assertions;
+        }
+        if (args.pin === true && wf) {
+          deps.db.update(schema.workflows)
+            .set({ settings: { ...((wf.settings as Record<string, unknown>) ?? {}), workflowTest: { inputs: inputs ?? {}, assertions: assertionSpecs ?? [] } }, updatedAt: new Date().toISOString() })
+            .where(eq(schema.workflows.id, wf.id))
+            .run();
+        }
+        const report = preflightWorkflow({ db: deps.db, workspaceId: ctx.workspaceId, workflowId, graph, inputs, mode: 'canvas' });
+        // Fold in the build-time expression + input-reachability gates so a dry-run
+        // is a COMPLETE pre-run check, not just a node simulation.
+        const exprIssues = [...dryRunGraphExpressions(graph), ...analyzeInputReachability(graph)].map((i) => ({
+          code: i.code, severity: i.severity, nodeId: i.nodeId, nodeTitle: i.nodeTitle, message: `${i.field}: ${i.message}`, autoRepairable: true,
+        }));
+        const trace = graph.nodes
+          .map((n) => report.nodes[n.id])
+          .filter((r): r is NonNullable<typeof r> => Boolean(r))
+          .map((r) => ({ nodeId: r.nodeId, title: r.title, kind: r.kind, status: r.status, input: r.input, output: r.output, error: r.error }));
+        const executed = trace.filter((t) => t.status === 'passed').length;
+        const mocked = trace.filter((t) => t.status === 'mocked').length;
+        const failed = trace.filter((t) => t.status === 'failed').length;
+        const issues = [...report.issues, ...exprIssues];
+        const blocking = issues.filter((i) => i.severity === 'error');
+        // P3.2 — TDD contract assertions: evaluate each declared expectation against
+        // the trace (deterministic, over the real/mocked I/O). This is the red/green
+        // the operator asked for — "revise the whole I/O through the process".
+        const nodesMap = Object.fromEntries(trace.map((t) => [t.nodeId, t.output ?? {}]));
+        const assertions = (assertionSpecs ?? []).map((a) => {
+          const nodeId = String(a?.nodeId ?? '');
+          const expr = String(a?.expr ?? '');
+          const message = a?.message ? String(a.message) : undefined;
+          const entry = trace.find((t) => t.nodeId === nodeId);
+          if (!entry) return { nodeId, expr, message, passed: false, detail: `node "${nodeId}" is not in the dry-run trace` };
+          if (entry.status === 'failed') return { nodeId, expr, message, passed: false, detail: `node "${nodeId}" failed: ${entry.error ?? 'error'}` };
+          try {
+            const passed = evalCondition(expr, { input: entry.input ?? {}, inputs: entry.input ?? {}, output: entry.output ?? {}, nodes: nodesMap, trigger: report.scenario.input });
+            return { nodeId, expr, message, passed };
+          } catch (err) {
+            return { nodeId, expr, message, passed: false, detail: `assertion expression error: ${(err as Error).message}` };
+          }
+        });
+        const failedAssertions = assertions.filter((a) => !a.passed);
+        return {
+          ok: report.status !== 'blocked' && blocking.length === 0 && failedAssertions.length === 0,
+          status: report.status,
+          scenario: report.scenario,
+          trace,
+          issues,
+          ...(assertions.length > 0 ? { assertions } : {}),
+          summary:
+            `Dry-ran ${trace.length} node(s): ${executed} executed for real, ${mocked} mocked (ai/integration/agent), `
+            + `${failed} failed. ${blocking.length} blocking issue(s).`
+            + (assertions.length > 0 ? (failedAssertions.length > 0 ? ` ${failedAssertions.length}/${assertions.length} assertion(s) FAILED.` : ` All ${assertions.length} assertion(s) passed.`) : '')
+            + ' No AI, integration, or external call was made.',
+        };
       },
     },
     {
@@ -843,11 +961,34 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     repairs.push({ rule: 14, kind: 'integration_operation_normalized', nodeId: r.nodeId, message: `Corrected ${r.integration} operation "${r.from}" → "${r.to}".` });
     if (args.stream) phase('repairing', `Corrected ${r.integration} operation → ${r.to}`);
   }
+  // Expression-contract gate (WORKFLOW-RELIABILITY Phase 1/2) — catch broken JS
+  // expressions BEFORE they ship. Deterministically repair near-miss references
+  // (`noeds`→`nodes`); surface anything still off-contract (`payload.x`, a syntax
+  // error) as a build warning on the same surface the operator already sees, so a
+  // transform that would die at run time with "X is not defined" never escapes.
+  const exprFix = repairGraphExpressions(opFix.graph);
+  for (const r of exprFix.repairs) {
+    repairs.push({ rule: 15, kind: 'expression_reference_repaired', nodeId: r.nodeId, message: `Fixed expression reference "${r.from}" → "${r.to}" in ${r.field}.` });
+    if (args.stream) phase('repairing', `Fixed expression reference ${r.from} → ${r.to}`);
+  }
+  // Sample-data dry run (P4.1): thread a representative sample from the
+  // inputContract + declared output keys through the graph and evaluate every
+  // expression against realistic upstream data — catches references the empty
+  // static probe masks behind a data access.
+  for (const issue of dryRunGraphExpressions(exprFix.graph)) {
+    preflight.warnings.push({ code: 'INVALID_EXPRESSION', nodeId: issue.nodeId, message: `${issue.field}: ${issue.message}` });
+  }
+  // P0.5 — input-reachability: a node that narrows its input (inputKeys /
+  // inputMapping) but references a field it just dropped gets undefined at run
+  // time (the silent "empty payload" class). Catch it before save.
+  for (const issue of analyzeInputReachability(exprFix.graph)) {
+    preflight.warnings.push({ code: 'INVALID_EXPRESSION', nodeId: issue.nodeId, message: `${issue.field}: ${issue.message}` });
+  }
   // Robustness audit (WORKFLOW-DESIGN-10X Phase 2) — enforce the design doctrine
   // deterministically: flag missing gates/state/reject-branches/failure-handling
   // and auto-repair the safe ones (bound an unbounded batch). Warnings ride the
   // same surface the operator already sees; repairs are narrated like any other.
-  const robustness = auditWorkflowRobustness(opFix.graph, brief.classification);
+  const robustness = auditWorkflowRobustness(exprFix.graph, brief.classification);
   for (const w of robustness.warnings) preflight.warnings.push(w);
   for (const r of robustness.repairs) {
     repairs.push({ rule: 6, kind: 'robustness_bound', message: r });
@@ -1001,7 +1142,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     // until a refresh fetches the finished workflow.
     const nodePhase = graph.phases?.find((phase) => phase.nodeIds.includes(node.id));
     publishCanvas(deps, pubCtx, REALTIME_EVENTS.CANVAS_NODE_PLACED, {
-      workflowId, runId: streamRunId, agentId: args.agentId ?? null,
+      workflowId, appId, runId: streamRunId, agentId: args.agentId ?? null,
       node: { id: node.id, type: 'default', position: node.position, data: { label: node.title, kind: node.config.kind } },
       ...(nodePhase ? {
         phase: {
@@ -1216,7 +1357,7 @@ const DELIVERY_SLUGS = new Set([
 /** One inspectable structural repair the pipeline applied (10X-CREATION §7 M1). */
 export interface RepairAction {
   rule: number;
-  kind: 'delivery_node_added' | 'recurring_state_added' | 'terminal_added' | 'cycle_broken' | 'dangling_edge_removed' | 'integration_operation_normalized' | 'cron_schedule_defaulted' | 'robustness_bound';
+  kind: 'delivery_node_added' | 'recurring_state_added' | 'terminal_added' | 'cycle_broken' | 'dangling_edge_removed' | 'integration_operation_normalized' | 'cron_schedule_defaulted' | 'robustness_bound' | 'expression_reference_repaired';
   nodeId?: string;
   message: string;
 }
@@ -1343,51 +1484,127 @@ export interface CastMember { role: string; agentId: string; created: boolean }
  * reusable across workflows. No-ops when the service isn't wired or a node is
  * already pinned to a specific agent.
  */
-function materializeCast(
+export function materializeCast(
   graph: WorkflowGraph,
   deps: ToolHandlerDeps,
   workspaceId: string,
   userId: string | undefined,
 ): { graph: WorkflowGraph; cast: CastMember[] } {
   if (!deps.specialists || !userId) return { graph, cast: [] };
+  // The orchestrator/manager tier are BUILDERS, never task workers. A node that
+  // pinned (or was authored as) one is the "orchestrator casts itself" bug — collect
+  // those ids so they get re-cast to a real specialist, and keep the worker roster
+  // so we can REUSE a fit specialist instead of minting a new role each time.
+  const allAgents = deps.db
+    .select({ id: schema.agents.id, role: schema.agents.role, capabilityTags: schema.agents.capabilityTags })
+    .from(schema.agents)
+    .where(eq(schema.agents.workspaceId, workspaceId))
+    .all();
+  const nonExecutorIds = new Set(allAgents.filter((a) => !isSpecialistRole(a.role)).map((a) => a.id));
+  const specialists = allAgents.filter((a) => isSpecialistRole(a.role));
+
   const cast: CastMember[] = [];
   const byRole = new Map<string, string>();
   const nodes = graph.nodes.map((n) => {
-    const cfg = n.config as { kind?: string; agentRole?: string; agentId?: string; requires?: unknown };
+    const cfg = n.config as { kind?: string; agentRole?: string; agentId?: string; requires?: unknown; capabilityTags?: string[] };
     if (!AGENT_NODE_KINDS.has(cfg.kind ?? '')) return n;
-    if (cfg.agentId) return n; // operator pinned a specific agent — respect it
+    // Respect a pin ONLY when it targets a real specialist — never the orchestrator.
+    if (cfg.agentId && !nonExecutorIds.has(cfg.agentId)) return n;
 
-    // When the node declares hard HAL runtime requirements, a freshly-seeded role
-    // specialist is an offline `http` placeholder that can NEVER satisfy them —
-    // the exact "the orchestrator runs browser work itself / the node stays red"
-    // failure. Bind a CONNECTED workspace agent whose LIVE runtime advertises the
-    // required affordances instead (preferring one that already matches the role).
+    // Hard HAL requirements → a CONNECTED capable WORKER (a freshly-seeded role is an
+    // offline placeholder that can't satisfy them). Never the orchestrator/manager.
     const requires = normalizeAgentRequirements(cfg.requires);
     if (requiredAffordanceKeys(requires).length > 0) {
       const capable = findConnectedCapableAgent(deps, workspaceId, requires, cfg.agentRole);
-      if (capable) {
-        if (!cast.some((c) => c.agentId === capable.id)) {
-          cast.push({ role: cfg.agentRole ?? capable.role ?? 'specialist', agentId: capable.id, created: false });
-        }
-        return { ...n, config: { ...cfg, agentId: capable.id } } as WorkflowNode;
+      if (capable && !nonExecutorIds.has(capable.id)) {
+        const capRole = cfg.agentRole ?? capable.role ?? 'specialist';
+        if (!cast.some((c) => c.agentId === capable.id)) cast.push({ role: capRole, agentId: capable.id, created: false });
+        return { ...n, config: { ...cfg, agentId: capable.id, agentRole: capRole } } as WorkflowNode;
       }
-      // No connected capable runtime — fall through to the role specialist and let
-      // workflow readiness surface the actionable gap (enable native browser /
-      // connect OpenClaw / use a Browser node) rather than dying at run time.
+      // else fall through to a specialist role; readiness surfaces the runtime gap.
     }
 
-    const role = cfg.agentRole;
-    if (!role || !isAgentRole(role)) return n;
+    // Derive a real WORKER role: the declared role if it's a specialist role, else
+    // one inferred from the node's capability tags / title, else generic specialist.
+    const declaredRole = cfg.agentRole && isAgentRole(cfg.agentRole) && isSpecialistRole(cfg.agentRole)
+      ? cfg.agentRole
+      : undefined;
+    const role = declaredRole ?? deriveSpecialistRole(cfg, n.title);
+
     let agentId = byRole.get(role);
     if (!agentId) {
-      const existed = deps.specialists!.resolveRole(workspaceId, role) !== null;
-      agentId = deps.specialists!.ensureRole(workspaceId, userId, role);
+      // Choose between agents: reuse the best-matching existing specialist (exact
+      // role, else strongest capability-tag overlap) before minting a new role.
+      const reuse = pickExistingSpecialist(specialists, role, cfg.capabilityTags);
+      const existed = reuse !== null || deps.specialists!.resolveRole(workspaceId, role) !== null;
+      agentId = reuse ?? deps.specialists!.ensureRole(workspaceId, userId, role);
       byRole.set(role, agentId);
+      // A freshly cast specialist is an offline `http` placeholder. Connect it to
+      // the workspace's default runtime NOW so it isn't "offline / fails on first
+      // run", and so model routing sees real candidates (not just the lone default).
+      if (!existed) connectSpecialistRuntime(deps, workspaceId, agentId);
       cast.push({ role, agentId, created: !existed });
     }
-    return { ...n, config: { ...cfg, agentId } } as WorkflowNode;
+    return { ...n, config: { ...cfg, agentId, agentRole: role } } as WorkflowNode;
   });
   return { graph: { ...graph, nodes }, cast };
+}
+
+/**
+ * Bind a freshly cast specialist to the workspace's default runtime at build time,
+ * so it shows CONNECTED (not an offline `http` placeholder that "fails on first
+ * run") and model routing has real candidates. Best-effort: when model-assisted
+ * runtime is disabled (resolver returns nothing) the specialist stays offline and
+ * the engine's lazy dispatch-time bind remains the fallback; a failure here never
+ * blocks the build.
+ */
+function connectSpecialistRuntime(deps: ToolHandlerDeps, workspaceId: string, agentId: string): void {
+  if (!deps.adapters || !deps.resolveAgentRuntime) return; // no runtime resolver wired
+  if (deps.adapters.get(agentId)) return; // already connected
+  try {
+    const runtime = deps.resolveAgentRuntime(workspaceId, agentId, null, null) as AgentAdapter | undefined;
+    if (!runtime) return;
+    deps.adapters.register(agentId, runtime);
+    deps.db
+      .update(schema.agents)
+      .set({ adapterType: runtime.adapterType, status: 'online', updatedAt: new Date().toISOString() })
+      .where(eq(schema.agents.id, agentId))
+      .run();
+  } catch (err) {
+    deps.logger?.warn?.('materialize_cast.connect_runtime_failed', { agentId, error: (err as Error).message });
+  }
+}
+
+/** Infer a specialist role slug from a node's capability tags or title. */
+function deriveSpecialistRole(cfg: { capabilityTags?: string[] }, title?: string): string {
+  const tag = (cfg.capabilityTags ?? []).find((t) => typeof t === 'string' && t.trim());
+  return roleSlug(tag ?? title ?? 'specialist');
+}
+
+function roleSlug(value: string): string {
+  const slug = value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return slug || 'specialist';
+}
+
+/** Best existing specialist for a role/capability set: exact role match, else the
+ *  strongest capability-tag overlap. Null when nothing reasonable matches. */
+function pickExistingSpecialist(
+  specialists: Array<{ id: string; role: string | null; capabilityTags: unknown }>,
+  role: string,
+  capabilityTags?: string[],
+): string | null {
+  const target = roleSlug(role);
+  const exact = specialists.find((s) => roleSlug(s.role ?? '') === target);
+  if (exact) return exact.id;
+  const want = new Set((capabilityTags ?? []).map((t) => String(t).toLowerCase()));
+  if (want.size === 0) return null;
+  let best: { id: string; score: number } | null = null;
+  for (const s of specialists) {
+    const tags = Array.isArray(s.capabilityTags) ? (s.capabilityTags as string[]) : [];
+    const overlap = tags.filter((t) => want.has(String(t).toLowerCase())).length;
+    if (overlap > 0 && (!best || overlap > best.score)) best = { id: s.id, score: overlap };
+  }
+  return best?.id ?? null;
 }
 
 /**
@@ -2204,7 +2421,6 @@ function nodeReason(node: WorkflowNode): string {
     agent_task: 'Delegates the main work to a configured agent.',
     checkpoint: 'Adds a human decision gate before continuing.',
     scratchpad: 'Stores the final output for later steps or inspection.',
-    skill_task: 'Runs a fast in-process skill.',
     router: 'Branches execution based on conditions.',
     merge: 'Collects branch results before continuing.',
     subflow: 'Calls another workflow as a reusable subflow.',
@@ -2572,7 +2788,10 @@ async function synthesizeWithLlm(
   // model-agnostic, no per-family tuning. Bounded so a failing model can't loop.
   let attemptPrompt = userPrompt;
   let lastError: string | null = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // Three correction passes (was two): a weak model often needs the validation
+  // error fed back more than once to converge on a valid graph; bounded so a
+  // hopeless model still can't loop.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     if (signal?.aborted) return { graph: null, reason: 'model_error', error: 'canceled' };
     const result = await runtime.completeStructured<{ graph?: unknown; patch?: unknown }>({
       system: systemPrompt,
@@ -2646,7 +2865,7 @@ const SYNTHESIS_ARCHITECT_PREAMBLE = [
   '3. Native Integration — email/Slack/GitHub/Sheets actions use an `integration` node, never',
   '   an agent_task prompt that says "send an email".',
   '4. Source Fetching — fetching a URL uses an `http_request` (or `browser`) node, never an agent prompt.',
-  '5. Knowledge Before Agent — wire a `knowledge` node before an agent_task that needs workspace facts.',
+  '5. Knowledge Before Agent — wire a `knowledge` node (Knowledge-Base/RAG search) before an agent_task that needs facts from UPLOADED DOCS. Do NOT add a node to write memory — the Brain learns automatically and agents write it via tools.',
   '6. Guard Expensive/External Steps — put an `evaluator` or `checkpoint` before any delivery action.',
   '7. Scheduled = Autonomous — a cron trigger runs unattended; do NOT add a checkpoint unless the',
   '   user explicitly asked for human approval.',
@@ -2698,20 +2917,37 @@ function renderCreationBrief(brief: CreationBrief): string {
   return lines.join('\n');
 }
 
-const SYNTHESIS_SYSTEM_PROMPT = [
+export const SYNTHESIS_SYSTEM_PROMPT = [
   'You are the Agentis workflow architect. Convert the user\'s description into a valid',
   '`WorkflowGraph` JSON object. Return ONLY a JSON object of shape',
   '{ "graph": { version: 1, nodes: [...], edges: [...], viewport: { x: 0, y: 0, zoom: 1 } } }',
   '— no prose, no markdown, no code fences.',
   '',
-  'Node kinds available on `node.config.kind`:',
-  '  control: trigger, router, merge, subflow, wait, loop, parallel',
-  '  data:    transform, filter, integration, http_request, workflow_store, scratchpad',
-  '  intel:   agent_task, agent_session, skill_task, agent_swarm, dynamic_swarm, planner, evaluator, guardrails',
-  '  know:    knowledge, artifact_collect',
-  '  output:  return_output, artifact_save',
-  '  native:  browser',
-  '  human:   checkpoint',
+  'Node kinds. PREFER the PRIMARY set — it expresses the vast majority of workflows. Reach for an',
+  'ADVANCED kind only when a primary one genuinely cannot do the job:',
+  '  PRIMARY:',
+  '    trigger        — entry point (manual | cron | webhook | persistent_listener)',
+  '    agent_task     — a REAL tool-using agent (set useSession:true for a long, multi-step / delegating mission)',
+  '    transform      — ALL deterministic data shaping: projection, array filter/dedupe/rank, object construction',
+  '    filter         — boolean gate (pass / skip) — never returns data',
+  '    http_request   — fetch a URL / call a JSON API',
+  '    integration    — a connector action (Slack / Gmail / GitHub / Sheets / …)',
+  '    knowledge      — Knowledge-Base (RAG) search over UPLOADED DOCS (not the Brain memory)',
+  '    router         — branch by condition',
+  '    merge          — join parallel branches',
+  '    evaluator      — LLM-judge gate: score an output, route pass/fail, retry on fail',
+  '    workflow_store — persistent state ACROSS RUNS of this workflow (dedup cursors, running logs)',
+  '    return_output  — REQUIRED terminal node that renders the operator-facing result',
+  '  ADVANCED (only when warranted): loop, parallel, converge (loop-until-a-goal), dynamic_swarm (parallelize an',
+  '    unknown number of similar items), agent_swarm, planner, subflow, wait, checkpoint (human approval),',
+  '    guardrails, browser (headless web automation), artifact_save, artifact_collect, scratchpad',
+  '    (ephemeral state within ONE run).',
+  '',
+  'Choosing an intelligence node (smallest sufficient): agent_task (one focused mission; +useSession for long,',
+  'stateful, delegating work)  <  dynamic_swarm (parallelize an unknown number of similar items)  <  converge',
+  '(iterate a cohort until a goal or quality bar is met). A single agent_task already searches the web + KB,',
+  'recalls/records memory, persists state, and runs sandboxed code — so prefer ONE capable agent_task over a',
+  'pipeline of tiny ones.',
   '',
   'Required config fields per kind (anything else is optional):',
   '  trigger:        { kind: "trigger", triggerType: "manual" | "cron" | "webhook" | "persistent_listener" }',
@@ -2733,11 +2969,10 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '                  form, scrape, screenshot, or render a PDF — use a `browser` node (platform headless Chromium), NOT',
   '                  requires.browser. Set requires.browser/computerUse only when this agent task itself must drive a native,',
   '                  stateful browser/desktop/GUI/computer-use runtime that the operator has actually connected.',
-  '  agent_session:  { kind: "agent_session", prompt, agentRole, inputKeys, outputKeys, capabilityTags, maxSteps? }',
-  '                  A PERSISTENT autonomous agent for longer, multi-step missions: it keeps memory across steps, can DELEGATE',
-  '                  sub-tasks to other specialists and await their results, wait for events, and pause for approval — sleeping',
-  '                  at zero cost while it waits. Use this (not agent_task) when the work needs sub-agents, long research, or',
-  '                  cross-step state. Heavier than agent_task; prefer agent_task for a single focused reasoning task.',
+  '                  PERSISTENCE: for a long, multi-step mission that must DELEGATE to sub-agents, await events, or',
+  '                  pause for approval (sleeping at zero cost while it waits), set `useSession: true` on the',
+  '                  agent_task. Do NOT emit a separate node kind for this — one agent node, with a flag. Prefer a',
+  '                  plain agent_task (no useSession) for a single focused reasoning task.',
   '  dynamic_swarm:  { kind: "dynamic_swarm", goal, agentRole, maxTasks, maxParallel, mergeStrategy: "collect_all"|"first_success"|"majority_vote", outputKey, capabilityTags }',
   '                  A planner agent decides the task LIST at runtime from `goal`, then maxParallel workers (role=agentRole) run',
   '                  in parallel. Use for broad, parallelizable work whose item count is unknown up front (e.g. "research each',
@@ -2745,8 +2980,10 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '  planner:        { kind: "planner", goal, agentRole?, workerRole?, inputKeys, outputKeys, maxNodes? }',
   '                  A planner agent decomposes `goal` and SPLICES the sub-steps into the live run as real agent nodes (they',
   '                  appear on the canvas and run through the engine). Use when the sub-structure is unknown until runtime.',
-  '  skill_task:     { kind: "skill_task", skillId, inputMapping, outputMapping }',
   '  knowledge:      { kind: "knowledge", queryMode: "static" | "dynamic", topK, retrievalMode }',
+  '                  Searches the Knowledge Base (uploaded docs / RAG). NOT the Brain (the',
+  '                  agents\' learned memory) — that fills automatically from chat + runs, and',
+  '                  agents write it via tools; never author a node to "save to the Brain".',
   '  router:         { kind: "router", routingMode: "first_match" | "all_matching" | "llm_route", branches: [] }',
   '  merge:          { kind: "merge", requiredInputs: "all" | "any" }',
   '  checkpoint:     { kind: "checkpoint", approvalMode: "manual" | "auto_after_timeout" }',
@@ -2763,6 +3000,9 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '                  Example JSON extraction: `{ outputKey: "items", bodyPath: "data.items" }`. Never use `{ raw: "body" }` or `{ json: "body" }`.',
   '  workflow_store: { kind: "workflow_store", operations: [{ op, key, value?, outputKey? }] }',
   '                  op MUST be one of: get | set | delete | increment | append | get_all (NOT read/write).',
+  '                  Persistent KV SCOPE: `workflow_store` persists across runs of THIS workflow (the common case —',
+  '                  dedup cursors, running logs). For state shared across ALL workflows use `workspace_store`',
+  '                  (same operations shape); for throwaway state within ONE run use `scratchpad`.',
   '  evaluator:      { kind: "evaluator", targetPath, criteria, passThreshold? }',
   '  guardrails:     { kind: "guardrails", rules: [], onViolation: "block"|"flag" }',
   '  loop:           { kind: "loop", itemsExpression, maxConcurrency, bodyWorkflowId, outputArrayKey, onIterationError }',
@@ -2809,14 +3049,37 @@ const SYNTHESIS_SYSTEM_PROMPT = [
   '  produce HTML in a transform, then browser serve_html with htmlPath:"content", then return_output renderAs:"html".',
   '- HAL runtime requirements (`requires`) are rare. Web search uses specialist tools; URL fetch/scrape uses',
   '  http_request/browser nodes; only native browser/computer-control agent tasks need requires.browser/computerUse.',
-  '- Use skill_task only with a real skillId from AVAILABLE SKILLS. Never invent skill IDs.',
   '- Choosing the intelligence node: default to `agent_task` (a capable tool-using agent) for a focused reasoning task.',
-  '  Use `agent_session` when the work must delegate to sub-specialists, run many steps, or keep memory across steps;',
-  '  `dynamic_swarm` when an agent must fan out an unknown number of parallel sub-tasks; `planner` when the sub-structure',
-  '  is unknown until runtime. Do NOT chain many agent_tasks when one agent_session that delegates would be cleaner.',
+  '  Set `useSession: true` on the agent_task when the work must delegate to sub-specialists, run many steps, or keep',
+  '  memory across steps; use `dynamic_swarm` to fan out an unknown number of parallel sub-tasks. Do NOT chain many',
+  '  tiny agent_tasks when one capable agent_task (with useSession if needed) would be cleaner.',
   '- Use `evaluator` after an `agent_task` whenever output quality matters; route its FAIL handle',
   '  back to the agent_task with the critique embedded via `{{nodes.<EVALID>.critique}}`.',
   '- Use `checkpoint` only when human review is genuinely needed (irreversible action, high spend).',
   '- Always give each node a stable string `id` (kebab-case) and a human-readable `title`.',
   '- Place nodes left-to-right: trigger at x ≈ 0, each downstream step at x += 260.',
+  '',
+  'WORKED EXAMPLES (study the SHAPE — node kinds, how edges connect, the terminal return_output — then',
+  'adapt to the request; do not copy them literally):',
+  '',
+  'A) Scheduled digest — "every morning email me a summary of new HN AI posts":',
+  '{"version":1,"viewport":{"x":0,"y":0,"zoom":1},"nodes":[',
+  '  {"id":"trigger","type":"trigger","title":"Every morning 9am","position":{"x":0,"y":0},"config":{"kind":"trigger","triggerType":"cron","schedule":"0 9 * * *"}},',
+  '  {"id":"seen","type":"workflow_store","title":"Load seen IDs","position":{"x":260,"y":0},"config":{"kind":"workflow_store","operations":[{"op":"get","key":"seenIds","outputKey":"seen"}]}},',
+  '  {"id":"fetch","type":"http_request","title":"Fetch HN AI posts","position":{"x":520,"y":0},"config":{"kind":"http_request","method":"GET","url":"https://hn.algolia.com/api/v1/search?query=AI&tags=story","responseMapping":{"outputKey":"hits","bodyPath":"hits"}}},',
+  '  {"id":"new","type":"transform","title":"Keep only new posts","position":{"x":780,"y":0},"config":{"kind":"transform","expression":"({ posts: (nodes.fetch.hits||[]).filter(p => !(nodes.seen.seen||[]).includes(p.objectID)) })"}},',
+  '  {"id":"write","type":"agent_task","title":"Write the digest","position":{"x":1040,"y":0},"config":{"kind":"agent_task","agentRole":"writer","prompt":"Write a concise morning digest of these AI posts.","inputKeys":["posts"],"outputKeys":["subject","body"]}},',
+  '  {"id":"send","type":"integration","title":"Email the digest","position":{"x":1300,"y":0},"config":{"kind":"integration","integrationId":"agentmail","operationId":"send_message","inputs":{"subject":"{{nodes.write.subject}}","body":"{{nodes.write.body}}"}}},',
+  '  {"id":"save","type":"workflow_store","title":"Remember sent IDs","position":{"x":1560,"y":0},"config":{"kind":"workflow_store","operations":[{"op":"set","key":"seenIds","value":"{{nodes.fetch.hits}}"}]}},',
+  '  {"id":"out","type":"return_output","title":"Done","position":{"x":1820,"y":0},"config":{"kind":"return_output","renderAs":"markdown","valuePath":"nodes.write.body"}}',
+  '],"edges":[{"id":"e1","source":"trigger","target":"seen"},{"id":"e2","source":"seen","target":"fetch"},{"id":"e3","source":"fetch","target":"new"},{"id":"e4","source":"new","target":"write"},{"id":"e5","source":"write","target":"send"},{"id":"e6","source":"send","target":"save"},{"id":"e7","source":"save","target":"out"}]}',
+  '',
+  'B) Watch → qualify → act — "when a new lead arrives, score it and Slack me only the good ones":',
+  '{"version":1,"viewport":{"x":0,"y":0,"zoom":1},"nodes":[',
+  '  {"id":"trigger","type":"trigger","title":"New lead webhook","position":{"x":0,"y":0},"config":{"kind":"trigger","triggerType":"webhook"}},',
+  '  {"id":"score","type":"agent_task","title":"Score the lead","position":{"x":260,"y":0},"config":{"kind":"agent_task","agentRole":"analyst","prompt":"Score this lead 0-10 for fit and explain why.","inputKeys":["lead"],"outputKeys":["score","reason"]}},',
+  '  {"id":"gate","type":"router","title":"Good lead?","position":{"x":520,"y":0},"config":{"kind":"router","routingMode":"first_match","branches":[{"label":"good","condition":"nodes.score.score >= 7"}]}},',
+  '  {"id":"notify","type":"integration","title":"Slack me","position":{"x":780,"y":0},"config":{"kind":"integration","integrationId":"slack","operationId":"send_message","inputs":{"text":"Hot lead ({{nodes.score.score}}): {{nodes.score.reason}}"}}},',
+  '  {"id":"out","type":"return_output","title":"Done","position":{"x":1040,"y":0},"config":{"kind":"return_output","renderAs":"json","valuePath":"nodes.score"}}',
+  '],"edges":[{"id":"e1","source":"trigger","target":"score"},{"id":"e2","source":"score","target":"gate"},{"id":"e3","source":"gate","target":"notify","type":"condition","condition":"nodes.score.score >= 7"},{"id":"e4","source":"notify","target":"out"},{"id":"e5","source":"gate","target":"out"}]}',
 ].join('\n');

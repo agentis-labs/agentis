@@ -60,7 +60,7 @@ const agentTaskConfigSchema = z.object({
   capabilityTags: z.array(z.string()).default([]),
   requires: agentRequirementsSchema.optional(),
   prompt: z.string().min(1),
-  inputKeys: z.array(z.string()).default([]),
+  inputKeys: z.array(z.string()).default([]).describe('Input allow-list: keep ONLY these top-level keys from the merged upstream input before this node runs. EMPTY (default) = pass the ENTIRE input through. Non-empty = every key NOT listed is dropped.'),
   outputKeys: z.array(z.string()).default([]),
   skills: z.array(z.string()).optional(),
   extensions: z.array(z.string()).optional(),
@@ -79,7 +79,7 @@ const agentSessionConfigSchema = z.object({
   agentRole: agentRoleSchema.optional(),
   prompt: z.string().min(1),
   persona: z.string().optional(),
-  inputKeys: z.array(z.string()).default([]),
+  inputKeys: z.array(z.string()).default([]).describe('Input allow-list: keep ONLY these top-level keys from the merged upstream input before this node runs. EMPTY (default) = pass the ENTIRE input through. Non-empty = every key NOT listed is dropped.'),
   outputKeys: z.array(z.string()).default([]),
   maxSteps: z.number().int().positive().optional(),
   capabilityTags: z.array(z.string()).default([]),
@@ -93,7 +93,7 @@ const extensionTaskConfigSchema = z.object({
   extensionSlug: z.string().min(1).optional(),
   operationName: z.string().min(1),
   version: z.string().min(1).optional(),
-  inputMapping: z.record(z.string(), z.string()).default({}),
+  inputMapping: z.record(z.string(), z.string()).default({}).describe('Field remap { targetField: sourcePath }. EMPTY (default) = pass the ENTIRE upstream input through unchanged. Non-empty = build a NEW object with ONLY the mapped targetFields; every unmapped field is DROPPED (becomes undefined). sourcePath forms: "field", "inputs.field", or "scratchpad.x.y".'),
   outputMapping: z.record(z.string(), z.string()).default({}),
   timeoutMs: z.number().int().positive().optional(),
 });
@@ -155,7 +155,7 @@ const subflowConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('subflow'),
   workflowId: z.string().uuid(),
-  inputMapping: z.record(z.string(), z.string()).default({}),
+  inputMapping: z.record(z.string(), z.string()).default({}).describe('Field remap { targetField: sourcePath }. EMPTY (default) = pass the ENTIRE upstream input through unchanged. Non-empty = build a NEW object with ONLY the mapped targetFields; every unmapped field is DROPPED (becomes undefined). sourcePath forms: "field", "inputs.field", or "scratchpad.x.y".'),
   outputMapping: z.record(z.string(), z.string()).default({}),
 });
 

@@ -47,7 +47,7 @@ export const WORKFLOW_PATTERNS: WorkflowPattern[] = [
     nodes: [
       { id: 'fetch', kind: 'browser', title: 'Fetch candidate', config: { kind: 'browser', operation: 'extract_text' } },
       { id: 'qualify', kind: 'agent_task', title: 'Qualify candidate', config: { kind: 'agent_task', agentRole: 'analyst', prompt: 'Score the candidate against the bar; output { pass: boolean, reason }.', outputKeys: ['pass'] } },
-      { id: 'gate', kind: 'router', title: 'Qualified?', config: { kind: 'router', routingMode: 'first_match', branches: [{ condition: 'inputs["qualify"].pass == true' }, { condition: 'inputs["qualify"].pass == false' }] } },
+      { id: 'gate', kind: 'router', title: 'Qualified?', config: { kind: 'router', routingMode: 'first_match', branches: [{ condition: 'nodes["qualify"].pass == true' }, { condition: 'nodes["qualify"].pass == false' }] } },
     ],
     edges: [
       { from: 'fetch', to: 'qualify' },
@@ -94,7 +94,7 @@ export const WORKFLOW_PATTERNS: WorkflowPattern[] = [
     nodes: [
       { id: 'action', kind: 'integration', title: 'Irreversible action', config: { kind: 'integration', integrationId: '', operationId: '', inputs: {} } },
       { id: 'validate', kind: 'evaluator', title: 'Action succeeded?', config: { kind: 'evaluator', targetPath: 'result', criteria: 'The action verifiably succeeded (e.g. live URL returns 200).', passThreshold: 0.7 } },
-      { id: 'gate', kind: 'router', title: 'Ok?', config: { kind: 'router', routingMode: 'first_match', branches: [{ condition: 'inputs["validate"].pass == true' }, { condition: 'inputs["validate"].pass == false' }] } },
+      { id: 'gate', kind: 'router', title: 'Ok?', config: { kind: 'router', routingMode: 'first_match', branches: [{ condition: 'nodes["validate"].pass == true' }, { condition: 'nodes["validate"].pass == false' }] } },
       { id: 'rollback', kind: 'integration', title: 'Rollback / cleanup', config: { kind: 'integration', integrationId: '', operationId: '', inputs: {} } },
     ],
     edges: [

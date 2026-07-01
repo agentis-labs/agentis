@@ -22,7 +22,11 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.workflow.run',
         family: 'run',
-        description: 'Start a workflow run with optional inputs.',
+        mcpExposed: true,
+        description:
+          'Start a workflow run with optional inputs. Set debugRun:true for a TEST run that '
+          + 'disables self-healing and fallback recovery so you observe the RAW per-node failure '
+          + '(use while debugging a build; use a normal run in production).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -31,6 +35,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
             planId: { type: 'string' },
             inputs: { type: 'object' },
             input: { type: 'string' },
+            debugRun: { type: 'boolean', description: 'Test run: disable self-heal + fallback so raw per-node failures surface.' },
           },
           required: ['workflowId'],
         },
@@ -81,6 +86,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           triggerId: null,
           inputs,
           initialState,
+          debugRun: args.debugRun === true,
           graph,
         });
         return { runId: handle.runId, workflowId: handle.workflowId, status: 'started' };
@@ -90,6 +96,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.run.cancel',
         family: 'run',
+        mcpExposed: true,
         description: 'Cancel a running workflow run.',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: true,
@@ -111,6 +118,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.run.status',
         family: 'run',
+        mcpExposed: true,
         description: 'Quick status check on a run (lighter than agentis.run.inspect).',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: false,
@@ -123,6 +131,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.workflow.status',
         family: 'run',
+        mcpExposed: true,
         description: 'Get run status, progress, active node, and failed-node summary.',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: false,
@@ -133,6 +142,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.workflow.list',
         family: 'inspect',
+        mcpExposed: true,
         description: 'List recent workflow runs in the workspace.',
         inputSchema: {
           type: 'object',
@@ -149,6 +159,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.run.query',
         family: 'inspect',
+        mcpExposed: true,
         description: 'Query run history by workflow, status, date, and limit.',
         inputSchema: {
           type: 'object',
@@ -172,6 +183,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.run.diagnose',
         family: 'inspect',
+        mcpExposed: true,
         description: 'Diagnose a failed or stalled run using state and recent ledger events.',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: false,
@@ -228,6 +240,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.run.replay',
         family: 'run',
+        mcpExposed: true,
         description: 'Create a child run that replays from a chosen point.',
         inputSchema: {
           type: 'object',
@@ -270,7 +283,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
       definition: {
         id: 'agentis.memory.write',
         family: 'run',
-        description: 'Store a new memory entry in the workspace persistent memory.',
+        description: 'Store a memory entry directly in the WORKSPACE-wide persistent memory (ungated: no formation judge or PII scrub). For App-scoped, gated learnings prefer agentis.data.promote_memory instead. Write only durable, reusable lessons — never transient work product.',
         inputSchema: {
           type: 'object',
           properties: {

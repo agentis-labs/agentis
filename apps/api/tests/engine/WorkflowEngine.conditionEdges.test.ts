@@ -429,6 +429,40 @@ describe('WorkflowEngine condition-edge dispatch', () => {
     expect(state.nodeStates.broken?.status).toBe('FAILED');
     expect(state.nodeStates.downstream?.status).toBe('SKIPPED');
   });
+
+  it('routes a conditional edge that references an upstream node by id — nodes["id"].field (P0.1)', async () => {
+    // Regression for the unified condition scope. Before P0.1, an edge condition
+    // was evaluated against ONLY { output, scratchpad } — so `nodes["decide"]`
+    // resolved to undefined and BOTH branches silently evaluated false. Now edge
+    // conditions see the same real scope as routers/transforms/templates.
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'decide', type: 'transform', title: 'Decide', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ pass: true })' } },
+        { id: 'accept', type: 'transform', title: 'Accept', position: { x: 400, y: 0 }, config: { kind: 'transform', expression: '({ routed: "accept" })' } },
+        { id: 'reject', type: 'transform', title: 'Reject', position: { x: 400, y: 200 }, config: { kind: 'transform', expression: '({ routed: "reject" })' } },
+      ],
+      edges: [
+        { id: 't-d', source: 'trigger', target: 'decide' },
+        { id: 'd-a', source: 'decide', target: 'accept', type: 'condition', condition: 'nodes["decide"].pass == true' },
+        { id: 'd-r', source: 'decide', target: 'reject', type: 'condition', condition: 'nodes["decide"].pass == false' },
+      ],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph);
+    const terminal = waitForTerminal(runId);
+    await makeEngine(new AdapterManager(ctx.logger)).startRun({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id,
+      triggerId: null, inputs: {}, initialState, graph,
+    });
+    await terminal;
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    const state = run.runState as { nodeStates: Record<string, { status: string }> };
+    expect(run.status).toBe('COMPLETED');
+    expect(state.nodeStates.accept?.status).toBe('COMPLETED');
+    expect(state.nodeStates.reject?.status).toBe('SKIPPED');
+  });
 });
 
 function makeEngine(adapters: AdapterManager): WorkflowEngine {

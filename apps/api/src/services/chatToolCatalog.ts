@@ -232,7 +232,8 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.workflow.patch',
     description:
-      'Patch a workflow graph. Use workflowId + graph for an at-rest workflow, or runId + patch for a live run graph patch after diagnosing a concrete issue.',
+      'Replace a workflow graph ATOMICALLY: workflowId + the COMPLETE graph for an at-rest workflow, or runId + patch for a live run after diagnosing a concrete issue. ' +
+      'This is NOT a partial editor — for a scoped add/update/remove of nodes or edges, use agentis.build_workflow with workflowId + patchDraft instead.',
     parameters: {
       type: 'object',
       properties: {
@@ -908,7 +909,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         description: { type: 'string', description: 'What the extension does.' },
         source: {
           type: 'string',
-          description: 'JavaScript source exporting async functions matching the operation names.',
+          description: 'JavaScript source: declare a TOP-LEVEL async function per operation — `async function <operationName>(inputs, ctx) { ... }`. Do NOT use module.exports, exports, require, or import (all blocked by the sandbox); use `ctx.http.fetch(url, opts)` for network. Return the operation output object.',
         },
         operations: {
           type: 'array',
@@ -946,9 +947,10 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.app.scaffold',
     description:
-      'Give an App its DATA + INTERFACE in one call — the fast path to a real product. Defines the datastore collections (the data format) AND authors a real, data-bound operator surface (AgentConsole + ActivityStream + a board/table/form bound to those collections, create actions wired). ' +
+      'Give an App its DATA + INTERFACE in one call — the fast path to a real product. Defines the datastore collections (the data format) AND authors a real, data-bound operator surface (ActivityStream + a board/table/form bound to those collections, create actions wired). ' +
       'Use this whenever the operator asks for an app with an interface — a CRM, dashboard, tracker, pipeline, board, portal, or console. An App with logic but no UI or data is incomplete. ' +
-      'Pass collections to define the data model and prompt to describe the interface. More reliable than hand-authoring a ViewNode tree with ui_render.',
+      'It picks a premium design language (aurora/soft/editorial/console) that fits the domain, so the surface looks designed — not a flat template. ' +
+      'Pass collections to define the data model and prompt to describe the interface (mention the vibe — e.g. "exec dashboard", "friendly CRM" — to steer the look). More reliable than hand-authoring a ViewNode tree with ui_render.',
     parameters: {
       type: 'object',
       properties: {
@@ -1007,8 +1009,9 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.ui.render',
     description:
-      'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge/CustomView). ' +
-      'Table/List bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Button/Form reference an action declared with agentis.ui.action_schema.',
+      'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Split/Tabs/Hero/KPIStrip/Metric/Chart/Table/List/DataBoard/Funnel/Timeline/Form/Button/ActivityStream/WorkflowControl/ChatThread/Inbox/CustomView…). ' +
+      'On the ROOT node set style.theme AND style.design to pick the LOOK — design:"aurora" (glass/glow dashboards), "soft" (consumer/CRM), "editorial" (content), "console" (ops), "operations" (default); when in doubt for a dashboard use "aurora". Lead an App overview DASHBOARD-FIRST: a Hero + KPIStrip, and a WorkflowControl panel (the App\'s own workflows, each with a run button — no bind) when the App owns workflows, THEN charts + a table; never a flat card stack and never data-entry Forms at the top. ' +
+      'Table/List/Chart/DataBoard bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Button/Form reference an action declared with agentis.ui.action_schema.',
     parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, view: { type: 'object' } }, required: ['surface', 'view'] },
   },
   {

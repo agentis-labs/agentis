@@ -22,6 +22,8 @@ export interface EphemeralRunInput {
   graph: WorkflowGraph;
   inputs?: Record<string, unknown>;
   maxDurationMs?: number | null;
+  /** P1.2: test run — suppress self-heal + fallback so raw per-node failures surface. */
+  debugRun?: boolean;
 }
 
 export interface EphemeralRunResult {
@@ -97,6 +99,7 @@ export async function startEphemeralWorkflow(
     triggerId: null,
     inputs: input.inputs ?? {},
     initialState,
+    debugRun: input.debugRun === true,
     graph,
   });
 

@@ -92,6 +92,7 @@ import {
   genericSpecialist,
   roleTools,
   effectiveSpecialistTools,
+  DEFAULT_SPECIALIST_TOOLS,
   normalizeRole,
   isAgentRole,
 } from '@agentis/core';
@@ -135,6 +136,7 @@ import { AgentToolLoop, type StructuredLlm } from '../services/agentToolLoop.js'
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
 import { ChatSessionExecutor } from '../services/chatSessionExecutor.js';
 import type { AgentSessionService } from '../services/agentSession.js';
+import { estimateTokens } from '../services/agentSession.js';
 import type { AgentSessionRuntime, SessionRunContext, SessionOutcome, SessionYield } from '../services/agentSessionRuntime.js';
 import { attenuateGrant } from '../services/agentSessionRuntime.js';
 import type { PlanService } from '../services/planService.js';
@@ -157,10 +159,11 @@ import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
 import { buildTemplateContext, resolveTemplate, resolveTemplateDeep, readTemplatePath, type TemplateContext } from './templateResolver.js';
 import { nodeIdempotencyKey } from './idempotency.js';
-import { NodeHandlerRegistry } from './handlers/NodeHandler.js';
+import { NodeHandlerRegistry, type PureNodeHandler } from './handlers/NodeHandler.js';
 import { registerPureNodeHandlers } from './handlers/pureHandlers.js';
 import { registerUtilityNodeHandlers } from './handlers/utilityHandlers.js';
 import { evaluateExpression, evaluateBooleanExpression } from './safeExpression.js';
+import { repairExpressionReferences } from './validateExpressions.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
 import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
 import { getCustomIntegrationManifest } from '../services/integrationRegistry.js';
@@ -350,6 +353,9 @@ export interface StartRunArgs {
   inputs: Record<string, unknown>;
   initialState: WorkflowRunState;
   graph: WorkflowGraph;
+  /** P1.2: when true, suppress self-heal + fallback recovery so a debugging agent
+   *  observes the RAW per-node failure. For test/debug runs, not production. */
+  debugRun?: boolean;
 }
 
 export interface RunHandle {
@@ -360,6 +366,9 @@ export interface RunHandle {
 export class WorkflowEngine {
   /** In-flight run-state cache keyed by runId. */
   readonly #runs = new Map<string, RunningContext>();
+  /** P1.2: runIds started in debug/test mode — self-heal + fallback recovery are
+   *  suppressed so an agent debugging a build sees the RAW failure, not a heal. */
+  readonly #debugRuns = new Set<string>();
   /**
    * LAYER 1 (immersive-realtime): a capped, in-memory replayable activity tail per
    * run — every node step, agent thought, tool call, and status change as a
@@ -385,6 +394,9 @@ export class WorkflowEngine {
   async startRun(args: StartRunArgs): Promise<RunHandle> {
     const normalized = normalizeWorkflowGraph(this.deps.db, args.workspaceId, args.graph);
     const graph = normalized.graph;
+    // P1.2: mark a debug/test run so self-heal + fallback recovery are suppressed
+    // and the agent observes the RAW per-node failure instead of a healed result.
+    if (args.debugRun) this.#debugRuns.add(args.initialState.runId);
     if (normalized.repairs.length > 0) {
       this.deps.logger.info('engine.graph.normalized', {
         runId: args.initialState.runId,
@@ -1131,6 +1143,22 @@ export class WorkflowEngine {
     }
   }
 
+  /**
+   * P1.3: is a LIVE run of this workflow currently self-healing (DIAGNOSING /
+   * PLANNING)? Lets an editing tool warn before it races the healer's own graph
+   * patch on the same workflow. Reads live in-memory run state (not the DB).
+   */
+  isSelfHealInFlight(workflowId: string): boolean {
+    for (const ctx of this.#runs.values()) {
+      if (ctx.workflowId !== workflowId) continue;
+      for (const incident of Object.values(ctx.state.selfHealIncidents ?? {})) {
+        const status = (incident as { status?: string })?.status;
+        if (status === 'DIAGNOSING' || status === 'PLANNING') return true;
+      }
+    }
+    return false;
+  }
+
   async cancelRun(runId: string): Promise<void> {
     const ctx = this.#runs.get(runId);
     if (!ctx) {
@@ -1266,6 +1294,14 @@ export class WorkflowEngine {
       }
       output = heal.output;
     }
+    // Attribute the dispatch path's tokens (estimated): the input prompt stashed
+    // at dispatch + the returned output. Exact usage isn't reported by most CLI
+    // harnesses, so a grounded estimate lands on the terminal node.completed entry.
+    const dispatchInputTokens = ctx.nodeDispatchInputTokens?.get(args.nodeId);
+    if (dispatchInputTokens !== undefined) {
+      ctx.nodeDispatchInputTokens?.delete(args.nodeId);
+      this.#recordNodeTokens(ctx, args.nodeId, dispatchInputTokens, estimateTokens(safeJson(args.output)));
+    }
     try {
       const completedOutput = await this.#completeNode(ctx, args.nodeId, output);
       if (!completedOutput) {
@@ -1304,6 +1340,8 @@ export class WorkflowEngine {
     rawOutput: Record<string, unknown>,
     error: string,
   ): Promise<SelfHealEngineResult> {
+    // P1.2: a debug/test run never self-heals — surface the raw failure.
+    if (this.#debugRuns.has(ctx.runId)) return { kind: 'none' };
     if (!this.deps.selfHeal) return { kind: 'none' };
     if (!isSelfHealableNode(node)) return { kind: 'none' };
     let cfg;
@@ -1339,6 +1377,22 @@ export class WorkflowEngine {
     if (node.config.kind === 'agent_task' && isRuntimeBindingFailure(error)) {
       const runtimeRepair = await this.#repairNodeRuntime(ctx, node, error, cfg);
       if (runtimeRepair.kind !== 'none') return runtimeRepair;
+    }
+
+    // ── CAPABILITY-AWARE (E4): a missing capability/provider/tool/binary is not a
+    //    structural fault — swapping the agent or rewriting the graph cannot add it.
+    //    Escalate honestly with the capability to enable instead of burning LLM
+    //    replans that pointlessly reroute the agent (the sonnet→hermes loop).
+    const capGap = capabilityGapReason(error);
+    if (capGap) {
+      this.#emitWorkStep(ctx, node, 'fail', `Missing capability — ${capGap}. Enable it rather than swapping the agent.`);
+      this.#audit(ctx, { nodeId: node.id, action: 'self_heal.capability_gap', actorType: 'system', actorId: 'engine', outputSummary: capGap });
+      this.deps.logger.info('engine.self_heal.capability_gap', { runId: ctx.runId, nodeId: node.id, reason: capGap });
+      return {
+        kind: 'none',
+        reason: `This step needs a capability that isn't available — ${capGap}. Enable it (or bind a runtime/agent that provides it); rewriting or swapping the agent cannot add a missing capability`,
+        diagnosis: capGap,
+      };
     }
 
     const prompt = (node.config as { prompt?: string }).prompt ?? '';
@@ -2625,9 +2679,22 @@ export class WorkflowEngine {
       await this.#onSwarmSubtask(ctx, swarm.nodeId, swarm.index, null, args.error);
       return;
     }
-    // W7 — autonomous self-healing on a hard node failure: diagnose + (when
-    // Self-healing agent task (AGENTIS-PLATFORM-10X Â§A9): re-dispatch with the
-    // Phase 4 — Feynman repair loop. We reach here when an agent_task has hard-
+    // RELIABILITY: a bound agent/harness that hard-fails (e.g. `claude_code exited 1`,
+    // a dead model pin) must not be terminal for the whole run. Re-run the task once
+    // on a guaranteed workspace runtime before failing the node.
+    const node = ctx.graph.nodes.find((n) => n.id === args.nodeId);
+    if (node) {
+      const recovered = await this.#recoverAgentNodeViaFallback(ctx, node, args.error);
+      if (recovered) {
+        try {
+          await this.#completeNode(ctx, args.nodeId, recovered);
+          void this.#tick(ctx);
+          return;
+        } catch (err) {
+          this.deps.logger.warn('engine.agent_fallback.complete_failed', { runId: ctx.runId, nodeId: args.nodeId, err: (err as Error).message });
+        }
+      }
+    }
     await this.#failNode(ctx, args.nodeId, args.error);
     void this.#tick(ctx);
   }
@@ -2717,6 +2784,7 @@ export class WorkflowEngine {
   #disposeRunState(runId: string): void {
     this.#runs.delete(runId);
     this.#runActivity.delete(runId);
+    this.#debugRuns.delete(runId);
   }
 
   /** Resolve an agent's display name for conversation/activity attribution. */
@@ -3001,8 +3069,12 @@ export class WorkflowEngine {
 
     const requiredInputs: string[] = [];
     const receivedInputs: Record<string, unknown> = {};
-    const scratchpad = this.deps.scratchpad.snapshotOf(ctx.runId);
     let blockedByCondition = false;
+    // P0.1: lazily-built condition scope base (built once, only if a conditional
+    // edge is present); `condScopeFor` layers each source's output on top.
+    let condBase: Record<string, unknown> | null = null;
+    const condScopeFor = (data: Record<string, unknown>) =>
+      withCurrentData((condBase ??= this.#buildConditionScopeBase(ctx)), data);
 
     for (const edge of incoming) {
       const sourceState = ctx.state.nodeStates[edge.source];
@@ -3019,8 +3091,9 @@ export class WorkflowEngine {
       }
 
       if (sourceState?.status === 'COMPLETED') {
-        if (shouldTraverseEdge(edge, sourceState.outputData ?? {}, scratchpad)) {
-          receivedInputs[edge.source] = sourceState.outputData ?? {};
+        const srcOut = sourceState.outputData ?? {};
+        if (shouldTraverseEdge(edge, srcOut, () => condScopeFor(srcOut))) {
+          receivedInputs[edge.source] = srcOut;
         } else {
           blockedByCondition = true;
         }
@@ -3242,7 +3315,17 @@ export class WorkflowEngine {
     // RAW config (not the template-resolved one) + the template context.
     const pureHandler = this.#nodeHandlers.get(node.config.kind);
     if (pureHandler) {
-      const result = pureHandler.execute(node.config, { inputData: item.inputData, tctx });
+      let result: Record<string, unknown>;
+      try {
+        result = pureHandler.execute(node.config, { inputData: item.inputData, tctx });
+      } catch (err) {
+        // Phase 2 rung 0 — deterministic, zero-token expression repair. A
+        // transform/filter that throws on an off-contract reference (`noeds`,
+        // a near-miss typo) is fixed in-place and retried BEFORE we spend a
+        // single self-heal token. Anything we can't confidently fix re-throws
+        // into the normal failure / self-heal path.
+        result = this.#repairAndRetryPureNode(ctx, node, item, tctx, pureHandler, err as Error);
+      }
       await this.#completeNode(ctx, node.id, result);
       return;
     }
@@ -3803,6 +3886,27 @@ export class WorkflowEngine {
   ): Promise<boolean> {
     // Explicit opt-out for a deterministic one-shot transform task.
     if (config.useRoleTools === false) return false;
+
+    // E1 — a marker_protocol CLI harness (Codex / Claude Code) bound to this node
+    // runs its OWN reasoning, but in workflow dispatch it was awareness-only. Bind
+    // it (idempotent, like dispatch) and give it a REAL Agentis tool loop so it
+    // wields its native tools AND the Agentis platform surface (search/brain/app/
+    // data/cooperation/channels) mid-task, then completes the node with its result.
+    // Anything it can't run falls back to dispatch; mcp_native harnesses keep their
+    // own MCP loop.
+    if (config.agentId) {
+      if (!this.deps.adapters.get(config.agentId)) {
+        const pin = stringValue(config.modelOverride) ?? this.#agentConfiguredModel(config.agentId);
+        const runtime = this.deps.resolveAgentRuntime?.(ctx.workspaceId, config.agentId, config.prompt, pin);
+        if (runtime) this.deps.adapters.register(config.agentId, runtime);
+      }
+      const fwd = this.deps.adapters.get(config.agentId)?.adapter.capabilities?.().toolForwarding;
+      if (fwd === 'marker_protocol'
+        && await this.#runHarnessChatToolLoop(ctx, node, config, config.agentId, inputData)) {
+        return true;
+      }
+    }
+
     // The loop needs a structured-LLM (evaluation role) + the tool runtime. When
     // unwired (e.g. minimal test engines), fall through to single-shot dispatch.
     const toolLoopLlm = this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'evaluation', { task: config.prompt, purpose: 'agent_tool_loop' }) ?? this.deps.evaluatorRuntime;
@@ -3822,7 +3926,13 @@ export class WorkflowEngine {
     if (boundForwarding === 'mcp_native' || boundForwarding === 'marker_protocol') return false;
 
     const def = this.#specialistDef(ctx, role);
-    const tools = effectiveSpecialistTools(def);
+    // A workflow agent gets its FULL Agentis-native toolbox, not a starved subset:
+    // the role manifest UNION the universal floor UNION whatever its declared
+    // capabilities imply. This is the fix for "agents don't have their total
+    // abilities" — declaring a capability now actually grants the tools, and no
+    // agent_task drops below the knowledge-worker floor (search, browser, brain,
+    // data, compute).
+    const tools = resolveAgentTaskTools(def, config);
     if (tools.length === 0) return false;
 
     // Conversation theater: the work hand-off (workflow → specialist) on the loop
@@ -3837,10 +3947,16 @@ export class WorkflowEngine {
     // browser, any operator-mounted server) are offered alongside the static
     // manifest, and the bound runtime's native affordances are surfaced so the
     // agent knows its real powers instead of describing what it would do.
-    const extraTools = (await this.deps.agentTools.listBridgedTools(ctx.workspaceId)).map((spec) => ({
+    const bridgedTools = (await this.deps.agentTools.listBridgedTools(ctx.workspaceId)).map((spec) => ({
       id: spec.id,
       description: spec.provides ? `${spec.description} [grants ${spec.provides}]` : spec.description,
     }));
+    // E2 — the agent is a full Agentis citizen: offer the `agentis.*` integration
+    // catalog (channels, cooperation, app management, …) alongside its native +
+    // bridged tools, so it can talk to humans, cooperate, and operate the App
+    // mid-task instead of being confined to the AgentTool enum.
+    const platformTools = this.deps.agentTools.listPlatformTools();
+    const extraTools = [...bridgedTools, ...platformTools];
     const liveAffordances = agentId ? this.deps.adapters.capabilities(agentId)?.affordances ?? {} : {};
     const runtimeAffordances = (Object.keys(liveAffordances) as AgentAffordance[])
       .filter((key) => liveAffordances[key] === true)
@@ -3854,7 +3970,7 @@ export class WorkflowEngine {
     const result = await loop.run({
       workspaceId: ctx.workspaceId,
       role,
-      task: `${config.prompt}${agentOutputContractPrompt(config.outputKeys)}${inputBlock}`,
+      task: `${config.prompt}${buildNodeProcessBriefing(ctx.graph, node, config)}${inputBlock}`,
       systemPreamble: preamble,
       tools,
       ...(extraTools.length > 0 ? { extraTools } : {}),
@@ -3862,6 +3978,7 @@ export class WorkflowEngine {
       maxSteps: config.maxToolSteps,
       workflowId: ctx.workflowId,
       agentId,
+      userId: ctx.userId,
       // Stream the agent's live reasoning + tool use into the run room (the
       // immersive monitor/triage/canvas all read this), correctly attributed to
       // this node via taskId=node.id.
@@ -3898,9 +4015,116 @@ export class WorkflowEngine {
       steps: result.steps.length,
       stoppedReason: result.stoppedReason,
     };
+    this.#recordNodeTokens(ctx, node.id, result.tokensIn, result.tokensOut);
     this.#recordSpecialistResult(ctx, node, agentId, output);
     await this.#completeNode(ctx, node.id, output);
     return true;
+  }
+
+  /**
+   * E1 — run a marker_protocol CLI harness through a REAL Agentis chat tool loop
+   * inside a workflow node: it reasons with its OWN native tools AND the Agentis
+   * platform surface (autonomous via permissionMode 'auto' — no confirmation
+   * gating), and the node completes with its final result through the same
+   * `#completeNode` chokepoint the in-engine loop uses (so declared-output
+   * contracts + self-heal apply identically). Returns false WITHOUT side effects
+   * when the harness can't run here (no chat / no tool registry) so the caller
+   * falls back to dispatch; once committed it always completes or fails the node.
+   */
+  async #runHarnessChatToolLoop(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: AgentTaskNodeConfig,
+    agentId: string,
+    inputData: Record<string, unknown>,
+  ): Promise<boolean> {
+    const adapter = this.deps.adapters.get(agentId)?.adapter;
+    if (!adapter?.chat || adapter.capabilities?.().interactiveChat === false) return false;
+    const tools = this.#agentChatTools();
+    if (!tools) return false;
+
+    // ── committed: from here this method OWNS the node completion. ──
+    this.#recordSpecialistAssignment(ctx, node, agentId, config.prompt);
+    const role = (this.#agentRole(agentId) ?? config.agentRole ?? 'specialist') as AgentRole;
+    const rolePrompt = this.#specialistDef(ctx, role).systemPrompt;
+    const inputBlock = Object.keys(inputData).length > 0 ? `\n\nINPUT:\n${safeJson(inputData)}` : '';
+    const brief = `${config.prompt}${buildNodeProcessBriefing(ctx.graph, node, config)}${inputBlock}`;
+    const systemAddendum = [
+      rolePrompt,
+      'You are executing a workflow step. Use your OWN native tools AND the Agentis platform tools below — search, browser, the workspace/app/agent brain, app data, cooperation, and channels — whichever the task needs. Work autonomously; do not ask the operator to confirm. Finish with your result as your final message.',
+    ].filter(Boolean).join('\n\n');
+    const appId = this.deps.resolveAppIdForWorkflow?.(ctx.workspaceId, ctx.workflowId);
+    const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+    this.#emitWorkStep(ctx, node, 'thinking', 'Running on its full-power runtime with the Agentis toolset');
+    let text = '';
+    try {
+      for await (const delta of ChatSessionExecutor.turn(adapter, [], brief, {
+        workspaceId: ctx.workspaceId,
+        agentId,
+        userId: ctx.userId,
+        conversationId: `agent-task:${ctx.runId}:${node.id}`,
+        clientTurnId: `agent-task:${ctx.runId}:${node.id}`,
+        executionMode: 'chat',
+        permissionMode: 'auto',
+        runId: ctx.runId,
+        ambientId: ctx.ambientId,
+        ...(appId ? { appId } : {}),
+        viewport: {
+          surface: 'run_detail',
+          route: `/runs/${ctx.runId}`,
+          resourceId: ctx.runId,
+          resourceKind: 'run',
+          activeRunId: ctx.runId,
+          workspaceId: ctx.workspaceId,
+          ambientId: ctx.ambientId,
+        },
+        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+      }, {
+        tools,
+        maxTurns: Math.max(2, Math.min(config.maxToolSteps ?? 8, 12)),
+        maxToolCalls: 24,
+        systemAddendum,
+      })) {
+        if (delta.type === 'text') text += delta.delta;
+        this.#relaySelfHealChatDelta(ctx, node, agentId, delta, clip);
+      }
+    } catch (err) {
+      this.deps.logger.warn('engine.agent_task.harness_loop_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
+      await this.#failNode(ctx, node.id, `agent runtime failed: ${(err as Error).message}`);
+      return true;
+    }
+    if (ctx.abortController?.signal.aborted || ctx.state.status === 'CANCELLED') return true;
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+      await this.#failNode(ctx, node.id, 'agent produced no output');
+      return true;
+    }
+    const structured = parseGeneric(trimmed);
+    const output: Record<string, unknown> = structured && typeof structured === 'object' && !Array.isArray(structured)
+      ? (structured as Record<string, unknown>)
+      : { output: trimmed };
+    this.#audit(ctx, { nodeId: node.id, action: 'agent.harness_tool_loop', actorType: 'agent', actorId: agentId, outputSummary: clip(trimmed, 200) });
+    this.#recordSpecialistResult(ctx, node, agentId, output);
+    await this.#completeNode(ctx, node.id, output);
+    return true;
+  }
+
+  /** The `agentis.*` platform tools a workflow harness agent may call (E1) — the
+   *  mcp-exposed catalog (vetted for autonomous harnesses) minus the recursion /
+   *  run-control blocklist. Same safe set the in-engine loop gets (E2). */
+  #agentChatTools(): ToolDefinition[] | undefined {
+    const registry = this.deps.toolRegistry;
+    if (!registry) return undefined;
+    const tools = registry.catalog({ mcpOnly: true }).tools
+      .filter((tool) => !WORKFLOW_AGENT_TOOL_BLOCKLIST.has(tool.id))
+      .map((tool) => ({
+        name: tool.id,
+        description: tool.longDescription ?? tool.description,
+        parameters: toolInputSchemaToChatParameters(tool.inputSchema),
+      }));
+    return tools.length > 0 ? tools : undefined;
   }
 
   /** Resolve the identity the platform tool loop should run as, or defer. */
@@ -4015,6 +4239,12 @@ export class WorkflowEngine {
     config: AgentTaskNodeConfig,
     inputData: Record<string, unknown>,
   ): Promise<void> {
+    // P0.3: honor inputKeys as an input allow-list, matching the agent_session /
+    // planner / code paths — previously agent_task silently ignored it, so the
+    // field lied about scoping the agent's input. Empty (default) = full input.
+    if (config.inputKeys.length > 0) {
+      inputData = pickKeys(inputData, config.inputKeys);
+    }
     if (config.agentId && !this.deps.adapters.get(config.agentId)) {
       const runtimePin = stringValue(config.modelOverride) ?? this.#agentConfiguredModel(config.agentId);
       const runtime = this.deps.resolveAgentRuntime?.(ctx.workspaceId, config.agentId, config.prompt, runtimePin);
@@ -4051,7 +4281,7 @@ export class WorkflowEngine {
     // prompt. No agent call starts from zero (Principle #2).
     const contextResult = await this.#withWorkspaceContext(
       ctx,
-      `${config.prompt}${agentOutputContractPrompt(config.outputKeys)}`,
+      `${config.prompt}${buildNodeProcessBriefing(ctx.graph, node, config)}`,
       rolePrompt,
       '',
       agentId,
@@ -4090,6 +4320,17 @@ export class WorkflowEngine {
       reason: routing.reason,
       alternatives: routing.alternatives.slice(0, 4),
     });
+
+    // Estimate the input tokens this dispatch sends so the dispatch path can
+    // attribute consumption on completion (most CLI harnesses report no usage).
+    if (!ctx.nodeDispatchInputTokens) ctx.nodeDispatchInputTokens = new Map();
+    ctx.nodeDispatchInputTokens.set(
+      node.id,
+      estimateTokens(prompt) + (Object.keys(inputData).length > 0 ? estimateTokens(safeJson(inputData)) : 0),
+    );
+    // Capture the resolved input so the reliability fallback can rebuild the task
+    // if this bound runtime returns empty / fails.
+    this.#recordNodeInput(ctx, node.id, inputData);
 
     await this.deps.adapters.dispatchTask({
       taskId,
@@ -4179,7 +4420,7 @@ export class WorkflowEngine {
     const runContextResult = await this.#withWorkspaceContext(ctx, config.prompt, undefined, '', agentId);
     const runContextBlock = runContextResult.prompt;
     const scoped = config.inputKeys.length > 0 ? pickKeys(inputData, config.inputKeys) : inputData;
-    const promptWithContract = `${config.prompt}${agentOutputContractPrompt(config.outputKeys)}`;
+    const promptWithContract = `${config.prompt}${buildNodeProcessBriefing(ctx.graph, node, config)}`;
     const taskBlock = Object.keys(scoped).length > 0
       ? `${promptWithContract}\n\nINPUT:\n${safeJson(scoped)}`
       : promptWithContract;
@@ -4404,6 +4645,10 @@ export class WorkflowEngine {
       case 'completed':
       case 'max_steps':
         {
+          // Roll the session's accumulated token usage onto this node so it lands
+          // on the terminal node.completed audit entry (the single analytics sink).
+          const session = this.deps.sessions?.get(sessionId);
+          if (session) this.#recordNodeTokens(ctx, node.id, session.totalTokensIn, session.totalTokensOut);
           const completedOutput = await this.#completeNode(ctx, node.id, outcome.output);
           if (!completedOutput) return;
           this.#enqueueSuccessfulBrainCapture(ctx, node.id, completedOutput, runCtx.agentId);
@@ -5604,6 +5849,10 @@ export class WorkflowEngine {
     preferredRole?: AgentRole,
   ): string | null {
     try {
+      // Prefer a real WORKER specialist. The orchestrator stays only as the
+      // last-resort RUNTIME a node can borrow when it is the sole connected, capable
+      // brain (single-runtime workspaces) — its IDENTITY is never AUTHORED onto a
+      // task node (materializeCast guarantees that at build time).
       const candidates = this.deps.adapters
         .list()
         .filter((registration) => this.#agentSatisfiesRequirements(registration.agentId, requires));
@@ -5874,19 +6123,46 @@ export class WorkflowEngine {
     }
   }
 
+  /**
+   * Phase 2 rung 0 — deterministic, zero-token repair of a pure node that threw
+   * on an off-contract expression reference. Fixes a near-miss typo in-place
+   * (`noeds`→`nodes`) and retries the handler once; if nothing can be confidently
+   * repaired (or the retry still fails) the error propagates into the normal
+   * failure / LLM self-heal path. This is the cheapest rung of the recovery
+   * ladder: most expression failures are typos, and a typo should never cost a
+   * model call.
+   */
+  #repairAndRetryPureNode(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    item: ReadyQueueItem,
+    tctx: TemplateContext,
+    handler: PureNodeHandler,
+    err: Error,
+  ): Record<string, unknown> {
+    const cfg = node.config as { kind?: string; expression?: string; condition?: string };
+    const field = cfg.kind === 'transform' ? 'expression' : cfg.kind === 'filter' ? 'condition' : null;
+    const original = field ? cfg[field] : undefined;
+    if (!field || typeof original !== 'string') throw err;
+    const repair = repairExpressionReferences(original);
+    if (!repair.changed) throw err;
+    (node.config as unknown as Record<string, unknown>)[field] = repair.expression;
+    const summary = repair.rewrites.map((r) => `${r.from} → ${r.to}`).join(', ');
+    this.#emitWorkStep(ctx, node, 'thinking', `Deterministic repair: corrected expression reference ${summary} (0 tokens)`);
+    this.#audit(ctx, { nodeId: node.id, action: 'self_heal.expression_repaired', actorType: 'system', actorId: 'engine', outputSummary: summary });
+    this.deps.logger.info('engine.self_heal.expression_repaired', { runId: ctx.runId, nodeId: node.id, rewrites: repair.rewrites });
+    return handler.execute(node.config, { inputData: item.inputData, tctx });
+  }
+
   #executeRouter(
     ctx: RunningContext,
     config: RouterNodeConfig,
     inputData: Record<string, unknown>,
   ): string[] {
-    const scope = {
-      input: inputData,
-      inputs: inputData,
-      output: inputData,
-      trigger: inputData,
-      nodes: inputData,
-      scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId),
-    };
+    // P0.1: real per-id `nodes` + real `trigger` (previously both aliased to
+    // `inputData`, so `nodes["other"].x` / `trigger.x` silently re-read the
+    // router's own input). Shared with edge conditions + the build validator.
+    const scope = this.#buildConditionScope(ctx, inputData);
     const matches: string[] = [];
     for (const branch of config.branches) {
       if (config.routingMode === 'space_route') {
@@ -6862,16 +7138,31 @@ export class WorkflowEngine {
     }
     const evaluator = this.#resolveEvaluationRuntime(ctx, node, config.targetPath);
     if (!evaluator) {
-      throw new AgentisError(
-        'WORKFLOW_GRAPH_INVALID',
-        'evaluator node has no dedicated evaluation model and no chat-capable workspace agent',
-      );
+      // RELIABILITY: a missing evaluation runtime is an infra gap, not a quality
+      // failure. Don't kill the run — DEGRADE to a visible pass so downstream work
+      // proceeds, and surface the gap via audit + critique.
+      this.deps.logger.warn('engine.evaluator.no_runtime_degrade', { runId: ctx.runId, nodeId: node.id });
+      this.#audit(ctx, { nodeId: node.id, action: 'evaluator.degraded', actorType: 'system', actorId: 'engine', outputSummary: 'no evaluation runtime — passed by default' });
+      const prevIteration = Number(inputData['__evalIteration'] ?? 0);
+      return {
+        score: config.passThreshold ?? 7,
+        passed: true,
+        critique: 'Evaluator skipped: no evaluation model or chat-capable agent is available. Passed by default so the run can continue — connect an evaluation model to enforce this gate.',
+        dimensionScores: [],
+        iterationCount: prevIteration + 1,
+        maxRetriesReached: true,
+      };
     }
     // Read the raw value (typed, not stringified) from the input or run context.
-    const target = readTemplatePath({ ...tctx, trigger: inputData, nodes: { ...tctx.nodes, input: inputData } }, config.targetPath)
+    let target = readTemplatePath({ ...tctx, trigger: inputData, nodes: { ...tctx.nodes, input: inputData } }, config.targetPath)
       ?? readDotPath(inputData, config.targetPath);
     if (target === undefined) {
-      throw new AgentisError('VALIDATION_FAILED', `evaluator: targetPath '${config.targetPath}' did not resolve`);
+      // RELIABILITY: a targetPath that doesn't resolve (e.g. a hyphenated
+      // `{{nodes.x-y}}` ref, or the upstream output shaped differently than the
+      // planner assumed) must NOT abort the run. Degrade to evaluating the node's
+      // whole input rather than throwing `did not resolve`.
+      this.deps.logger.warn('engine.evaluator.targetpath_degrade', { runId: ctx.runId, nodeId: node.id, targetPath: config.targetPath });
+      target = inputData;
     }
     ctx.state.activeExecutions[node.id] = {
       taskId: `evaluator:${node.id}`,
@@ -7453,10 +7744,9 @@ export class WorkflowEngine {
       let keepGoing = false;
       try {
         keepGoing = evalCondition(expr, {
+          ...this.#buildConditionScope(ctx, output),
           body: output,
-          output,
           iteration,
-          scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId),
         });
       } catch (err) {
         // A broken predicate stops the loop (fail-safe) rather than spin forever.
@@ -7756,6 +8046,8 @@ export class WorkflowEngine {
     inputSummary?: string | null;
     outputSummary?: string | null;
     costCents?: number | null;
+    tokensIn?: number | null;
+    tokensOut?: number | null;
   }): void {
     if (!this.deps.audit) return;
     this.deps.audit.record({
@@ -7770,6 +8062,8 @@ export class WorkflowEngine {
       inputSummary: entry.inputSummary ?? null,
       outputSummary: entry.outputSummary ?? null,
       costCents: entry.costCents ?? null,
+      tokensIn: entry.tokensIn ?? null,
+      tokensOut: entry.tokensOut ?? null,
     });
   }
 
@@ -7795,6 +8089,93 @@ export class WorkflowEngine {
   #nodeDispatchCounts(ctx: RunningContext): Map<string, number> {
     if (!ctx.nodeDispatchCounts) ctx.nodeDispatchCounts = new Map();
     return ctx.nodeDispatchCounts;
+  }
+
+  /**
+   * Record real model token consumption for a node so it lands on the terminal
+   * `node.completed` audit entry. Accumulates across re-dispatch / multi-step.
+   */
+  #recordNodeTokens(ctx: RunningContext, nodeId: string, tokensIn: number, tokensOut: number): void {
+    if (!(tokensIn > 0) && !(tokensOut > 0)) return;
+    if (!ctx.nodeTokenUsage) ctx.nodeTokenUsage = new Map();
+    const prev = ctx.nodeTokenUsage.get(nodeId) ?? { tokensIn: 0, tokensOut: 0 };
+    ctx.nodeTokenUsage.set(nodeId, {
+      tokensIn: prev.tokensIn + Math.max(0, Math.round(tokensIn)),
+      tokensOut: prev.tokensOut + Math.max(0, Math.round(tokensOut)),
+    });
+  }
+
+  /** Capture an agent node's resolved input so the reliability fallback can rebuild its task. */
+  #recordNodeInput(ctx: RunningContext, nodeId: string, inputData: Record<string, unknown>): void {
+    if (!ctx.nodeLastInput) ctx.nodeLastInput = new Map();
+    ctx.nodeLastInput.set(nodeId, inputData);
+  }
+
+  /**
+   * RELIABILITY (W-reliability): last-resort recovery for an agent node whose bound
+   * runtime returned EMPTY output or exited non-zero. Re-runs the SAME task once
+   * against a guaranteed workspace structured-completion runtime (synthesis role →
+   * the configured evaluator/orchestrator model), parses the JSON, and — if it
+   * satisfies the declared output contract — completes the node instead of failing
+   * the whole run. Returns true when it recovered the node.
+   *
+   * This is what stops "agent produced nothing" (a flaky/unconnected CLI harness,
+   * a bad model pin, a `claude_code exited 1`) from cascading into a dead run.
+   *
+   * Returns the recovered, contract-satisfying output for the caller to complete
+   * the node with — or null when no fallback runtime is available or it couldn't
+   * satisfy the contract. Does NOT complete the node itself (the caller owns that),
+   * so it never re-enters the completion chokepoint.
+   */
+  async #recoverAgentNodeViaFallback(ctx: RunningContext, node: WorkflowNode, reason: string): Promise<Record<string, unknown> | null> {
+    // P1.2: debug/test runs surface the raw agent failure — no fallback recovery.
+    if (this.#debugRuns.has(ctx.runId)) return null;
+    if (node.config.kind !== 'agent_task' && node.config.kind !== 'agent_session') return null;
+    if (!ctx.nodeFallbackAttempted) ctx.nodeFallbackAttempted = new Set();
+    if (ctx.nodeFallbackAttempted.has(node.id)) return null;
+    ctx.nodeFallbackAttempted.add(node.id);
+
+    const config = node.config as AgentTaskNodeConfig;
+    const runtime = this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'synthesis', { task: config.prompt, purpose: 'agent_output_fallback' })
+      ?? this.deps.evaluatorRuntime;
+    if (!runtime) return null;
+
+    const inputData = ctx.nodeLastInput?.get(node.id) ?? {};
+    const inputBlock = Object.keys(inputData).length > 0 ? `\n\nINPUT:\n${safeJson(inputData)}` : '';
+    const system = 'You are completing one step of an automated workflow on behalf of an agent whose runtime was unavailable. '
+      + 'Do the task from the instructions and INPUT below. Respond with ONE strict JSON object and nothing else — no prose, no code fences.';
+    const user = `${config.prompt}${buildNodeProcessBriefing(ctx.graph, node, config)}${inputBlock}`;
+
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = await runtime.completeStructured<Record<string, unknown>>({
+        system,
+        user,
+        maxTokens: 4_000,
+        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+      });
+    } catch (err) {
+      this.deps.logger.warn('engine.agent_fallback.failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    // Must satisfy the declared contract (if any) to count as a real recovery.
+    const result = normalizeDeclaredNodeOutputResult(node, parsed);
+    if (result.missingKeys.length > 0) {
+      this.deps.logger.warn('engine.agent_fallback.contract_unmet', { runId: ctx.runId, nodeId: node.id, missing: result.missingKeys });
+      return null;
+    }
+
+    this.deps.logger.info('engine.agent_fallback.recovered', { runId: ctx.runId, nodeId: node.id, reason });
+    this.#audit(ctx, {
+      nodeId: node.id,
+      action: 'agent.output_fallback',
+      actorType: 'system',
+      actorId: 'engine',
+      outputSummary: `recovered via workspace runtime after: ${reason}`.slice(0, 200),
+    });
+    return result.output;
   }
 
   /** Whether a failed node qualifies for generic `retryPolicy` re-dispatch. */
@@ -8186,6 +8567,23 @@ export class WorkflowEngine {
       : outputNormalization(normalizedOutput);
     if (completedNode && normalization.missingKeys.length > 0) {
       const missingMessage = missingDeclaredOutputMessage(completedNode, normalization.missingKeys);
+      // RELIABILITY fast path: when an agent produced NO usable output, extraction-
+      // based self-heal is pointless (there is nothing to extract) and would burn
+      // ~3 LLM repair attempts before giving up. Go straight to a one-shot retry on
+      // a guaranteed workspace runtime. If it recovers we skip self-heal entirely;
+      // if not, we fall through to the existing self-heal ladder unchanged (the
+      // one-shot guard stops the later fallback rung from re-running).
+      const isAgentNode = completedNode.config.kind === 'agent_task' || completedNode.config.kind === 'agent_session';
+      if (isAgentNode && !hasAnyUsableOutput(output)) {
+        const recovered = await this.#recoverAgentNodeViaFallback(ctx, completedNode, agentOutputFailureReason(output, missingMessage));
+        if (recovered) {
+          normalization = normalizeDeclaredNodeOutputResult(completedNode, recovered);
+          normalizedOutput = normalization.output;
+        }
+      }
+    }
+    if (completedNode && normalization.missingKeys.length > 0) {
+      const missingMessage = missingDeclaredOutputMessage(completedNode, normalization.missingKeys);
       const heal = await this.#runSelfHeal(
         ctx,
         completedNode,
@@ -8197,7 +8595,17 @@ export class WorkflowEngine {
         normalization = normalizeDeclaredNodeOutputResult(completedNode, heal.output);
         normalizedOutput = normalization.output;
       } else if (heal.kind === 'none' && heal.reason) {
-        throw new Error(selfHealFailureMessage(missingMessage, heal));
+        // RELIABILITY: self-heal couldn't recover the contract from the agent's own
+        // output (dominant real case: the bound runtime returned EMPTY — flaky/
+        // unconnected harness or a bad model pin). Last resort: re-run the task once
+        // on a guaranteed workspace runtime, then complete with that output inline.
+        const recovered = await this.#recoverAgentNodeViaFallback(ctx, completedNode, agentOutputFailureReason(output, missingMessage));
+        if (recovered) {
+          normalization = normalizeDeclaredNodeOutputResult(completedNode, recovered);
+          normalizedOutput = normalization.output;
+        } else {
+          throw new Error(selfHealFailureMessage(agentOutputFailureReason(output, missingMessage), heal));
+        }
       }
     }
     const deviation = normalization.missingKeys.length > 0
@@ -8233,6 +8641,7 @@ export class WorkflowEngine {
       });
     }
     if (completedNode) this.#emitWorkStep(ctx, completedNode, 'complete');
+    const nodeTokens = ctx.nodeTokenUsage?.get(nodeId);
     this.#audit(ctx, {
       nodeId,
       action: 'node.completed',
@@ -8240,7 +8649,12 @@ export class WorkflowEngine {
       actorId: completedNode ? nodeActorId(completedNode) : 'engine',
       outputSummary: summarizeForAudit(normalizedOutput),
       costCents: completedNode ? nodeCostCents(completedNode) : null,
+      tokensIn: nodeTokens?.tokensIn ?? null,
+      tokensOut: nodeTokens?.tokensOut ?? null,
     });
+    // Usage has been persisted on the terminal entry; drop it so a re-dispatch
+    // of the same node id (retry / loop body) starts a fresh tally.
+    ctx.nodeTokenUsage?.delete(nodeId);
     ctx.eventsSinceSnapshot += 1;
 
     // Phase governance (Layer 5): accrue cost; on budget overrun, halt the run
@@ -8279,6 +8693,11 @@ export class WorkflowEngine {
     // this node from each target's required inputs so the run still settles.
     const held = (normalizedOutput as { __hold?: unknown } | null)?.__hold === true;
 
+    // P0.1: one lazily-built condition scope for the whole fan-out (all edges
+    // share this node's `normalizedOutput`); base snapshots built once, and only
+    // if some edge actually carries a condition.
+    let fanoutScope: Record<string, unknown> | null = null;
+    const buildFanoutScope = () => (fanoutScope ??= this.#buildConditionScope(ctx, normalizedOutput));
     for (const edge of ctx.downstreamEdges.get(nodeId) ?? []) {
       const buf = ctx.state.waitingInputs[edge.target];
       if (!buf) continue;
@@ -8299,7 +8718,7 @@ export class WorkflowEngine {
       }
 
       // Conditional / branch edge gating (router branches, filter gates, etc.).
-      if (!shouldTraverseEdge(edge, normalizedOutput, this.deps.scratchpad.snapshotOf(ctx.runId))) {
+      if (!shouldTraverseEdge(edge, normalizedOutput, buildFanoutScope)) {
           // NATIVE-ADVANCEMENT Proposal 3 (Agentis-native skip propagation):
           // the branch was NOT taken, so this edge will never deliver. Drop it
           // from the target's required inputs so the target doesn't block the
@@ -8708,6 +9127,44 @@ export class WorkflowEngine {
       run: { id: ctx.runId, startedAt: ctx.startedAt },
       loop,
     });
+  }
+
+  /**
+   * P0.1 (WORKFLOW-BUILD-LOOP): the UNIFIED condition scope. Router branches,
+   * edge conditions, and the build-time validator (`assertConditionSyntax`) must
+   * see the same variables with the same meaning, or a condition that lints
+   * clean silently evaluates against `undefined` at runtime. The base carries
+   * the expensive snapshots (real per-id `nodes`, real `trigger`, plus
+   * scratchpad/store/workspace/run); `withCurrentData` layers the current value.
+   */
+  #buildConditionScopeBase(ctx: RunningContext): Record<string, unknown> {
+    const nodeOutputs: Record<string, Record<string, unknown>> = {};
+    for (const [id, ns] of Object.entries(ctx.state.nodeStates)) {
+      if (ns.outputData) nodeOutputs[id] = ns.outputData as Record<string, unknown>;
+    }
+    const triggerNode = ctx.graph.nodes.find((n) => n.type === 'trigger');
+    const triggerInputs = (triggerNode && ctx.state.nodeStates[triggerNode.id]?.inputData) as
+      | Record<string, unknown>
+      | undefined;
+    const storeSnap = this.deps.workflowStore && ctx.workflowId
+      ? this.deps.workflowStore.snapshot(ctx.workspaceId, ctx.workflowId)
+      : {};
+    const workspaceKvSnap = this.deps.workspaceStore
+      ? this.deps.workspaceStore.snapshot(ctx.workspaceId)
+      : {};
+    return {
+      trigger: triggerInputs ?? {},
+      nodes: nodeOutputs,
+      scratchpad: this.deps.scratchpad.snapshotOf(ctx.runId),
+      store: storeSnap,
+      workspace: { id: ctx.workspaceId, kv: workspaceKvSnap },
+      run: { id: ctx.runId, startedAt: ctx.startedAt },
+    };
+  }
+
+  /** Full condition scope with `input`/`inputs`/`output` aliased to `currentData`. */
+  #buildConditionScope(ctx: RunningContext, currentData: Record<string, unknown>): Record<string, unknown> {
+    return withCurrentData(this.#buildConditionScopeBase(ctx), currentData);
   }
 
   #skipBlockedNodes(ctx: RunningContext, reason: string): void {
@@ -9143,6 +9600,25 @@ interface RunningContext {
   /** Per-node dispatch counts for the infinite-cycle ceiling. */
   nodeDispatchCounts?: Map<string, number>;
   /**
+   * Real model token consumption per node, keyed by node id. Every agent
+   * execution path (session / tool-loop / dispatch) records here; the terminal
+   * `node.completed` audit entry reads + persists it so analytics can SUM
+   * tokens from a single sink with no double counting. Exact when the runtime
+   * reports usage, estimated from prompt+output text otherwise.
+   */
+  nodeTokenUsage?: Map<string, { tokensIn: number; tokensOut: number }>;
+  /** Estimated input tokens of a dispatched task prompt, keyed by node id —
+   *  combined with the returned output to attribute tokens for the dispatch path. */
+  nodeDispatchInputTokens?: Map<string, number>;
+  /**
+   * Resolved input data per agent node, captured at dispatch. Lets the reliability
+   * fallback (a structured-completion retry on a guaranteed runtime) reconstruct
+   * the task when the bound agent/harness returns empty output or exits non-zero.
+   */
+  nodeLastInput?: Map<string, Record<string, unknown>>;
+  /** Agent nodes that already used their one-shot fallback-runtime retry. */
+  nodeFallbackAttempted?: Set<string>;
+  /**
    * Run-scoped cancellation (NATIVE-ADVANCEMENT Proposal 7, Agentis-native form).
    * `cancelRun` aborts this so in-flight work that honors the signal (HTTP
    * requests today; other handlers can adopt it) stops promptly instead of
@@ -9343,6 +9819,37 @@ function isSelfHealTerminalError(error: string): boolean {
  */
 function isRuntimeBindingFailure(error: string): boolean {
   return /no connected runtime|has no connected runtime|ADAPTER_UNAVAILABLE|adapter is (?:not connected|offline)|agent is offline|no runtime|runtime not connected/i.test(error);
+}
+
+/**
+ * Capability-aware self-heal (AGENT-WORKFLOW-CAPABILITY-10X E4). A failure that
+ * means "a capability / provider / tool / binary this step needs is not present"
+ * is NOT a structural problem: rewriting the graph or swapping the agent/model
+ * cannot add a missing capability. Detecting this lets the engine escalate
+ * honestly ("enable X") instead of burning LLM replans that pointlessly reroute
+ * the agent (the sonnet→hermes loop the operator hit). High precision by design —
+ * it only matches the platform's explicit "not configured / not wired / not
+ * available / requires <binary>" phrasings, so genuine structural failures still
+ * reach the replan.
+ */
+/** Platform tools a workflow agent must NOT call — recursion / run-control / spawn
+ *  (mirrors the in-engine E2 bridge's blocklist in bootstrap). */
+const WORKFLOW_AGENT_TOOL_BLOCKLIST = new Set<string>([
+  'agentis.build_workflow',
+  'agentis.workflow.patch',
+  'agentis.workflow.run',
+  'agentis.ephemeral.run',
+  'agentis.run.cancel',
+  'agentis.approval.resolve',
+]);
+
+export function capabilityGapReason(error: string): string | null {
+  const matched =
+    /(provider is not configured|is not configured|is not wired(?: in this runtime)?|are not enabled in this runtime|is not (?:available|enabled) in this runtime|requires (?:a |an )?[\w.+-]+ (?:interpreter|binary|runtime)(?: on PATH)?|requires [\w.+-]+ on PATH)/i.test(
+      error,
+    );
+  if (!matched) return null;
+  return error.replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 function selfHealFailureMessage(error: string, heal: SelfHealEngineResult | null): string {
@@ -9919,18 +10426,156 @@ function toolInputSchemaToChatParameters(schemaValue: unknown): ToolDefinition['
   return { type: 'object', properties: {} };
 }
 
-function agentOutputContractPrompt(outputKeys: string[] | undefined): string {
-  const keys = (outputKeys ?? []).map((key) => key.trim()).filter(Boolean);
-  if (keys.length === 0) return '';
-  return [
+/**
+ * Build the PROCESS BRIEFING appended to an agent_task's prompt — the structural
+ * guarantee that an agent inside a workflow node UNDERSTANDS the process it is in,
+ * not just its local instruction. It is derived entirely from the live graph (no
+ * DB calls, no guessing), so it always matches the real run:
+ *
+ *   • WHERE it sits — its step, what upstream nodes feed it (so the input blob has
+ *     provenance), and what downstream nodes consume its output.
+ *   • WHAT IT MUST RETURN — the declared output keys with an INFERRED TYPE and a
+ *     concrete JSON example (the old contract gave key NAMES only, so the agent
+ *     guessed shapes and missed the contract → self-heal churn).
+ *   • THE FLOW RULES — why the contract is non-negotiable: the run routes off this
+ *     output, so an empty-but-complete object is success and a missing key stalls
+ *     or misroutes the whole workflow.
+ *
+ * This is scaffolding, not a cage: it never constrains HOW the agent works or what
+ * tools it uses — it only makes the contract and the surrounding process legible.
+ */
+export function buildNodeProcessBriefing(graph: WorkflowGraph, node: WorkflowNode, config: { outputKeys?: string[] }): string {
+  const outputKeys = (config.outputKeys ?? []).map((key) => key.trim()).filter(Boolean);
+  const nodeById = new Map(graph.nodes.map((candidate) => [candidate.id, candidate] as const));
+  const upstream = graph.edges.filter((edge) => edge.target === node.id);
+  const downstream = graph.edges.filter((edge) => edge.source === node.id);
+
+  const lines: string[] = [
     '',
     '',
-    'OUTPUT CONTRACT:',
-    `Return one strict JSON object with these exact top-level keys: ${keys.map((key) => JSON.stringify(key)).join(', ')}.`,
-    'Do not wrap the JSON in markdown or code fences.',
-    'If a list has no items, return an empty array for that key.',
-    'If a count is zero, still include every declared list/content key with an empty or safe value.',
-  ].join('\n');
+    'PROCESS BRIEFING — you are ONE node inside a running Agentis workflow. Use this so your output keeps the whole run flowing (it does not limit how you work):',
+    `- YOUR STEP: "${node.title}".`,
+  ];
+
+  const goal = workflowGoalLine(graph);
+  if (goal) lines.push(goal);
+
+  if (upstream.length > 0) {
+    lines.push('- FEEDS INTO YOU (your input data was produced by these upstream steps):');
+    for (const edge of upstream) {
+      const src = nodeById.get(edge.source);
+      if (!src) continue;
+      const keys = nodeOutputKeys(src);
+      lines.push(`    • "${src.title}"${keys.length ? ` → ${keys.join(', ')}` : ''}`);
+    }
+  } else {
+    lines.push('- FEEDS INTO YOU: the workflow trigger input.');
+  }
+
+  if (outputKeys.length > 0) {
+    lines.push(
+      '',
+      'OUTPUT CONTRACT — return EXACTLY one strict JSON object with these top-level keys (no markdown, no code fences, no prose). Shape:',
+      '{',
+    );
+    outputKeys.forEach((key, index) => {
+      const info = inferContractKey(key, graph, downstream);
+      const comma = index < outputKeys.length - 1 ? ',' : '';
+      lines.push(`  ${JSON.stringify(key)}: ${info.example}${comma}   // ${info.type}${info.note ? ` — ${info.note}` : ''}`);
+    });
+    lines.push('}');
+  }
+
+  if (downstream.length > 0) {
+    lines.push('', 'WHAT YOUR OUTPUT DRIVES NEXT (the run routes off these — a missing or wrong key stalls or misroutes it):');
+    for (const edge of downstream) {
+      const tgt = nodeById.get(edge.target);
+      if (!tgt) continue;
+      const cond = edge.condition?.trim();
+      lines.push(`    • "${tgt.title}"${cond ? ` — runs only when: ${cond}` : ''}`);
+    }
+  }
+
+  lines.push(
+    '',
+    'FLOW RULES (these keep the run alive — they are correctness, not style):',
+    ...(outputKeys.length > 0
+      ? [
+        '- Return EVERY key above on EVERY run, even when there is nothing to do: [] for an empty list, a safe default for scalars, and set boolean gates honestly (e.g. {"passed": false}). Never omit a key.',
+        '- Do NOT fail or refuse just because the result is empty — emitting the empty-but-complete contract IS success; it lets the downstream branches route correctly.',
+        '- Return ONLY the JSON object. No explanation before or after, no markdown fences.',
+      ]
+      : [
+        '- Complete the step and return your result as the node output. Do not fail just because the result is empty — say so plainly so the run can continue.',
+      ]),
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * The workflow's end goal, summarized from its declared final output contract so
+ * the agent understands the WHOLE objective it is contributing to — not just its
+ * local step. Graph-derived (no DB); returns null when the workflow declares no
+ * output contract.
+ */
+function workflowGoalLine(graph: WorkflowGraph): string | null {
+  const fields = (graph.outputContract?.fields ?? []).filter((field) => field.key?.trim());
+  if (fields.length === 0) return null;
+  const summary = fields
+    .map((field) => (field.description?.trim() ? `${field.key} (${field.description.trim()})` : field.key))
+    .join(', ');
+  return `- THE WORKFLOW'S GOAL: produce → ${summary}. Your step contributes to that end.`;
+}
+
+/** Output keys a node advertises (agent/session/swarm and other declared kinds). */
+function nodeOutputKeys(node: WorkflowNode): string[] {
+  const config = node.config as { outputKeys?: unknown };
+  return Array.isArray(config.outputKeys)
+    ? config.outputKeys.filter((key): key is string => typeof key === 'string' && key.trim().length > 0)
+    : [];
+}
+
+/**
+ * Infer the type + a concrete JSON example for one declared output key, plus a
+ * note on how the run uses it. Prefers the workflow's typed `outputContract`;
+ * otherwise reads the key name; and flags keys a downstream edge branches on.
+ */
+function inferContractKey(
+  key: string,
+  graph: WorkflowGraph,
+  downstream: WorkflowGraph['edges'],
+): { type: string; example: string; note?: string } {
+  const declared = graph.outputContract?.fields?.find((field) => field.key === key);
+  const type = declared && declared.type !== 'any' ? declared.type : inferTypeFromKeyName(key);
+  const branches = downstream.some((edge) => edge.condition && new RegExp(`\\b${escapeRegExp(key)}\\b`).test(edge.condition));
+  const note = branches
+    ? 'the run BRANCHES on this — set it correctly'
+    : declared?.description?.trim() || undefined;
+  return { type, example: exampleForContractType(type), note };
+}
+
+function inferTypeFromKeyName(key: string): 'string' | 'number' | 'boolean' | 'array' | 'object' {
+  const k = key.toLowerCase();
+  if (/^(is|has|should|can|did|was|are|needs|allow)/.test(k) || /(passed|ready|valid|enabled|done|sent|skip|skipped|success|approved|^ok)$/.test(k)) return 'boolean';
+  if (/(count|number|num|total|score|amount|qty|quantity|index|size|length|rank|cents|price)$/.test(k) || /^(count|num)/.test(k)) return 'number';
+  if (/(list|items|results|articles|entries|rows|records|messages|urls|links|ids|tags|candidates|leads|matches|sources|chunks)$/.test(k)) return 'array';
+  if (/(data|payload|record|meta|metadata|config|map|object|details)$/.test(k)) return 'object';
+  return 'string';
+}
+
+function exampleForContractType(type: string): string {
+  switch (type) {
+    case 'boolean': return 'false';
+    case 'number': return '0';
+    case 'array': return '[]';
+    case 'object': return '{}';
+    default: return '"…"';
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 interface DeclaredOutputNormalizationResult {
@@ -10001,6 +10646,30 @@ function missingDeclaredOutputMessage(node: WorkflowNode, missing: string[]): st
   return `agent node '${node.id}' did not produce declared output key(s): ${missing.join(', ')}`;
 }
 
+/**
+ * Honest failure reason for an agent node. When the agent produced NO usable
+ * output at all (the common "harness returned empty / exited / bad model pin"
+ * case), say that plainly instead of blaming the declared-output contract — the
+ * misleading "missing keys" message sends self-heal (and the operator) chasing
+ * an output-extraction problem that doesn't exist.
+ */
+function agentOutputFailureReason(output: Record<string, unknown>, originalError: string): string {
+  return hasAnyUsableOutput(output)
+    ? originalError
+    : 'agent produced no usable output — its runtime returned empty or failed (check the agent has a working, connected model)';
+}
+
+function hasAnyUsableOutput(output: Record<string, unknown>): boolean {
+  if (!output || typeof output !== 'object') return false;
+  return Object.values(output).some((value) => {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return true; // number / boolean
+  });
+}
+
 function buildContractDeviation(
   node: WorkflowNode | undefined,
   result: DeclaredOutputNormalizationResult,
@@ -10017,6 +10686,31 @@ function buildContractDeviation(
     message,
     outputPreview: compactRealtimePayload(result.output),
   };
+}
+
+/**
+ * The full tool surface a workflow agent_task receives: its role manifest, the
+ * universal knowledge-worker floor (DEFAULT_SPECIALIST_TOOLS — search, browser,
+ * brain, data, compute), and the tools its declared capabilities imply. Tags and
+ * `requires` are ADDITIVE — declaring a capability now actually grants its tools,
+ * and no agent drops below the floor. This is the "agents have their total
+ * abilities and are driven by Agentis capacities" fix.
+ */
+function resolveAgentTaskTools(def: SpecialistDefinition, config: AgentTaskNodeConfig): AgentTool[] {
+  const set = new Set<AgentTool>([...effectiveSpecialistTools(def), ...DEFAULT_SPECIALIST_TOOLS]);
+  const tags = (config.capabilityTags ?? []).map((t) => String(t).toLowerCase());
+  const wants = (...kw: string[]): boolean => tags.some((t) => kw.some((k) => t.includes(k)));
+  const requires = config.requires as { fileSystem?: boolean; terminal?: boolean } | undefined;
+  if (requires?.fileSystem || wants('code', 'develop', 'engineer', 'file', 'refactor', 'debug')) {
+    set.add('read_file');
+    set.add('write_file');
+    set.add('search_code');
+  }
+  if (requires?.terminal || wants('git', 'deploy', 'ci', 'code')) {
+    set.add('git_status');
+    set.add('git_diff');
+  }
+  return [...set];
 }
 
 function declaredOutputKeys(node: WorkflowNode): string[] {
@@ -10338,14 +11032,30 @@ function contentTypeFor(name: string, type: 'html' | 'image' | 'document' | 'cod
   return 'text/plain';
 }
 
+/**
+ * Layer the "current value" aliases onto a condition scope base. `input`,
+ * `inputs`, and `output` all point at the same value (the node's merged input
+ * for a router; the source node's output for an edge) - mirroring the unified
+ * expression contract in `safeExpression`, so one condition string means the
+ * same thing on a router branch and on a conditional edge.
+ */
+function withCurrentData(
+  base: Record<string, unknown>,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...base, input: data, inputs: data, output: data };
+}
+
 function shouldTraverseEdge(
   edge: WorkflowEdge,
   output: Record<string, unknown>,
-  scratchpad: Record<string, unknown>,
+  buildScope: () => Record<string, unknown>,
 ): boolean {
   if (edge.type === 'error') return false;
   if (edge.condition) {
-    return evalCondition(edge.condition, { output, scratchpad });
+    // P0.1: evaluate against the unified condition scope (real nodes/trigger/
+    // store/workspace/run), built lazily so the no-condition path pays nothing.
+    return evalCondition(edge.condition, buildScope());
   }
   if (edge.type === 'condition') {
     return implicitConditionEdgeResult(output);
