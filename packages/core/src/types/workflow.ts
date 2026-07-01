@@ -1380,7 +1380,7 @@ export interface ActiveExecution {
 
 export interface WorkflowGraphPatch {
   patchId: string;
-  reason: 'planner_replan' | 'user_edit' | 'hub_package_update' | 'self_heal';
+  reason: 'planner_replan' | 'user_edit' | 'hub_package_update' | 'self_heal' | 'agent_evolve';
   baseGraphRevision: number;
   addNodes: WorkflowNode[];
   updateNodes: WorkflowNode[];

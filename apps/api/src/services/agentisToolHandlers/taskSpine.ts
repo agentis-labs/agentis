@@ -14,6 +14,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.accept',
+        mcpExposed: true,
         family: 'run',
         description: 'Accept an operator objective into the durable task spine.',
         inputSchema: {
@@ -52,6 +53,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.set_steps',
+        mcpExposed: true,
         family: 'run',
         description:
           'Publish the ordered checklist the operator watches live (the StepTrack shown in chat, the Live Workspace, and channels). '
@@ -89,6 +91,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.advance_step',
+        mcpExposed: true,
         family: 'run',
         description:
           'Advance the live checklist. With no target, marks the current step done and starts the next — call it each time you finish a step. '
@@ -129,6 +132,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.inspect',
+        mcpExposed: true,
         family: 'inspect',
         description: 'Inspect one durable task spine row by task/plan id.',
         inputSchema: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] },
@@ -142,6 +146,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.bind_run',
+        mcpExposed: true,
         family: 'run',
         description: 'Bind a workflow run to a durable task spine row.',
         inputSchema: {
@@ -161,6 +166,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.record_decision',
+        mcpExposed: true,
         family: 'run',
         description: 'Record a durable decision on a task spine.',
         inputSchema: {
@@ -189,6 +195,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
     {
       definition: {
         id: 'agentis.task.flag_deviation',
+        mcpExposed: true,
         family: 'run',
         description: 'Record a durable deviation on a task spine.',
         inputSchema: {

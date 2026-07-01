@@ -243,6 +243,18 @@ export function buildRunRoutes(deps: {
     return c.json({ scratchpad, entries });
   });
 
+  // Durable, identity-tagged blackboard log — the operator Blackboard panel
+  // hydrates from here, then streams live via BLACKBOARD_ENTRY events.
+  // Optional ?namespace= filters to a convergence loop's state. (§Pillar 2/3.)
+  app.get('/:id/blackboard', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    loadRunRow(deps.db, ws.workspaceId, id);
+    const namespace = c.req.query('namespace') || undefined;
+    const entries = deps.scratchpad.listEntries(id, namespace ? { namespace } : undefined);
+    return c.json({ entries });
+  });
+
   // V1-SPEC §6.6 — apply a graph patch to a (possibly live) run.
   app.post('/:id/graph-patches', async (c) => {
     const ws = getWorkspace(c);

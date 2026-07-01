@@ -118,6 +118,15 @@ import { StructuredEvaluatorRuntime } from '../services/structuredEvaluatorRunti
 import { AdapterStructuredCompleter, FallbackStructuredCompleter, type StructuredCompleter } from '../services/structuredCompleter.js';
 import { WorkflowSelfHealService, type IntentAnchor, type RepairResourceContext, type DeepPlanArgs, type DeepPlanResult } from '../services/workflowSelfHeal.js';
 import { getSelfHealConfig, type SelfHealConfig } from '../services/selfHealSettings.js';
+import {
+  evaluateEvolution,
+  summarizeContract,
+  resolveEvolutionAuthority,
+  firstOutwardNode,
+  type EvolveResult,
+  type EvolutionRegression,
+} from '../services/atomicEvolution.js';
+import { type IntentManifest } from '../services/intentContract.js';
 import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../services/workflowRecoveryPolicy.js';
 import { composeOperatingManual, getWorkspaceManual } from '../services/agentOperatingManual.js';
 import { loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../services/agentIdentity.js';
@@ -2906,6 +2915,190 @@ export class WorkflowEngine {
     return { newRevision };
   }
 
+  /**
+   * ORGAN 3 / AGENT-PRIMARY M1 — evolve a LIVE run's graph through the contract
+   * transaction. Unlike raw {@link applyGraphPatch} (which only checks revision +
+   * structure), this runs the full green ratchet: an evolution that breaks a data
+   * coupling (Organ 1), forces an approval bypass (Organ 2), or removes the
+   * running/completed spine is REJECTED with named regressions the agent can fix
+   * and re-propose — it never corrupts the graph. Authority-gated: `operator`
+   * mode (deterministic) refuses agent self-evolution; the agent modes commit
+   * within the ratchet. On commit it reuses `applyGraphPatch` (the proven
+   * validate+persist+revision+audit primitive) so there is one commit path.
+   */
+  async evolveGraph(args: {
+    runId: string;
+    patch: WorkflowGraphPatch;
+    /** Override the resolved authority (tests / operator route). */
+    authority?: 'operator' | 'agent_within_green' | 'agent';
+    actorId?: string;
+  }): Promise<EvolveResult> {
+    const { runId } = args;
+    function reject(rejected: 'regression' | 'authority' | 'conflict' | 'invalid', regressions: EvolutionRegression[]): EvolveResult {
+      return { committed: false, rejected, regressions };
+    }
+    const run = await this.deps.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get();
+    if (!run) return reject('invalid', [{ code: 'STRUCTURAL', message: `Run ${runId} not found` }]);
+
+    const ctx = this.#runs.get(runId);
+    const currentState = run.runState as unknown as WorkflowRunState;
+    const currentRevision = ctx?.state.graphRevision ?? currentState.graphRevision ?? 0;
+
+    // Normalize the patch (the MCP-harness caller may omit arrays) + stamp the
+    // current revision and reason — the agent authors shape, not bookkeeping.
+    const patch: WorkflowGraphPatch = {
+      patchId: typeof args.patch.patchId === 'string' && args.patch.patchId ? args.patch.patchId : randomUUID(),
+      reason: 'agent_evolve',
+      baseGraphRevision: currentRevision,
+      addNodes: Array.isArray(args.patch.addNodes) ? args.patch.addNodes : [],
+      updateNodes: Array.isArray(args.patch.updateNodes) ? args.patch.updateNodes : [],
+      removeNodeIds: Array.isArray(args.patch.removeNodeIds) ? args.patch.removeNodeIds : [],
+      addEdges: Array.isArray(args.patch.addEdges) ? args.patch.addEdges : [],
+      removeEdgeIds: Array.isArray(args.patch.removeEdgeIds) ? args.patch.removeEdgeIds : [],
+    };
+
+    // Workflow settings carry the intent manifest (Organ 2 baseline) + any pinned authority.
+    const wf = run.workflowId
+      ? this.deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, run.workflowId)).get()
+      : undefined;
+    const settings = (wf?.settings ?? {}) as { intentManifest?: IntentManifest; evolutionAuthority?: unknown; executionMode?: unknown };
+    const authority = args.authority
+      ?? resolveEvolutionAuthority(this.deps.db, run.workspaceId, settings);
+
+    if (authority === 'operator') {
+      return reject('authority', [{
+        code: 'STRUCTURAL',
+        message:
+          'This workflow runs in deterministic (operator) mode — an agent cannot self-evolve the graph. '
+          + 'Flag a deviation with your proposed change instead, or the operator can raise the evolution authority.',
+      }]);
+    }
+
+    const baseGraph = ctx?.graph ?? (run.workflowId ? this.#loadWorkflowGraph(run.workflowId) : (run.graphSnapshot as WorkflowGraph | null));
+    if (!baseGraph) return reject('invalid', [{ code: 'STRUCTURAL', message: 'Run has no graph to evolve' }]);
+
+    // Never let an evolution rewrite the spine that is already running or done —
+    // check the live ctx first, else the persisted run state (parked runs).
+    const nodeStates = ctx?.state.nodeStates ?? currentState.nodeStates ?? {};
+    for (const removeId of patch.removeNodeIds) {
+      const st = nodeStates[removeId]?.status;
+      if (st === 'COMPLETED' || st === 'RUNNING') {
+        return reject('regression', [{
+          code: 'IMMUTABLE_NODE', nodeId: removeId,
+          message: `Cannot remove node '${removeId}': it is already ${st.toLowerCase()}. Evolve the plan AHEAD of what has run, not behind it.`,
+        }]);
+      }
+    }
+
+    // Outward/irreversible new step: under agent_within_green it must not
+    // auto-commit — that is an operator decision (full `agent` authority allows).
+    if (authority === 'agent_within_green') {
+      const outward = firstOutwardNode(patch.addNodes);
+      if (outward) {
+        return reject('authority', [{
+          code: 'STRUCTURAL', nodeId: outward.id,
+          message:
+            `Node '${outward.id}' performs an outward/irreversible action (integration or external write). `
+            + 'In green-guarded mode you cannot auto-commit an outward step — flag a deviation with this proposal for operator approval, '
+            + 'or evolve only the internal steps and route the outward action through an existing approval checkpoint.',
+        }]);
+      }
+    }
+
+    let merged: WorkflowGraph;
+    try {
+      merged = mergeGraphPatch(baseGraph, patch);
+    } catch (err) {
+      return reject('invalid', [{ code: 'STRUCTURAL', message: (err as Error).message }]);
+    }
+    try {
+      validateWorkflowGraph(merged, { currentWorkflowId: run.workflowId });
+    } catch (err) {
+      return reject('regression', [{ code: 'STRUCTURAL', message: err instanceof AgentisError ? err.message : (err as Error).message }]);
+    }
+
+    // The green ratchet (Organ 1 + Organ 2), diffed against the base graph.
+    const decision = evaluateEvolution(baseGraph, merged, settings.intentManifest ?? null);
+    if (!decision.ok) return reject('regression', decision.regressions);
+
+    // Commit through the one proven path.
+    let newRevision: number;
+    try {
+      ({ newRevision } = await this.applyGraphPatch({ runId, patch }));
+    } catch (err) {
+      const code = err instanceof AgentisError ? err.code : 'UNKNOWN';
+      return reject(code === 'GRAPH_REVISION_CONFLICT' ? 'conflict' : 'invalid', [{
+        code: 'STRUCTURAL', message: err instanceof AgentisError ? err.message : (err as Error).message,
+      }]);
+    }
+
+    // M6 — snapshot the pre-evolve graph so an operator can one-click revert via
+    // the existing rollbackSelfHeal path (reuses the repair-checkpoint table +
+    // rollback mechanism; the synthetic incident/plan ids just satisfy its NOT NULL
+    // columns — a missing incident is handled gracefully on rollback).
+    try {
+      await this.deps.db.insert(schema.workflowRepairCheckpoints).values({
+        id: randomUUID(),
+        workspaceId: run.workspaceId,
+        runId,
+        workflowId: run.workflowId || null,
+        incidentId: 'evolve',
+        planId: `evolve:${patch.patchId}`,
+        revisionBefore: currentRevision,
+        revisionAfter: newRevision,
+        graphBefore: baseGraph as unknown as object,
+        graphAfter: merged as unknown as object,
+        patch: patch as unknown as object,
+      });
+    } catch (err) {
+      this.deps.logger.warn('engine.evolve.checkpoint_failed', { runId, err: (err as Error).message });
+    }
+
+    // Seed run bookkeeping for the new nodes (applyGraphPatch updates
+    // ctx.graph/downstreamEdges but not nodeStates/waitingInputs). Without a
+    // waiting buffer keyed on its incoming edges, a completing upstream's fan-out
+    // finds no target to promote and the evolved node is silently orphaned —
+    // mirror buildInitialRunState so the new node joins the live dataflow.
+    if (ctx) {
+      const incomingByTarget = new Map<string, string[]>();
+      const addedIds = new Set(patch.addNodes.map((n) => n.id));
+      for (const e of ctx.graph.edges) {
+        if (!addedIds.has(e.target)) continue;
+        const list = incomingByTarget.get(e.target) ?? [];
+        list.push(e.source);
+        incomingByTarget.set(e.target, list);
+      }
+      for (const added of patch.addNodes) {
+        if (ctx.state.nodeStates[added.id]) continue; // never clobber existing state
+        ctx.state.nodeStates[added.id] = { nodeId: added.id, status: 'PENDING' };
+        const incoming = incomingByTarget.get(added.id) ?? [];
+        if (incoming.length === 0) {
+          ctx.state.readyQueue.push({ nodeId: added.id, priority: 0, insertedAt: new Date().toISOString(), inputData: {} });
+          continue;
+        }
+        const buffer = { requiredInputs: incoming.slice(), receivedInputs: {} as Record<string, unknown>, sourceNodeIds: incoming.slice() };
+        // Absorb any upstream that ALREADY completed before this evolution, so a
+        // node wired behind finished work is promoted instead of hanging forever.
+        for (const src of incoming) {
+          const ss = ctx.state.nodeStates[src];
+          if (ss?.status === 'COMPLETED') {
+            buffer.receivedInputs[src] = ss.outputData ?? {};
+            buffer.requiredInputs = buffer.requiredInputs.filter((id) => id !== src);
+          }
+        }
+        ctx.state.waitingInputs[added.id] = buffer;
+        this.#promoteOrSkipTarget(ctx, added.id, 'Skipped: evolved node has no reachable input');
+      }
+      await this.#persistRun(ctx);
+    }
+
+    this.deps.logger.info('engine.evolve.committed', {
+      runId, authority, newRevision,
+      added: patch.addNodes.length, edges: patch.addEdges.length, warnings: decision.warnings.length,
+    });
+    return { committed: true, newRevision, contractSummary: summarizeContract(merged), warnings: decision.warnings };
+  }
+
   /** Roll back the newest unapplied self-healing checkpoint without clobbering later edits. */
   async rollbackSelfHeal(args: { runId: string; checkpointId: string }): Promise<{ newRevision: number }> {
     const ctx = this.#runs.get(args.runId) ?? this.#ensureRecoveredCtx(args.runId);
@@ -3593,6 +3786,22 @@ export class WorkflowEngine {
           },
         });
         return;
+      }
+      default: {
+        // Defense-in-depth. No explicit case above and no registered pure
+        // handler (checked before this switch) matches this node kind. Every
+        // entry point (startRun / applyGraphPatch / evolveGraph) runs
+        // `validateWorkflowGraph`, whose SUPPORTED_NODE_KINDS allowlist already
+        // rejects truly-unknown kinds, so this is normally unreachable. It
+        // guards allowlist/dispatch DRIFT: a kind that passes the allowlist but
+        // has no handler (e.g. an allowlisted kind whose case was removed).
+        // Without it, such a node would be STARTED but never completed and the
+        // run would hang forever. Fail loudly instead: the dispatch caller's
+        // `.catch()` funnels this into `#failNode`, so the run settles to FAILED.
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `node kind '${String((node.config as { kind?: unknown }).kind)}' has no execution handler wired`,
+        );
       }
     }
   }
@@ -4591,9 +4800,47 @@ export class WorkflowEngine {
       runContextBlock: childRunContext.prompt,
       ...(grant ? { grant } : {}),
     };
+    // Specialist run telemetry — record the delegation as a specialist run and
+    // advance it planned → running → completed/failed. Before this, delegation
+    // created a specialist INSTANCE but no run, and the demand-router path left
+    // run rows stuck at `planned` (write-only). Best-effort: a telemetry failure
+    // must never break the delegation itself.
+    let specialistRunId: string | null = null;
+    if (this.deps.specialistRuntime && resolved.instanceId) {
+      try {
+        specialistRunId = this.deps.specialistRuntime.recordPlannedRun({
+          workspaceId: ctx.workspaceId,
+          role: y.role,
+          agentId,
+          topology: 'direct',
+          task: y.task,
+        }).id;
+        this.deps.specialistRuntime.updateRun(ctx.workspaceId, specialistRunId, {
+          status: 'running',
+          traceEvent: { event: 'running', summary: 'Delegation started.' },
+        });
+      } catch { /* telemetry is best-effort */ }
+    }
+    const settleSpecialistRun = (status: 'completed' | 'failed', summary: string) => {
+      if (!specialistRunId || !this.deps.specialistRuntime) return;
+      try {
+        this.deps.specialistRuntime.updateRun(ctx.workspaceId, specialistRunId, {
+          status,
+          outputSummary: summary.slice(0, 400),
+          traceEvent: { event: status, summary: `Delegation ${status}.` },
+        });
+      } catch { /* telemetry is best-effort */ }
+    };
     const outcome = await this.#advanceSessionLoop(ctx, node, child.id, childCtx);
-    if (outcome.kind === 'completed' || outcome.kind === 'max_steps') return { ok: true, result: outcome.output };
-    if (outcome.kind === 'failed') return { ok: false, error: outcome.error };
+    if (outcome.kind === 'completed' || outcome.kind === 'max_steps') {
+      settleSpecialistRun('completed', typeof outcome.output === 'string' ? outcome.output : JSON.stringify(outcome.output ?? {}));
+      return { ok: true, result: outcome.output };
+    }
+    if (outcome.kind === 'failed') {
+      settleSpecialistRun('failed', outcome.error);
+      return { ok: false, error: outcome.error };
+    }
+    settleSpecialistRun('failed', 'delegated sub-agent attempted an unsupported non-delegate yield');
     // A delegated child cannot park (no cross-tick wake path for sub-sessions).
     return { ok: false, error: 'delegated sub-agent attempted a non-delegate yield (await/sleep/approval), which is unsupported inside synchronous delegation' };
   }
@@ -5346,12 +5593,45 @@ export class WorkflowEngine {
     } catch (err) {
       this.deps.logger.warn('engine.operating_manual.failed', { runId: ctx.runId, err: (err as Error).message });
     }
+    // AGENT-PRIMARY M5 — the global tier: the live plan the agent may EVOLVE.
+    // Carries the Intent Manifest goal + the typed contract summary (so the agent
+    // reasons over the whole plan, not 70 node bodies) AND the runId + how to
+    // extend it — which also gives an external harness the run handle it needs (M2).
+    const evolutionBlock = this.#buildLivePlanBlock(ctx);
     return {
-      prompt: [agentIdentityBlock, operatingManualBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, abilityResult.xml, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
+      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, abilityResult.xml, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
       abilities: abilityResult.abilities,
       abilityEnv: abilityResult.env,
       preferredModel: abilityResult.preferredModel,
     };
+  }
+
+  /**
+   * AGENT-PRIMARY M5 — the "global tier" block: the live plan the agent can
+   * evolve. Only injected when this run's authority is agent-primary (deterministic
+   * runs omit it, so their agents are never told to reshape a frozen pipeline).
+   */
+  #buildLivePlanBlock(ctx: RunningContext): string {
+    try {
+      const wf = ctx.workflowId
+        ? this.deps.db.select({ settings: schema.workflows.settings }).from(schema.workflows).where(eq(schema.workflows.id, ctx.workflowId)).get()
+        : undefined;
+      const settings = (wf?.settings ?? {}) as { intentManifest?: IntentManifest; evolutionAuthority?: unknown; executionMode?: unknown };
+      const authority = resolveEvolutionAuthority(this.deps.db, ctx.workspaceId, settings);
+      if (authority === 'operator') return '';
+      const goal = settings.intentManifest?.goal;
+      const lines = [
+        `You are executing inside live run "${ctx.runId}". The workflow graph below is the plan you OWN and may EVOLVE.`,
+        goal ? `Objective (intent): ${goal}` : '',
+        `Current plan contract:`,
+        summarizeContract(ctx.graph),
+        `If a step is missing to reach the objective, EXTEND the plan: in-session call evolve_plan; over MCP call agentis.workflow.patch with { runId: "${ctx.runId}", patch: { addNodes, addEdges } }. The engine validates against the contracts and either commits or names exactly what to fix. Never gut a step or fabricate to avoid evolving.`,
+      ].filter(Boolean);
+      return `<live_plan>\n${lines.join('\n')}\n</live_plan>`;
+    } catch (err) {
+      this.deps.logger.warn('engine.live_plan_block.failed', { runId: ctx.runId, err: (err as Error).message });
+      return '';
+    }
   }
 
   #enqueueSuccessfulBrainCapture(
@@ -8186,6 +8466,44 @@ export class WorkflowEngine {
     return result.output;
   }
 
+  /**
+   * INTELLIGENT OUTPUT ADAPTATION (reshape). The agent produced USABLE output but
+   * not in the declared shape (e.g. returned {stores:[…]} for `candidates`). One
+   * bounded, GROUNDED structured-completion call maps its own output onto the
+   * contract — never invents data; a genuinely-absent field is left for typed
+   * defaulting. Gated to a WIRED synthesis runtime (a no-op on the stub-only test
+   * path, which sets evaluatorRuntime not resolveEvaluatorRuntime) and one-shot
+   * per node. Returns the reshaped object merged over the original.
+   */
+  async #reshapeAgentOutputToContract(ctx: RunningContext, node: WorkflowNode, output: Record<string, unknown>, missingKeys: string[]): Promise<Record<string, unknown> | null> {
+    if (this.#debugRuns.has(ctx.runId)) return null;
+    if (!ctx.nodeReshapeAttempted) ctx.nodeReshapeAttempted = new Set();
+    if (ctx.nodeReshapeAttempted.has(node.id)) return null;
+    ctx.nodeReshapeAttempted.add(node.id);
+    const runtime = this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'synthesis', { task: 'reshape output to contract', purpose: 'output_reshape' });
+    if (!runtime) return null;
+    const config = node.config as AgentTaskNodeConfig;
+    const system = 'You reshape one automated step\'s output to a strict JSON contract. '
+      + 'Map the SOURCE object\'s EXISTING data onto the required keys — same data, correct shape/names. '
+      + 'Do NOT invent data absent from SOURCE; if a required field is genuinely not present, use its empty default ([], false, 0, "", {}). '
+      + 'Respond with ONE strict JSON object and nothing else — no prose, no code fences.';
+    const user = `SOURCE (the step's actual output):\n${safeJson(output)}\n\nMissing required keys: ${missingKeys.join(', ')}${buildNodeProcessBriefing(ctx.graph, node, config)}`;
+    try {
+      const parsed = await runtime.completeStructured<Record<string, unknown>>({
+        system,
+        user,
+        maxTokens: 4_000,
+        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+      });
+      if (!parsed || typeof parsed !== 'object') return null;
+      this.deps.logger.info('engine.output_reshaped', { runId: ctx.runId, nodeId: node.id });
+      return { ...output, ...parsed };
+    } catch (err) {
+      this.deps.logger.warn('engine.output_reshape.failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
+      return null;
+    }
+  }
+
   /** Whether a failed node qualifies for generic `retryPolicy` re-dispatch. */
   #shouldGenericRetry(node: WorkflowNode, error: string): boolean {
     const policy = node.retryPolicy;
@@ -8626,15 +8944,28 @@ export class WorkflowEngine {
     // is a valid "no store found", not a run-killing failure). A node that
     // produced NOTHING usable was already hard-failed above.
     if (completedNode && normalization.missingKeys.length > 0 && hasAnyUsableOutput(normalizedOutput)) {
-      const filled = normalizeDeclaredNodeOutputResult(completedNode, normalizedOutput, { fillTypedDefaults: true });
-      normalizedOutput = filled.output;
-      // Keep the adaptation HONEST + VISIBLE: the run is COMPLETED_WITH_CONTRACT_VIOLATION
-      // (a deviation records the defaulted keys), downstream reads get typed empties
-      // instead of undefined, and the run neither crashes nor loops. A node that
-      // produced NOTHING usable was already hard-failed above.
-      normalization = { ...filled, missingKeys: filled.defaultedKeys };
-      if (filled.defaultedKeys.length > 0) {
-        this.deps.logger.info('engine.output_adapted', { runId: ctx.runId, nodeId, defaultedKeys: filled.defaultedKeys });
+      // 1. RESHAPE — recover the declared keys' SUBSTANCE from the agent's actual
+      //    output shape (one bounded, grounded call) before defaulting to empty.
+      const isAgentNode = completedNode.config.kind === 'agent_task' || completedNode.config.kind === 'agent_session';
+      if (isAgentNode) {
+        const reshaped = await this.#reshapeAgentOutputToContract(ctx, completedNode, normalizedOutput, normalization.missingKeys);
+        if (reshaped) {
+          const re = normalizeDeclaredNodeOutputResult(completedNode, reshaped);
+          if (re.missingKeys.length < normalization.missingKeys.length) { normalization = re; normalizedOutput = re.output; }
+        }
+      }
+      // 2. TYPED-EMPTY DEFAULTS — complete any keys STILL absent. Keeps the
+      //    adaptation HONEST + VISIBLE: the run is COMPLETED_WITH_CONTRACT_VIOLATION
+      //    (a deviation records the defaulted keys), downstream reads get typed
+      //    empties instead of undefined, and the run neither crashes nor loops. A
+      //    node that produced NOTHING usable was already hard-failed above.
+      if (normalization.missingKeys.length > 0) {
+        const filled = normalizeDeclaredNodeOutputResult(completedNode, normalizedOutput, { fillTypedDefaults: true });
+        normalizedOutput = filled.output;
+        normalization = { ...filled, missingKeys: filled.defaultedKeys };
+        if (filled.defaultedKeys.length > 0) {
+          this.deps.logger.info('engine.output_adapted', { runId: ctx.runId, nodeId, defaultedKeys: filled.defaultedKeys });
+        }
       }
     }
     const deviation = normalization.missingKeys.length > 0
@@ -9657,6 +9988,8 @@ interface RunningContext {
   nodeLastInput?: Map<string, Record<string, unknown>>;
   /** Agent nodes that already used their one-shot fallback-runtime retry. */
   nodeFallbackAttempted?: Set<string>;
+  /** Agent nodes that already used their one-shot output-reshape attempt. */
+  nodeReshapeAttempted?: Set<string>;
   /**
    * Run-scoped cancellation (NATIVE-ADVANCEMENT Proposal 7, Agentis-native form).
    * `cancelRun` aborts this so in-flight work that honors the signal (HTTP

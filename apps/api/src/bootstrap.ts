@@ -15,7 +15,7 @@ import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { and, eq, inArray } from 'drizzle-orm';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type WorkflowGraph } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type WorkflowGraph, type WorkflowGraphPatch } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AgentisRuntimeHandle, AgentisRuntimeStartResult } from '@agentis/runtime';
 import { loadEnv, type AgentisEnv } from './env.js';
@@ -113,7 +113,6 @@ import { ProactiveFollowupService } from './services/proactiveFollowups.js';
 import { AppLearningService } from './services/appLearning.js';
 import { ConversationParticipantService } from './services/conversationParticipants.js';
 import { OutboundPolicyService } from './services/outboundPolicy.js';
-import { buildScratchpadRoutes } from './routes/scratchpad.js';
 import { buildTaskRoutes } from './routes/tasks.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
 import { BudgetService } from './services/budget.js';
@@ -701,6 +700,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         logger,
       })
     : undefined;
+  // AGENT-PRIMARY M2 — late-bound so the session runtime can evolve the live run
+  // through the engine's contract transaction (engine is constructed just below).
+  let evolveGraphFn: ((args: { runId: string; patch: WorkflowGraphPatch }) => ReturnType<WorkflowEngine['evolveGraph']>) | undefined;
   const sessionRuntime = new AgentSessionRuntime({
     sessions: sessionStore,
     ...(envSessionAdapter ? { adapter: envSessionAdapter } : {}),
@@ -710,6 +712,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     bus,
     logger,
     agentTools: agentToolRuntime,
+    evolvePlan: (args) => {
+      if (!evolveGraphFn) return Promise.resolve({ committed: false as const, rejected: 'invalid' as const, regressions: [{ code: 'STRUCTURAL' as const, message: 'evolution engine not ready' }] });
+      return evolveGraphFn(args);
+    },
     // Cross-runtime identity for blackboard entries — resolved from the live
     // adapter registry (in-memory, no DB). (AGENT-COOPERATION-10X §Pillar 2.)
     resolveRuntimeLabel: (agentId: string) => {
@@ -815,6 +821,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     telemetry,
   };
   const engine = new WorkflowEngine(engineDeps);
+  // Bind the session runtime's evolve callback now that the engine exists (M2).
+  evolveGraphFn = (args) => engine.evolveGraph(args);
   // Brain — knowledge graph + memory subsystem (workspace-scoped).
   // §B1.1 — KnowledgeStore keeps a default instance for its synchronous lexical
   // path; the KnowledgeBase service already resolves the per-workspace provider
@@ -1751,6 +1759,23 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
           }
         } catch (err) {
           logger.warn('brain.reembed_sweep_error', { message: (err as Error).message });
+        }
+        // Session moments defer async embeddings the same way a fresh memory
+        // write does; sweep them too so a deferred session atom becomes
+        // semantically seekable instead of staying lexical-only forever
+        // (closes the session-moment recall gap).
+        try {
+          const pendingSessions = sqlite
+            .selectDistinct({ workspaceId: schema.sessionMoments.workspaceId })
+            .from(schema.sessionMoments)
+            .where(eq(schema.sessionMoments.needsReembed, true))
+            .all();
+          for (const { workspaceId } of pendingSessions) {
+            void SessionMoments.reembedPending(workspaceId).catch((err) =>
+              logger.warn('session_moments.reembed_sweep_failed', { workspaceId, message: (err as Error).message }));
+          }
+        } catch (err) {
+          logger.warn('session_moments.reembed_sweep_error', { message: (err as Error).message });
         }
       }, 15_000);
       reembedSweep.unref();

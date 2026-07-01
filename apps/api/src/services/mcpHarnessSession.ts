@@ -141,6 +141,12 @@ export function harnessMcpArgs(adapterType: AdapterType, servers: McpHarnessServ
   if (servers.length === 0) return [];
   if (adapterType === 'claude_code') return claudeMcpArgs(servers);
   if (adapterType === 'codex') return codexMcpArgs(servers);
+  // Cursor (`cursor-agent`) and Antigravity (`agy`) have NO spawn-arg MCP
+  // emitter on purpose: neither CLI accepts an inline `--mcp-config`/`-c` server
+  // override (cursor reads a `.cursor/mcp.json` file; agy uses its own settings),
+  // so injecting one would break the spawn. Until a file-based emitter is added
+  // and verified against the real binaries, these harnesses use the marker
+  // protocol (see agentCommission.registerAdapter) rather than native MCP tools.
   return [];
 }
 

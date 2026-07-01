@@ -17,6 +17,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
     {
       definition: {
         id: 'agentis.approval.resolve',
+        mcpExposed: true,
         family: 'environment',
         description: 'Approve or reject a pending approval.',
         inputSchema: {
@@ -47,6 +48,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
     {
       definition: {
         id: 'agentis.viewport.context',
+        mcpExposed: true,
         family: 'environment',
         description: 'Return the agent’s view of its current environment (workspace, ambient, latest activity).',
         inputSchema: { type: 'object', properties: {} },
@@ -67,6 +69,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
     {
       definition: {
         id: 'agentis.canvas.context',
+        mcpExposed: true,
         family: 'environment',
         description: 'Read the operator viewport context plus selected workflow/run/agent details.',
         inputSchema: {
@@ -92,6 +95,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
     {
       definition: {
         id: 'agentis.gateways.status',
+        mcpExposed: true,
         family: 'inspect',
         description: 'Check gateway and registered adapter health for the workspace.',
         inputSchema: { type: 'object', properties: { gatewayId: { type: 'string' } } },
@@ -133,6 +137,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
     {
       definition: {
         id: 'http_fetch',
+        mcpExposed: true,
         family: 'data',
         description: 'Fetch an HTTP(S) URL using the built-in SSRF-guarded fetcher.',
         inputSchema: {

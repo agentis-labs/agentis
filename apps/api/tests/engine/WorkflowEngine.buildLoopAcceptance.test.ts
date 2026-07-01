@@ -224,6 +224,59 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
     expect(state.nodeStates.scout?.outputData?.blockers).toEqual([]);
   });
 
+  it('RESHAPES usable-but-wrong-shape output onto the contract — recovers SUBSTANCE, not just empty defaults (LLM reshape)', async () => {
+    // The agent did the real work but returned {stores:[…]} where the contract
+    // declares `candidates`. A wired, grounded one-shot reshape maps its own data
+    // onto the contract — so downstream gets the REAL stores, not candidates:[]
+    // (which is all typed-defaulting alone could have produced).
+    const RECOVERED = [{ instagramHandle: 'lojazys', name: 'ZYS' }, { instagramHandle: 'modarihanne', name: 'RIHANNE' }];
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Scout', adapterType: 'codex', capabilityTags: [], config: {}, role: 'worker', status: 'online',
+    }).run();
+    const adapters = new AdapterManager(ctx.logger);
+    // Agent returns the RIGHT data under WRONG key names (`stores`) — and MULTIPLE
+    // declared keys, so the lenient single-key auto-remap can't rescue it. This is
+    // exactly where typed-defaulting alone would blank `candidates` to [].
+    adapters.register(agentId, new CapturingAdapter(agentId, [], { stores: RECOVERED }));
+    // A WIRED synthesis runtime that maps the source's data onto the declared keys.
+    let reshapeCalls = 0;
+    const reshapeRuntime = {
+      completeStructured: async ({ user }: { user: string }): Promise<Record<string, unknown>> => {
+        reshapeCalls += 1;
+        // Grounded: recover the stores the agent ACTUALLY produced from the SOURCE.
+        const m = /"stores"\s*:\s*(\[[\s\S]*?\])/.exec(user);
+        return { candidates: m ? JSON.parse(m[1]) : [], exhausted: true };
+      },
+    };
+    const engine = makeEngine(adapters, { resolveEvaluatorRuntime: () => reshapeRuntime });
+    adapters.onEvent((event) => {
+      if (event.eventType === 'task.completed') void engine.notifyTaskCompleted({ runId: event.runId, nodeId: event.taskId, output: event.output });
+    });
+
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'scout', type: 'agent_task', title: 'Scout', position: { x: 200, y: 0 }, config: { kind: 'agent_task', agentId, prompt: 'Find stores.', inputKeys: [], outputKeys: ['candidates', 'exhausted'], capabilityTags: [] } },
+      ],
+      edges: [{ id: 't-s', source: 'trigger', target: 'scout' }],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph, {});
+    const terminal = waitForTerminal(runId);
+    await engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph });
+    await terminal;
+
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    const state = run.runState as { nodeStates: Record<string, { status: string; outputData?: Record<string, unknown> }> };
+    expect(reshapeCalls).toBe(1);
+    expect(state.nodeStates.scout?.status).toBe('COMPLETED');
+    // The declared keys hold the REAL recovered data — not empty defaults.
+    expect(state.nodeStates.scout?.outputData?.candidates).toEqual(RECOVERED);
+    expect(state.nodeStates.scout?.outputData?.exhausted).toBe(true);
+  });
+
   it('quarantines a RESOURCE failure (usage limit) — pauses the node, never fails or edits it (Organ 4)', async () => {
     // The transcript: "Instagram Fashion Store Scout failed: Codex exited with code
     // 1: You've hit your usage limit." A rate/usage limit is NOT a workflow bug —
@@ -324,7 +377,7 @@ class FailingAdapter implements AgentAdapter {
   async cancelTask(): Promise<void> {}
 }
 
-function makeEngine(adapters: AdapterManager = new AdapterManager(ctx.logger)): WorkflowEngine {
+function makeEngine(adapters: AdapterManager = new AdapterManager(ctx.logger), extra: Record<string, unknown> = {}): WorkflowEngine {
   return new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
@@ -335,7 +388,8 @@ function makeEngine(adapters: AdapterManager = new AdapterManager(ctx.logger)): 
     approvals: new ApprovalInboxService(ctx.db, ctx.bus),
     extensions: {} as unknown as ExtensionRuntime,
     adapters,
-  });
+    ...extra,
+  } as ConstructorParameters<typeof WorkflowEngine>[0]);
 }
 
 function persistWorkflow(graph: WorkflowGraph, inputs: Record<string, unknown>): {

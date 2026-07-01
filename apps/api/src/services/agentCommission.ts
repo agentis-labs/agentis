@@ -279,6 +279,10 @@ export async function registerAdapter(
   }
   if (adapterType === 'cursor') {
     if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
+    // No `mcpServers` here (unlike codex/hermes/claude_code): `cursor-agent` has
+    // no inline MCP spawn-arg — it reads a `.cursor/mcp.json` file — so there is
+    // no `harnessMcpArgs('cursor', …)` emitter yet. This harness reaches Agentis
+    // tools via the marker protocol until a verified file-based emitter exists.
     const adapter = new CursorAdapter({
       agentId,
       workspaceId,
@@ -320,6 +324,10 @@ export async function registerAdapter(
   }
   if (adapterType === 'antigravity') {
     if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
+    // No `mcpServers` here (unlike codex/hermes/claude_code): `agy` has no inline
+    // MCP spawn-arg override, so there is no `harnessMcpArgs('antigravity', …)`
+    // emitter yet. This harness reaches Agentis tools via the marker protocol
+    // until a verified emitter exists.
     const adapter = new AntigravityAdapter({
       agentId,
       workspaceId,

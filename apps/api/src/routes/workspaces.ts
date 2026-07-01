@@ -15,6 +15,7 @@ import type { GroundingDiscoveryService } from '../grounding/discovery.js';
 import type { GroundingRuntime } from '../grounding/groundingRuntime.js';
 import { requireAuth, getUser } from '../middleware/auth.js';
 import { getSelfHealConfig, setSelfHealConfig } from '../services/selfHealSettings.js';
+import { getEvolutionConfig, setEvolutionConfig, normalizeAuthority } from '../services/atomicEvolution.js';
 
 export function buildWorkspaceRoutes(deps: {
   db: AgentisSqliteDb;
@@ -123,6 +124,23 @@ export function buildWorkspaceRoutes(deps: {
       mode: body.mode === 'guarded' || body.mode === 'bypass' ? body.mode : undefined,
       maxRepairPlans: typeof body.maxRepairPlans === 'number' ? body.maxRepairPlans : undefined,
       healerAgentId: body.healerAgentId === null || typeof body.healerAgentId === 'string' ? body.healerAgentId : undefined,
+    });
+    return c.json(next);
+  });
+
+  // AGENT-PRIMARY M3 — evolution authority (deterministic vs agent-primary).
+  app.get('/:id/evolution', (c) => {
+    const id = c.req.param('id');
+    ownedWorkspace(c, id);
+    return c.json(getEvolutionConfig(deps.db, id));
+  });
+
+  app.put('/:id/evolution', async (c) => {
+    const id = c.req.param('id');
+    ownedWorkspace(c, id);
+    const body = (await c.req.json().catch(() => ({}))) as { defaultAuthority?: unknown };
+    const next = setEvolutionConfig(deps.db, id, {
+      defaultAuthority: normalizeAuthority(body.defaultAuthority),
     });
     return c.json(next);
   });

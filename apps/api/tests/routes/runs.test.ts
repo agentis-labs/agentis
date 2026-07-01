@@ -550,6 +550,32 @@ describe('GET /v1/runs/:id/scratchpad', () => {
   });
 });
 
+describe('GET /v1/runs/:id/blackboard', () => {
+  it('returns the durable blackboard entries for a run', async () => {
+    const { runId } = seedRun();
+    scratchpad.write(runId, 'progress', { step: 1 });
+    const res = await app().request(`/v1/runs/${runId}/blackboard`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { entries: Array<{ key?: string; value?: unknown }> };
+    expect(body.entries).toEqual([
+      expect.objectContaining({ key: 'progress', value: { step: 1 } }),
+    ]);
+  });
+
+  it('returns 404 with WORKFLOW_RUN_NOT_FOUND for unknown run', async () => {
+    const res = await app().request(`/v1/runs/${randomUUID()}/blackboard`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('WORKFLOW_RUN_NOT_FOUND');
+  });
+
+  it('rejects without auth (401)', async () => {
+    const { runId } = seedRun();
+    const res = await app().request(`/v1/runs/${runId}/blackboard`);
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('POST /v1/runs/:id/graph-patches', () => {
   function basePatch(overrides: Record<string, unknown> = {}) {
     return {

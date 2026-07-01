@@ -15,6 +15,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     {
       definition: {
         id: 'agentis.agents.list',
+        mcpExposed: true,
         family: 'inspect',
         description: 'List agents available in the workspace.',
         inputSchema: {
@@ -47,6 +48,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     {
       definition: {
         id: 'agentis.routing.preview',
+        mcpExposed: true,
         family: 'inspect',
         description:
           'Explain which runtime and model Agentis would choose for a task. Use before spawning, dispatching, or escalating model power when routing is unclear.',
@@ -115,6 +117,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     {
       definition: {
         id: 'agentis.specialist.create',
+        mcpExposed: true,
         family: 'build' as const,
         description:
           'Author a NEW specialist (custom functional role) and materialize it so you can delegate to it immediately. ' +
@@ -204,6 +207,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     {
       definition: {
         id: 'agentis.specialist.request',
+        mcpExposed: true,
         family: 'run' as const,
         description:
           'Request the best existing or materialized specialist for a concrete task. ' +
@@ -238,6 +242,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     {
       definition: {
         id: 'agentis.agent.dispatch',
+        mcpExposed: true,
         family: 'run',
         description: 'Dispatch a task to an existing agent. Uses chat when the adapter supports it, otherwise dispatches a normalized task.',
         inputSchema: {
@@ -341,6 +346,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     return {
       definition: {
         id,
+        mcpExposed: true,
         family: 'build' as const,
         description: id === 'agentis.agent.spawn' ? 'Create a new agent from a role brief.' : 'Create a new agent.',
         inputSchema: {

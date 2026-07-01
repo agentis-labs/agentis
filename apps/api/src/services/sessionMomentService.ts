@@ -171,6 +171,44 @@ export class SessionMomentService {
     return result.changes;
   }
 
+  /**
+   * §B1.2 — backfill embeddings the write path deferred. An async provider
+   * (default local ONNX) returns a Promise from `embed()`, so `add()` stores a
+   * null vector + `needsReembed=1` instead of blocking the write. Without a
+   * sweep those atoms stay lexical-only forever and never become semantically
+   * seekable. This embeds the pending rows for a workspace and clears the flag.
+   * Called by the boot re-embed sweep (mirrors `SharedIntelligence.reembedPending`).
+   */
+  async reembedPending(workspaceId: string, limit = 50): Promise<number> {
+    const provider = this.resolveProvider?.(workspaceId);
+    if (!provider) return 0;
+    const rows = this.db.select().from(schema.sessionMoments)
+      .where(and(
+        eq(schema.sessionMoments.workspaceId, workspaceId),
+        eq(schema.sessionMoments.needsReembed, true),
+      ))
+      .limit(limit)
+      .all();
+    if (rows.length === 0) return 0;
+    const identity = providerIdentity(provider);
+    let embedded = 0;
+    for (const row of rows) {
+      try {
+        const vector = await provider.embed(row.content);
+        if (!Array.isArray(vector)) continue;
+        this.db.update(schema.sessionMoments)
+          .set({ embedding: vector, embeddingModel: identity.model, embeddingDims: identity.dims, needsReembed: false })
+          .where(eq(schema.sessionMoments.id, row.id))
+          .run();
+        embedded += 1;
+      } catch (err) {
+        this.logger.warn('session_moments.reembed_failed', { workspaceId, id: row.id, message: (err as Error).message });
+      }
+    }
+    if (embedded > 0) this.logger.info('session_moments.reembedded', { workspaceId, embedded });
+    return embedded;
+  }
+
   emitRefresh(args: { workspaceId: string; scopeId?: string | null; reason?: string | null; atomCount: number; SessionMomentCount: number }): void {
     this.bus.publish(REALTIME_ROOMS.workspace(args.workspaceId), REALTIME_EVENTS.BRAIN_REFRESH_TRIGGERED, {
       workspaceId: args.workspaceId,

@@ -235,8 +235,9 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.workflow.patch',
         family: 'build',
         description:
-          'Replace a workflow graph ATOMICALLY — pass workflowId + the COMPLETE graph (or runId + patch for a live run). ' +
-          'This is NOT a partial editor: for a SCOPED edit (add/update/remove a few nodes or edges) use agentis.build_workflow with workflowId + patchDraft instead — it validates, repairs, re-lays-out, and re-enriches, so you never have to resend the whole graph.',
+          'Replace a workflow graph ATOMICALLY — pass workflowId + the COMPLETE graph, OR runId + patch to EVOLVE a LIVE run you are executing inside (add steps you discovered are missing). ' +
+          'The live-run form goes through the contract transaction (green ratchet + authority): it commits, or returns named regressions to fix and re-propose — it never corrupts the run. ' +
+          'This is NOT a partial editor for at-rest workflows: for a SCOPED edit use agentis.build_workflow with workflowId + patchDraft instead — it validates, repairs, re-lays-out, and re-enriches, so you never have to resend the whole graph.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -257,11 +258,14 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             .where(eq(schema.workflowRuns.id, String(args.runId)))
             .get();
           if (!run || run.workspaceId !== ctx.workspaceId) throw new Error(`run ${args.runId} not found`);
-          const result = await deps.engine.applyGraphPatch({
+          // AGENT-PRIMARY M2 — a live-run patch from an agent (in-process or an MCP
+          // harness) goes through the contract transaction, not raw applyGraphPatch.
+          const result = await deps.engine.evolveGraph({
             runId: run.id,
             patch: args.patch as WorkflowGraphPatch,
+            actorId: (ctx as { agentId?: string }).agentId,
           });
-          return { runId: run.id, patched: true, ...result };
+          return { runId: run.id, ...result };
         }
 
         if (!args.workflowId || !args.graph) {

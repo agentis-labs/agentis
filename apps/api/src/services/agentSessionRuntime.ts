@@ -19,6 +19,7 @@
  * observations memory block via the injected `summarize` callback.
  */
 
+import { randomUUID } from 'node:crypto';
 import {
   CONSTANTS,
   REALTIME_EVENTS,
@@ -31,7 +32,9 @@ import {
   type ChatToolCall,
   type SessionAdapter,
   type ToolDefinition,
+  type WorkflowGraphPatch,
 } from '@agentis/core';
+import type { EvolveResult } from './atomicEvolution.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { ScratchpadService, BlackboardIdentity } from './scratchpad.js';
@@ -162,6 +165,12 @@ export interface AgentSessionRuntimeDeps {
    * (AGENT-COOPERATION-10X §Pillar 2.)
    */
   resolveRuntimeLabel?: (agentId: string) => { runtime?: string | null; label?: string | null } | undefined;
+  /**
+   * AGENT-PRIMARY M2 — evolve the LIVE run's graph. Backed by
+   * `WorkflowEngine.evolveGraph` (the contract transaction). Absent = the run
+   * cannot be self-evolved (the tool degrades to an honest "unavailable").
+   */
+  evolvePlan?: (args: { runId: string; patch: WorkflowGraphPatch }) => Promise<EvolveResult>;
 }
 
 // Control-tool names — a closed set so we never branch on magic strings.
@@ -181,6 +190,7 @@ const TOOL = {
   spawnTeam: 'spawn_team',
   runWorkflow: 'run_workflow',
   buildWorkflow: 'build_workflow',
+  evolvePlan: 'evolve_plan',
   awaitEvent: 'await_event',
   sleepUntil: 'sleep_until',
   requestApproval: 'request_approval',
@@ -644,10 +654,55 @@ export class AgentSessionRuntime {
         }
         return { ok: true, recorded: true };
       }
+      case TOOL.evolvePlan:
+        return this.#execEvolvePlan(args, runCtx);
       default:
         if (name.startsWith('mcp__')) return this.#execBridgedTool(name, args, runCtx);
         return this.#execRoleTool(name, args, runCtx);
     }
+  }
+
+  /**
+   * AGENT-PRIMARY M2 — the agent extends the plan it is running in. The engine
+   * runs the contract transaction (green ratchet + authority) and either commits
+   * or returns named regressions. A rejection is a typed instruction, not a dead
+   * end: the agent fixes what it would break and re-proposes.
+   */
+  async #execEvolvePlan(args: Record<string, unknown>, runCtx: SessionRunContext): Promise<unknown> {
+    if (!this.deps.evolvePlan) {
+      return { ok: false, error: 'graph evolution is not available for this run.' };
+    }
+    const nodes = (v: unknown) => (Array.isArray(v) ? (v as WorkflowGraphPatch['addNodes']) : []);
+    const ids = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const patch: WorkflowGraphPatch = {
+      patchId: randomUUID(),
+      reason: 'agent_evolve',
+      baseGraphRevision: 0, // the engine stamps the real revision
+      addNodes: nodes(args.addNodes),
+      updateNodes: nodes(args.updateNodes),
+      removeNodeIds: ids(args.removeNodeIds),
+      addEdges: (Array.isArray(args.addEdges) ? (args.addEdges as WorkflowGraphPatch['addEdges']) : []),
+      removeEdgeIds: ids(args.removeEdgeIds),
+    };
+    if (patch.addNodes.length === 0 && patch.updateNodes.length === 0 && patch.removeNodeIds.length === 0
+      && patch.addEdges.length === 0 && patch.removeEdgeIds.length === 0) {
+      return { ok: false, error: 'evolve_plan needs at least one of addNodes / addEdges / updateNodes / removeNodeIds / removeEdgeIds.' };
+    }
+    const res = await this.deps.evolvePlan({ runId: runCtx.runId, patch });
+    if (res.committed) {
+      return {
+        ok: true, committed: true, newRevision: res.newRevision, contractSummary: res.contractSummary,
+        ...(res.warnings.length ? { warnings: res.warnings } : {}),
+        guidance: 'Plan extended. The new steps are part of your run and execute after this node. Continue toward the objective.',
+      };
+    }
+    return {
+      ok: false, committed: false, rejected: res.rejected, regressions: res.regressions,
+      guidance:
+        'The engine rejected this evolution to keep the workflow correct — fix the NAMED regressions and re-propose: '
+        + 'read only data paths an upstream provably produces, never force an approval to true, and never remove a node that is already running or done. '
+        + 'Never fabricate or gut a step to get past this.',
+    };
   }
 
   /**
@@ -1025,6 +1080,27 @@ const CONTROL_TOOLS: ToolDefinition[] = [
         graph: { type: 'object', description: 'An Agentis WorkflowGraph JSON (version, nodes, edges, viewport).' },
       },
       required: ['title', 'graph'],
+    },
+  },
+  {
+    name: TOOL.evolvePlan,
+    description:
+      'Extend the plan you are running in. When you DISCOVER the current graph cannot reach the objective — a stage is '
+      + 'missing, the data is richer than assumed, an external surface changed — add the steps here instead of forcing a '
+      + 'bad fit or failing. Pass full WorkflowNode objects in addNodes and WorkflowEdge objects in addEdges to wire them '
+      + 'in AFTER the node you are in. The engine validates against the same contracts as authoring: if you read a data '
+      + 'path no upstream produces, force an approval true, or touch a node already running/done, it is REJECTED with the '
+      + 'exact reason — fix that and re-propose. This is authorship, not repair; never gut a step to get past a rejection.',
+    parameters: {
+      type: 'object',
+      properties: {
+        addNodes: { type: 'array', description: 'New WorkflowNode objects (id, type, title, position, config).', items: { type: 'object' } },
+        addEdges: { type: 'array', description: 'New WorkflowEdge objects (id, source, target) wiring the new nodes in.', items: { type: 'object' } },
+        updateNodes: { type: 'array', description: 'Full WorkflowNode objects replacing existing nodes by id (not yet running).', items: { type: 'object' } },
+        removeNodeIds: { type: 'array', description: 'Ids of not-yet-run nodes to remove.', items: { type: 'string' } },
+        removeEdgeIds: { type: 'array', description: 'Ids of edges to remove.', items: { type: 'string' } },
+        reason: { type: 'string', description: 'Why the plan needs this — grounded in what you discovered.' },
+      },
     },
   },
   {
