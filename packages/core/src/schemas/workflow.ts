@@ -61,7 +61,7 @@ const agentTaskConfigSchema = z.object({
   requires: agentRequirementsSchema.optional(),
   prompt: z.string().min(1),
   inputKeys: z.array(z.string()).default([]).describe('Input allow-list: keep ONLY these top-level keys from the merged upstream input before this node runs. EMPTY (default) = pass the ENTIRE input through. Non-empty = every key NOT listed is dropped.'),
-  outputKeys: z.array(z.string()).default([]),
+  outputKeys: z.array(z.string()).default([]).describe('The keys this node MUST return in its output object. Return EVERY key even when empty (typed empty: [] / false / 0 / "" / {}); an empty-but-complete contract is success. A genuinely-absent key is auto-completed with a typed empty at run time rather than failing the run.'),
   skills: z.array(z.string()).optional(),
   extensions: z.array(z.string()).optional(),
   modelOverride: z.string().optional(),
@@ -80,7 +80,7 @@ const agentSessionConfigSchema = z.object({
   prompt: z.string().min(1),
   persona: z.string().optional(),
   inputKeys: z.array(z.string()).default([]).describe('Input allow-list: keep ONLY these top-level keys from the merged upstream input before this node runs. EMPTY (default) = pass the ENTIRE input through. Non-empty = every key NOT listed is dropped.'),
-  outputKeys: z.array(z.string()).default([]),
+  outputKeys: z.array(z.string()).default([]).describe('The keys this node MUST return in its output object. Return EVERY key even when empty (typed empty: [] / false / 0 / "" / {}); an empty-but-complete contract is success. A genuinely-absent key is auto-completed with a typed empty at run time rather than failing the run.'),
   maxSteps: z.number().int().positive().optional(),
   capabilityTags: z.array(z.string()).default([]),
   requires: agentRequirementsSchema.optional(),
@@ -344,7 +344,7 @@ export const replayFromNodeSchema = z.object({
 
 export const workflowGraphPatchSchema = z.object({
   patchId: z.string().min(1),
-  reason: z.enum(['planner_replan', 'user_edit', 'hub_package_update']),
+  reason: z.enum(['planner_replan', 'user_edit', 'hub_package_update', 'self_heal', 'agent_evolve']),
   baseGraphRevision: z.number().int().nonnegative(),
   addNodes: z.array(workflowNodeSchema).default([]),
   updateNodes: z.array(workflowNodeSchema).default([]),
