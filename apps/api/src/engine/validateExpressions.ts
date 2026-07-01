@@ -274,6 +274,198 @@ function referencedInputFields(config: Record<string, unknown>): Array<{ field: 
   return out;
 }
 
+/**
+ * ORGAN 1 (UNBREAKABLE-WORKFLOW): typed edge-coupling check, deterministic-first.
+ * Infers each node's produced TOP-LEVEL output keys — from a transform's object
+ * literal, an agent's declared `outputKeys`, an extension's `outputMapping`, or a
+ * passthrough kind — threads them topologically, and flags a node that READS an
+ * `input.X` (or `nodes["id"].Y`) the producer provably does NOT emit. This is the
+ * exact silent shape-mismatch behind the Fashion Store bug (reads `.signals`,
+ * upstream produces `.evidence`) turned into a NAMED build error. Zero false
+ * positives: only flags when the producing shape is FULLY KNOWN (closed) and the
+ * key is definitively absent; any uncertainty (spread, opaque node, computed key)
+ * → treated as OPEN and never flagged.
+ */
+export function analyzeEdgeCouplings(graph: WorkflowGraph): ExpressionIssue[] {
+  const issues: ExpressionIssue[] = [];
+  const incoming = new Map<string, string[]>();
+  for (const n of graph.nodes) incoming.set(n.id, []);
+  for (const e of graph.edges) { if (e.type !== 'error') incoming.get(e.target)?.push(e.source); }
+  const outKeys = new Map<string, Set<string> | null>(); // null = open / unknown shape
+  const triggerKeys = contractKeys(graph);
+
+  for (const node of topoOrder(graph)) {
+    const cfg = node.config as unknown as Record<string, unknown>;
+    const preds = incoming.get(node.id) ?? [];
+    // Composed input keys = union of predecessor outputs; OPEN if any pred is open.
+    let inputKeys: Set<string> | null;
+    if (preds.length === 0) {
+      inputKeys = triggerKeys ? new Set(triggerKeys) : null;
+    } else {
+      inputKeys = new Set<string>();
+      for (const p of preds) {
+        const po = outKeys.get(p);
+        if (!po) { inputKeys = null; break; }
+        for (const k of po) inputKeys.add(k);
+      }
+    }
+
+    // Only check nodes that do NOT narrow their input (narrowing is owned by
+    // analyzeInputReachability), and only when the input shape is fully known.
+    if (inputKeys && !scopedAvailableKeys(cfg)) {
+      for (const { field, ref, expression } of referencedInputFields(cfg)) {
+        if (inputKeys.has(ref)) continue;
+        const near = nearestKey(ref, inputKeys);
+        issues.push({
+          nodeId: node.id, nodeTitle: node.title ?? node.id, field, expression: clip(expression),
+          severity: 'error', code: 'unknown_reference', identifier: `input.${ref}`,
+          message:
+            `Reads input field "${ref}", but its upstream produces { ${[...inputKeys].join(', ') || '—'} } — `
+            + `"${ref}" is never produced and resolves to undefined at runtime.`
+            + (near ? ` Did you mean "${near}"?` : ''),
+        });
+      }
+      for (const { ref, key, expression } of referencedNodeFields(cfg)) {
+        const producer = outKeys.get(ref);
+        if (!producer || producer.has(key)) continue;
+        const near = nearestKey(key, producer);
+        issues.push({
+          nodeId: node.id, nodeTitle: node.title ?? node.id, field: 'config', expression: clip(expression),
+          severity: 'error', code: 'unknown_reference', identifier: `nodes["${ref}"].${key}`,
+          message:
+            `Reads nodes["${ref}"].${key}, but node "${ref}" produces { ${[...producer].join(', ') || '—'} } — `
+            + `"${key}" is never produced.` + (near ? ` Did you mean "${near}"?` : ''),
+        });
+      }
+    }
+
+    outKeys.set(node.id, inferNodeOutputKeys(node, cfg, inputKeys));
+  }
+  return issues;
+}
+
+/** Declared workflow-input keys, or null when no inputContract is declared. */
+function contractKeys(graph: WorkflowGraph): Set<string> | null {
+  const fields = (graph as { inputContract?: { fields?: Array<{ key?: string }> } }).inputContract?.fields;
+  if (!Array.isArray(fields)) return null;
+  const keys = new Set<string>();
+  for (const f of fields) if (f && typeof f.key === 'string' && f.key) keys.add(f.key);
+  return keys.size > 0 ? keys : null;
+}
+
+/** A node's produced top-level output keys, or null when the shape is open/unknown. */
+function inferNodeOutputKeys(node: WorkflowNode, cfg: Record<string, unknown>, inputKeys: Set<string> | null): Set<string> | null {
+  const kind = String(cfg.kind ?? node.type ?? '');
+  if (['merge', 'parallel', 'wait', 'return_output', 'router', 'filter', 'trigger', 'guardrails', 'checkpoint', 'human_input'].includes(kind)) {
+    return inputKeys; // passthrough — output shape is the input shape
+  }
+  if (kind === 'transform') {
+    const expr = typeof cfg.expression === 'string' ? cfg.expression : '';
+    if (/^\s*(inputs?|\$json|\$inputs?)\s*$/.test(expr)) return inputKeys; // bare passthrough
+    const lit = extractObjectLiteralKeys(expr);
+    return lit ? (lit.open ? null : lit.keys) : null;
+  }
+  if (kind === 'agent_task' || kind === 'agent_session' || kind === 'planner') {
+    const ok = Array.isArray(cfg.outputKeys) ? (cfg.outputKeys as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0) : [];
+    return ok.length > 0 ? new Set(ok) : null;
+  }
+  if (kind === 'extension_task' || kind === 'subflow') {
+    const om = cfg.outputMapping && typeof cfg.outputMapping === 'object' ? Object.keys(cfg.outputMapping as object) : [];
+    return om.length > 0 ? new Set(om) : null;
+  }
+  return null; // integration / http_request / code / data_* / mcp / … → open
+}
+
+/**
+ * Extract the TOP-LEVEL keys of a transform's returned object literal, plus an
+ * `open` flag set on ANY uncertainty (spread, computed/quoted key, non-literal).
+ * Conservative by design: `open` means "may have other keys" → the caller treats
+ * the node's shape as unknown and never flags a downstream read against it.
+ */
+function extractObjectLiteralKeys(src: string): { keys: Set<string>; open: boolean } | null {
+  let s = src.trim();
+  const ret = /^return\b/.exec(s);
+  if (ret) s = s.slice(ret[0].length).trim();
+  while (s.startsWith('(') && s.endsWith(')')) s = s.slice(1, -1).trim();
+  if (!s.startsWith('{') || !s.endsWith('}')) return null;
+  const body = s.slice(1, -1);
+  const keys = new Set<string>();
+  let open = false, depth = 0, expectKey = true, token = '';
+  let str: string | null = null;
+  const flushPending = (): void => {
+    const t = token.trim(); token = '';
+    if (!t) return;
+    if (t.startsWith('...')) { open = true; return; }
+    if (/^[A-Za-z_$][\w$]*$/.test(t)) keys.add(t); else open = true;
+  };
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (str) { if (c === '\\') i++; else if (c === str) str = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { if (depth === 0 && expectKey) open = true; str = c; continue; }
+    if (c === '{' || c === '[' || c === '(') { depth++; continue; }
+    if (c === '}' || c === ']' || c === ')') { depth--; continue; }
+    if (depth > 0) continue;
+    if (c === ',') { if (expectKey) flushPending(); expectKey = true; token = ''; continue; }
+    if (expectKey && c === ':') {
+      const key = token.trim(); token = '';
+      if (key.startsWith('...')) open = true;
+      else if (/^[A-Za-z_$][\w$]*$/.test(key)) keys.add(key);
+      else open = true;
+      expectKey = false;
+      continue;
+    }
+    if (expectKey) token += c;
+  }
+  if (expectKey) flushPending();
+  return { keys, open };
+}
+
+const NODE_REF_BRACKET_RE = /\bnodes\s*\[\s*["']([A-Za-z0-9_-]+)["']\s*\]\s*\.\s*([A-Za-z_$][\w$]*)/g;
+const NODE_REF_DOT_RE = /\bnodes\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g;
+
+/** Every `nodes["id"].key` / `nodes.id.key` reference across a node's string config. */
+function referencedNodeFields(config: Record<string, unknown>): Array<{ ref: string; key: string; expression: string }> {
+  const out: Array<{ ref: string; key: string; expression: string }> = [];
+  const seen = new Set<string>();
+  const add = (ref: string, key: string, expression: string): void => {
+    const k = `${ref}.${key}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ ref, key, expression });
+  };
+  const walk = (value: unknown): void => {
+    if (typeof value === 'string') {
+      for (const m of value.matchAll(NODE_REF_BRACKET_RE)) add(m[1]!, m[2]!, value);
+      for (const m of value.matchAll(NODE_REF_DOT_RE)) add(m[1]!, m[2]!, value);
+      return;
+    }
+    if (Array.isArray(value)) { value.forEach(walk); return; }
+    if (value && typeof value === 'object') Object.values(value as Record<string, unknown>).forEach(walk);
+  };
+  walk(config);
+  return out;
+}
+
+function keyEditDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const d: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) d[i]![0] = i;
+  for (let j = 0; j <= n; j++) d[0]![j] = j;
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
+    d[i]![j] = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+  }
+  return d[m]![n]!;
+}
+
+function nearestKey(ref: string, keys: Set<string>): string | null {
+  let best: string | null = null, bestD = Infinity;
+  for (const k of keys) {
+    const dd = keyEditDistance(ref.toLowerCase(), k.toLowerCase());
+    if (dd < bestD) { bestD = dd; best = k; }
+  }
+  return best && bestD <= 2 && bestD < ref.length ? best : null;
+}
+
 /** Kahn topological order; falls back to declaration order if the graph isn't a DAG. */
 function topoOrder(graph: WorkflowGraph): WorkflowNode[] {
   const indeg = new Map<string, number>();

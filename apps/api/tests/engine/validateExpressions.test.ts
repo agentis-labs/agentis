@@ -5,6 +5,7 @@ import {
   dryRunGraphExpressions,
   repairExpressionReferences,
   analyzeInputReachability,
+  analyzeEdgeCouplings,
 } from '../../src/engine/validateExpressions.js';
 
 function graphWith(config: Record<string, unknown>): WorkflowGraph {
@@ -149,5 +150,57 @@ describe('analyzeInputReachability (P0.5 — input scoping)', () => {
     );
     expect(issues).toHaveLength(1);
     expect(issues[0]!.message).toContain('inputMapping');
+  });
+});
+
+describe('analyzeEdgeCouplings (Organ 1 — typed edges)', () => {
+  const N = (id: string, kind: string, config: Record<string, unknown>) =>
+    ({ id, type: kind, title: id, position: { x: 0, y: 0 }, config: { kind, ...config } });
+  const G = (nodes: unknown[], edges: unknown[]) => ({ nodes, edges } as unknown as WorkflowGraph);
+
+  it('flags a node that reads a key its upstream does not produce (the Fashion Store shape-mismatch)', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'transform', { expression: '({ evidence: { signals: input.raw } })' }),
+      N('B', 'transform', { expression: '({ score: input.signals })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    const issues = analyzeEdgeCouplings(graph);
+    expect(issues.some((i) => i.nodeId === 'B' && i.identifier === 'input.signals')).toBe(true);
+  });
+
+  it('does NOT flag a valid coupling (upstream produces the key)', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'transform', { expression: '({ signals: input.raw })' }),
+      N('B', 'transform', { expression: '({ score: input.signals })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph)).toEqual([]);
+  });
+
+  it('does NOT flag when the producer is opaque (an integration with no declared shape)', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'integration', { integrationId: 'x', operationId: 'y', inputs: {} }),
+      N('B', 'transform', { expression: '({ score: input.anything })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph)).toEqual([]);
+  });
+
+  it('does NOT flag past a spread (open shape)', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'transform', { expression: '({ ...input, extra: 1 })' }),
+      N('B', 'transform', { expression: '({ score: input.anything })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph)).toEqual([]);
+  });
+
+  it('flags a nodes["id"].key read the producer does not emit', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('score', 'agent_task', { agentRole: 'analyst', prompt: 'x', outputKeys: ['scoredCount'] }),
+      N('B', 'transform', { expression: '({ ok: nodes["score"].candidates })' }),
+    ], [{ id: 'e1', source: 'T', target: 'score' }, { id: 'e2', source: 'score', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph).some((i) => i.identifier === 'nodes["score"].candidates')).toBe(true);
   });
 });

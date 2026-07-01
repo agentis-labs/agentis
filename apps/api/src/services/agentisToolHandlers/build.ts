@@ -32,7 +32,7 @@ import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
 import { evalCondition } from '../../engine/SafeConditionParser.js';
-import { repairGraphExpressions, dryRunGraphExpressions, analyzeInputReachability } from '../../engine/validateExpressions.js';
+import { repairGraphExpressions, dryRunGraphExpressions, analyzeInputReachability, analyzeEdgeCouplings } from '../../engine/validateExpressions.js';
 import { PackagerService } from '../packager.js';
 import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan } from '../creationPipeline.js';
 import { AdapterStructuredCompleter, type StructuredCompleter } from '../structuredCompleter.js';
@@ -551,7 +551,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const report = preflightWorkflow({ db: deps.db, workspaceId: ctx.workspaceId, workflowId, graph, inputs, mode: 'canvas' });
         // Fold in the build-time expression + input-reachability gates so a dry-run
         // is a COMPLETE pre-run check, not just a node simulation.
-        const exprIssues = [...dryRunGraphExpressions(graph), ...analyzeInputReachability(graph)].map((i) => ({
+        const exprIssues = [...dryRunGraphExpressions(graph), ...analyzeInputReachability(graph), ...analyzeEdgeCouplings(graph)].map((i) => ({
           code: i.code, severity: i.severity, nodeId: i.nodeId, nodeTitle: i.nodeTitle, message: `${i.field}: ${i.message}`, autoRepairable: true,
         }));
         const trace = graph.nodes
@@ -982,6 +982,12 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // inputMapping) but references a field it just dropped gets undefined at run
   // time (the silent "empty payload" class). Catch it before save.
   for (const issue of analyzeInputReachability(exprFix.graph)) {
+    preflight.warnings.push({ code: 'INVALID_EXPRESSION', nodeId: issue.nodeId, message: `${issue.field}: ${issue.message}` });
+  }
+  // Organ 1 — typed edge couplings: a node reads a key its upstream provably does
+  // not produce (the silent shape-mismatch behind the Fashion Store bug). Named at
+  // build time instead of an undefined at run time.
+  for (const issue of analyzeEdgeCouplings(exprFix.graph)) {
     preflight.warnings.push({ code: 'INVALID_EXPRESSION', nodeId: issue.nodeId, message: `${issue.field}: ${issue.message}` });
   }
   // Robustness audit (WORKFLOW-DESIGN-10X Phase 2) — enforce the design doctrine
