@@ -4242,8 +4242,16 @@ export class WorkflowEngine {
     // P0.3: honor inputKeys as an input allow-list, matching the agent_session /
     // planner / code paths — previously agent_task silently ignored it, so the
     // field lied about scoping the agent's input. Empty (default) = full input.
+    // GUARD (found against a real 71-node workflow): agents commonly misuse
+    // inputKeys, putting node references ("nodes.prospect-plan") instead of
+    // top-level key names. Honoring that literally strips the input to {} and
+    // starves the node. So only narrow when the keys actually select something;
+    // if they match nothing in a non-empty input, keep the full input.
     if (config.inputKeys.length > 0) {
-      inputData = pickKeys(inputData, config.inputKeys);
+      const scoped = pickKeys(inputData, config.inputKeys);
+      if (Object.keys(scoped).length > 0 || Object.keys(inputData).length === 0) {
+        inputData = scoped;
+      }
     }
     if (config.agentId && !this.deps.adapters.get(config.agentId)) {
       const runtimePin = stringValue(config.modelOverride) ?? this.#agentConfiguredModel(config.agentId);

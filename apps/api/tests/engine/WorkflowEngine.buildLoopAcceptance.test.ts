@@ -15,7 +15,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { REALTIME_EVENTS, type WorkflowGraph } from '@agentis/core';
+import {
+  REALTIME_EVENTS,
+  type AdapterCapabilities,
+  type AdapterType,
+  type AgentAdapter,
+  type ChatDelta,
+  type ChatInvocationOptions,
+  type ChatMessage,
+  type NormalizedAgentEvent,
+  type NormalizedTask,
+  type ToolDefinition,
+  type WorkflowGraph,
+} from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import { buildInitialRunState } from '../../src/engine/initialRunState.js';
@@ -131,9 +143,81 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
     const issues = analyzeInputReachability(graph);
     expect(issues.some((i) => i.identifier === 'input.candidates')).toBe(true);
   });
+
+  it('does NOT starve an agent_task whose inputKeys are MISUSED as node references (real 71-node-workflow regression)', async () => {
+    // The operator's real workflow set inputKeys: ["nodes.prospect-plan"] on agent
+    // nodes (node references, not top-level keys). Honoring that literally would
+    // pickKeys -> {} and starve the agent. The P0.3 guard keeps the full input.
+    const captured: Record<string, unknown>[] = [];
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Scout', adapterType: 'codex', capabilityTags: [], config: {}, role: 'worker', status: 'online',
+    }).run();
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new CapturingAdapter(agentId, captured, { ok: true }));
+    const engine = makeEngine(adapters);
+    adapters.onEvent((event) => {
+      if (event.eventType === 'task.completed') {
+        void engine.notifyTaskCompleted({ runId: event.runId, nodeId: event.taskId, output: event.output });
+      }
+    });
+
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'source', type: 'transform', title: 'Source', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ candidates: [1,2,3], meta: "x" })' } },
+        { id: 'worker', type: 'agent_task', title: 'Scout', position: { x: 400, y: 0 }, config: { kind: 'agent_task', agentId, prompt: 'scout', inputKeys: ['nodes.source'], outputKeys: ['ok'], capabilityTags: [] } },
+      ],
+      edges: [{ id: 't-s', source: 'trigger', target: 'source' }, { id: 's-w', source: 'source', target: 'worker' }],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph, {});
+    const terminal = waitForTerminal(runId);
+    await engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph });
+    await terminal;
+
+    expect(captured.length).toBeGreaterThan(0);
+    // The agent got the FULL upstream output, not {} — the misused inputKeys
+    // selected nothing, so the guard preserved the input.
+    expect(captured[0]).toHaveProperty('candidates');
+  });
 });
 
-function makeEngine(): WorkflowEngine {
+/** Records the inputData handed to the dispatched agent, then completes the task. */
+class CapturingAdapter implements AgentAdapter {
+  readonly adapterType: AdapterType = 'codex';
+  readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
+  constructor(
+    private readonly agentId: string,
+    private readonly sink: Record<string, unknown>[],
+    private readonly payload: Record<string, unknown>,
+  ) {}
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async healthCheck() { return { isHealthy: true, checkedAt: new Date().toISOString() }; }
+  capabilities(): AdapterCapabilities { return { interactiveChat: true, toolCalling: false }; }
+  onEvent(handler: (e: NormalizedAgentEvent) => void): void { this.#handlers.add(handler); }
+  async dispatchTask(task: NormalizedTask): Promise<void> {
+    this.sink.push(task.inputData as Record<string, unknown>);
+    queueMicrotask(() => {
+      for (const handler of this.#handlers) {
+        handler({
+          eventType: 'task.completed', agentId: this.agentId, taskId: task.taskId,
+          runId: task.runId, workflowId: task.workflowId,
+          output: { text: ['```json', JSON.stringify(this.payload), '```'].join('\n') },
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
+  }
+  async *chat(_h: ChatMessage[], _t: ToolDefinition[], _o?: ChatInvocationOptions): AsyncIterable<ChatDelta> {
+    yield { type: 'done', finishReason: 'stop' };
+  }
+  async cancelTask(): Promise<void> {}
+}
+
+function makeEngine(adapters: AdapterManager = new AdapterManager(ctx.logger)): WorkflowEngine {
   return new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
@@ -143,7 +227,7 @@ function makeEngine(): WorkflowEngine {
     activity: new ActivityFeedService(ctx.db, ctx.bus),
     approvals: new ApprovalInboxService(ctx.db, ctx.bus),
     extensions: {} as unknown as ExtensionRuntime,
-    adapters: new AdapterManager(ctx.logger),
+    adapters,
   });
 }
 
