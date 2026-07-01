@@ -8929,12 +8929,13 @@ export class WorkflowEngine {
     // to either hang as "running" forever or fail opaquely on an out-of-credits model.
     const node = ctx.graph.nodes.find((candidate) => candidate.id === nodeId);
     const recoverableModelFailure = isRecoverableModelError(error);
-    // Organ 4 — failure taxonomy: a RESOURCE failure (rate/usage limit, quota,
-    // auth/captcha wall, transient 5xx/network) is NOT a logic bug. Quarantine the
-    // node (pause with a blocker) BEFORE self-heal can edit its logic — so a
-    // rate-limited scout is never "fixed" by rewriting or deleting it. The operator
-    // waits / adds capacity / connects access, then resumes from exactly here.
-    if (isResourceFailure(error)) {
+    // Organ 4 — failure taxonomy: a RESOURCE failure on an AGENT node (rate/usage
+    // limit, quota, auth/captcha wall, transient 5xx/network) is NOT a logic bug.
+    // Quarantine the node (pause with a blocker) BEFORE self-heal can edit its logic
+    // — so a rate-limited scout is never "fixed" by rewriting or deleting it. Scoped
+    // to agent nodes so non-agent kinds keep their own retryPolicy / fail semantics.
+    const isAgentNodeFailure = node?.config.kind === 'agent_task' || node?.config.kind === 'agent_session';
+    if (isAgentNodeFailure && isResourceFailure(error)) {
       await this.#pauseNodeBlocked(ctx, nodeId, resourceBlockerReason(error));
       return;
     }
