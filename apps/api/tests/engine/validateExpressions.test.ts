@@ -203,4 +203,31 @@ describe('analyzeEdgeCouplings (Organ 1 — typed edges)', () => {
     ], [{ id: 'e1', source: 'T', target: 'score' }, { id: 'e2', source: 'score', target: 'B' }]);
     expect(analyzeEdgeCouplings(graph).some((i) => i.identifier === 'nodes["score"].candidates')).toBe(true);
   });
+
+  it('ORGAN 1-deep: flags a 2-segment read the nested shape lacks (input.evidence.signals ← evidence is { candidates })', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'transform', { expression: '({ evidence: { candidates: input.raw } })' }),
+      N('B', 'transform', { expression: '({ score: input.evidence.signals })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph).some((i) => i.nodeId === 'B' && i.identifier === 'input.evidence.signals')).toBe(true);
+  });
+
+  it('ORGAN 1-deep: does NOT flag a valid 2-segment read (evidence really has signals)', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'transform', { expression: '({ evidence: { signals: input.raw } })' }),
+      N('B', 'transform', { expression: '({ score: input.evidence.signals })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph)).toEqual([]);
+  });
+
+  it('ORGAN 1-deep: does NOT flag when the nested value is opaque (evidence = a call, open shape)', () => {
+    const graph = G([
+      N('T', 'trigger', { triggerType: 'manual' }),
+      N('A', 'transform', { expression: '({ evidence: buildEvidence(input) })' }),
+      N('B', 'transform', { expression: '({ score: input.evidence.signals })' }),
+    ], [{ id: 'e1', source: 'T', target: 'A' }, { id: 'e2', source: 'A', target: 'B' }]);
+    expect(analyzeEdgeCouplings(graph)).toEqual([]);
+  });
 });

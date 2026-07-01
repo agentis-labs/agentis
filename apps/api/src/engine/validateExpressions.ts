@@ -274,6 +274,32 @@ function referencedInputFields(config: Record<string, unknown>): Array<{ field: 
   return out;
 }
 
+const INPUT_PATH2_RE = /\b(?:input|inputs|\$input|\$inputs|\$json)\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g;
+
+/** Every 2-segment `input.a.b` read across a node's string config (ORGAN 1-deep). */
+function referencedInputPaths(config: Record<string, unknown>): Array<{ first: string; second: string; field: string; expression: string }> {
+  const out: Array<{ first: string; second: string; field: string; expression: string }> = [];
+  const seen = new Set<string>();
+  const walk = (value: unknown, path: string): void => {
+    if (typeof value === 'string') {
+      for (const m of value.matchAll(INPUT_PATH2_RE)) {
+        const first = m[1]!, second = m[2]!;
+        const key = `${path}:${first}.${second}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ first, second, field: path || 'config', expression: value });
+      }
+      return;
+    }
+    if (Array.isArray(value)) { value.forEach((v, i) => walk(v, `${path}[${i}]`)); return; }
+    if (value && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) walk(v, path ? `${path}.${k}` : k);
+    }
+  };
+  walk(config, '');
+  return out;
+}
+
 /**
  * ORGAN 1 (UNBREAKABLE-WORKFLOW): typed edge-coupling check, deterministic-first.
  * Infers each node's produced TOP-LEVEL output keys — from a transform's object
@@ -292,6 +318,7 @@ export function analyzeEdgeCouplings(graph: WorkflowGraph): ExpressionIssue[] {
   for (const n of graph.nodes) incoming.set(n.id, []);
   for (const e of graph.edges) { if (e.type !== 'error') incoming.get(e.target)?.push(e.source); }
   const outKeys = new Map<string, Set<string> | null>(); // null = open / unknown shape
+  const outNested = new Map<string, Map<string, Set<string> | null> | null>(); // ORGAN 1-deep: one-level shapes
   const triggerKeys = contractKeys(graph);
 
   for (const node of topoOrder(graph)) {
@@ -309,6 +336,9 @@ export function analyzeEdgeCouplings(graph: WorkflowGraph): ExpressionIssue[] {
         for (const k of po) inputKeys.add(k);
       }
     }
+    // Nested shape: a single-producer chain carries it through; a trigger contract
+    // or a multi-predecessor merge is nested-unknown (conservative — never flags).
+    const inputNested: Map<string, Set<string> | null> | null = preds.length === 1 ? (outNested.get(preds[0]!) ?? null) : null;
 
     // Only check nodes that do NOT narrow their input (narrowing is owned by
     // analyzeInputReachability), and only when the input shape is fully known.
@@ -337,9 +367,26 @@ export function analyzeEdgeCouplings(graph: WorkflowGraph): ExpressionIssue[] {
             + `"${key}" is never produced.` + (near ? ` Did you mean "${near}"?` : ''),
         });
       }
+      // ORGAN 1-deep: a 2-segment read input.a.b where "a" IS produced but with a
+      // KNOWN shape that lacks "b" (e.g. reads input.evidence.signals while evidence
+      // is produced as { candidates } — the deeper Fashion-Store shape cut).
+      for (const { first, second, field, expression } of referencedInputPaths(cfg)) {
+        const sub = inputNested?.get(first);
+        if (sub == null || sub.has(second)) continue; // absent-first is the flat check's job; opaque value → skip
+        const near = nearestKey(second, sub);
+        issues.push({
+          nodeId: node.id, nodeTitle: node.title ?? node.id, field, expression: clip(expression),
+          severity: 'error', code: 'unknown_reference', identifier: `input.${first}.${second}`,
+          message:
+            `Reads input.${first}.${second}, but "${first}" is produced as { ${[...sub].join(', ') || '—'} } — `
+            + `"${second}" is never produced and resolves to undefined at runtime.`
+            + (near ? ` Did you mean "${near}"?` : ''),
+        });
+      }
     }
 
     outKeys.set(node.id, inferNodeOutputKeys(node, cfg, inputKeys));
+    outNested.set(node.id, inferNodeOutputNested(node, cfg, inputNested));
   }
   return issues;
 }
@@ -382,7 +429,7 @@ function inferNodeOutputKeys(node: WorkflowNode, cfg: Record<string, unknown>, i
  * Conservative by design: `open` means "may have other keys" → the caller treats
  * the node's shape as unknown and never flags a downstream read against it.
  */
-function extractObjectLiteralKeys(src: string): { keys: Set<string>; open: boolean } | null {
+function extractObjectLiteralKeys(src: string): { keys: Set<string>; open: boolean; nested: Map<string, Set<string> | null> } | null {
   let s = src.trim();
   const ret = /^return\b/.exec(s);
   if (ret) s = s.slice(ret[0].length).trim();
@@ -390,13 +437,24 @@ function extractObjectLiteralKeys(src: string): { keys: Set<string>; open: boole
   if (!s.startsWith('{') || !s.endsWith('}')) return null;
   const body = s.slice(1, -1);
   const keys = new Set<string>();
+  // nested[key] = the value's own top-level keys when it is an object literal, or
+  // null when the value is opaque (a call, variable, array, spread, …). ORGAN 1-deep:
+  // lets the caller check a 2-segment read like `input.evidence.signals`.
+  const nested = new Map<string, Set<string> | null>();
   let open = false, depth = 0, expectKey = true, token = '';
+  let curKey = '', valueStart = -1;
   let str: string | null = null;
   const flushPending = (): void => {
     const t = token.trim(); token = '';
     if (!t) return;
     if (t.startsWith('...')) { open = true; return; }
-    if (/^[A-Za-z_$][\w$]*$/.test(t)) keys.add(t); else open = true;
+    if (/^[A-Za-z_$][\w$]*$/.test(t)) { keys.add(t); nested.set(t, null); } else open = true;
+  };
+  const flushValue = (endIdx: number): void => {
+    if (!curKey) return;
+    const inner = extractObjectLiteralKeys(body.slice(valueStart, endIdx).trim());
+    nested.set(curKey, inner && !inner.open ? inner.keys : null);
+    curKey = '';
   };
   for (let i = 0; i < body.length; i++) {
     const c = body[i]!;
@@ -405,19 +463,34 @@ function extractObjectLiteralKeys(src: string): { keys: Set<string>; open: boole
     if (c === '{' || c === '[' || c === '(') { depth++; continue; }
     if (c === '}' || c === ']' || c === ')') { depth--; continue; }
     if (depth > 0) continue;
-    if (c === ',') { if (expectKey) flushPending(); expectKey = true; token = ''; continue; }
+    if (c === ',') { if (expectKey) flushPending(); else flushValue(i); expectKey = true; token = ''; continue; }
     if (expectKey && c === ':') {
       const key = token.trim(); token = '';
       if (key.startsWith('...')) open = true;
-      else if (/^[A-Za-z_$][\w$]*$/.test(key)) keys.add(key);
+      else if (/^[A-Za-z_$][\w$]*$/.test(key)) { keys.add(key); curKey = key; valueStart = i + 1; }
       else open = true;
       expectKey = false;
       continue;
     }
     if (expectKey) token += c;
   }
-  if (expectKey) flushPending();
-  return { keys, open };
+  if (expectKey) flushPending(); else flushValue(body.length);
+  return { keys, open, nested };
+}
+
+/** A node's produced ONE-LEVEL nested shape (topKey → its own keys | null), or null. */
+function inferNodeOutputNested(node: WorkflowNode, cfg: Record<string, unknown>, inputNested: Map<string, Set<string> | null> | null): Map<string, Set<string> | null> | null {
+  const kind = String(cfg.kind ?? node.type ?? '');
+  if (['merge', 'parallel', 'wait', 'return_output', 'router', 'filter', 'trigger', 'guardrails', 'checkpoint', 'human_input'].includes(kind)) {
+    return inputNested; // passthrough
+  }
+  if (kind === 'transform') {
+    const expr = typeof cfg.expression === 'string' ? cfg.expression : '';
+    if (/^\s*(inputs?|\$json|\$inputs?)\s*$/.test(expr)) return inputNested;
+    const lit = extractObjectLiteralKeys(expr);
+    return lit && !lit.open ? lit.nested : null;
+  }
+  return null; // agents/extensions declare only top-level keys → nested unknown
 }
 
 const NODE_REF_BRACKET_RE = /\bnodes\s*\[\s*["']([A-Za-z0-9_-]+)["']\s*\]\s*\.\s*([A-Za-z_$][\w$]*)/g;
