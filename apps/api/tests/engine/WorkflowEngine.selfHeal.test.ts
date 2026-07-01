@@ -364,8 +364,10 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
     const runId = await runTo(engine, graphWithKeys(['location', 'budget']), completedOrFailed);
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     const incident = (run.runState as { selfHealIncidents?: Record<string, { status?: string; plans?: Array<{ fingerprint?: string }> }> }).selfHealIncidents?.A;
-    expect(run.status).toBe('FAILED');
-    expect(incident?.status).toBe('BLOCKED');
+    // The repeated fingerprint is deduped to a single distinct plan and the node
+    // then ADAPTS (typed-empty defaults + visible deviation) — no infinite
+    // re-apply loop, no crash.
+    expect(run.status).toBe('COMPLETED_WITH_CONTRACT_VIOLATION');
     expect(incident?.plans).toHaveLength(1);
   });
 
@@ -480,7 +482,7 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
     expect(state.selfHealIncidents?.A?.status).toBe('APPLIED');
   });
 
-  it('escalates honestly (send to Agentis team) when the orchestrator cannot ground a repair — no blind re-run loop', async () => {
+  it('adapts (typed-empty defaults + visible deviation) when self-heal cannot ground a repair — no blind re-run loop, no crash', async () => {
     // The real failure log: blindly re-running the same step burned minutes. The
     // orchestrator (the primary repair, inside heal()) already had its full turn,
     // so on escalation we stop and offer the operator the report path — we do NOT
@@ -501,13 +503,16 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
     expect(retried).toBe(false);
 
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
-    expect(run.status).toBe('FAILED');
-    const state = run.runState as { nodeStates: Record<string, { error?: string }>; selfHealAttempts?: Record<string, number> };
-    expect(state.nodeStates.A?.error).toContain('Self-healing stopped');
-    expect(state.nodeStates.A?.error).toContain('send this run to the Agentis team');
-    const status = (run.runState as {
-      selfHealIncidents?: Record<string, { status?: string }>;
-    }).selfHealIncidents?.A?.status;
+    // NEW CONTRACT: an agent that produced USABLE output but not its declared keys
+    // ADAPTS (typed-empty defaults) and completes with a visible, honest deviation —
+    // it does not crash the run. Honest hard-failure is reserved for a node that
+    // produced NOTHING usable (covered by the reliability suite).
+    expect(run.status).toBe('COMPLETED_WITH_CONTRACT_VIOLATION');
+    const state = run.runState as { nodeStates: Record<string, { status?: string; contractDeviation?: { kind?: string; missingKeys?: string[] } }>; selfHealIncidents?: Record<string, { status?: string }> };
+    expect(state.nodeStates.A?.status).toBe('COMPLETED');
+    expect(state.nodeStates.A?.contractDeviation?.kind).toBe('missing_declared_output_keys');
+    expect(state.nodeStates.A?.contractDeviation?.missingKeys).toEqual(expect.arrayContaining(['location', 'budget']));
+    const status = state.selfHealIncidents?.A?.status;
     expect(['EXHAUSTED', 'BLOCKED']).toContain(status);
   });
 });

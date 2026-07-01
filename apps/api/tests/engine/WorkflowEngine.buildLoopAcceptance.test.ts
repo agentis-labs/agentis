@@ -182,6 +182,47 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
     // selected nothing, so the guard preserved the input.
     expect(captured[0]).toHaveProperty('candidates');
   });
+
+  it('adapts an agent that produced usable output but omitted declared keys — typed-empty defaults, no crash (scout regression)', async () => {
+    // The operator's exact failure: "agent node 'prospect-scout' did not produce
+    // declared output key(s): candidates, searchQueriesUsed, ...". The agent DID
+    // produce usable output (a summary) but not the declared metadata keys → it now
+    // completes with typed-empty defaults instead of hard-failing the whole run.
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Scout', adapterType: 'codex', capabilityTags: [], config: {}, role: 'worker', status: 'online',
+    }).run();
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new CapturingAdapter(agentId, [], { summary: 'Scouted, but returned prose not the declared JSON.' }));
+    const engine = makeEngine(adapters);
+    adapters.onEvent((event) => {
+      if (event.eventType === 'task.completed') void engine.notifyTaskCompleted({ runId: event.runId, nodeId: event.taskId, output: event.output });
+    });
+
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'scout', type: 'agent_task', title: 'Instagram Scout', position: { x: 200, y: 0 }, config: { kind: 'agent_task', agentId, prompt: 'Find stores.', inputKeys: [], outputKeys: ['candidates', 'searchQueriesUsed', 'rejectedHandles', 'processedHandles', 'exhausted', 'blockers'], capabilityTags: [] } },
+      ],
+      edges: [{ id: 't-s', source: 'trigger', target: 'scout' }],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph, {});
+    const terminal = waitForTerminal(runId);
+    await engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph });
+    await terminal;
+
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    const state = run.runState as { nodeStates: Record<string, { status: string; outputData?: Record<string, unknown> }> };
+    // No crash — the run completed (with an honest contract-violation marker).
+    expect(['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION']).toContain(run.status);
+    expect(state.nodeStates.scout?.status).toBe('COMPLETED');
+    // Genuinely-absent metadata keys were completed with typed-empty defaults:
+    expect(state.nodeStates.scout?.outputData?.candidates).toEqual([]);
+    expect(state.nodeStates.scout?.outputData?.exhausted).toBe(false);
+    expect(state.nodeStates.scout?.outputData?.blockers).toEqual([]);
+  });
 });
 
 /** Records the inputData handed to the dispatched agent, then completes the task. */

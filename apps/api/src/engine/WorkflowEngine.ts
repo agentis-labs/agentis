@@ -8611,9 +8611,30 @@ export class WorkflowEngine {
         if (recovered) {
           normalization = normalizeDeclaredNodeOutputResult(completedNode, recovered);
           normalizedOutput = normalization.output;
-        } else {
+        } else if (!hasAnyUsableOutput(normalizedOutput)) {
+          // Genuinely no usable output (runtime returned empty) and the fallback
+          // could not recover → honest hard failure.
           throw new Error(selfHealFailureMessage(agentOutputFailureReason(output, missingMessage), heal));
         }
+        // else: the agent produced usable output but not every declared key —
+        // fall through; the typed-empty defaults below complete the contract.
+      }
+    }
+    // INTELLIGENT OUTPUT ADAPTATION: an agent that produced usable output but
+    // omitted some declared keys COMPLETES with typed-empty defaults for the
+    // absent ones (empty-but-complete contract = success — e.g. `candidates: []`
+    // is a valid "no store found", not a run-killing failure). A node that
+    // produced NOTHING usable was already hard-failed above.
+    if (completedNode && normalization.missingKeys.length > 0 && hasAnyUsableOutput(normalizedOutput)) {
+      const filled = normalizeDeclaredNodeOutputResult(completedNode, normalizedOutput, { fillTypedDefaults: true });
+      normalizedOutput = filled.output;
+      // Keep the adaptation HONEST + VISIBLE: the run is COMPLETED_WITH_CONTRACT_VIOLATION
+      // (a deviation records the defaulted keys), downstream reads get typed empties
+      // instead of undefined, and the run neither crashes nor loops. A node that
+      // produced NOTHING usable was already hard-failed above.
+      normalization = { ...filled, missingKeys: filled.defaultedKeys };
+      if (filled.defaultedKeys.length > 0) {
+        this.deps.logger.info('engine.output_adapted', { runId: ctx.runId, nodeId, defaultedKeys: filled.defaultedKeys });
       }
     }
     const deviation = normalization.missingKeys.length > 0
@@ -10565,9 +10586,13 @@ function inferContractKey(
 
 function inferTypeFromKeyName(key: string): 'string' | 'number' | 'boolean' | 'array' | 'object' {
   const k = key.toLowerCase();
-  if (/^(is|has|should|can|did|was|are|needs|allow)/.test(k) || /(passed|ready|valid|enabled|done|sent|skip|skipped|success|approved|^ok)$/.test(k)) return 'boolean';
-  if (/(count|number|num|total|score|amount|qty|quantity|index|size|length|rank|cents|price)$/.test(k) || /^(count|num)/.test(k)) return 'number';
-  if (/(list|items|results|articles|entries|rows|records|messages|urls|links|ids|tags|candidates|leads|matches|sources|chunks)$/.test(k)) return 'array';
+  // Prefix checks use the ORIGINAL key with a camelCase/underscore boundary so
+  // "canDeploy" → boolean but "candidates" (which merely starts with "can") does not.
+  if (/^(is|has|should|can|did|was|are|needs|allow|will)([A-Z_]|$)/.test(key)
+    || /(passed|ready|valid|enabled|done|sent|skip|skipped|success|approved|exhausted|complete|completed|finished|found|blocked|present|exists|ok)$/.test(k)) return 'boolean';
+  if (/(count|number|num|total|score|amount|qty|quantity|index|size|length|rank|cents|price)$/.test(k) || /^(count|num)([A-Z_]|$)/.test(key)) return 'number';
+  if (/(list|items|results|articles|entries|rows|records|messages|urls|links|ids|tags|candidates|leads|matches|sources|chunks|handles|queries|blockers|errors|warnings|reasons|signals|notes|steps|events|logs)$/.test(k)
+    || /(handles|queries|blockers|candidates|results|leads|records|signals|errors|warnings|reasons)/.test(k)) return 'array';
   if (/(data|payload|record|meta|metadata|config|map|object|details)$/.test(k)) return 'object';
   return 'string';
 }
@@ -10582,6 +10607,19 @@ function exampleForContractType(type: string): string {
   }
 }
 
+/** The empty-but-valid default value for an inferred output type — used to
+ *  complete an agent's declared contract when a metadata key is genuinely absent
+ *  (empty-but-complete = success), instead of hard-failing the run. */
+function typedEmptyDefault(type: 'string' | 'number' | 'boolean' | 'array' | 'object'): unknown {
+  switch (type) {
+    case 'array': return [];
+    case 'boolean': return false;
+    case 'number': return 0;
+    case 'object': return {};
+    default: return '';
+  }
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -10591,17 +10629,19 @@ interface DeclaredOutputNormalizationResult {
   declaredKeys: string[];
   missingKeys: string[];
   recoveredKeys: string[];
+  /** Keys the agent genuinely omitted, completed with a typed-empty default. */
+  defaultedKeys: string[];
 }
 
 function outputNormalization(output: Record<string, unknown>): DeclaredOutputNormalizationResult {
-  return { output, declaredKeys: [], missingKeys: [], recoveredKeys: [] };
+  return { output, declaredKeys: [], missingKeys: [], recoveredKeys: [], defaultedKeys: [] };
 }
 
 function normalizeDeclaredNodeOutput(node: WorkflowNode, output: Record<string, unknown>): Record<string, unknown> {
   return normalizeDeclaredNodeOutputResult(node, output).output;
 }
 
-function normalizeDeclaredNodeOutputResult(node: WorkflowNode, output: Record<string, unknown>): DeclaredOutputNormalizationResult {
+function normalizeDeclaredNodeOutputResult(node: WorkflowNode, output: Record<string, unknown>, opts?: { fillTypedDefaults?: boolean }): DeclaredOutputNormalizationResult {
   const keys = declaredOutputKeys(node);
   if (keys.length === 0) return outputNormalization(output);
   const parsed = parseStructuredOutputEnvelope(output);
@@ -10641,12 +10681,25 @@ function normalizeDeclaredNodeOutputResult(node: WorkflowNode, output: Record<st
       recovered.add(keys[0]!);
     }
   }
-  const missing = keys.filter((key) => !isOutputValuePresent(normalized[key]));
+  let missing = keys.filter((key) => !isOutputValuePresent(normalized[key]));
+  const defaultedKeys: string[] = [];
+  // Intelligent adaptation: complete genuinely-absent declared keys with a
+  // typed-empty default (candidates: [], exhausted: false, …) so an agent that
+  // did real work but omitted a metadata key satisfies its contract instead of
+  // hard-failing. Gated by the caller (only when the node produced usable output).
+  if (opts?.fillTypedDefaults && missing.length > 0) {
+    for (const key of missing) {
+      normalized[key] = typedEmptyDefault(inferTypeFromKeyName(key));
+      defaultedKeys.push(key);
+    }
+    missing = [];
+  }
   return {
     output: normalized,
     declaredKeys: keys,
     missingKeys: missing,
-    recoveredKeys: [...recovered].filter((key) => !missing.includes(key)),
+    recoveredKeys: [...recovered].filter((key) => !missing.includes(key) && !defaultedKeys.includes(key)),
+    defaultedKeys,
   };
 }
 
