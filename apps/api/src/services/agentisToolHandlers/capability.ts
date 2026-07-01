@@ -4,8 +4,52 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { normalizeExtensionIdentity } from '../extensionLibrary.js';
+import { ExtensionRuntime } from '../extensionRuntime.js';
 
 export function registerCapabilityTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
+  registry.register(
+    {
+      id: 'agentis.extension.test',
+      family: 'inspect',
+      description:
+        'TEST an installed extension operation with sample inputs BEFORE wiring it into a workflow — runs it for real in the sandbox and returns { ok, output, producedKeys, error, durationMs }. Use this to PROVE an extension_task node will emit what the next node reads (closes the build loop for extensions the way agentis.workflow.dry_run does for graphs). Pass extensionId or extensionSlug (from agentis.extension.resolve/create), the operationName, and a sample input object.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          extensionId: { type: 'string', description: 'Extension ID (from resolve/create).' },
+          extensionSlug: { type: 'string', description: 'Extension slug (alternative to extensionId).' },
+          operationName: { type: 'string', description: "Operation to run. Defaults to the extension's first operation." },
+          input: { type: 'object', description: 'Sample input object the operation would receive at run time.' },
+        },
+        required: [],
+      },
+      mutating: false,
+      mcpExposed: true,
+    },
+    async (args, ctx) => {
+      const extensionId = stringArg(args.extensionId);
+      const extensionSlug = stringArg(args.extensionSlug);
+      if (!extensionId && !extensionSlug) throw new Error('extensionId or extensionSlug is required');
+      const operationName = stringArg(args.operationName);
+      // A throwaway runtime built from the deps we already hold (db + logger) —
+      // node_worker extensions run in the in-process sandbox, no DI/bootstrap needed.
+      const runtime = new ExtensionRuntime(deps.db, deps.logger, {
+        dockerEnabled: String(process.env.AGENTIS_EXTENSION_DOCKER ?? '').toLowerCase() === 'true',
+      });
+      const outcome = await runtime.execute({
+        workspaceId: ctx.workspaceId,
+        ...(extensionId ? { extensionId } : {}),
+        ...(extensionSlug ? { extensionSlug } : {}),
+        ...(operationName ? { operationName } : {}),
+        input: isRecord(args.input) ? args.input : {},
+        scratchpadSnapshot: {},
+      });
+      if (outcome.ok) {
+        return { ok: true, output: outcome.output, producedKeys: Object.keys(outcome.output), durationMs: outcome.durationMs };
+      }
+      return { ok: false, errorCode: outcome.errorCode, error: outcome.message, durationMs: outcome.durationMs };
+    },
+  );
   registry.register(
     {
       id: 'agentis.extension.resolve',
