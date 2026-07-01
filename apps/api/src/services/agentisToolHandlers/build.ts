@@ -336,6 +336,10 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
               type: 'object',
               description: 'Agent-authored patch object for editing the target workflow: addNodes/updateNodes/removeNodeIds/addEdges/removeEdgeIds.',
             },
+            confirmIntentChange: {
+              type: 'boolean',
+              description: 'Acknowledge a DELIBERATE capability change. Required to save an edit that removes load-bearing work (agent workers / fetch steps / integrations / persistence) — otherwise the edit is rejected as green-washing.',
+            },
           },
           required: ['description'],
         },
@@ -378,6 +382,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             workflowId: targetWorkflowId,
             graphDraft: args.graphDraft,
             patchDraft: args.patchDraft,
+            confirmIntentChange: args.confirmIntentChange === true,
             stream: true,
             ...(ctx.signal ? { signal: ctx.signal } : {}),
           });
@@ -679,6 +684,9 @@ export interface CreateWorkflowArgs {
   graphDraft?: unknown;
   /** Agent-authored edit patch for the target workflow. */
   patchDraft?: unknown;
+  /** Acknowledge a deliberate capability change (Organ 2): allows an edit that
+   *  removes load-bearing work to save instead of being rejected as green-washing. */
+  confirmIntentChange?: boolean;
   /** When true, animate the build (per-node canvas events + small delays). */
   stream?: boolean;
   /**
@@ -1018,9 +1026,25 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // that hollows out the workflow's load-bearing work (removed agent workers /
   // fetch steps / integrations / persistence). Then record the current signature.
   const priorIntent = (existingWorkflow?.settings as { intentManifest?: IntentManifest } | null)?.intentManifest ?? null;
-  for (const v of checkIntentIntegrity(graph, priorIntent)) {
-    preflight.warnings.push({ code: v.code, ...(v.nodeId ? { nodeId: v.nodeId } : {}), message: v.message });
+  const intentViolations = checkIntentIntegrity(graph, priorIntent);
+  // Approval integrity is UNAMBIGUOUS — a `|| true` (or constant) before an
+  // irreversible action is always wrong. Hard-block the save (new or edit).
+  const approvalBypass = intentViolations.filter((v) => v.code === 'AUTO_APPROVAL_BYPASS');
+  if (approvalBypass.length > 0) {
+    phase('blocked', 'Approval bypass — an irreversible action can self-approve');
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+      `Rejected (Organ 2 — approval integrity): ${approvalBypass.map((v) => v.message).slice(0, 2).join(' | ')}`);
   }
+  // Capability removal (edit only, vs the stored manifest) is the green-washing
+  // signal — hard-block UNLESS the caller explicitly acknowledges the intent change.
+  const capabilityRemoved = intentViolations.filter((v) => v.code === 'CAPABILITY_REMOVED');
+  if (capabilityRemoved.length > 0 && !args.confirmIntentChange) {
+    phase('blocked', 'Capability removed — would hollow out the workflow');
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+      `Rejected (Organ 2 — this edit hollows out the workflow): ${capabilityRemoved.map((v) => v.message).slice(0, 2).join(' | ')} `
+      + 'If this intent change is deliberate, retry with confirmIntentChange: true.');
+  }
+  for (const v of capabilityRemoved) preflight.warnings.push({ code: v.code, ...(v.nodeId ? { nodeId: v.nodeId } : {}), message: v.message });
   const intentManifest = deriveIntentManifest(graph, description);
 
   // Organ 3 — Atomic Evolution (green ratchet): reject an EDIT that INTRODUCES a
