@@ -8929,6 +8929,15 @@ export class WorkflowEngine {
     // to either hang as "running" forever or fail opaquely on an out-of-credits model.
     const node = ctx.graph.nodes.find((candidate) => candidate.id === nodeId);
     const recoverableModelFailure = isRecoverableModelError(error);
+    // Organ 4 — failure taxonomy: a RESOURCE failure (rate/usage limit, quota,
+    // auth/captcha wall, transient 5xx/network) is NOT a logic bug. Quarantine the
+    // node (pause with a blocker) BEFORE self-heal can edit its logic — so a
+    // rate-limited scout is never "fixed" by rewriting or deleting it. The operator
+    // waits / adds capacity / connects access, then resumes from exactly here.
+    if (isResourceFailure(error)) {
+      await this.#pauseNodeBlocked(ctx, nodeId, resourceBlockerReason(error));
+      return;
+    }
     if (!isSelfHealTerminalError(error)) {
       if (node && isSelfHealableNode(node)) {
         const heal = await this.#runSelfHeal(ctx, node, {}, error);
@@ -10036,6 +10045,36 @@ function isRecoverableModelError(error: string): boolean {
     || /quota exceeded|exceeded your current quota/.test(e)
     || /billing (hard limit|issue|required)/.test(e)
     || /\bno credits?\b/.test(e);
+}
+
+/**
+ * Organ 4 — a RESOURCE failure (external/infra), NOT a workflow logic bug: rate /
+ * usage limits, exhausted quota, auth/captcha walls, transient 5xx / network. These
+ * must be QUARANTINED (pause + resume), never "repaired" by editing or deleting the
+ * node — the exact reason agents gut a workflow when a scout hits a rate limit.
+ */
+function isResourceFailure(error: string): boolean {
+  if (isRecoverableModelError(error)) return true;
+  const e = (error || '').toLowerCase();
+  return /\b429\b|rate.?limit|too many requests/.test(e)
+    || /usage limit|hit your usage limit|quota (?:exceeded|exhausted)|out of quota/.test(e)
+    || /login wall|captcha required|\b403\b|access denied|401 unauthorized|permission denied/.test(e)
+    || /\b(502|503|504)\b|service unavailable|temporarily unavailable|bad gateway|gateway timeout/.test(e)
+    || /econnreset|etimedout|enotfound|socket hang up/.test(e);
+}
+
+/** Operator-facing reason for a resource quarantine (distinct from a logic failure). */
+function resourceBlockerReason(error: string): string {
+  if (isRecoverableModelError(error)) return friendlyBlockedReason(error);
+  const e = (error || '').toLowerCase();
+  const tail = ` (source: ${(error || '').slice(0, 160)})`;
+  if (/\b429\b|rate.?limit|too many requests|usage limit/.test(e)) {
+    return 'Rate/usage limit hit on an external service or model — this is NOT a workflow bug. Wait for the limit to reset (or add capacity), then resume the run from here.' + tail;
+  }
+  if (/login|captcha|unauthorized|\b403\b|401|access denied|permission denied/.test(e)) {
+    return 'An external service returned an access/auth wall (login / captcha / 401 / 403) — connect a session or credential, then resume. NOT a workflow logic bug.' + tail;
+  }
+  return 'A transient external/resource failure (network / timeout / 5xx) — retry or resume the run. NOT a workflow logic bug.' + tail;
 }
 
 /** A replayable activity item — a RealtimeEnvelope kept in the per-run tail. */

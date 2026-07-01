@@ -223,6 +223,49 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
     expect(state.nodeStates.scout?.outputData?.exhausted).toBe(false);
     expect(state.nodeStates.scout?.outputData?.blockers).toEqual([]);
   });
+
+  it('quarantines a RESOURCE failure (usage limit) — pauses the node, never fails or edits it (Organ 4)', async () => {
+    // The transcript: "Instagram Fashion Store Scout failed: Codex exited with code
+    // 1: You've hit your usage limit." A rate/usage limit is NOT a workflow bug —
+    // the node is quarantined (paused) so the operator waits/adds capacity and
+    // resumes, instead of the run failing (which is what made the agent delete it).
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Scout', adapterType: 'codex', capabilityTags: [], config: {}, role: 'worker', status: 'online',
+    }).run();
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, new FailingAdapter(agentId, "Codex exited with code 1: You've hit your usage limit."));
+    const engine = makeEngine(adapters);
+    adapters.onEvent((event) => {
+      if (event.eventType === 'task.failed') {
+        void engine.notifyTaskFailed({ runId: event.runId, nodeId: event.taskId, error: String((event as { error?: unknown }).error ?? '') });
+      }
+    });
+
+    const graph: WorkflowGraph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'scout', type: 'agent_task', title: 'Scout', position: { x: 200, y: 0 }, config: { kind: 'agent_task', agentId, prompt: 'find', inputKeys: [], outputKeys: ['candidates'], capabilityTags: [] } },
+      ],
+      edges: [{ id: 't-s', source: 'trigger', target: 'scout' }],
+    };
+    const { runId, workflowId, initialState } = persistWorkflow(graph, {});
+    await engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph });
+    // Poll until the node is quarantined (the pause persists just after its event).
+    const readRun = () => ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    const deadline = Date.now() + 15_000;
+    let run = readRun();
+    while (Date.now() < deadline && (run.runState as { nodeStates?: Record<string, { status?: string }> }).nodeStates?.scout?.status !== 'WAITING') {
+      await new Promise((r) => setTimeout(r, 40));
+      run = readRun();
+    }
+    const state = run.runState as { nodeStates: Record<string, { status: string; blockedReason?: string }> };
+    expect(run.status).not.toBe('FAILED');            // quarantined, not failed
+    expect(state.nodeStates.scout?.status).toBe('WAITING');
+    expect(state.nodeStates.scout?.blockedReason ?? '').toMatch(/limit/i);
+  });
 });
 
 /** Records the inputData handed to the dispatched agent, then completes the task. */
@@ -249,6 +292,29 @@ class CapturingAdapter implements AgentAdapter {
           output: { text: ['```json', JSON.stringify(this.payload), '```'].join('\n') },
           timestamp: new Date().toISOString(),
         });
+      }
+    });
+  }
+  async *chat(_h: ChatMessage[], _t: ToolDefinition[], _o?: ChatInvocationOptions): AsyncIterable<ChatDelta> {
+    yield { type: 'done', finishReason: 'stop' };
+  }
+  async cancelTask(): Promise<void> {}
+}
+
+/** Dispatches then emits a `task.failed` with a fixed error (to drive #failNode). */
+class FailingAdapter implements AgentAdapter {
+  readonly adapterType: AdapterType = 'codex';
+  readonly #handlers = new Set<(e: NormalizedAgentEvent) => void>();
+  constructor(private readonly agentId: string, private readonly error: string) {}
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async healthCheck() { return { isHealthy: true, checkedAt: new Date().toISOString() }; }
+  capabilities(): AdapterCapabilities { return { interactiveChat: true, toolCalling: false }; }
+  onEvent(handler: (e: NormalizedAgentEvent) => void): void { this.#handlers.add(handler); }
+  async dispatchTask(task: NormalizedTask): Promise<void> {
+    queueMicrotask(() => {
+      for (const handler of this.#handlers) {
+        handler({ eventType: 'task.failed', agentId: this.agentId, taskId: task.taskId, runId: task.runId, workflowId: task.workflowId, error: this.error, timestamp: new Date().toISOString() } as NormalizedAgentEvent);
       }
     });
   }
