@@ -57,6 +57,19 @@ describe('repairSurface — auto-fixes the garbage', () => {
     expect(fixes).toContain('set root theme');
   });
 
+  it('guarantees a premium design language (inferred from theme) so nothing renders flat', () => {
+    // A Chart → analytics theme → aurora design language.
+    const { view, fixes } = repairSurface({ type: 'Stack', children: [{ type: 'Chart', bind: { collection: 'm', live: true }, chartType: 'area', x: 'd', y: 'v' }] }, { collections: ['m'] });
+    expect(view.style?.design).toBe('aurora');
+    expect(fixes).toContain('set root design language');
+  });
+
+  it('honors a design language the agent already chose', () => {
+    const { view, fixes } = repairSurface({ type: 'Stack', style: { theme: 'analytics', design: 'console' }, children: [{ type: 'Heading', value: 'hi' }] });
+    expect(view.style?.design).toBe('console');
+    expect(fixes).not.toContain('set root design language');
+  });
+
   it('is idempotent and leaves a good (golden) surface essentially intact', () => {
     const golden = buildArchetypeSurface([
       { id: 'c', appId: 'a', name: 'metrics', schema: { fields: [{ key: 'day', type: 'string', required: false, indexed: false }, { key: 'count', type: 'number', required: false, indexed: false }] }, createdAt: '', updatedAt: '' },

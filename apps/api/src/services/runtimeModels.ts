@@ -138,7 +138,7 @@ export function defaultModelFor(adapterType: V1HarnessAdapterType): string | nul
   // with "model is not supported". Defaulting here keeps a fresh Codex agent
   // runnable out of the box; users on an API key can still pick a `*-codex` id.
   if (adapterType === 'codex') return 'gpt-5.5';
-  if (adapterType === 'claude_code') return 'claude-sonnet-4-6';
+  if (adapterType === 'claude_code') return 'claude-sonnet-5';
   if (adapterType === 'cursor') return 'auto';
   if (adapterType === 'hermes_agent') return 'hermes-auto';
   if (adapterType === 'antigravity') return null;
@@ -370,9 +370,9 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
   }
   if (adapterType === 'claude_code') {
     return [
-      option('claude-sonnet-4-6', 'Anthropic', true),
+      option('claude-sonnet-5', 'Anthropic', true),
+      option('claude-sonnet-4-6', 'Anthropic'),
       option('claude-haiku-4-5', 'Anthropic'),
-      option('claude-haiku-3-5', 'Anthropic'),
       option('claude-opus-4-8', 'Anthropic'),
       option('claude-opus-4-7', 'Anthropic'),
     ];

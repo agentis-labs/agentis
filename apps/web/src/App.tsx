@@ -385,7 +385,7 @@ function Shell({
 
   return (
     <div className="flex h-full flex-col bg-canvas" data-agentis-shell>
-      <header data-agentis-shell-header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
+      <header data-agentis-shell-header className="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
         <button
           onClick={() => nav('/home')}
           className="flex items-center gap-2 text-[13px] font-semibold text-text-primary"
@@ -399,7 +399,7 @@ function Shell({
           workspaceImage={workspaceImage}
           workspaceId={workspaceId}
         />
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex min-w-0 items-center justify-end gap-2">
           <button
             type="button"
             onClick={() => {
@@ -427,9 +427,9 @@ function Shell({
       <div data-agentis-onboarding-strip>
         <OnboardingStrip />
       </div>
-      <div data-agentis-shell-layout className="flex min-h-0 flex-1">
+      <div data-agentis-shell-layout className="flex min-h-0 min-w-0 flex-1">
         <Sidebar />
-        <main data-agentis-shell-main className="min-h-0 flex-1 overflow-auto">{children}</main>
+        <main data-agentis-shell-main className="min-h-0 min-w-0 flex-1 overflow-auto">{children}</main>
         <ChatPanelMount />
       </div>
       <div data-agentis-live-strip>

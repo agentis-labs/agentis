@@ -1,8 +1,5 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type {
   AgentAdapter,
   AdapterCapabilities,
@@ -17,12 +14,12 @@ import type {
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
-import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { McpHarnessServer } from '../services/mcpHarnessSession.js';
 import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { linkAbortSignal } from './abort.js';
+import { buildMarkerToolPrompt } from './markerToolProtocol.js';
 import { AcpClient, toAcpHttpMcpServers, type AcpModelInfo, type AcpSessionUpdate } from './acpClient.js';
 import {
   chatHardCeilingMs,
@@ -36,8 +33,21 @@ import { runtimeProgressActivity } from './runtimeProgress.js';
 const DEFAULT_HERMES_STARTUP_TIMEOUT_MS = 120_000;
 const MAX_HERMES_STARTUP_TIMEOUT_MS = 300_000;
 const DEFAULT_HERMES_FIRST_EVENT_TIMEOUT_MS = 90_000;
-const MIN_HERMES_FIRST_EVENT_TIMEOUT_MS = 15_000;
+// Interactive chat cannot sit silent for 90s while we wait to see whether the
+// ACP build will EVER stream output. When the operator is at a keyboard
+// (latencyClass 'interactive'), a session that opens but produces no first event
+// quickly is treated as an ACP stall: in `auto` transport we cut over to the
+// stable CLI path fast instead of freezing. Env-overridable for genuinely slow
+// providers.
+const DEFAULT_HERMES_INTERACTIVE_FIRST_EVENT_TIMEOUT_MS = 8_000;
+const MIN_HERMES_FIRST_EVENT_TIMEOUT_MS = 2_000;
 const MAX_HERMES_FIRST_EVENT_TIMEOUT_MS = 120_000;
+// Once an `auto`-transport turn has had to abandon a stalled ACP attempt and fall
+// back to the CLI, attempting ACP again next turn just re-burns the same
+// ~startup + first-event-probe seconds for nothing. Latch the CLI route for this
+// cooldown so subsequent turns are CLI-fast, then periodically re-try ACP in case
+// the build recovered. Env-overridable; 0 disables the breaker.
+const DEFAULT_HERMES_ACP_STALL_COOLDOWN_MS = 600_000;
 
 export interface HermesAgentAdapterOptions {
   agentId: string;
@@ -81,6 +91,11 @@ export class HermesAgentAdapter implements AgentAdapter {
     models?: AcpModelInfo[];
   } | undefined;
   #activeSessionId: string | undefined;
+  /**
+   * Epoch ms until which `auto` transport should skip ACP and go straight to the
+   * CLI, set after an ACP attempt stalled and fell back. 0 = ACP enabled.
+   */
+  #acpDisabledUntil = 0;
   #turnTail: Promise<void> = Promise.resolve();
   #version: string | null = null;
   readonly #sessions = new Map<string, {
@@ -131,6 +146,10 @@ export class HermesAgentAdapter implements AgentAdapter {
       env: this.opts.env,
       logger: this.opts.logger,
       logTag: 'hermes_agent',
+      // Hermes is a Python CLI: `--version` cold-starts the interpreter + venv in
+      // ~4s and spikes higher under load. The shared 5s default trips on a healthy
+      // runtime, so give it real headroom (env-overridable).
+      timeoutMs: hermesProbeTimeoutMs(),
     });
     this.#version = result.version;
     return result.health;
@@ -144,7 +163,7 @@ export class HermesAgentAdapter implements AgentAdapter {
       toolForwarding: acp ? 'mcp_native' : 'marker_protocol',
       ...(!acp ? {
         limitations: [
-          'Using Hermes CLI compatibility transport because current Hermes ACP builds can stall before returning model output.',
+          'Using the stable Hermes CLI chat transport. Set chatTransport to acp or auto to use the experimental ACP stream.',
         ],
       } : {}),
       execution: {
@@ -369,12 +388,16 @@ export class HermesAgentAdapter implements AgentAdapter {
   /**
    * Build a `hermes chat` invocation for one headless turn.
    *
-   * The prompt is written to a temp file and passed as `-q "@file:<path>"`
-   * (Hermes's documented file-injection syntax) rather than inline. A full chat
-   * prompt — system context, tool schemas, brain discourse, conversation history
-   * — is tens of KB and blows the OS command-line limit when passed as a literal
-   * argument (`spawn ENAMETOOLONG`). `@file:` keeps the command line tiny and
-   * handles Windows drive-letter paths (`C:\...`) correctly.
+   * The prompt is ALWAYS delivered inline as the `-q` query so Hermes treats it as
+   * the prompt to ACT ON. We deliberately NEVER use Hermes's `@file:` syntax: that
+   * attaches the file as a DOCUMENT, so the model reads it back ("The content from
+   * the specified file is too long … first 500 lines … Agentis interactive chat
+   * session …") instead of acting — a real failure operators hit. When a full chat
+   * prompt (system context + tool catalog + history) would exceed the OS command
+   * line, we trim its MIDDLE to fit, preserving the tool protocol + identity (head)
+   * and the operator's request + recent context (tail). An acted-upon trimmed
+   * prompt beats a complete-but-echoed one. Hermes resolves to a direct `.exe`, so
+   * the budget is the 32767-char Windows CreateProcess limit (env-overridable).
    *
    * `-Q` (quiet) is the documented programmatic mode: it suppresses the
    * banner/spinner/tool previews and prints only the final response to stdout
@@ -383,41 +406,47 @@ export class HermesAgentAdapter implements AgentAdapter {
    * top level is the "unrecognized arguments" crash this adapter used to hit).
    * `--yolo` avoids a TTY approval hang.
    *
-   * The caller MUST invoke `cleanup()` once the process has exited.
+   * `cleanup()` is retained for call-site symmetry but is now a no-op (no temp file).
    */
   #buildChatInvocation(prompt: string, model = this.opts.model): { args: string[]; cleanup: () => void } {
-    const dir = mkdtempSync(join(tmpdir(), 'agentis-hermes-'));
-    const promptFile = join(dir, 'prompt.txt');
-    writeFileSync(promptFile, prompt, 'utf8');
-    const args = [
+    const baseArgs = (queryArg: string): string[] => [
       'chat',
-      '-q', `@file:${promptFile}`,
+      '-q', queryArg,
       '-Q',
       ...(model ? ['-m', model] : []),
-      '--max-turns', String(this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24),
+      // Codex parity: no native turn cap by default — a stale `--max-turns 24`
+      // killed long runs mid-task. Pass it ONLY when explicitly set (env via
+      // agentCommission.nativeTurnCap); otherwise let Hermes run to completion.
+      ...(this.opts.maxTurns && this.opts.maxTurns > 0 ? ['--max-turns', String(this.opts.maxTurns)] : []),
+      // Don't let Hermes auto-inject AGENTS.md / SOUL.md / .cursorrules / memory
+      // from the working directory — Agentis supplies the agent's identity and
+      // instructions. Without this, a Hermes running inside a repo adopts that
+      // repo's coding-agent identity and rejects/ignores the Agentis persona.
+      '--ignore-rules',
       '--yolo',
       ...(this.opts.extraArgs ?? []),
     ];
-    return {
-      args,
-      cleanup: () => {
-        try {
-          rmSync(dir, { recursive: true, force: true });
-        } catch {
-          // A leftover temp file in the OS temp dir is harmless.
-        }
-      },
-    };
+
+    const limit = hermesInlinePromptLimit();
+    const query = prompt.length <= limit ? prompt : truncateHermesPromptToInline(prompt, limit);
+    return { args: baseArgs(query), cleanup: () => {} };
   }
 
   async *chat(
     messages: ChatMessage[],
-    _tools: ToolDefinition[],
+    tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
     const transport = this.#chatTransport();
     if (transport === 'cli') {
-      yield* this.#chatCli(messages, options);
+      yield* this.#chatCli(messages, tools, options);
+      return;
+    }
+    if (transport === 'auto' && Date.now() < this.#acpDisabledUntil) {
+      // ACP stalled recently in this environment — don't re-pay the startup +
+      // first-event probe every turn; serve straight from the stable CLI until
+      // the cooldown elapses, then ACP is re-attempted on the next turn.
+      yield* this.#chatCli(messages, tools, options);
       return;
     }
     const allowCliFallback = transport === 'auto';
@@ -430,9 +459,12 @@ export class HermesAgentAdapter implements AgentAdapter {
       : DEFAULT_CHAT_TURN_TIMEOUT_MS;
     const requestedRoundMs = Math.max(30_000, options?.timeoutMs ?? configuredTimeoutMs);
     const hardCeilingMs = chatHardCeilingMs(requestedRoundMs, 'AGENTIS_HERMES_CHAT_HARD_CEILING_MS');
+    const interactive = options?.latencyClass === 'interactive';
     const firstEventTimeoutMs = boundedTimeout(
-      process.env.AGENTIS_HERMES_FIRST_EVENT_TIMEOUT_MS,
-      DEFAULT_HERMES_FIRST_EVENT_TIMEOUT_MS,
+      interactive
+        ? (process.env.AGENTIS_HERMES_INTERACTIVE_FIRST_EVENT_TIMEOUT_MS ?? process.env.AGENTIS_HERMES_FIRST_EVENT_TIMEOUT_MS)
+        : process.env.AGENTIS_HERMES_FIRST_EVENT_TIMEOUT_MS,
+      interactive ? DEFAULT_HERMES_INTERACTIVE_FIRST_EVENT_TIMEOUT_MS : DEFAULT_HERMES_FIRST_EVENT_TIMEOUT_MS,
       Math.min(hardCeilingMs, MAX_HERMES_FIRST_EVENT_TIMEOUT_MS),
       MIN_HERMES_FIRST_EVENT_TIMEOUT_MS,
     );
@@ -469,6 +501,15 @@ export class HermesAgentAdapter implements AgentAdapter {
       if (settled || fallbackStarted) return;
       fallbackStarted = true;
       settled = true;
+      // Trip the breaker: this environment's ACP build couldn't deliver, so route
+      // the next turns straight to the CLI instead of re-burning the probe.
+      const cooldownMs = hermesAcpStallCooldownMs();
+      if (cooldownMs > 0) this.#acpDisabledUntil = Date.now() + cooldownMs;
+      this.opts.logger.warn('hermes_agent.acp.fallback_to_cli', {
+        code,
+        cooldownMs,
+        agentId: this.opts.agentId,
+      });
       if (firstEventTimer) clearTimeout(firstEventTimer);
       if (hardTimer) clearTimeout(hardTimer);
       if (client) {
@@ -489,7 +530,7 @@ export class HermesAgentAdapter implements AgentAdapter {
         agentId: this.opts.agentId,
       });
       try {
-        for await (const delta of this.#chatCli(messages, options)) queue.push(delta);
+        for await (const delta of this.#chatCli(messages, tools, options)) queue.push(delta);
       } catch (err) {
         queue.push({
           type: 'tool_result',
@@ -504,7 +545,7 @@ export class HermesAgentAdapter implements AgentAdapter {
       }
     };
     const failTurn = (code: string, message: string) => {
-      if (allowCliFallback && !firstEventSeen && isHermesAcpStartupOrSessionFailure(code)) {
+      if (allowCliFallback && !firstEventSeen && isHermesAcpFallbackEligible(code)) {
         void fallbackToCli(code, message);
         return;
       }
@@ -613,9 +654,12 @@ export class HermesAgentAdapter implements AgentAdapter {
         });
 
         firstEventTimer = setTimeout(() => {
+          const secs = Math.round(firstEventTimeoutMs / 1000);
           failTurn(
             'first_event_timeout',
-            `Hermes produced no model event within ${Math.round(firstEventTimeoutMs / 1000)} seconds.`,
+            interactive
+              ? `Hermes opened a session but streamed no model output within ${secs}s (the ACP transport can stall before producing output).`
+              : `Hermes produced no model event within ${secs} seconds.`,
           );
         }, firstEventTimeoutMs);
         firstEventTimer.unref?.();
@@ -668,6 +712,7 @@ export class HermesAgentAdapter implements AgentAdapter {
 
   async *#chatCli(
     messages: ChatMessage[],
+    tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
@@ -675,7 +720,7 @@ export class HermesAgentAdapter implements AgentAdapter {
       : DEFAULT_CHAT_TURN_TIMEOUT_MS;
     const idleTimeoutMs = Math.max(30_000, options?.timeoutMs ?? configuredTimeoutMs);
     const requestedModel = normalizeHermesCliModel(options?.preferredModel) ?? normalizeHermesCliModel(this.opts.model);
-    const invocation = this.#buildChatInvocation(formatAcpPrompt(messages), requestedModel);
+    const invocation = this.#buildChatInvocation(buildHermesCliPrompt(messages, tools), requestedModel);
 
     yield {
       type: 'activity',
@@ -706,7 +751,7 @@ export class HermesAgentAdapter implements AgentAdapter {
           const text = extractText(parsed);
           return text ? { kind: 'final', text } : { kind: 'ignore' };
         },
-        formatExitError: (_code, stderr) => stderr.trim(),
+        formatExitError: (_code, stderr, stdoutErr) => formatHermesExitError(stderr, stdoutErr),
         onEmptyResult: () => {
           this.opts.logger.warn('hermes_agent.chat.empty_result', {
             agentId: this.opts.agentId,
@@ -739,7 +784,8 @@ export class HermesAgentAdapter implements AgentAdapter {
     const normalized = configured?.trim().toLowerCase();
     if (normalized === 'cli') return 'cli';
     if (normalized === 'acp') return 'acp';
-    return 'auto';
+    if (normalized === 'auto') return 'auto';
+    return 'cli';
   }
 
   async #acquireTurn(): Promise<() => void> {
@@ -1080,17 +1126,63 @@ function normalizeHermesCliModel(model: string | null | undefined): string | und
   return value;
 }
 
+function hermesInlinePromptLimit(): number {
+  // Windows CreateProcess caps a command line at 32767 chars; Hermes resolves to
+  // a direct `.exe` (Node passes argv straight through), so we can use most of it
+  // and only reserve headroom for the binary path + the handful of flags. Bigger
+  // than before on purpose: every char that fits inline is a char that does NOT
+  // have to be trimmed, and inline is the only delivery that Hermes acts on (never
+  // `@file:`). Env-overridable for tighter shells.
+  const raw = Number(process.env.AGENTIS_HERMES_INLINE_PROMPT_LIMIT);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30_000;
+}
+
+/**
+ * Trim an over-long prompt to fit inline, removing the MIDDLE. Keeps the head (the
+ * marker tool protocol + AUTHORITATIVE IDENTITY RULE) and the tail (recent history
+ * + the operator's actual request), which are the parts the agent must act on, and
+ * drops the bulky middle (older context / platform knowledge). A trimmed prompt the
+ * model ACTS on is far better than a complete one it echoes back via `@file:`.
+ */
+function truncateHermesPromptToInline(prompt: string, limit: number): string {
+  const marker = '\n\n…[earlier context trimmed to fit the runtime prompt limit — act on the TOOL PROTOCOL above and the OPERATOR REQUEST below; call agentis tools to fetch anything you still need]…\n\n';
+  const budget = Math.max(0, limit - marker.length);
+  const head = Math.floor(budget * 0.6);
+  const tail = budget - head;
+  return `${prompt.slice(0, head)}${marker}${prompt.slice(prompt.length - tail)}`;
+}
+
+function hermesProbeTimeoutMs(): number {
+  const raw = Number(process.env.AGENTIS_HERMES_PROBE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 8_000;
+}
+
+function hermesAcpStallCooldownMs(): number {
+  const raw = Number(process.env.AGENTIS_HERMES_ACP_STALL_COOLDOWN_MS);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_HERMES_ACP_STALL_COOLDOWN_MS;
+}
+
 function shouldPrewarmHermesOnConnect(env: Record<string, string> | undefined): boolean {
   const value = env?.AGENTIS_HERMES_PREWARM_ON_CONNECT ?? process.env.AGENTIS_HERMES_PREWARM_ON_CONNECT;
   return value === '1' || value?.toLowerCase() === 'true';
 }
 
-function isHermesAcpStartupOrSessionFailure(code: string): boolean {
+/**
+ * Codes that mean "ACP couldn't deliver this turn" and so, in `auto` transport,
+ * should transparently retry on the stable CLI transport instead of hard-failing.
+ *
+ * `first_event_timeout` is the most common one: the session opens fine but the
+ * current Hermes ACP build stalls before streaming any model output. Without it
+ * in this set, the adapter used to dead-end on a fabricated "gateway not running"
+ * error instead of falling back to the CLI path the other harnesses use.
+ */
+function isHermesAcpFallbackEligible(code: string): boolean {
   return code === 'handshake_timeout'
     || code === 'session_prewarm_timeout'
     || code === 'session_load_timeout'
     || code === 'session_open_timeout'
-    || code === 'model_selection_timeout';
+    || code === 'model_selection_timeout'
+    || code === 'first_event_timeout';
 }
 
 function boundedTimeout(raw: string | undefined, fallback: number, maximum: number, minimum = 1_000): number {
@@ -1112,6 +1204,34 @@ async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, code: str
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * Build a useful exit-error detail for a failed `hermes chat -Q`.
+ *
+ * Hermes prints its REAL failure to STDOUT as plain text (e.g. "API call failed
+ * after 3 retries: HTTP 404: No endpoints found for openrouter/owl-alpha.") and
+ * always writes a `session_id: <id>` line to STDERR on exit — which is NOT an
+ * error. Surfacing that stderr line gave the useless "Hermes exited 1: session_id:
+ * …". Prefer the stdout error, strip the session_id/noise from stderr, and turn a
+ * dead/removed model into a one-step fix.
+ */
+function formatHermesExitError(stderr: string, stdoutErr: string): string {
+  const cleanStderr = stderr
+    .split('\n')
+    .filter((line) => !/^\s*session_id\s*:/i.test(line))
+    .join('\n')
+    .trim();
+  const detail = (stdoutErr || '').trim() || cleanStderr;
+  // Removed / unavailable model: OpenRouter returns 404 "No endpoints found for
+  // <model>" (e.g. a retired stealth model). Make the fix obvious instead of a
+  // cryptic HTTP code.
+  const noEndpoints = detail.match(/no endpoints found for\s+([^\s."']+)/i);
+  if (noEndpoints || /http\s*404/i.test(detail)) {
+    const model = noEndpoints?.[1];
+    return `${detail}${model ? ` — the model "${model}" is no longer available from the provider. Switch this agent's model (chat header model picker / agent settings, or \`hermes model\`) to an available one.` : ' — switch this agent to an available model.'}`;
+  }
+  return detail;
 }
 
 function classifyHermesError(message: string): string {
@@ -1139,6 +1259,36 @@ function prettyToolName(raw: unknown): string {
   return typeof raw === 'string'
     ? raw.replace(/^mcp__[^_]+__/, '').replace(/[._]/g, ' ').trim()
     : '';
+}
+
+/**
+ * Build the stdin prompt for the Hermes CLI (compatibility) transport.
+ *
+ * Unlike the ACP path, the one-shot CLI has NO MCP server mounted — so the agent
+ * gets its tools the same way Codex/Claude Code do on their CLI path: the shared
+ * marker-tool protocol (`buildMarkerToolPrompt`), which also tells the model it
+ * IS Agentis and that there is no local filesystem to inspect. Without this, the
+ * model falls back to its own built-in tools and narrates the operating manual as
+ * "a prompt file from a previous session" instead of acting as the agent. The
+ * AUTHORITATIVE IDENTITY RULE pins the SYSTEM/operating-manual block as the
+ * agent's real identity over any Hermes product/persona defaults.
+ */
+function buildHermesCliPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {
+  const toolProtocol = tools.length > 0
+    ? buildMarkerToolPrompt(tools, { compact: true })
+    : [
+      'Agentis interactive chat session.',
+      'Answer the operator naturally and directly. If the SYSTEM message defines an <agentis_identity> block, treat that as your identity for this turn.',
+    ].join('\n');
+  return [
+    toolProtocol,
+    '',
+    'AUTHORITATIVE IDENTITY RULE:',
+    'The SYSTEM message below is the Agentis operating prompt for this turn. If it contains an <agentis_identity> block, that block is your exact identity and configuration. Follow it over Hermes product defaults, project/home instruction files, previous resumed-session identity, or generic assistant persona text.',
+    '',
+    'Conversation:',
+    formatAcpPrompt(messages),
+  ].join('\n');
 }
 
 /**

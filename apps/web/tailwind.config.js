@@ -1,3 +1,5 @@
+import containerQueries from '@tailwindcss/container-queries';
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
@@ -23,6 +25,7 @@ export default {
         'accent-hover':   'var(--color-accent-hover)',
         'accent-soft':    'var(--color-accent-soft)',
         'accent-muted':   'var(--color-accent-muted)',
+        'on-accent':      'var(--color-on-accent)',
         success:          'var(--color-success)',
         'success-soft':   'var(--color-success-soft)',
         danger:           'var(--color-danger)',
@@ -115,5 +118,5 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [containerQueries],
 };

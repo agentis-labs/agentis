@@ -163,3 +163,38 @@ export const updateAppSchema = z.object({
   installedChecksum: z.string().nullable().optional(),
 });
 export type UpdateAppInput = z.infer<typeof updateAppSchema>;
+
+/**
+ * An App's orchestration metadata for ONE of its workflows — the control plane.
+ * Stored on the workflow's own `settings.appBinding` (no migration; a workflow
+ * belongs to exactly one App via `workflows.appId`). It answers, per workflow:
+ * why it exists (`purpose`), the operator-facing order, whether it's enabled,
+ * and which sibling workflows must run first (`dependsOn`). Without this an App
+ * is just a bag of workflows with no run/order/explain control.
+ */
+export const appWorkflowBindingSchema = z.object({
+  order: z.number().int().min(0).optional(),
+  purpose: z.string().max(400).optional(),
+  enabled: z.boolean().optional(),
+  dependsOn: z.array(z.string()).default([]),
+});
+export type AppWorkflowBinding = z.infer<typeof appWorkflowBindingSchema>;
+
+/** PATCH payload for an App→workflow binding. */
+export const updateAppWorkflowBindingSchema = appWorkflowBindingSchema.partial();
+export type UpdateAppWorkflowBindingInput = z.infer<typeof updateAppWorkflowBindingSchema>;
+
+/** A workflow as seen from its owning App's control plane. */
+export interface AppWorkflowSummary {
+  id: string;
+  title: string;
+  /** Why this workflow exists in the App (binding.purpose, else the description). */
+  purpose: string | null;
+  order: number;
+  enabled: boolean;
+  dependsOn: string[];
+  /** Derived from the trigger node: manual | cron | webhook | persistent_listener | … */
+  triggerKind: string | null;
+  /** Most recent run, if any. */
+  lastRun: { id: string; status: string; at: string } | null;
+}

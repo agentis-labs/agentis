@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   extractCandidateStatements,
+  extractOperatorCandidates,
   classifyOutputShape,
   isRejectable,
   scoreStatement,
@@ -118,5 +119,23 @@ describe('resolveMemoryPolicy — the write-policy gate', () => {
   });
   it('writes nothing for empty output', () => {
     expect(resolveMemoryPolicy({ nodeTitle: 'noop', output: '' }).policy).toBe('none');
+  });
+});
+
+
+describe('extractOperatorCandidates (authoritative operator chat)', () => {
+  it('keeps first-person facts, short rules, and preferences the strict gate would drop', () => {
+    const got = extractOperatorCandidates('I am the CTO of Acme. Always use HTTPS. I prefer concise answers.').map((c) => c.text);
+    expect(got.some((t) => /CTO of Acme/.test(t))).toBe(true);      // first-person fact (strict gate rejects "I am")
+    expect(got.some((t) => /Always use HTTPS/.test(t))).toBe(true);  // too short for the 25-char strict floor
+    expect(got.some((t) => /prefer concise answers/.test(t))).toBe(true);
+  });
+  it('drops questions, pure task commands, and empties', () => {
+    expect(extractOperatorCandidates('How do I like my responses?')).toHaveLength(0);
+    expect(extractOperatorCandidates('Create a workflow that watches AI posts.')).toHaveLength(0);
+    expect(extractOperatorCandidates('   ')).toHaveLength(0);
+  });
+  it('keeps a standing-policy command (modality), not a one-off task', () => {
+    expect(extractOperatorCandidates('Always create a backup before deploy.').length).toBeGreaterThan(0);
   });
 });

@@ -8,8 +8,9 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { AgentisAppClient } from '@agentis/app-client';
-import type { ViewNode } from '@agentis/core';
+import type { DesignLanguage, ViewNode } from '@agentis/core';
 import { RuntimeProvider, ViewRenderer } from '../components/apps/ViewRenderer';
+import { DESIGN_LANGUAGES } from '../components/apps/designLanguage';
 
 // ── In-memory datasets the bound nodes read ─────────────────
 const DATA: Record<string, Array<Record<string, unknown>>> = {
@@ -85,7 +86,7 @@ const ANALYTICS: ViewNode = {
 const CONSOLE: ViewNode = {
   type: 'Stack',
   gap: 16,
-  style: { theme: 'console', density: 'compact' },
+  style: { theme: 'operations', density: 'compact' },
   children: [
     { type: 'Hero', eyebrow: 'OPERATOR', title: 'Mission control', subtitle: 'A dense ops command center — tabs and rails instead of one giant scroll.' },
     {
@@ -147,7 +148,7 @@ const PIPELINE: ViewNode = {
 const CODE: ViewNode = {
   type: 'Stack',
   gap: 16,
-  style: { theme: 'console' },
+  style: { theme: 'operations' },
   children: [
     { type: 'Hero', eyebrow: 'CODE SURFACE', title: 'Full-power tier', subtitle: 'When the typed grammar is not enough, the agent writes JS — sandboxed, on-brand, and live.' },
     {
@@ -173,7 +174,7 @@ const CODE: ViewNode = {
 
 const SURFACES: Array<{ key: string; label: string; node: ViewNode }> = [
   { key: 'analytics', label: 'Analytics dashboard', node: ANALYTICS },
-  { key: 'console', label: 'Ops command center', node: CONSOLE },
+  { key: 'operations', label: 'Ops command center', node: CONSOLE },
   { key: 'pipeline', label: 'Pipeline / CRM', node: PIPELINE },
   { key: 'code', label: 'Code surface', node: CODE },
 ];
@@ -187,19 +188,23 @@ function surfaceIndexFromHash(): number {
 export function GenUIShowcasePage() {
   const client = useMemo(() => stubClient(), []);
   const [active, setActive] = useState(surfaceIndexFromHash);
+  // `design = undefined` → let each surface's own theme pick its language; otherwise override.
+  const [design, setDesign] = useState<DesignLanguage | undefined>(undefined);
   useEffect(() => {
     const onHash = () => setActive(surfaceIndexFromHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
   const current = SURFACES[active] ?? SURFACES[0]!;
+  // Operator override: stamp the chosen design language onto the surface root.
+  const node: ViewNode = design ? { ...current.node, style: { ...current.node.style, design } } : current.node;
 
   return (
     <div className="min-h-screen bg-canvas px-6 py-6 text-text-primary">
       <div className="mx-auto max-w-6xl">
-        <div className="mb-4 flex items-center gap-3">
-          <span className="text-[13px] font-semibold">GenUI Renaissance — agent-authored surfaces</span>
-          <div className="ml-auto flex gap-1 rounded-btn border border-line bg-surface p-1">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <span className="text-[13px] font-semibold">GenUI — agent-authored surfaces</span>
+          <div className="flex gap-1 rounded-btn border border-line bg-surface p-1">
             {SURFACES.map((s, i) => (
               <button
                 key={s.key}
@@ -211,9 +216,29 @@ export function GenUIShowcasePage() {
               </button>
             ))}
           </div>
+          <div className="ml-auto flex items-center gap-1 rounded-btn border border-line bg-surface p-1" title="Design language">
+            <button
+              type="button"
+              onClick={() => setDesign(undefined)}
+              className={`rounded-[6px] px-2.5 py-1.5 text-[11px] font-medium ${design === undefined ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'}`}
+            >
+              Auto
+            </button>
+            {DESIGN_LANGUAGES.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                title={d.hint}
+                onClick={() => setDesign(d.id)}
+                className={`rounded-[6px] px-2.5 py-1.5 text-[11px] font-medium ${design === d.id ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'}`}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
         </div>
         <RuntimeProvider value={{ appId: 'showcase', surface: current.key, client, surfaceActions: [], uiState: {}, allowCustomCode: true, dataRevision: 0 }}>
-          <ViewRenderer node={current.node} editable={false} />
+          <ViewRenderer node={node} editable={false} />
         </RuntimeProvider>
       </div>
     </div>

@@ -27,6 +27,7 @@ import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from './chatSessionExecutor.js';
 import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from './chatPermissionMode.js';
+import { resolveChannelAccess, buildAccessAddendum, UNKNOWN_SENDER_DECLINE, type AccessDecision, type ChannelAccess } from './channelAccess.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
 import type { AppContactService } from './appContacts.js';
 import type { ConversationSummaryService } from './conversationSummaryService.js';
@@ -271,6 +272,29 @@ export class ChannelTurnDispatcher {
   }
 
   /**
+   * Resolve who this inbound sender is and how the agent should treat them, from
+   * the connection's `settings.access` (owner = the default recipient). No access
+   * configured → open (today's behavior). The single inbound choke point, so it
+   * governs resident chat AND workflow-triggered channels alike.
+   */
+  #resolveAccess(input: ChannelTurnInput): AccessDecision {
+    const row = this.deps.db
+      .select({ settings: schema.channelConnections.settings })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, input.connectionId))
+      .get();
+    const settings = row?.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+      ? (row.settings as { access?: ChannelAccess; defaultChatId?: string })
+      : {};
+    return resolveChannelAccess({
+      access: settings.access ?? null,
+      defaultChatId: settings.defaultChatId ?? null,
+      senderHandle: input.chatId,
+      senderName: input.from ?? null,
+    });
+  }
+
+  /**
    * Run one orchestrator turn and deliver the reply. If a confirmation from a
    * prior turn is pending for this chat and the message is a yes/no, resolve
    * that instead of starting a fresh turn. Never throws.
@@ -293,6 +317,21 @@ export class ChannelTurnDispatcher {
           ...(input.from ? { detail: `From ${input.from}` } : {}),
         });
         return { replied: false, reason: 'human_handling' };
+      }
+      // Channel access (CHANNEL-ACCESS-10x): only the owner (default recipient) and
+      // listed recipients are answered — unless "answer anyone" is on. A blocked
+      // sender is declined (one line) or silently ignored; an allowed non-owner
+      // carries the operator's free-text rules into the turn as guidance (below).
+      const access = this.#resolveAccess(input);
+      if (!access.allow) {
+        this.#publishWorkStep(input, clientTurnId, {
+          phase: 'received',
+          step: 'access',
+          description: 'Sender is not authorized for this channel',
+          ...(input.from ? { detail: `From ${input.from}` } : {}),
+        });
+        if (access.deny === 'decline') await this.#persistAndDeliver(input, UNKNOWN_SENDER_DECLINE);
+        return { replied: access.deny === 'decline', reason: 'not_authorized' };
       }
       // Multi-party threads (G1): the inbound turn is answered by the active
       // responder — an active 'specialist' agent (warm handoff target) if present,
@@ -372,7 +411,9 @@ export class ChannelTurnDispatcher {
         // App-scoped addendum: tell the resident agent which App it operates and to
         // persist what it learns where the App's surfaces read it (Living Apps §4.2).
         const appAddendum = input.appId ? this.#appOperatingAddendum(input.appId) : null;
-        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, conversationSummary, appAddendum]
+        // Non-owner senders carry the operator's per-recipient (or answer-anyone) rules.
+        const accessAddendum = buildAccessAddendum(access);
+        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, accessAddendum, conversationSummary, appAddendum]
           .filter((s): s is string => Boolean(s))
           .join('\n\n');
         stream = runTurn(adapter, this.#buildHistory(input, excludeMessageIds), runtimeText, ctx, {

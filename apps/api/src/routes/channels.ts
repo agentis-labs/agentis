@@ -63,9 +63,29 @@ const testSchema = z.object({
   body: z.string().min(1).max(2048).optional(),
 });
 
+const accessSchema = z
+  .object({
+    recipients: z
+      .array(
+        z.object({
+          handle: z.string().min(1).max(256),
+          name: z.string().max(120).optional(),
+          rules: z.string().max(4000).optional(),
+        }),
+      )
+      .max(200)
+      .optional(),
+    answerAnyone: z.boolean().optional(),
+    anyoneRules: z.string().max(4000).optional(),
+    unknownReply: z.enum(['ignore', 'decline']).optional(),
+  })
+  .nullable()
+  .optional();
+
 const targetSchema = z.object({
   defaultChatId: z.string().min(1).max(120).nullable().optional(),
   targetAliases: z.record(z.string().min(1).max(80), z.string().min(1).max(120).nullable()).optional(),
+  access: accessSchema,
 });
 
 export function buildChannelRoutes(deps: {

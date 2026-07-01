@@ -73,7 +73,8 @@ export async function probeCliRuntime(input: {
       version: detail,
     };
   } catch (error) {
-    const message = controller.signal.aborted
+    const timedOut = controller.signal.aborted;
+    const message = timedOut
       ? `${input.binary} probe timed out`
       : (error as Error).message;
     input.logger.debug?.(`${input.logTag}.probe_failed`, { err: message });
@@ -81,6 +82,10 @@ export async function probeCliRuntime(input: {
       health: {
         isHealthy: false,
         error: message,
+        // A timeout is ambiguous (binary spawned, just slow) — flag it so the
+        // caller can treat it as "unknown" rather than a definitive "down". A real
+        // spawn error (ENOENT etc.) is NOT flagged and stays a hard failure.
+        ...(timedOut ? { timedOut: true } : {}),
         latencyMs: Date.now() - startedAt,
         checkedAt: new Date().toISOString(),
       },

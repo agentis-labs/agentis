@@ -31,14 +31,14 @@ describe('classifyArchetype', () => {
 });
 
 describe('buildArchetypeSurface', () => {
-  it('pipeline → themed board + operator rail, declares insert', () => {
+  it('pipeline → themed board + activity rail, declares insert', () => {
     const built = buildArchetypeSurface([leads]);
     expect(built.archetype).toBe('pipeline');
     const json = JSON.stringify(built.view);
     expect(built.view).toMatchObject({ type: 'Stack', style: { theme: 'product' } });
     expect(json).toContain('"type":"DataBoard"');
     expect(json).toContain('"type":"Hero"');
-    expect(json).toContain('"type":"AgentConsole"');
+    expect(json).toContain('"type":"ActivityStream"');
     expect(built.actions).toEqual([{ name: 'create_leads', kind: 'data', target: 'leads.insert' }]);
   });
 
@@ -52,17 +52,17 @@ describe('buildArchetypeSurface', () => {
     expect(json).toContain('"type":"Tabs"');
   });
 
-  it('operations → console table + add tab', () => {
+  it('operations -> table + add tab', () => {
     const built = buildArchetypeSurface([notes]);
     expect(built.archetype).toBe('operations');
-    expect(built.view).toMatchObject({ type: 'Stack', style: { theme: 'console' } });
+    expect(built.view).toMatchObject({ type: 'Stack', style: { theme: 'operations' } });
     expect(JSON.stringify(built.view)).toContain('"type":"Table"');
   });
 
   it('empty → operator hero, no actions', () => {
     const built = buildArchetypeSurface([]);
     const json = JSON.stringify(built.view);
-    expect(json).toContain('"type":"AgentConsole"');
+    expect(json).toContain('"type":"ActivityStream"');
     expect(json).toContain('"type":"ActivityStream"');
     expect(built.actions).toEqual([]);
   });

@@ -131,6 +131,63 @@ export function extractCandidateStatements(taskOutput: unknown): ScoredStatement
 }
 
 /**
+ * Extract candidate statements from AUTHORITATIVE OPERATOR speech (a chat turn).
+ *
+ * The operator is the source of truth, speaks in first person, and is terse —
+ * so the strict agent-output gate (`extractCandidateStatements`) is WRONG here:
+ * it drops "I am the CTO" (first-person), "Use HTTPS always" (too short), and
+ * "My company is Acme" (no durable-knowledge cue word). Those are exactly the
+ * things the operator complains aren't remembered. This gate is deliberately
+ * permissive — it keeps first-person and short statements and assigns a passing
+ * base score — and only drops what is clearly NOT a memory: questions, pure
+ * task commands ("create a workflow"), sensitive secrets, and empties. The
+ * FormationJudge downstream is the real quality + reconciliation gate.
+ */
+export function extractOperatorCandidates(text: string): ScoredStatement[] {
+  const seen = new Set<string>();
+  const out: ScoredStatement[] = [];
+  for (const rawLine of String(text ?? '').split(/\r?\n|(?<=[.!?])\s+/)) {
+    const statement = stripMarkdownPrefix(rawLine).trim().replace(/\s+/g, ' ');
+    const len = [...statement].length;
+    const minLen = CJK_DENSE.test(statement) ? 4 : 8; // terse operator lines are valid
+    if (len < minLen || len > 500) continue;
+    if (isOperatorQuestion(statement)) continue;
+    if (isPureTaskCommand(statement)) continue;
+    if (looksSensitive(statement)) continue;
+    const key = tokenize(statement).slice(0, 18).join(' ');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    // Operator speech is authoritative — start above the formation threshold so
+    // it always reaches the judge; cue words still raise it.
+    let score = 0.6;
+    if (/\b(always|never|must|should|do not|don'?t|avoid|prefer|require|only|i am|i'?m|my|our|we use|we prefer)\b/i.test(statement)) score += 0.2;
+    out.push({ text: statement, score: clamp01(score) });
+  }
+  return out;
+}
+
+/** A question is operator intent to be answered, not a durable statement. */
+function isOperatorQuestion(text: string): boolean {
+  const t = text.trim();
+  if (/\?\s*$/.test(t)) return true;
+  if (/^(do not|don'?t)\b/i.test(t)) return false; // imperative rule, not a question
+  return /^(how|what|why|when|where|who|which|whose|whom|can|could|would|should|will|is|are|do|does|did)\b/i.test(t);
+}
+
+/**
+ * A one-off task command ("create a workflow that…", "send the report") is work
+ * to DO now, not a durable memory — UNLESS it carries standing modality
+ * ("always create a backup before deploy"), which is a recurring rule and kept.
+ */
+function isPureTaskCommand(text: string): boolean {
+  const t = text.trim().toLowerCase()
+    .replace(/^(please|kindly|can you|could you|now|go ahead and|i need you to|i want you to)\s+/i, '');
+  const TASK_VERB = /^(create|build|make|set ?up|add|generate|watch|monitor|schedule|draft|write|design|deploy|run|fetch|scrape|email|send|post|publish|find|search|look up|check|update|delete|remove|configure|connect|integrate|summari[sz]e|analy[sz]e|review|compile|export|import|download|upload)\b/;
+  if (!TASK_VERB.test(t)) return false;
+  return !/\b(always|never|every time|whenever|each time|by default|going forward|from now on|any time)\b/.test(t);
+}
+
+/**
  * The reject list — text that is structurally NOT a memory. This is the heart
  * of the P0 fix. Each predicate maps to a class of pollution seen in production.
  */

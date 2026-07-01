@@ -84,6 +84,16 @@ export interface ToolHandlerDeps {
    * nodes) so the team is real and visible the moment a workflow is built.
    */
   specialists?: SpecialistAgentService;
+  /**
+   * Resolve (and lazily connect) a runtime for an agent — the same mechanism the
+   * engine uses at dispatch. The build uses it to bind a freshly-cast specialist to
+   * the workspace's default model runtime at CREATION, so it is connected (not an
+   * offline `http` placeholder that shows "fails on first run"), and model routing
+   * has real model candidates to choose from. Returns undefined when model-assisted
+   * runtime is disabled — the specialist then stays offline (the lazy dispatch bind
+   * remains the fallback). Untyped here to avoid an engine-type import cycle.
+   */
+  resolveAgentRuntime?: (workspaceId: string, agentId: string, task?: string | null, explicitModel?: string | null) => unknown;
   specialistProfiles?: SpecialistProfileService;
   specialistRuntime?: SpecialistRuntimeService;
   specialistRouter?: SpecialistDemandRouter;

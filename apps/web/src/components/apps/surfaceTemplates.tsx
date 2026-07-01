@@ -12,7 +12,6 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  Bot,
   Code2,
   FileText,
   Gauge,
@@ -43,7 +42,7 @@ export type ElementKind =
   // layout
   | 'split' | 'tabs' | 'accordion' | 'grid' | 'card' | 'section' | 'row' | 'stack' | 'divider'
   // agent & interactive
-  | 'agent_console' | 'activity_stream' | 'button' | 'badge'
+  | 'activity_stream' | 'button' | 'badge'
   // advanced / embeds
   | 'code_surface' | 'document_viewer' | 'map' | 'web_embed' | 'media_gallery' | 'status_board'
   // legacy kinds kept only for labelling existing nodes (not shown in the palette)
@@ -121,9 +120,8 @@ export const SURFACE_GROUPS: Array<{ title: string; hint: string; items: Palette
   },
   {
     title: 'Agent & interactive',
-    hint: 'The operator and its work',
+    hint: 'Live work and actions',
     items: [
-      { kind: 'agent_console', label: 'Agent console', hint: 'Operator presence + command line', icon: <Bot size={15} /> },
       { kind: 'activity_stream', label: 'Activity', hint: 'Live feed of the agent’s work', icon: <Activity size={15} /> },
       { kind: 'button', label: 'Button', hint: 'Action trigger', icon: <Send size={15} /> },
       { kind: 'badge', label: 'Badge', hint: 'Status pill', icon: <Gauge size={15} /> },
@@ -324,9 +322,8 @@ export function buildBlock(kind: BlockKind, collections: CollectionInfo[]): Buil
       return { node: { type: 'Divider' } };
 
     // ── agent & interactive ──
-    case 'agent_console':
     case 'agent_card':
-      return { node: { type: 'AgentConsole' } };
+      return { node: { type: 'ActivityStream', title: 'Live activity', limit: 20 } };
     case 'activity_stream':
     case 'message_feed':
       return { node: { type: 'ActivityStream', title: 'Live activity', limit: 20 } };

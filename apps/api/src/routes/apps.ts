@@ -27,10 +27,14 @@ import {
   appManifestEnvelopeSchema,
   promoteAppEnvironmentSchema,
   upsertAppEnvironmentSchema,
+  appWorkflowBindingSchema,
+  updateAppWorkflowBindingSchema,
   type AppInstallPreview,
   type AppRecord,
+  type AppWorkflowBinding,
+  type AppWorkflowSummary,
 } from '@agentis/core';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowGraph, AgentTool } from '@agentis/core';
@@ -38,12 +42,13 @@ import type { AuthService } from '../services/auth.js';
 import type { EventBus } from '../event-bus.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentToolRuntime } from '../services/agentToolRuntime.js';
-import { runPublishedWorkflow } from '../engine/runPublishedWorkflow.js';
+import { runPublishedWorkflow, startPublishedWorkflow } from '../engine/runPublishedWorkflow.js';
 import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness } from '@agentis/app';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { scanArtifactBytes, type ScanFinding } from '../services/registryScanner.js';
 import { generateSurfaceView } from '../services/surfaceGenerator.js';
+import { aggregateRunAnalytics } from '../services/runAnalytics.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
 import type { AppStaffingService } from '../services/appStaffing.js';
 import type { ConversationStore } from '../services/conversationStore.js';
@@ -394,6 +399,90 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.get('/:id', (c) => {
     const ws = getWorkspace(c);
     return c.json({ data: store.get(ws.workspaceId, c.req.param('id')) });
+  });
+
+  // ── Workflow control plane (E0) — an App governs its workflows ──────────────
+  // The missing operator control: see every workflow the App owns, why it exists,
+  // its order, status + last run, and run it — without leaving the App.
+
+  app.get('/:id/workflows', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    const rows = deps.db.select({
+      id: schema.workflows.id,
+      title: schema.workflows.title,
+      description: schema.workflows.description,
+      graph: schema.workflows.graph,
+      settings: schema.workflows.settings,
+    }).from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.appId, appId)))
+      .all();
+    const summaries: AppWorkflowSummary[] = rows.map((row) => {
+      const binding = readAppWorkflowBinding(row.settings);
+      const lastRun = deps.db.select({
+        id: schema.workflowRuns.id,
+        status: schema.workflowRuns.status,
+        startedAt: schema.workflowRuns.startedAt,
+        createdAt: schema.workflowRuns.createdAt,
+      }).from(schema.workflowRuns)
+        .where(and(eq(schema.workflowRuns.workspaceId, ws.workspaceId), eq(schema.workflowRuns.workflowId, row.id)))
+        .orderBy(desc(schema.workflowRuns.createdAt)).limit(1).get();
+      return {
+        id: row.id,
+        title: row.title,
+        purpose: binding.purpose ?? (row.description?.trim() || null),
+        order: binding.order ?? 0,
+        enabled: binding.enabled ?? true,
+        dependsOn: binding.dependsOn ?? [],
+        triggerKind: triggerKindOf(row.graph as WorkflowGraph),
+        lastRun: lastRun ? { id: lastRun.id, status: lastRun.status, at: lastRun.startedAt ?? lastRun.createdAt } : null,
+      };
+    }).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
+    return c.json({ data: summaries });
+  });
+
+  app.post('/:id/workflows/:wid/run', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    const wid = c.req.param('wid');
+    const body = await c.req.json().catch(() => ({})) as { inputs?: unknown };
+    const row = deps.db.select({ id: schema.workflows.id, appId: schema.workflows.appId, graph: schema.workflows.graph })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.id, wid)))
+      .get();
+    if (!row || row.appId !== appId) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${wid} is not part of app ${appId}`);
+    if (!deps.engine) throw new AgentisError('INTERNAL_ERROR', 'workflow engine is not available in this runtime');
+    // Non-blocking start (reuses the engine run path); the UI polls run status.
+    const { runId } = await startPublishedWorkflow({
+      db: deps.db,
+      engine: deps.engine,
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId ?? null,
+      userId: user.id,
+      workflowId: wid,
+      graph: row.graph as WorkflowGraph,
+      inputs: body.inputs && typeof body.inputs === 'object' ? body.inputs as Record<string, unknown> : {},
+    });
+    return c.json({ data: { runId } }, 202);
+  });
+
+  app.patch('/:id/workflows/:wid/binding', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const wid = c.req.param('wid');
+    const patch = updateAppWorkflowBindingSchema.parse(await c.req.json().catch(() => ({})));
+    const row = deps.db.select({ appId: schema.workflows.appId, settings: schema.workflows.settings })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.id, wid)))
+      .get();
+    if (!row || row.appId !== appId) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${wid} is not part of app ${appId}`);
+    const next: AppWorkflowBinding = { ...readAppWorkflowBinding(row.settings), ...patch };
+    deps.db.update(schema.workflows)
+      .set({ settings: { ...(row.settings as Record<string, unknown>), appBinding: next }, updatedAt: new Date().toISOString() })
+      .where(eq(schema.workflows.id, wid)).run();
+    return c.json({ data: next });
   });
 
   // ── Packaging — `.agentisapp` export/import (§7.2) ──────────
@@ -907,11 +996,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   });
 
   // ── Workflow adoption ───────────────────────────────────────
-
-  app.get('/:id/workflows', (c) => {
-    const ws = getWorkspace(c);
-    return c.json({ data: store.listWorkflowIds(ws.workspaceId, c.req.param('id')) });
-  });
+  // Listing is handled by the richer `GET /:id/workflows` control-plane route
+  // above (returns AppWorkflowSummary[], not bare ids).
 
   app.post('/:id/workflows', async (c) => {
     const ws = getWorkspace(c);
@@ -919,6 +1005,26 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid adopt input');
     store.adoptWorkflow(ws.workspaceId, c.req.param('id'), parsed.data.workflowId);
     return c.json({ data: store.listWorkflowIds(ws.workspaceId, c.req.param('id')) });
+  });
+
+  // ── App analytics (§7.1) ────────────────────────────────────
+  // App-level rollup across every workflow the app owns (an app can own many;
+  // the per-workflow monitor shows one). Same metric shape + a per-workflow split.
+  app.get('/:id/analytics', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const appRow = store.get(ws.workspaceId, appId);
+    if (!appRow) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    const workflowIds = store.listWorkflowIds(ws.workspaceId, appId);
+    const workflows = workflowIds.length > 0
+      ? deps.db.select({ id: schema.workflows.id, title: schema.workflows.title, graph: schema.workflows.graph })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), inArray(schema.workflows.id, workflowIds)))
+          .all()
+          .map((row) => ({ id: row.id, title: row.title, graph: row.graph as WorkflowGraph }))
+      : [];
+    const analytics = aggregateRunAnalytics(deps.db, ws.workspaceId, workflows);
+    return c.json({ appId, ...analytics });
   });
 
   // ── App Datastore (§5) ──────────────────────────────────────
@@ -1146,6 +1252,12 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         .get();
       if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found: ${action.target}`);
       if (!deps.engine) throw new AgentisError('VALIDATION_FAILED', 'workflow actions are not enabled in this runtime');
+      // Responsive, non-blackbox invoke: give a fast/deterministic workflow a
+      // short budget to return its output inline, but never hang the App
+      // interface for the whole run. After the budget we return { runId, status,
+      // terminal:false } so the caller can subscribe to the run's realtime room
+      // (REALTIME_ROOMS.run) — and the bound surfaces keep updating live via
+      // DATA_CHANGED as the workflow writes rows in the background.
       const result = await runPublishedWorkflow({
         db: deps.db,
         engine: deps.engine,
@@ -1155,6 +1267,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         workflowId: wf.id,
         graph: wf.graph as WorkflowGraph,
         inputs: callArgs,
+        timeoutMs: 2_500,
       });
       return c.json({ data: result });
     }
@@ -1179,4 +1292,17 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   });
 
   return app;
+}
+
+/** Read an App→workflow binding off the workflow's `settings.appBinding` (safe defaults). */
+function readAppWorkflowBinding(settings: unknown): AppWorkflowBinding {
+  const raw = settings && typeof settings === 'object' ? (settings as Record<string, unknown>).appBinding : undefined;
+  const parsed = appWorkflowBindingSchema.safeParse(raw ?? {});
+  return parsed.success ? parsed.data : { dependsOn: [] };
+}
+
+/** The trigger kind of a workflow graph (manual | cron | webhook | …), or null. */
+function triggerKindOf(graph: WorkflowGraph | null | undefined): string | null {
+  const trigger = graph?.nodes?.find((node) => node.config?.kind === 'trigger');
+  return trigger && 'triggerType' in trigger.config ? String((trigger.config as { triggerType?: unknown }).triggerType ?? '') || null : null;
 }

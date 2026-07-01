@@ -20,7 +20,7 @@ export type ChatPanelThread = {
 const STORAGE_KEY = 'agentis.chatPanel.state';
 const WIDTH_STORAGE_KEY = 'agentis.chatPanel.dockedWidth';
 const DEFAULT_DOCKED_WIDTH = 480;
-const MIN_DOCKED_WIDTH = 360;
+const MIN_DOCKED_WIDTH = 320;
 const MAX_DOCKED_WIDTH = 720;
 
 function readStored(): ChatPanelState {

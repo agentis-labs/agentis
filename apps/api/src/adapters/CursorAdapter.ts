@@ -16,6 +16,7 @@ import type {
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt } from './markerToolProtocol.js';
+import { toolActivityLabel } from './runtimeProgress.js';
 import { linkAbortSignal } from './abort.js';
 import {
   chatHardCeilingMs,
@@ -515,7 +516,7 @@ export function cursorJsonEventToChatPart(event: CursorJsonEvent): CliChatPart {
   if (toolCall) {
     return {
       kind: 'activity',
-      delta: cursorToolActivity(event, toolCall.tool),
+      delta: cursorToolActivity(event, toolCall.tool, toolCall.input),
     };
   }
   if (isCompletionEvent(event)) {
@@ -555,6 +556,7 @@ function cursorStreamError(event: CursorJsonEvent): string | null {
 function cursorToolActivity(
   event: CursorJsonEvent,
   tool: string,
+  input?: unknown,
 ): Extract<ChatDelta, { type: 'activity' }> {
   const subtype = String(event.subtype ?? '').toLowerCase();
   const failed = /fail|error|cancel/.test(subtype);
@@ -565,7 +567,7 @@ function cursorToolActivity(
     id: `cursor-${id}`,
     phase: 'tool',
     status: failed ? 'error' : completed ? 'success' : 'running',
-    label: failed ? `Failed ${tool}` : completed ? `Used ${tool}` : `Using ${tool}`,
+    label: toolActivityLabel(failed ? 'Failed' : completed ? 'Used' : 'Using', tool, input),
     ...(completed
       ? { completedAt: new Date().toISOString() }
       : { startedAt: new Date().toISOString() }),

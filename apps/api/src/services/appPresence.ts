@@ -2,7 +2,7 @@
  * AppPresenceService — live co-presence over the existing realtime bus
  * (LIVING-APPS-10X §6 / G9). EPHEMERAL: presence lives only in memory + on the
  * realtime bus, never in the DB. It answers "who else is on this App / thread
- * right now?" so two operators can tell they overlap and the console feels live.
+ * right now?" so two operators can tell they overlap and the interface feels live.
  *
  * Model: each viewer heartbeats `join(appId, conversationId?)` while their console
  * is open. The service keeps one entry per (app, viewer) and re-broadcasts the

@@ -282,6 +282,11 @@ export class CodexAdapter implements AgentAdapter {
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
         if (!line) continue;
+        // The codex stream is JSONL. On Windows, child-process teardown can leak
+        // non-JSON OS noise into stdout (e.g. taskkill's "ÊXITO: o processo com PID
+        // … foi finalizado."). Such a line is not a malformed event — skip it
+        // silently; only a line that LOOKS like JSON but won't parse is worth a warn.
+        if (line[0] !== '{' && line[0] !== '[') continue;
         try {
           const event = JSON.parse(line) as CodexJsonEvent;
           stdoutError = extractCodexError(event) ?? stdoutError;

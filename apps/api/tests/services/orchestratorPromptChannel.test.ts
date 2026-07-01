@@ -40,6 +40,40 @@ describe('channel-shaped orchestrator prompt', () => {
     expect(prompt).not.toContain('RESPONSE STYLE');
   });
 
+  it('surfaces a resolved open App and its workflows so "this workflow" binds to a concrete id', () => {
+    const viewport = {
+      surface: 'app_detail' as const,
+      resourceKind: 'app' as const,
+      resourceId: 'app-9',
+      metadata: {
+        appId: 'app-9',
+        appName: 'AI News Email Digest',
+        workflows: [
+          { id: 'wf-rank', title: 'Rank and write AI digest' },
+          { id: 'wf-send', title: 'Send the digest email' },
+        ],
+      },
+    };
+    const prompt = buildOrchestratorSystemPrompt({ context: { ...baseContext, viewport }, viewport });
+    expect(prompt).toContain('VIEWPORT CONTEXT');
+    expect(prompt).toContain('openApp="AI News Email Digest"');
+    expect(prompt).toContain('Workflows in this App');
+    expect(prompt).toContain('"Rank and write AI digest" (id=wf-rank)');
+    expect(prompt).toContain('"Send the digest email" (id=wf-send)');
+  });
+
+  it('calls out a single-workflow App as unambiguously "this workflow"', () => {
+    const viewport = {
+      surface: 'app_detail' as const,
+      resourceKind: 'app' as const,
+      resourceId: 'app-1',
+      metadata: { appId: 'app-1', appName: 'Solo App', workflows: [{ id: 'wf-1', title: 'The only flow' }], workflowId: 'wf-1' },
+    };
+    const prompt = buildOrchestratorSystemPrompt({ context: { ...baseContext, viewport }, viewport });
+    expect(prompt).toContain('This App has one workflow');
+    expect(prompt).toContain('"The only flow" (id=wf-1)');
+  });
+
   it('response profile differs by surface family', () => {
     expect(responseProfileForChannel('telegram')).toContain('short and conversational');
     expect(responseProfileForChannel('slack')).toContain('threaded');

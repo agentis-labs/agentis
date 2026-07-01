@@ -136,7 +136,7 @@ Example: "children/0/title" is the title of the first child; "children/2" is the
 RULES:
 - Emit ONLY the ops needed to satisfy the instruction. Do not rebuild the whole tree. If you'd touch most of it, that's a render, not a patch — still, prefer the fewest surgical ops.
 - Preserve everything the instruction doesn't mention. Keep the stable frame.
-- Any inserted ViewNode must be valid AG-UI grammar (Stack/Row/Grid/Card/Hero/KPIStrip/Table/Chart/DataBoard/Funnel/Timeline/Form/Button/Text/Heading/Metric/Badge/Callout/AgentRegion/…). Bind Table/Chart/Board only to collections that EXIST (listed below) and to real fields — never invent data.
+- Any inserted ViewNode must be valid AG-UI grammar (Stack/Row/Grid/Card/Hero/KPIStrip/Table/Chart/DataBoard/Funnel/Timeline/Form/Button/Text/Heading/Metric/Badge/Callout/WorkflowControl/AgentRegion/…). Bind Table/Chart/Board only to collections that EXIST (listed below) and to real fields — never invent data. WorkflowControl(title?) needs no bind — it shows the App's own workflows with a run button.
 - To filter/sort a data panel, set its bind, e.g. { "op":"set", "path":"children/1/bind/query", "value":{ "amount": { "gt": 20000 } } } or set bind/sort / bind/limit.
 - To reorder, use remove + insert (or set the whole array). To restyle, set the node's "style" object (theme/tone/elevation/pad/accent enums only).
 - If the instruction is impossible against this tree, return { "ops": [] }.`;
@@ -166,12 +166,23 @@ Return ONE strict JSON object: { "view": <ViewNode>, "actions": <SurfaceAction[]
 
 CRAFT RULES (this is what separates a great surface from a dumb one):
 - NEVER emit one tall stack of identical cards. COMPOSE a layout: a Hero or Toolbar header; a Split
-  (main content + an operator rail) or a Grid; Tabs/Accordion for progressive disclosure instead of one
+  (main content + an activity rail) or a Grid; Tabs/Accordion for progressive disclosure instead of one
   giant scroll.
-- Choose a THEME on the ROOT node's style: { "style": { "theme": "console"|"analytics"|"product"|"editorial", "density": "comfortable"|"compact" } }.
-  console = dense ops command center; analytics = KPI dashboards; product = consumer-grade; editorial = content-forward.
+- Choose a THEME on the ROOT node's style: { "style": { "theme": "analytics"|"product"|"editorial", "density": "comfortable"|"compact" } }.
+  analytics = KPI dashboards; product = consumer-grade; editorial = content-forward.
+- Choose a DESIGN LANGUAGE on the ROOT node's style ("design") — it sets the whole LOOK (radii, elevation, gradients, type scale, palette). Pick the one that fits the app:
+  • "aurora"  — glass cards, ambient glow, gradient accents, big numbers. Best for analytics/exec dashboards (the "wow" look).
+  • "soft"    — rounded consumer cards, colorful tiles, friendly spacing. Best for product/CRM/pipeline apps.
+  • "editorial" — big type, generous whitespace, restrained color. Best for content/report/document apps.
+  • "console" — dense neon-on-black terminal, tight grid. Best for ops/SRE/monitoring.
+  • "operations" — the dense command center (the safe default).
+  Example: { "style": { "theme": "analytics", "design": "aurora" } }. When in doubt for a dashboard, use "aurora".
 - Visualize, don't narrate: use Chart (line/area/bar/pie/donut, multi-series via "series"), KPIStrip, Sparkline,
   ProgressBar, Timeline — not paragraphs of Text.
+- DASHBOARD-FIRST for an App overview: lead with the headline numbers (a KPIStrip), and — when the App owns
+  workflows — a WorkflowControl panel so the operator sees the App's pulse and can RUN its workflows; THEN the
+  supporting charts + a table. An App is an operational unit, not a form: the operator should grasp its state and
+  act on it without scrolling. Put data-entry Forms behind a Tab, never at the top.
 - Shape hierarchy with bounded style intent on any node: "style": { "elevation":"flat"|"raised"|"inset"|"outline",
   "pad":"none"|"sm"|"md"|"lg"|"xl", "tone":"neutral"|"accent"|"success"|"warning"|"danger"|"info",
   "accent":"blue"|"teal"|"purple"|"orange"|..., "size":"sm"|"md"|"lg"|"xl", "span":1-12 }. (No raw CSS — these enums only.)
@@ -180,14 +191,13 @@ NEVER (these produce broken UIs and are auto-stripped by the layout auditor — 
 - NEVER use Image nodes as a header, and never put text-baked generated images at the top. Lead with a Hero (it looks great with NO image — a gradient) + a KPIStrip or Chart.
 - NEVER nest Cards inside Cards inside Cards. ONE level of boxing. Group with Stack/Grid; use Card only for a genuine panel.
 - NEVER cram a Split — ratios stay balanced (1 to 2.5); the rail is ~320px, the main pane is the star.
-- NEVER build 4+ data panels for one sparse collection. If the app has little/empty data, build ONE table or board + the operator rail — not a wall of "No records" panels.
+- NEVER build 4+ data panels for one sparse collection. If the app has little/empty data, build ONE table or board + the activity rail — not a wall of "No records" panels.
 - NEVER bind a Table/Chart/Board/List/Inbox to a collection or field that isn't listed below. Don't invent data.
 
 AGENT-NATIVE composites (foreground the operator — usually in a side rail, not the whole page):
-- { "type":"AgentConsole" } — the operator's presence + a command line.
 - { "type":"ActivityStream", "limit"?:number } — live feed of the agent's work.
 - { "type":"DataBoard", "bind":{ "collection":string }, "groupBy":string, "titleField"?:string } — kanban over a status field.
-- { "type":"AgentRegion", "region":string, "title"?:string, "placeholder"?:string } — a STABLE, usually-empty slot that the agent PERFORMS into live (it composes a panel here unprompted when it notices something — e.g. "churn risk"). Place ONE near the top of the operator rail (region:"attention") on a resident/console surface so the console can compose itself. Leave it empty in the initial tree.
+- { "type":"AgentRegion", "region":string, "title"?:string, "placeholder"?:string } — a STABLE, usually-empty slot that the agent PERFORMS into live (it composes a panel here unprompted when it notices something — e.g. "churn risk"). Place ONE near the top of the activity rail (region:"attention") on a resident interface so the interface can compose itself. Leave it empty in the initial tree.
 
 KEY NODES:
 - Layout: Stack | Row | Grid(columns?) | Split(left,right,ratio?) | Tabs(tabs:[{label,children}]) | Accordion(sections:[{title,defaultOpen?,children}]) | Toolbar(title?,children) | Hero(title,subtitle?,eyebrow?,actions?)
@@ -196,6 +206,7 @@ KEY NODES:
 - Data-bound: Table(bind,columns:[{key,label?}],rowActions?) | List(bind,item) | Chart(bind,chartType,x,y,series?:[{y,label?,color?}],area?,stacked?,curve?) | Timeline(bind?,items?,titleField?,detailField?,atField?)
 - Domain (use these to fit the app): ChatThread(title?,source?,bind?,roleField?,contentField?,messages?,channel?,send?,placeholder?) and Inbox(source?,bind?,titleField?,channelField?,messagesBind?,matchField?,send?) — conversations. SET source:"conversations" to bind to the App's REAL live channel threads (the resident inbox — a 24/7 sales/support desk; no bind needed, it reads the App's connected channels); use the default source:"collection" with a bind only to show conversation rows stored in a datastore collection; MediaGen(title?,generate?,bind?,srcField?) — image/media generation; Funnel(stages?:[{label,value}] | bind+labelField+valueField) — marketing/sales conversion; Calendar(events?:[{date,label}] | bind+dateField+labelField) — scheduling; Gauge(label?,value,max?,tone?) — a single metric.
 - Interactive: Form(fields:[{key,label?,type,required?,options?}],submit:{action},submitLabel?) | Button(label,action:{action,args?},variant?)
+- App control: WorkflowControl(title?) — the App's OWN workflows (each with purpose, trigger, last run) and a RUN button per row. App-scoped, no bind. Drop ONE into an App overview so the operator can see why each workflow exists, the order they run, and start them without leaving the App. This is the App's control plane — prefer it over describing workflows in Text.
 - Escape hatch (LAST RESORT, only when the nodes above cannot express it): { "type":"CodeSurface", "code":<plain JS string>, "collections":[<names the code reads>] } — runs in a hardened, zero-egress sandbox with \`ui\` (component+chart kit: ui.card/row/grid/metric/badge/table/heading/text + ui.chart.bar/line/donut) and \`agentis\` (agentis.data.query, agentis.actions.invoke) and \`root\` (mount). Requires the app's custom-code policy. Prefer typed nodes.
 
 Bindable = a literal, or { "$row":"field" } (current row), or { "$state":"key" } (UI state).

@@ -29,6 +29,7 @@ import clsx from 'clsx';
 import * as Collapsible from '@radix-ui/react-collapsible';
 import type { ChatDelta, ChatTurnTrace } from '@agentis/core';
 import type { ToolCallData } from './toolCalls';
+import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 
 type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
 type ThoughtState = 'active' | 'done' | 'error';
@@ -273,6 +274,12 @@ function ToolDetailRow({ data }: { data: ToolCallData }) {
   const [detailOpen, setDetailOpen] = useState(data.status === 'error');
   const isError = data.status === 'error';
 
+  const artifactIds = useMemo(() => {
+    const ids = new Set<string>();
+    collectArtifactIds(data.result, ids);
+    return [...ids];
+  }, [data.result]);
+
   return (
     <Collapsible.Root open={detailOpen} onOpenChange={setDetailOpen} className="min-w-0">
       <Collapsible.Trigger asChild>
@@ -306,6 +313,12 @@ function ToolDetailRow({ data }: { data: ToolCallData }) {
             <JsonBlock label="Error" value={data.error ?? 'Unknown error'} tone="error" />
           ) : (
             data.result !== undefined && <JsonBlock label="Result" value={data.result} />
+          )}
+          {artifactIds.length > 0 && (
+            <div className="mt-2 last:mb-0">
+              <div className="mb-2 font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-text-muted">Generated Assets</div>
+              <ChatArtifactAttachments artifactIds={artifactIds} />
+            </div>
           )}
         </div>
       </Collapsible.Content>

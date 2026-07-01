@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { appIdentitySchema } from './app.js';
+import { appManifestSchema } from './manifest.js';
 import { upsertSurfaceSchema } from './view.js';
 import { collectionSchemaSchema } from './datastore.js';
 
@@ -251,3 +252,103 @@ export const packageExportEnvelopeSchema = z.object({
   exportedAt: z.string().datetime(),
 });
 export type PackageExportEnvelope = z.infer<typeof packageExportEnvelopeSchema>;
+
+// ── Workspace bundle (`.agentis`) ───────────────────────────────────────────
+//
+// A whole-workspace portable bundle: every agent, app, workflow, extension,
+// ability, integration, and knowledge seed in one envelope an operator can back
+// up, share, or sell. It is the workspace-scope superset of the single-app
+// `.agentisapp` package — composed from the SAME per-entity schemas, plus an
+// `apps[]` array of self-contained AppManifests (an operator can own many apps).
+//
+// The **profile** is the safety dimension that distinguishes the three uses, and
+// it is STRUCTURAL — what travels is decided here, never by a UI checkbox:
+//   - `backup`  → full fidelity (the manifest path is NOT used; see backup.ts).
+//   - `share`   → structure + optional sample rows; NEVER secret values; embeddings dropped.
+//   - `sell`    → like share + PII/secret scrub gate + signature/licence; NEVER secrets.
+export const exportProfileSchema = z.enum(['backup', 'share', 'sell']);
+export type ExportProfile = z.infer<typeof exportProfileSchema>;
+
+export const bundleAuthorSchema = z.object({
+  id: z.string().optional(),
+  displayName: z.string().optional(),
+});
+export type BundleAuthor = z.infer<typeof bundleAuthorSchema>;
+
+/** The portable contents of a whole workspace. Composes the per-entity schemas. */
+export const workspaceBundleManifestSchema = z.object({
+  /** Workspace-shared specialists/agents. */
+  agents: z.array(agentContentsSchema).default([]),
+  /** Workspace extensions (never `builtin` — those are host-shipped). */
+  extensions: z.array(extensionContentsSchema).default([]),
+  /** Bare workflows (no owning App). App workflows live inside `apps[].workflows`. */
+  workflows: z.array(workflowContentsSchema).default([]),
+  /** Connector/integration definitions (no credential values). */
+  integrations: z.array(integrationContentsSchema).default([]),
+  /** Compiled behavioural abilities; embeddings dropped for share/sell (recompiled on install). */
+  abilities: z.array(abilityPackageContentsSchema).default([]),
+  /** Self-contained Agentic Apps (identity + policy + surfaces + collections + their workflows). */
+  apps: z.array(appManifestSchema).default([]),
+  /** Knowledge documents that travel as seeds (embeddings dropped for share/sell). */
+  knowledgeSeeds: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        content: z.string().min(1),
+        tags: z.array(z.string()).default([]),
+        metadata: z.record(z.unknown()).default({}),
+      }),
+    )
+    .default([]),
+  /** Credential REQUIREMENTS the installer must fill in — never the secret values. */
+  credentialSlots: z.array(credentialSlotSchema).default([]),
+});
+export type WorkspaceBundleManifest = z.infer<typeof workspaceBundleManifestSchema>;
+
+/** The serialized `.agentis` envelope: manifest + profile + integrity + provenance. */
+export const workspaceBundleEnvelopeSchema = z.object({
+  format: z.literal('.agentis'),
+  formatVersion: z.literal(1).default(1),
+  agentisVersion: z.string().min(1).default('1.0.0'),
+  profile: exportProfileSchema,
+  name: z.string().min(1).max(160),
+  description: z.string().max(2000).nullable().optional(),
+  manifest: workspaceBundleManifestSchema,
+  /** sha256 over the canonical manifest — deserialize rejects on mismatch. */
+  checksum: z.string().regex(/^[a-f0-9]{64}$/i),
+  exportedAt: z.string().datetime(),
+  // Provenance / trust — populated for `sell`.
+  author: bundleAuthorSchema.nullable().optional(),
+  license: z.string().max(8000).nullable().optional(),
+  /** Base64 RSA-SHA256 signature over the canonical manifest (sell only; verified on import). */
+  signature: z.string().nullable().optional(),
+  /** SPKI PEM public key the signature verifies against — travels with the bundle (self-certifying). */
+  signerPublicKeyPem: z.string().nullable().optional(),
+});
+export type WorkspaceBundleEnvelope = z.infer<typeof workspaceBundleEnvelopeSchema>;
+
+/** Non-mutating install summary shown before a `.agentis` bundle enters a workspace. */
+export const workspaceBundlePreviewSchema = z.object({
+  format: z.literal('.agentis'),
+  formatVersion: z.literal(1),
+  profile: exportProfileSchema,
+  name: z.string(),
+  checksum: z.string(),
+  exportedAt: z.string(),
+  author: bundleAuthorSchema.nullable(),
+  license: z.string().nullable(),
+  counts: z.object({
+    agents: z.number().int().nonnegative(),
+    apps: z.number().int().nonnegative(),
+    workflows: z.number().int().nonnegative(),
+    extensions: z.number().int().nonnegative(),
+    abilities: z.number().int().nonnegative(),
+    integrations: z.number().int().nonnegative(),
+    knowledgeSeeds: z.number().int().nonnegative(),
+    credentialSlots: z.number().int().nonnegative(),
+  }),
+  requiredCredentials: z.array(z.object({ key: z.string(), service: z.string(), label: z.string() })).default([]),
+  permissions: z.array(z.string()).default([]),
+  warnings: z.array(z.string()).default([]),
+});
+export type WorkspaceBundlePreview = z.infer<typeof workspaceBundlePreviewSchema>;

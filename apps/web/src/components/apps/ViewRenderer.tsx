@@ -13,7 +13,7 @@
  * to production — there is no separate "preview" render path to drift from.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Activity, AlertTriangle, Bot, Check, ChevronDown, ChevronUp, Code2, Copy, Download, ExternalLink, FileText, Globe2, Image as ImageIcon, Loader2, MapPin, MessageSquare, Pin, Send, Sparkles, Trash2, Wrench, X } from 'lucide-react';
+import { Activity, AlertTriangle, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Copy, Download, ExternalLink, FileText, Globe2, Image as ImageIcon, Loader2, MapPin, MessageSquare, Pin, Play, Search, Send, Sparkles, Trash2, Workflow, Wrench, X } from 'lucide-react';
 import clsx from 'clsx';
 import {
   APP_CLIENT_MESSAGE_SOURCE,
@@ -22,16 +22,17 @@ import {
   type AppClientMessage,
   type AppClientResponse,
 } from '@agentis/app-client';
-import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPresenceViewer, DataBind, SurfaceAction, Tone, ViewNode } from '@agentis/core';
+import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPresenceViewer, AppWorkflowSummary, DataBind, SurfaceAction, Tone, ViewNode } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { tokens } from '../../lib/api';
-import { appsApi, type AppOperator, type AppConversation, type AppConversationMessage } from '../../lib/appsApi';
-import { pathsEqual } from './viewTree';
-import { ThemeProvider, accentColor, resolveTheme, useTheme } from './theme';
-import { containerClasses, textClasses, toneFillClass, toneSoftClass } from './styleIntent';
+import { appsApi, type AppConversation, type AppConversationMessage } from '../../lib/appsApi';
+import { pathsEqual, pathKey } from './viewTree';
+import { CHART_PALETTE, ThemeProvider, accentColor, resolveTheme, useTheme, type ResolvedTheme } from './theme';
+import { containerClasses, textClasses, toneFillClass, toneFromStatus, toneSoftClass } from './styleIntent';
 import { DataChart, Sparkline as SparkSvg, type ChartSeries } from './charts';
 import { CODE_SURFACE_KIT, CODE_SURFACE_TOKENS } from './codeSurfaceKit';
+import { registerBlock, getBlock, type BlockContext, type ResolveScope } from './blocks/registry';
 
 interface RuntimeCtx {
   appId: string;
@@ -75,11 +76,6 @@ export function SurfaceEditProvider({ value, children }: { value: SurfaceEditCon
   return <EditCtx.Provider value={value}>{children}</EditCtx.Provider>;
 }
 
-interface ResolveScope {
-  row?: Record<string, unknown>;
-  state: Record<string, unknown>;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -107,6 +103,49 @@ function resolveDeep(value: unknown, scope: ResolveScope): unknown {
   if (Array.isArray(value)) return value.map((item) => resolveDeep(item, scope));
   if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, resolveDeep(v, scope)]));
   return value;
+}
+
+/** The binding path of a bindable, for the unbound marker. */
+function bindablePath(value: unknown): string {
+  if (isRecord(value)) {
+    if ('$bind' in value) return String(value.$bind);
+    if ('$row' in value) return `row.${String(value.$row)}`;
+    if ('$state' in value) return `state.${String(value.$state)}`;
+  }
+  return '?';
+}
+
+function displayString(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+/**
+ * Resolve a value for DISPLAY. Returns the text PLUS the binding path when a
+ * binding that was supposed to resolve came back empty — so the renderer surfaces
+ * a visible "unbound" marker instead of silently rendering nothing (the silent
+ * data-binding failure that made broken apps look merely empty).
+ */
+function resolveDisplay(value: unknown, scope: ResolveScope): { text: string; unbound: string | null } {
+  if (isBindableObject(value)) {
+    const resolved = resolveBindable(value, scope);
+    if (resolved === undefined || resolved === null) return { text: '', unbound: bindablePath(value) };
+    return { text: displayString(resolved), unbound: null };
+  }
+  return { text: value == null ? '' : displayString(value), unbound: null };
+}
+
+/** A visible, non-breaking marker for a binding that did not resolve. */
+function UnboundMarker({ path }: { path: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded bg-danger/10 px-1.5 py-0.5 align-middle text-[11px] font-medium text-danger"
+      title={`Unbound data: "${path}" did not resolve. Check that the source node/field exists and ran.`}
+    >
+      ⚠ unbound: {path}
+    </span>
+  );
 }
 
 function resolveArgs(args: Record<string, unknown> | undefined, scope: ResolveScope): Record<string, unknown> {
@@ -201,18 +240,25 @@ export function ViewRenderer({
   const inherited = useTheme();
   const boxed = useContext(BoxedCtx);
   const isRoot = path.length === 0;
+  // At the root the surface is self-contained: use its own theme/design/density and
+  // let resolveTheme apply the theme's preset design when none is set (so e.g. a
+  // `product` theme leads with `soft`, not the context default). Don't fall back to
+  // the inherited (context-default) design here — that would override the theme.
   const effective = isRoot
-    ? resolveTheme(node.style?.theme ?? inherited.theme, node.style?.density ?? inherited.density)
+    ? resolveTheme(node.style?.theme, node.style?.design, node.style?.density)
     : inherited;
-  const density = effective.density;
-  const layoutGap = 'gap' in node && node.gap != null ? node.gap : density === 'compact' ? 8 : 12;
-  const childGap = density === 'compact' ? 8 : 12;
 
   let content = renderContent();
   if (isRoot) {
     content = (
       <ThemeProvider value={effective}>
-        <div className="mx-auto w-full" style={{ maxWidth: effective.contentWidth }}>{content}</div>
+        <div
+          className="@container mx-auto w-full"
+          data-design={effective.design.id}
+          style={{ maxWidth: effective.contentWidth, ...effective.design.vars }}
+        >
+          {content}
+        </div>
       </ThemeProvider>
     );
   }
@@ -224,158 +270,22 @@ export function ViewRenderer({
   );
 
   function renderContent(): React.ReactNode {
-    switch (node.type) {
-      case 'Stack':
-        return (
-          <div className={clsx('flex flex-col', containerClasses(node.style, density))} style={{ gap: layoutGap }}>
-            {node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}
-          </div>
-        );
-      case 'Row':
-        return (
-          <div className={clsx('flex flex-wrap', !node.style?.align && 'items-stretch', containerClasses(node.style, density))} style={{ gap: layoutGap }}>
-            {node.children.map((c, i) => (
-              <div key={i} className="min-w-[160px]" style={{ flex: `${node.widths?.[i] ?? 1} 1 0` }}>
-                <ViewRenderer node={c} scope={scope} path={[...path, i]} />
-              </div>
-            ))}
-          </div>
-        );
-      case 'Grid': {
-        const cols = node.columns;
-        return (
-          <div
-            className={clsx('grid', !cols && 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3', containerClasses(node.style, density))}
-            style={{ gap: layoutGap, ...(cols ? { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` } : {}) }}
-          >
-            {node.children.map((c, i) => {
-              const span = c.style?.span ? Math.min(c.style.span, cols ?? 12) : undefined;
-              return (
-                <div key={i} style={span ? { gridColumn: `span ${span}` } : undefined}>
-                  <ViewRenderer node={c} scope={scope} path={[...path, i]} />
-                </div>
-              );
-            })}
-          </div>
-        );
-      }
-      case 'Card': {
-        // Nested cards flatten — a box inside a box renders borderless (no triple frames).
-        const elevation = node.style?.elevation ?? (boxed ? 'flat' : 'raised');
-        const isBox = elevation !== 'flat';
-        return (
-          <div className={containerClasses({ ...node.style, elevation }, density, { defaultPad: isBox ? 'md' : 'none' })}>
-            {node.title ? <div className="mb-3 text-[13px] font-semibold text-text-primary">{node.title}</div> : null}
-            <BoxedCtx.Provider value={boxed || isBox}>
-              <div className="flex flex-col" style={{ gap: childGap }}>
-                {node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}
-              </div>
-            </BoxedCtx.Provider>
-          </div>
-        );
-      }
-      case 'Section': {
-        const sectionBoxed = (node.style?.elevation ?? 'flat') !== 'flat';
-        return (
-          <section className={containerClasses(node.style, density, { defaultElevation: 'flat', defaultPad: sectionBoxed ? 'md' : 'none' })}>
-            {node.title ? <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">{node.title}</div> : null}
-            <BoxedCtx.Provider value={boxed || sectionBoxed}>
-              <div className="flex flex-col" style={{ gap: childGap }}>
-                {node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}
-              </div>
-            </BoxedCtx.Provider>
-          </section>
-        );
-      }
-      case 'Heading':
-        return <h2 className={clsx('text-[15px] font-semibold text-text-primary', textClasses(node.style))}>{node.value}</h2>;
-      case 'Text':
-        return <p className={clsx('text-[13px] leading-relaxed text-text-secondary', textClasses(node.style))}>{node.value}</p>;
-      case 'Markdown':
-        return <p className={clsx('whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary', textClasses(node.style))}>{node.value}</p>;
-      case 'Divider':
-        return <hr className="border-line" />;
-      case 'Metric':
-        return <MetricView node={node} scope={resolvedScope} />;
-      case 'Badge':
-        return <span className={clsx('inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[11px]', toneSoftClass(node.tone ?? node.style?.tone))}>{String(resolveBindable(node.value, resolvedScope) ?? '')}</span>;
-      case 'Callout':
-        return <CalloutView node={node} />;
-      case 'Image':
-        return <img src={String(resolveBindable(node.src, resolvedScope) ?? '')} alt={node.alt ?? ''} className="max-h-72 w-full rounded-card border border-line bg-canvas object-contain" />;
-      case 'Avatar':
-        return <AvatarView node={node} scope={resolvedScope} />;
-      case 'ProgressBar':
-        return <ProgressBarView node={node} scope={resolvedScope} />;
-      case 'Sparkline':
-        return <SparklineView node={node} />;
-      case 'KPIStrip':
-        return <KpiStripView node={node} scope={resolvedScope} />;
-      case 'Hero':
-        return <HeroView node={node} scope={scope} />;
-      case 'Toolbar':
-        return <ToolbarView node={node} scope={scope} path={path} />;
-      case 'Tabs':
-        return <TabsView node={node} scope={scope} path={path} />;
-      case 'Accordion':
-        return <AccordionView node={node} scope={scope} path={path} />;
-      case 'Split':
-        return <SplitView node={node} scope={scope} path={path} />;
-      case 'Timeline':
-        return <TimelineView node={node} />;
-      case 'Button':
-        return <ActionButton label={node.label} action={node.action.action} args={node.action.args} scope={scope} variant={node.variant} />;
-      case 'Table':
-        return <BoundTable node={node} />;
-      case 'List':
-        return <BoundList node={node} />;
-      case 'Chart':
-        return <BoundChart node={node} />;
-      case 'Form':
-        return <ActionForm node={node} />;
-      case 'AgentConsole':
-        return <AgentConsoleView node={node} />;
-      case 'ActivityStream':
-        return <ActivityStreamView node={node} />;
-      case 'DataBoard':
-        return <BoundBoard node={node} />;
-      case 'DocumentViewer':
-        return <DocumentViewerBlock node={node} />;
-      case 'MapView':
-        return <MapViewBlock node={node} scope={resolvedScope} />;
-      case 'StatusBoard':
-        return <StatusBoardBlock node={node} scope={resolvedScope} />;
-      case 'WebEmbed':
-        return <WebEmbedBlock node={node} />;
-      case 'Narrative':
-        return <NarrativeBlock node={node} />;
-      case 'ConversationThread':
-        return <ConversationThreadBlock node={node} />;
-      case 'CodeViewer':
-        return <CodeViewerBlock node={node} />;
-      case 'MediaGallery':
-        return <MediaGalleryBlock node={node} scope={resolvedScope} />;
-      case 'ChatThread':
-        return <ChatThreadView node={node} />;
-      case 'Inbox':
-        return <InboxView node={node} />;
-      case 'MediaGen':
-        return <MediaGenView node={node} scope={resolvedScope} />;
-      case 'Funnel':
-        return <FunnelView node={node} />;
-      case 'Calendar':
-        return <CalendarView node={node} />;
-      case 'Gauge':
-        return <GaugeView node={node} scope={resolvedScope} />;
-      case 'AgentRegion':
-        return <AgentRegionView node={node} scope={scope} path={path} />;
-      case 'CustomView':
-        return <CustomViewFrame node={node} />;
-      case 'CodeSurface':
-        return <CodeSurfaceFrame node={node} />;
-      default:
-        return null;
-    }
+    // Dispatch through the open block registry (see ./blocks/registry). Built-in
+    // blocks register at module load; an unregistered kind renders a visible
+    // UnknownBlock instead of silently returning null. Children recurse through
+    // ctx.renderChild so blocks never import the renderer.
+    const ctx: BlockContext = {
+      scope,
+      resolvedScope,
+      path,
+      theme: effective,
+      boxed,
+      renderChild: (child, childPath, childScope) => (
+        <ViewRenderer key={pathKey(childPath)} node={child} scope={childScope} path={childPath} />
+      ),
+    };
+    const renderer = getBlock(node.type);
+    return renderer ? renderer(node, ctx) : <UnknownBlock node={node} />;
   }
 }
 
@@ -487,7 +397,7 @@ function InlineTextEditor({
 
 function PanelShell({ title, icon, children, action }: { title?: string; icon: ReactNode; children: ReactNode; action?: ReactNode }) {
   return (
-    <div className="overflow-hidden rounded-card border border-line bg-surface shadow-card">
+    <div className="s-panel overflow-hidden">
       {(title || action) ? (
         <div className="flex items-center gap-2 border-b border-line px-3 py-2">
           <span className="text-accent">{icon}</span>
@@ -527,7 +437,7 @@ function MapViewBlock({ node, scope }: { node: Extract<ViewNode, { type: 'MapVie
         <div className="absolute inset-0 opacity-70 [background-image:linear-gradient(var(--color-line)_1px,transparent_1px),linear-gradient(90deg,var(--color-line)_1px,transparent_1px)] [background-size:28px_28px]" />
         <div className="relative flex min-h-52 flex-col justify-between p-3">
           <div className="text-[12px] font-medium text-text-primary">{node.region ?? 'Global'}</div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-2 @md:grid-cols-2">
             {pins.length === 0 ? (
               <div className="rounded-btn border border-line bg-surface/90 px-3 py-2 text-[12px] text-text-muted">No pins configured</div>
             ) : pins.map((pin, index) => (
@@ -639,7 +549,7 @@ function CodeViewerBlock({ node }: { node: Extract<ViewNode, { type: 'CodeViewer
 function MediaGalleryBlock({ node, scope }: { node: Extract<ViewNode, { type: 'MediaGallery' }>; scope: ResolveScope }) {
   return (
     <PanelShell title={node.title ?? 'Media'} icon={<ImageIcon size={14} />}>
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+      <div className="grid grid-cols-2 gap-2 @2xl:grid-cols-3">
         {node.items.length === 0 ? (
           <div className="col-span-full rounded-btn border border-line bg-canvas px-3 py-6 text-center text-[12px] text-text-muted">No media yet</div>
         ) : node.items.map((item, index) => {
@@ -843,7 +753,7 @@ function ActionButton({
   const invoke = useActionInvoker();
   const editing = useContext(EditCtx);
   const [busy, setBusy] = useState(false);
-  const cls = variant === 'danger' ? 'bg-danger text-white' : variant === 'secondary' ? 'border border-line bg-surface text-text-primary' : 'bg-accent text-white';
+  const cls = variant === 'danger' ? 'bg-danger text-white' : variant === 'secondary' ? 'border border-line bg-surface text-text-primary' : 'bg-accent text-on-accent';
   return (
     <button
       type="button"
@@ -864,28 +774,112 @@ function ActionButton({
   );
 }
 
+/** Column keys whose values read as a status — auto-rendered as a toned pill. */
+function isStatusKey(key: string): boolean {
+  return /^(status|stage|state|priority|severity|tier|phase)$/i.test(key);
+}
+/** First textual column → gets an avatar + emphasis (the row's identity). */
+function isNameKey(key: string): boolean {
+  return /^(name|title|account|company|customer|user|client|agent|owner|label)$/i.test(key);
+}
+
+/** Sort comparator that understands numbers (even numeric strings) and falls back to locale text. */
+function compareCells(a: unknown, b: unknown): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1;
+  if (b == null) return 1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  const na = Number(a), nb = Number(b);
+  if (!Number.isNaN(na) && !Number.isNaN(nb) && String(a).trim() !== '' && String(b).trim() !== '') return na - nb;
+  return String(a).localeCompare(String(b));
+}
+
+const TABLE_PAGE_SIZE = 10;
+
 function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   const { rows, loading } = useBoundRows(node.bind);
+  // Client-side over the bound rows: click a header to sort (asc → desc → off),
+  // a filter box, and pagination — all kick in only for sizeable tables.
+  const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const sorted = useMemo(() => {
+    if (!sort) return rows;
+    const sign = sort.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => sign * compareCells(a[sort.key], b[sort.key]));
+  }, [rows, sort]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter((row) => node.columns.some((c) => String(row[c.key] ?? '').toLowerCase().includes(q)));
+  }, [sorted, query, node.columns]);
+  const toggleSort = (key: string) => setSort((s) => (s?.key === key ? (s.dir === 'asc' ? { key, dir: 'desc' } : null) : { key, dir: 'asc' }));
   if (loading) return <SkeletonRows />;
+  const identityCol = node.columns.find((c) => isNameKey(c.key))?.key ?? node.columns[0]?.key;
+  const filterable = rows.length > 8;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / TABLE_PAGE_SIZE));
+  const current = Math.min(page, pageCount - 1);
+  const paginate = filtered.length > TABLE_PAGE_SIZE;
+  const visible = paginate ? filtered.slice(current * TABLE_PAGE_SIZE, current * TABLE_PAGE_SIZE + TABLE_PAGE_SIZE) : filtered;
+  const colCount = node.columns.length + (node.rowActions?.length ? 1 : 0);
   return (
-    <div className="overflow-hidden rounded-card border border-line">
+    <div className="s-panel overflow-hidden">
+      {filterable ? (
+        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+          <Search size={13} className="shrink-0 text-text-muted" />
+          <input
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setPage(0); }}
+            placeholder="Filter…"
+            className="w-full bg-transparent text-[12px] text-text-primary placeholder:text-text-muted focus:outline-none"
+            aria-label="Filter rows"
+          />
+          {query ? <span className="shrink-0 text-[11px] text-text-muted">{filtered.length} of {rows.length}</span> : null}
+        </div>
+      ) : null}
       <table className="w-full text-left text-[12px]">
-        <thead className="bg-canvas text-text-muted">
+        <thead className="bg-canvas/60 text-text-muted">
           <tr>
-            {node.columns.map((col) => <th key={col.key} className="px-3 py-2 font-medium">{col.label ?? col.key}</th>)}
-            {node.rowActions?.length ? <th className="px-3 py-2" /> : null}
+            {node.columns.map((col) => (
+              <th key={col.key} className="px-3.5 py-2.5 text-[10px] font-semibold uppercase tracking-wide">
+                <button type="button" onClick={() => toggleSort(col.key)} className="inline-flex items-center gap-1 uppercase tracking-wide transition-colors hover:text-text-secondary" aria-label={`Sort by ${col.label ?? col.key}`}>
+                  {col.label ?? col.key}
+                  {sort?.key === col.key ? (sort.dir === 'asc' ? <ChevronUp size={11} /> : <ChevronDown size={11} />) : null}
+                </button>
+              </th>
+            ))}
+            {node.rowActions?.length ? <th className="px-3 py-2.5" /> : null}
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? (
-            <tr><td colSpan={node.columns.length + 1} className="px-3 py-3 text-center text-[12px] text-text-muted">No records yet</td></tr>
-          ) : rows.map((row, i) => (
-            <tr key={(row.id as string) ?? i} className="border-t border-line">
-              {node.columns.map((col) => <td key={col.key} className="px-3 py-2 text-text-secondary">{formatCell(row[col.key], col.format)}</td>)}
+          {visible.length === 0 ? (
+            <tr><td colSpan={colCount}><EmptyState label={query ? 'No matches' : 'No records yet'} hint={query ? 'Try a different filter.' : 'Rows the agent or a form adds will appear here.'} /></td></tr>
+          ) : visible.map((row, i) => (
+            <tr key={(row.id as string) ?? i} className="border-t border-line transition-colors odd:bg-surface/30 hover:bg-surface-2/60">
+              {node.columns.map((col) => {
+                const isId = col.key === identityCol;
+                const asStatus = col.format === 'badge' || (!col.format && isStatusKey(col.key));
+                const raw = row[col.key];
+                return (
+                  <td key={col.key} className={clsx('px-3.5 py-2.5', isId ? 'text-text-primary' : 'text-text-secondary')}>
+                    {asStatus && raw != null && raw !== '' ? (
+                      <span className={clsx('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium', toneSoftClass(toneFromStatus(String(raw))))}>
+                        <span className={clsx('h-1.5 w-1.5 rounded-full', toneFillClass(toneFromStatus(String(raw))))} />
+                        {String(raw)}
+                      </span>
+                    ) : isId ? (
+                      <span className="inline-flex items-center gap-2 font-medium">
+                        <AvatarChip name={String(raw ?? '')} />
+                        <span className="truncate">{formatCell(raw, col.format)}</span>
+                      </span>
+                    ) : formatCell(raw, col.format)}
+                  </td>
+                );
+              })}
               {node.rowActions?.length ? (
-                <td className="px-3 py-2">
-                  <div className="flex gap-1">
-                    {node.rowActions.map((a, j) => <ActionButton key={j} label={a.action} action={a.action} args={a.args} scope={row} variant="secondary" />)}
+                <td className="px-3 py-2.5">
+                  <div className="flex justify-end gap-1">
+                    {node.rowActions.map((a, j) => <ActionButton key={j} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={row} variant="secondary" />)}
                   </div>
                 </td>
               ) : null}
@@ -893,6 +887,33 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
           ))}
         </tbody>
       </table>
+      {paginate ? (
+        <div className="flex items-center justify-between border-t border-line px-3 py-2 text-[11px] text-text-muted">
+          <span className="tabular-nums">{current * TABLE_PAGE_SIZE + 1}–{Math.min((current + 1) * TABLE_PAGE_SIZE, filtered.length)} of {filtered.length}</span>
+          <div className="flex items-center gap-1">
+            <button type="button" disabled={current === 0} onClick={() => setPage(current - 1)} className="inline-flex h-6 w-6 items-center justify-center rounded-btn border border-line text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-40" aria-label="Previous page"><ChevronLeft size={13} /></button>
+            <span className="px-1 tabular-nums">{current + 1} / {pageCount}</span>
+            <button type="button" disabled={current >= pageCount - 1} onClick={() => setPage(current + 1)} className="inline-flex h-6 w-6 items-center justify-center rounded-btn border border-line text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-40" aria-label="Next page"><ChevronRight size={13} /></button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A tiny initials chip for the identity column (no image source needed). */
+function AvatarChip({ name }: { name: string }) {
+  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p.charAt(0).toUpperCase()).join('') || '·';
+  return <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[9px] font-semibold text-accent">{initials}</span>;
+}
+
+/** A designed empty state — intentional, not an error. Used by tables/boards/lists. */
+function EmptyState({ label, hint }: { label: string; hint?: string }) {
+  return (
+    <div className="flex flex-col items-center gap-1.5 px-4 py-8 text-center">
+      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-text-muted"><Sparkles size={16} /></span>
+      <div className="text-[12px] font-medium text-text-secondary">{label}</div>
+      {hint ? <div className="max-w-xs text-[11px] text-text-muted">{hint}</div> : null}
     </div>
   );
 }
@@ -908,6 +929,7 @@ function BoundList({ node }: { node: Extract<ViewNode, { type: 'List' }> }) {
 }
 
 function BoundChart({ node }: { node: Extract<ViewNode, { type: 'Chart' }> }) {
+  const { design } = useTheme();
   const { rows, loading } = useBoundRows(node.bind);
   if (loading) return <SkeletonRows />;
   const series: ChartSeries[] = node.series && node.series.length > 0 ? node.series : [{ y: node.y }];
@@ -922,9 +944,13 @@ function BoundChart({ node }: { node: Extract<ViewNode, { type: 'Chart' }> }) {
       height={node.height}
       legend={node.legend}
       curve={node.curve}
+      gradientFill={design.policy.gradientCharts}
     />
   );
 }
+
+/** Shared field styling — consistent height, hover + accent focus ring, tokenized. */
+const FORM_INPUT = 'w-full rounded-btn border border-line bg-canvas px-2.5 py-2 text-[12px] text-text-primary placeholder:text-text-muted transition-colors hover:border-line-strong focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-soft';
 
 function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
   const resolvedScope = useResolvedScope();
@@ -948,137 +974,37 @@ function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
         }
       }}
     >
-      {node.fields.map((f) => (
-        <label key={f.key} className="flex flex-col gap-1 text-[12px] text-text-secondary">
-          <span>{f.label ?? f.key}{f.required ? ' *' : ''}</span>
-          {f.type === 'textarea' ? (
-            <textarea required={f.required} placeholder={f.placeholder} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} className="rounded-btn border border-line bg-canvas px-2 py-1.5 text-text-primary" />
-          ) : f.type === 'select' ? (
-            <select required={f.required} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} className="rounded-btn border border-line bg-canvas px-2 py-1.5 text-text-primary">
-              <option value="">Select...</option>
-              {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          ) : f.type === 'checkbox' ? (
-            <input type="checkbox" checked={Boolean(values[f.key])} onChange={(e) => set(f.key, e.target.checked)} />
-          ) : (
-            <input type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'} required={f.required} placeholder={f.placeholder} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, f.type === 'number' ? Number(e.target.value) : e.target.value)} className="rounded-btn border border-line bg-canvas px-2 py-1.5 text-text-primary" />
-          )}
-        </label>
-      ))}
-      <button type="submit" disabled={busy} className="inline-flex w-fit rounded-btn bg-accent px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-50">{busy ? '...' : node.submitLabel ?? 'Submit'}</button>
+      {node.fields.map((f) => {
+        if (f.type === 'checkbox') {
+          return (
+            <label key={f.key} className="inline-flex items-center gap-2 text-[12px] text-text-secondary">
+              <input type="checkbox" checked={Boolean(values[f.key])} onChange={(e) => set(f.key, e.target.checked)} className="h-4 w-4 rounded border border-line bg-canvas accent-accent" />
+              <span>{f.label ?? f.key}{f.required ? ' *' : ''}</span>
+            </label>
+          );
+        }
+        return (
+          <label key={f.key} className="flex flex-col gap-1.5 text-[12px] text-text-secondary">
+            <span className="font-medium">{f.label ?? f.key}{f.required ? <span className="text-accent"> *</span> : null}</span>
+            {f.type === 'textarea' ? (
+              <textarea required={f.required} placeholder={f.placeholder} rows={3} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} className={FORM_INPUT} />
+            ) : f.type === 'select' ? (
+              <select required={f.required} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} className={FORM_INPUT}>
+                <option value="">Select…</option>
+                {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            ) : (
+              <input type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'} required={f.required} placeholder={f.placeholder} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, f.type === 'number' ? Number(e.target.value) : e.target.value)} className={FORM_INPUT} />
+            )}
+          </label>
+        );
+      })}
+      <button type="submit" disabled={busy} className="mt-1 inline-flex w-fit items-center gap-1.5 rounded-btn bg-accent px-3.5 py-2 text-[12px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-50">{busy ? <Loader2 size={13} className="animate-spin" /> : null}{busy ? 'Saving…' : node.submitLabel ?? 'Submit'}</button>
     </form>
   );
 }
 
 // ── Agent-native composites — the agentic core of a surface ──────────────────
-
-/** The operator agent: presence, live status, and a command line to direct it. */
-function AgentConsoleView({ node }: { node: Extract<ViewNode, { type: 'AgentConsole' }> }) {
-  const { appId } = useRuntime();
-  const editing = useContext(EditCtx);
-  const [operator, setOperator] = useState<AppOperator | null>(null);
-  const [liveStatus, setLiveStatus] = useState<string | null>(null);
-  const [command, setCommand] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    appsApi.operator(appId)
-      .then((op) => { if (!cancelled) setOperator(op); })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setLoaded(true); });
-    return () => { cancelled = true; };
-  }, [appId]);
-
-  const onStatus = useCallback((env: RealtimeEnvelope) => {
-    const p = env.payload;
-    if (isRecord(p) && operator && p.agentId === operator.agentId && typeof p.status === 'string') setLiveStatus(p.status);
-  }, [operator]);
-  useRealtime(useMemo(() => [REALTIME_EVENTS.AGENT_STATUS_CHANGED], []), onStatus);
-
-  const status = operator ? (liveStatus ?? operator.status ?? 'offline') : 'unassigned';
-  const canCommand = Boolean(operator?.canCommand) && !editing;
-  const name = operator?.name ?? 'Operator';
-
-  async function submit(event: { preventDefault: () => void }) {
-    event.preventDefault();
-    const text = command.trim();
-    if (!text || busy || !canCommand) return;
-    setBusy(true);
-    setNote(null);
-    try {
-      await appsApi.runOperatorCommand(appId, text);
-      setCommand('');
-      setNote('Sent to the operator — watch the activity below.');
-    } catch (err) {
-      setNote(err instanceof Error ? err.message : 'Could not reach the operator');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="rounded-card border border-line bg-surface p-4 shadow-card">
-      <div className="flex items-center gap-3">
-        <span
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[15px] font-semibold text-white"
-          style={{ background: operator?.colorHex ?? '#6366f1' }}
-        >
-          {operator?.name ? operator.name.charAt(0).toUpperCase() : <Bot size={18} />}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-[14px] font-semibold text-text-primary">{name}</span>
-            {loaded ? <StatusPill status={status} /> : null}
-          </div>
-          <div className="text-[11px] text-text-muted">{node.title ?? (operator ? 'Operator — the agent running this app' : 'No operator assigned')}</div>
-        </div>
-      </div>
-      <form onSubmit={(event) => void submit(event)} className="mt-3 flex items-center gap-2">
-        <input
-          value={command}
-          onChange={(event) => setCommand(event.target.value)}
-          onClick={(event) => event.stopPropagation()}
-          placeholder={operator ? (node.prompt ?? 'Tell the operator what to do…') : 'Assign an operator to send commands'}
-          aria-label="Direct the operator"
-          disabled={!canCommand}
-          className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60"
-        />
-        <button
-          type="submit"
-          disabled={!canCommand || !command.trim() || busy}
-          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-white disabled:opacity-50"
-        >
-          {busy ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} Send
-        </button>
-      </form>
-      {loaded && !operator ? (
-        <p className="mt-2 text-[11px] text-text-muted">Assign an agent in the App engine and it’ll operate this app — and respond to commands here.</p>
-      ) : operator && !operator.canCommand ? (
-        <p className="mt-2 text-[11px] text-text-muted">Add a workflow so the operator can act on commands.</p>
-      ) : note ? (
-        <p className="mt-2 text-[11px] text-text-secondary">{note}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function StatusPill({ status }: { status: string }) {
-  const tone = status === 'online' ? 'bg-accent-soft text-accent'
-    : status === 'busy' ? 'bg-warn-soft text-warn'
-    : status === 'error' ? 'bg-danger-soft text-danger'
-    : status === 'unassigned' ? 'bg-surface-2 text-text-muted'
-    : 'bg-canvas text-text-muted';
-  const label = status === 'online' ? 'Ready' : status === 'busy' ? 'Working' : status === 'error' ? 'Error' : status === 'unassigned' ? 'Unassigned' : 'Offline';
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${tone}`}>
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
-      {label}
-    </span>
-  );
-}
 
 interface ActivityItem { id: string; icon: ReactNode; label: string; tone: 'default' | 'accent' | 'success' | 'danger' | 'warning'; at: string; }
 
@@ -1102,7 +1028,7 @@ function mapActivity(env: RealtimeEnvelope): Omit<ActivityItem, 'id' | 'at'> | n
   const p = env.payload;
   switch (env.event) {
     case REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL:
-      return { icon: <Wrench size={13} />, tone: 'default', label: `Tool · ${field(p, 'tool') ?? field(p, 'name') ?? 'call'}` };
+      return { icon: <Wrench size={13} />, tone: 'default', label: `Tool - ${field(p, 'tool') ?? field(p, 'name') ?? 'call'}` };
     case REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE: {
       const message = field(p, 'message') ?? field(p, 'token');
       return message ? { icon: <Bot size={13} />, tone: 'default', label: message } : null;
@@ -1114,13 +1040,13 @@ function mapActivity(env: RealtimeEnvelope): Omit<ActivityItem, 'id' | 'at'> | n
     case REALTIME_EVENTS.RUN_COMPLETED:
       return { icon: <Check size={13} />, tone: 'success', label: 'Run completed' };
     case REALTIME_EVENTS.RUN_FAILED:
-      return { icon: <AlertTriangle size={13} />, tone: 'danger', label: `Run failed${field(p, 'error') ? ` · ${field(p, 'error')}` : ''}` };
+      return { icon: <AlertTriangle size={13} />, tone: 'danger', label: `Run failed${field(p, 'error') ? ` - ${field(p, 'error')}` : ''}` };
     case REALTIME_EVENTS.NODE_STARTED:
-      return { icon: <Activity size={13} />, tone: 'default', label: `Step · ${field(p, 'nodeTitle') ?? field(p, 'title') ?? field(p, 'nodeId') ?? ''}` };
+      return { icon: <Activity size={13} />, tone: 'default', label: `Step - ${field(p, 'nodeTitle') ?? field(p, 'title') ?? field(p, 'nodeId') ?? ''}` };
     case REALTIME_EVENTS.NODE_COMPLETED:
-      return { icon: <Check size={13} />, tone: 'success', label: `Done · ${field(p, 'nodeTitle') ?? field(p, 'title') ?? ''}` };
+      return { icon: <Check size={13} />, tone: 'success', label: `Done - ${field(p, 'nodeTitle') ?? field(p, 'title') ?? ''}` };
     case REALTIME_EVENTS.APPROVAL_REQUESTED:
-      return { icon: <AlertTriangle size={13} />, tone: 'warning', label: `Awaiting approval · ${field(p, 'summary') ?? field(p, 'title') ?? ''}` };
+      return { icon: <AlertTriangle size={13} />, tone: 'warning', label: `Awaiting approval - ${field(p, 'summary') ?? field(p, 'title') ?? ''}` };
     default:
       return null;
   }
@@ -1148,11 +1074,10 @@ function activityTime(at: string): string {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-/** A live feed of the operator's work, streamed over realtime. */
 function ActivityStreamView({ node }: { node: Extract<ViewNode, { type: 'ActivityStream' }> }) {
   const items = useActivityFeed(node.limit ?? 12);
   return (
-    <div className="rounded-card border border-line bg-surface">
+    <div className="s-panel overflow-hidden">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
         <Activity size={14} className="text-accent" />
         <span className="text-[12px] font-semibold text-text-primary">{node.title ?? 'Live activity'}</span>
@@ -1161,7 +1086,7 @@ function ActivityStreamView({ node }: { node: Extract<ViewNode, { type: 'Activit
         </span>
       </div>
       {items.length === 0 ? (
-        <div className="px-3 py-6 text-center text-[12px] text-text-muted">Waiting for the operator to act…</div>
+        <div className="px-3 py-6 text-center text-[12px] text-text-muted">Waiting for activity...</div>
       ) : (
         <ul className="max-h-72 divide-y divide-line overflow-auto">
           {items.map((item) => (
@@ -1194,18 +1119,22 @@ function BoundBoard({ node }: { node: Extract<ViewNode, { type: 'DataBoard' }> }
     <div className="flex gap-3 overflow-x-auto pb-1">
       {order.map((key) => {
         const groupRows = byGroup.get(key) ?? [];
+        const tone = toneFromStatus(key);
         return (
-          <div key={key} className="w-56 shrink-0 rounded-card border border-line bg-canvas/40">
-            <div className="flex items-center justify-between border-b border-line px-3 py-2">
-              <span className="truncate text-[12px] font-semibold capitalize text-text-primary">{key}</span>
-              <span className="rounded-full bg-surface px-1.5 text-[10px] text-text-muted">{groupRows.length}</span>
+          <div key={key} className="s-round flex w-60 shrink-0 flex-col bg-canvas/40 ring-1 ring-line">
+            <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+              <span className="inline-flex min-w-0 items-center gap-2">
+                <span className={clsx('h-2 w-2 shrink-0 rounded-full', toneFillClass(tone))} />
+                <span className="truncate text-[12px] font-semibold capitalize text-text-primary">{key}</span>
+              </span>
+              <span className={clsx('rounded-full px-1.5 text-[10px] font-medium', toneSoftClass(tone))}>{groupRows.length}</span>
             </div>
-            <div className="flex flex-col gap-2 p-2">
+            <div className="flex min-h-[40px] flex-col gap-2 px-2 pb-2">
               {groupRows.length === 0 ? (
-                <div className="px-1 py-2 text-[11px] text-text-muted">Empty</div>
+                <div className="rounded-btn border border-dashed border-line/70 px-2 py-3 text-center text-[11px] text-text-muted">Empty</div>
               ) : groupRows.map((row, i) => (
-                <div key={(row.id as string) ?? i} className="rounded-btn border border-line bg-surface px-2.5 py-2 text-[12px] text-text-secondary">
-                  {String(row[node.titleField ?? 'title'] ?? row.name ?? row.id ?? 'Untitled')}
+                <div key={(row.id as string) ?? i} className="s-panel cursor-default px-2.5 py-2 text-[12px] text-text-secondary transition-transform hover:-translate-y-0.5">
+                  <div className="font-medium text-text-primary">{String(row[node.titleField ?? 'title'] ?? row.name ?? row.id ?? 'Untitled')}</div>
                 </div>
               ))}
             </div>
@@ -1225,14 +1154,19 @@ function prettifyAction(name: string): string {
 
 function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' }>; scope: ResolveScope }) {
   const { density } = useTheme();
+  const value = resolveDisplay(node.value, scope);
   return (
     <div className={containerClasses(node.style, density, { defaultElevation: 'inset', defaultPad: 'sm' })}>
       <div className="text-[10px] uppercase tracking-wide text-text-muted">{node.label}</div>
       <div className="mt-0.5 flex items-baseline gap-2">
-        <span className={clsx('text-[19px] font-semibold leading-none text-text-primary', textClasses({ tone: node.style?.tone }))}>
-          {String(resolveBindable(node.value, scope) ?? '—')}
-        </span>
-        {node.delta != null ? <span className="text-[11px] text-text-secondary">{String(resolveBindable(node.delta, scope))}</span> : null}
+        {value.unbound ? (
+          <UnboundMarker path={value.unbound} />
+        ) : (
+          <span className={clsx('text-[19px] font-semibold leading-none text-text-primary', textClasses({ tone: node.style?.tone }))}>
+            {value.text || '—'}
+          </span>
+        )}
+        {node.delta != null ? <span className="text-[11px] text-text-secondary">{String(resolveBindable(node.delta, scope) ?? '')}</span> : null}
       </div>
     </div>
   );
@@ -1377,23 +1311,44 @@ function SparklineView({ node }: { node: Extract<ViewNode, { type: 'Sparkline' }
 }
 
 function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStrip' }>; scope: ResolveScope }) {
+  const { design } = useTheme();
   // Auto-fit so wide screens pack more KPIs per row (denser dashboards).
   return (
-    <div className="grid gap-2.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+    <div className="grid" style={{ gap: 'var(--s-gap, 12px)', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
       {node.items.map((item, i) => {
-        const sparkAccent = item.tone && item.tone !== 'neutral' ? item.tone : undefined;
+        // In multi-palette languages each tile gets a rotating accent edge + spark hue.
+        const paletteAccent = design.policy.multiPalette ? CHART_PALETTE[i % CHART_PALETTE.length] : undefined;
+        const sparkAccent = item.tone && item.tone !== 'neutral'
+          ? item.tone
+          : (paletteAccent as AccentName | undefined);
         return (
-          <div key={i} className="rounded-card border border-line bg-surface px-3 py-2.5">
-            <div className="text-[10px] uppercase tracking-wide text-text-muted">{item.label}</div>
-            <div className="mt-0.5 flex items-end justify-between gap-2">
-              <span className="text-[20px] font-semibold leading-none text-text-primary">{String(resolveBindable(item.value, scope) ?? '—')}</span>
+          <div key={i} className="s-tile relative overflow-hidden px-4 py-3">
+            {paletteAccent ? (
+              <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: accentColor(paletteAccent) }} />
+            ) : null}
+            <div className="break-words text-[10px] font-medium uppercase tracking-wide text-text-muted">{item.label}</div>
+            {/* wrap (not clip): values/deltas can be long phrases, and tiles narrow as the surface shrinks. */}
+            <div className="mt-1 flex flex-wrap items-end justify-between gap-x-2 gap-y-1">
+              {(() => {
+                const v = resolveDisplay(item.value, scope);
+                return v.unbound ? (
+                  <UnboundMarker path={v.unbound} />
+                ) : (
+                  <span
+                    className="min-w-0 break-words font-semibold leading-tight text-text-primary"
+                    style={{ fontSize: 'var(--s-kpi-size, 22px)' }}
+                  >
+                    {v.text || '—'}
+                  </span>
+                );
+              })()}
               {item.delta != null ? (
-                <span className={clsx('text-[11px]', item.tone ? textClasses({ tone: item.tone }) : 'text-text-secondary')}>
-                  {String(resolveBindable(item.delta, scope))}
+                <span className={clsx('min-w-0 break-words text-[11px] font-medium', item.tone ? textClasses({ tone: item.tone }) : 'text-success')}>
+                  {String(resolveBindable(item.delta, scope) ?? '')}
                 </span>
               ) : null}
             </div>
-            {item.spark && item.spark.length > 1 ? <div className="mt-1.5"><SparkSvg points={item.spark} accent={sparkAccent} height={24} /></div> : null}
+            {item.spark && item.spark.length > 1 ? <div className="mt-2"><SparkSvg points={item.spark} accent={sparkAccent} height={28} /></div> : null}
           </div>
         );
       })}
@@ -1407,12 +1362,15 @@ function HeroView({ node, scope }: { node: Extract<ViewNode, { type: 'Hero' }>; 
   const media = node.media != null ? String(resolveBindable(node.media, resolved) ?? '') : '';
   return (
     <div
-      className="relative overflow-hidden rounded-card border border-line p-6"
-      style={{ background: `linear-gradient(135deg, color-mix(in srgb, ${accent} 16%, var(--color-surface)) 0%, var(--color-surface) 62%)` }}
+      className="s-round relative overflow-hidden border border-line"
+      style={{
+        padding: 'var(--s-pad, 22px)',
+        background: `linear-gradient(135deg, color-mix(in srgb, ${accent} 16%, var(--color-surface)) 0%, var(--color-surface) 62%)`,
+      }}
     >
       <div className="relative z-10 max-w-2xl">
         {node.eyebrow ? <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: accent }}>{node.eyebrow}</div> : null}
-        <h1 className="text-[24px] font-semibold leading-tight text-text-primary">{node.title}</h1>
+        <h1 className="font-semibold leading-tight text-text-primary" style={{ fontSize: 'calc(var(--s-heading-size, 18px) + 6px)' }}>{node.title}</h1>
         {node.subtitle ? <p className="mt-2 text-[14px] leading-relaxed text-text-secondary">{node.subtitle}</p> : null}
         {node.actions?.length ? (
           <div className="mt-4 flex flex-wrap gap-2">
@@ -1479,7 +1437,7 @@ function AccordionView({ node, scope, path }: { node: Extract<ViewNode, { type: 
       {node.sections.map((section, i) => {
         const isOpen = open.has(i);
         return (
-          <div key={i} className="overflow-hidden rounded-card border border-line">
+          <div key={i} className="s-round overflow-hidden border border-line">
             <button
               type="button"
               onClick={(event) => { event.stopPropagation(); toggle(i); }}
@@ -1505,9 +1463,9 @@ function SplitView({ node, scope, path }: { node: Extract<ViewNode, { type: 'Spl
   // cap the rail so it can't balloon. The main pane keeps a readable minimum.
   const ratio = Math.min(2.5, Math.max(1, node.ratio ?? 2));
   return (
-    <div className="flex flex-col gap-4 lg:flex-row">
-      <div className="min-w-0 lg:min-w-[320px]" style={{ flex: ratio }}><ViewRenderer node={node.left} scope={scope} editable={false} path={[...path, 0]} /></div>
-      <div className="min-w-0 lg:min-w-[260px] lg:max-w-[440px]" style={{ flex: 1 }}><ViewRenderer node={node.right} scope={scope} editable={false} path={[...path, 1]} /></div>
+    <div className="flex flex-col gap-4 @2xl:flex-row">
+      <div className="min-w-0 @2xl:min-w-[320px]" style={{ flex: ratio }}><ViewRenderer node={node.left} scope={scope} editable={false} path={[...path, 0]} /></div>
+      <div className="min-w-0 @2xl:min-w-[260px] @2xl:max-w-[440px]" style={{ flex: 1 }}><ViewRenderer node={node.right} scope={scope} editable={false} path={[...path, 1]} /></div>
     </div>
   );
 }
@@ -1592,7 +1550,7 @@ function Composer({ placeholder, label, onSend, extraArgs }: { placeholder?: str
         disabled={Boolean(editing)}
         className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60"
       />
-      <button type="submit" disabled={Boolean(editing) || !text.trim() || busy} className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-white disabled:opacity-50">
+      <button type="submit" disabled={Boolean(editing) || !text.trim() || busy} className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-on-accent disabled:opacity-50">
         {busy ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} {label}
       </button>
     </form>
@@ -1603,7 +1561,7 @@ function ChatShell({ title, channel, messages, send, placeholder, sendArgs }: { 
   const invoke = useActionInvoker();
   const resolvedScope = useResolvedScope();
   return (
-    <div className="flex flex-col overflow-hidden rounded-card border border-line bg-surface">
+    <div className="s-panel flex flex-col overflow-hidden">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
         <MessageSquare size={14} className="text-accent" />
         <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text-primary">{title ?? 'Conversation'}</span>
@@ -1804,7 +1762,7 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
                 ) : null}
                 <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-primary">{row.title}</span>
                 {row.channel ? <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[9px] capitalize text-text-muted">{row.channel}</span> : null}
-                {row.unread > 0 ? <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-semibold text-white">{row.unread}</span> : null}
+                {row.unread > 0 ? <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-semibold text-on-accent">{row.unread}</span> : null}
               </div>
             </button>
           );
@@ -1954,7 +1912,7 @@ function MediaGenView({ node, scope }: { node: Extract<ViewNode, { type: 'MediaG
           }}
         >
           <input value={prompt} onChange={(event) => setPrompt(event.target.value)} onClick={(event) => event.stopPropagation()} placeholder={node.placeholder ?? 'Describe what to generate…'} disabled={Boolean(editing)} className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60" />
-          <button type="submit" disabled={Boolean(editing) || !prompt.trim() || busy} className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-white disabled:opacity-50">
+          <button type="submit" disabled={Boolean(editing) || !prompt.trim() || busy} className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-on-accent disabled:opacity-50">
             {busy ? <Loader2 size={13} className="animate-spin" /> : <ImageIcon size={13} />} Generate
           </button>
         </form>
@@ -1969,7 +1927,7 @@ function MediaGenGallery({ node, bind }: { node: Extract<ViewNode, { type: 'Medi
   if (loading) return <SkeletonRows />;
   if (rows.length === 0) return <div className="rounded-btn border border-dashed border-line p-6 text-center text-[12px] text-text-muted">No media yet — generate something above.</div>;
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div className="grid grid-cols-2 gap-2 @2xl:grid-cols-3">
       {rows.map((row, i) => {
         const src = String(row[node.srcField ?? 'url'] ?? row.src ?? row.image ?? '');
         return (
@@ -2113,6 +2071,97 @@ function SkeletonRows() {
   return <div className="flex flex-col gap-2">{[0, 1, 2].map((i) => <div key={i} className="h-8 animate-pulse rounded-btn bg-canvas" />)}</div>;
 }
 
+/** Compact relative time ("4m ago", "2h ago", "3d ago") for run timestamps. */
+function relativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+/**
+ * Workflow Control Plane (Agentic-Apps, Phase E) — the App's OWN workflows with
+ * purpose, order, trigger kind, last run, and a run control per row. App-scoped:
+ * it reads the current App from the runtime and loads the E0 control-plane endpoint
+ * (`GET /apps/:id/workflows`), so an agent drops it in with no binding. This is the
+ * control that was missing: an operator can see why each workflow exists, the order
+ * they run, their last status, and start one — without leaving the App.
+ */
+function WorkflowControlBlock({ node }: { node: Extract<ViewNode, { type: 'WorkflowControl' }> }) {
+  const { appId, dataRevision } = useRuntime();
+  const [rows, setRows] = useState<AppWorkflowSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await appsApi.listWorkflows(appId));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load workflows');
+    }
+  }, [appId]);
+
+  useEffect(() => { void load(); }, [load, dataRevision]);
+
+  const run = useCallback(async (wfId: string) => {
+    setBusyId(wfId);
+    try {
+      await appsApi.runAppWorkflow(appId, wfId);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start the workflow');
+    } finally {
+      setBusyId(null);
+    }
+  }, [appId, load]);
+
+  const icon = <Workflow size={15} className="text-text-secondary" />;
+  const title = node.title ?? (rows ? `Workflows · ${rows.length}` : 'Workflows');
+
+  if (error) return <PanelShell title={node.title ?? 'Workflows'} icon={icon}><EmptyState label="Couldn't load workflows" hint={error} /></PanelShell>;
+  if (rows === null) return <PanelShell title={node.title ?? 'Workflows'} icon={icon}><SkeletonRows /></PanelShell>;
+  if (rows.length === 0) return <PanelShell title={title} icon={icon}><EmptyState label="No workflows yet" hint="Add a workflow to give this app logic." /></PanelShell>;
+
+  return (
+    <PanelShell title={title} icon={icon}>
+      <div className="flex flex-col">
+        {rows.map((wf, i) => {
+          const status = wf.lastRun?.status;
+          const dot = status === 'running' ? 'bg-accent' : status === 'failed' ? 'bg-danger' : wf.enabled === false ? 'bg-text-disabled' : status === 'completed' ? 'bg-success' : 'bg-text-muted';
+          return (
+            <div key={wf.id} className={clsx('flex items-center gap-3 py-2.5', i > 0 && 'border-t border-line')}>
+              <span className={clsx('h-2 w-2 shrink-0 rounded-full', dot)} aria-hidden />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-[13px] text-text-primary">
+                  <span className="truncate">{wf.title}</span>
+                  {wf.dependsOn.length > 0 ? <span className="shrink-0 rounded border border-line px-1.5 py-px text-[10px] text-text-muted">after {wf.dependsOn.length}</span> : null}
+                  {wf.enabled === false ? <span className="shrink-0 rounded border border-line px-1.5 py-px text-[10px] text-text-muted">paused</span> : null}
+                </div>
+                {wf.purpose ? <div className="truncate text-[11px] text-text-muted">{wf.purpose}</div> : null}
+              </div>
+              {wf.triggerKind ? <span className="hidden shrink-0 rounded bg-surface-2 px-2 py-0.5 text-[10px] text-text-secondary sm:inline">{wf.triggerKind}</span> : null}
+              <span className="hidden w-[72px] shrink-0 text-right text-[11px] text-text-muted md:inline">{wf.lastRun ? relativeTime(wf.lastRun.at) : 'never run'}</span>
+              <button
+                type="button"
+                disabled={busyId === wf.id}
+                onClick={() => void run(wf.id)}
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-btn border border-line text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+                aria-label={`Run ${wf.title}`}
+              >
+                {busyId === wf.id ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </PanelShell>
+  );
+}
+
 export function useDataRevision(appId: string): number {
   const [rev, setRev] = useState(0);
   const handler = useCallback((env: RealtimeEnvelope) => {
@@ -2123,3 +2172,191 @@ export function useDataRevision(appId: string): number {
   useRealtime(useMemo(() => [REALTIME_EVENTS.DATA_CHANGED], []), handler);
   return rev;
 }
+
+// ── Built-in block registry ──────────────────────────────────
+// Every ViewNode kind registers its renderer here. This replaces the former
+// 52-case `switch` with an OPEN seam (see ./blocks/registry): the same
+// `registerBlock` API is public, so an agent/plugin/workspace can add or override
+// a block kind. Layout primitives recurse via `ctx.renderChild`; everything else
+// delegates to its existing view component (unchanged), so no surface drifts.
+//
+// Each renderer narrows `node` with a control-flow check on `node.type` — the
+// registry already guarantees the kind, but `ViewNode` is `Base & { style? }` (an
+// intersection) so `Extract<ViewNode, …>` can't narrow it; CFA is the reliable seam.
+
+/** Visible fallback for an unregistered kind — never silently render nothing. */
+function UnknownBlock({ node }: { node: ViewNode }) {
+  return (
+    <div className="rounded border border-dashed border-line bg-surface-2 px-3 py-2 text-[12px] text-text-muted">
+      Unknown block: <span className="font-medium text-text-secondary">{node.type}</span>
+    </div>
+  );
+}
+
+/** Layout gap from the design language's `--s-gap`, with the numeric baseline used
+ *  only for the Grid min-cell math. Mirrors the former inline computation exactly. */
+function gapsFor(theme: ResolvedTheme, node: ViewNode): { layout: string | number; child: string; base: number } {
+  const base = theme.density === 'compact' ? 8 : 12;
+  const explicit = 'gap' in node && (node as { gap?: number | null }).gap != null ? (node as { gap?: number }).gap! : null;
+  const v = `var(--s-gap, ${base}px)`;
+  return { base, layout: explicit ?? v, child: v };
+}
+
+// Layout primitives — recurse through ctx.renderChild.
+registerBlock('Stack', (node, ctx) => {
+  if (node.type !== 'Stack') return null;
+  const { layout } = gapsFor(ctx.theme, node);
+  return (
+    <div className={clsx('flex flex-col', containerClasses(node.style, ctx.theme.density))} style={{ gap: layout }}>
+      {node.children.map((c, i) => ctx.renderChild(c, [...ctx.path, i], ctx.scope))}
+    </div>
+  );
+});
+
+registerBlock('Row', (node, ctx) => {
+  if (node.type !== 'Row') return null;
+  const { layout } = gapsFor(ctx.theme, node);
+  return (
+    <div className={clsx('flex flex-wrap', !node.style?.align && 'items-stretch', containerClasses(node.style, ctx.theme.density))} style={{ gap: layout }}>
+      {node.children.map((c, i) => (
+        <div key={i} className="min-w-[160px]" style={{ flex: `${node.widths?.[i] ?? 1} 1 0` }}>
+          {ctx.renderChild(c, [...ctx.path, i], ctx.scope)}
+        </div>
+      ))}
+    </div>
+  );
+});
+
+registerBlock('Grid', (node, ctx) => {
+  if (node.type !== 'Grid') return null;
+  const { layout, base } = gapsFor(ctx.theme, node);
+  const cols = node.columns;
+  // Intrinsically responsive: auto-fit tracks the grid's CONTAINER width (editor
+  // panel, Split pane, …) not the viewport, so it never overflows. With explicit
+  // `columns`, size the min cell so the surface's full width yields ~that many
+  // columns, collapsing to fewer as the container narrows. `min(100%, …)` guards
+  // against containers narrower than one cell (→ single column, no overflow).
+  const minCell = cols
+    ? Math.max(160, Math.floor((ctx.theme.contentWidth - base * (cols - 1)) / cols))
+    : 240;
+  return (
+    <div
+      className={clsx('grid', containerClasses(node.style, ctx.theme.density))}
+      style={{ gap: layout, gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${minCell}px), 1fr))` }}
+    >
+      {node.children.map((c, i) => {
+        const span = c.style?.span ? Math.min(c.style.span, cols ?? 12) : undefined;
+        return (
+          <div key={i} style={span ? { gridColumn: `span ${span}` } : undefined}>
+            {ctx.renderChild(c, [...ctx.path, i], ctx.scope)}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+registerBlock('Card', (node, ctx) => {
+  if (node.type !== 'Card') return null;
+  // Nested cards flatten — a box inside a box renders borderless (no triple frames).
+  const { child } = gapsFor(ctx.theme, node);
+  const elevation = node.style?.elevation ?? (ctx.boxed ? 'flat' : 'raised');
+  const isBox = elevation !== 'flat';
+  return (
+    <div className={containerClasses({ ...node.style, elevation }, ctx.theme.density, { defaultPad: isBox ? 'md' : 'none' })}>
+      {node.title ? <div className="mb-3 text-[13px] font-semibold text-text-primary">{node.title}</div> : null}
+      <BoxedCtx.Provider value={ctx.boxed || isBox}>
+        <div className="flex flex-col" style={{ gap: child }}>
+          {node.children.map((c, i) => ctx.renderChild(c, [...ctx.path, i], ctx.scope))}
+        </div>
+      </BoxedCtx.Provider>
+    </div>
+  );
+});
+
+registerBlock('Section', (node, ctx) => {
+  if (node.type !== 'Section') return null;
+  const { child } = gapsFor(ctx.theme, node);
+  const sectionBoxed = (node.style?.elevation ?? 'flat') !== 'flat';
+  return (
+    <section className={containerClasses(node.style, ctx.theme.density, { defaultElevation: 'flat', defaultPad: sectionBoxed ? 'md' : 'none' })}>
+      {node.title ? <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">{node.title}</div> : null}
+      <BoxedCtx.Provider value={ctx.boxed || sectionBoxed}>
+        <div className="flex flex-col" style={{ gap: child }}>
+          {node.children.map((c, i) => ctx.renderChild(c, [...ctx.path, i], ctx.scope))}
+        </div>
+      </BoxedCtx.Provider>
+    </section>
+  );
+});
+
+// Text leaves — bind through resolveDisplay so an unresolved binding shows a marker.
+registerBlock('Heading', (node, ctx) => {
+  if (node.type !== 'Heading') return null;
+  const { text, unbound } = resolveDisplay(node.value, ctx.resolvedScope);
+  return <h2 className={clsx('text-[15px] font-semibold text-text-primary', textClasses(node.style))}>{unbound ? <UnboundMarker path={unbound} /> : text}</h2>;
+});
+registerBlock('Text', (node, ctx) => {
+  if (node.type !== 'Text') return null;
+  const { text, unbound } = resolveDisplay(node.value, ctx.resolvedScope);
+  return <p className={clsx('text-[13px] leading-relaxed text-text-secondary', textClasses(node.style))}>{unbound ? <UnboundMarker path={unbound} /> : text}</p>;
+});
+registerBlock('Markdown', (node, ctx) => {
+  if (node.type !== 'Markdown') return null;
+  const { text, unbound } = resolveDisplay(node.value, ctx.resolvedScope);
+  return <p className={clsx('whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary', textClasses(node.style))}>{unbound ? <UnboundMarker path={unbound} /> : text}</p>;
+});
+registerBlock('Badge', (node, ctx) => {
+  if (node.type !== 'Badge') return null;
+  const { text, unbound } = resolveDisplay(node.value, ctx.resolvedScope);
+  return <span className={clsx('inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[11px]', toneSoftClass(node.tone ?? node.style?.tone))}>{unbound ? <UnboundMarker path={unbound} /> : text}</span>;
+});
+registerBlock('Divider', () => <hr className="border-line" />);
+registerBlock('Image', (node, ctx) => (node.type === 'Image'
+  ? <img src={String(resolveBindable(node.src, ctx.resolvedScope) ?? '')} alt={node.alt ?? ''} className="max-h-72 w-full rounded-card border border-line bg-canvas object-contain" />
+  : null));
+
+// Resolved-scope blocks.
+registerBlock('Metric', (node, ctx) => (node.type === 'Metric' ? <MetricView node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('Callout', (node) => (node.type === 'Callout' ? <CalloutView node={node} /> : null));
+registerBlock('Avatar', (node, ctx) => (node.type === 'Avatar' ? <AvatarView node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('ProgressBar', (node, ctx) => (node.type === 'ProgressBar' ? <ProgressBarView node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('Sparkline', (node) => (node.type === 'Sparkline' ? <SparklineView node={node} /> : null));
+registerBlock('KPIStrip', (node, ctx) => (node.type === 'KPIStrip' ? <KpiStripView node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('MapView', (node, ctx) => (node.type === 'MapView' ? <MapViewBlock node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('StatusBoard', (node, ctx) => (node.type === 'StatusBoard' ? <StatusBoardBlock node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('MediaGallery', (node, ctx) => (node.type === 'MediaGallery' ? <MediaGalleryBlock node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('MediaGen', (node, ctx) => (node.type === 'MediaGen' ? <MediaGenView node={node} scope={ctx.resolvedScope} /> : null));
+registerBlock('Gauge', (node, ctx) => (node.type === 'Gauge' ? <GaugeView node={node} scope={ctx.resolvedScope} /> : null));
+
+// Raw-scope + path blocks (containers/interactive that recurse internally).
+registerBlock('Hero', (node, ctx) => (node.type === 'Hero' ? <HeroView node={node} scope={ctx.scope} /> : null));
+registerBlock('Toolbar', (node, ctx) => (node.type === 'Toolbar' ? <ToolbarView node={node} scope={ctx.scope} path={ctx.path} /> : null));
+registerBlock('Tabs', (node, ctx) => (node.type === 'Tabs' ? <TabsView node={node} scope={ctx.scope} path={ctx.path} /> : null));
+registerBlock('Accordion', (node, ctx) => (node.type === 'Accordion' ? <AccordionView node={node} scope={ctx.scope} path={ctx.path} /> : null));
+registerBlock('Split', (node, ctx) => (node.type === 'Split' ? <SplitView node={node} scope={ctx.scope} path={ctx.path} /> : null));
+registerBlock('AgentRegion', (node, ctx) => (node.type === 'AgentRegion' ? <AgentRegionView node={node} scope={ctx.scope} path={ctx.path} /> : null));
+registerBlock('Button', (node, ctx) => (node.type === 'Button'
+  ? <ActionButton label={node.label} action={node.action.action} args={node.action.args} scope={ctx.scope} variant={node.variant} />
+  : null));
+
+// Self-contained blocks (data binding + state handled internally).
+registerBlock('Timeline', (node) => (node.type === 'Timeline' ? <TimelineView node={node} /> : null));
+registerBlock('Table', (node) => (node.type === 'Table' ? <BoundTable node={node} /> : null));
+registerBlock('List', (node) => (node.type === 'List' ? <BoundList node={node} /> : null));
+registerBlock('Chart', (node) => (node.type === 'Chart' ? <BoundChart node={node} /> : null));
+registerBlock('Form', (node) => (node.type === 'Form' ? <ActionForm node={node} /> : null));
+registerBlock('ActivityStream', (node) => (node.type === 'ActivityStream' ? <ActivityStreamView node={node} /> : null));
+registerBlock('DataBoard', (node) => (node.type === 'DataBoard' ? <BoundBoard node={node} /> : null));
+registerBlock('DocumentViewer', (node) => (node.type === 'DocumentViewer' ? <DocumentViewerBlock node={node} /> : null));
+registerBlock('WebEmbed', (node) => (node.type === 'WebEmbed' ? <WebEmbedBlock node={node} /> : null));
+registerBlock('Narrative', (node) => (node.type === 'Narrative' ? <NarrativeBlock node={node} /> : null));
+registerBlock('ConversationThread', (node) => (node.type === 'ConversationThread' ? <ConversationThreadBlock node={node} /> : null));
+registerBlock('CodeViewer', (node) => (node.type === 'CodeViewer' ? <CodeViewerBlock node={node} /> : null));
+registerBlock('ChatThread', (node) => (node.type === 'ChatThread' ? <ChatThreadView node={node} /> : null));
+registerBlock('Inbox', (node) => (node.type === 'Inbox' ? <InboxView node={node} /> : null));
+registerBlock('Funnel', (node) => (node.type === 'Funnel' ? <FunnelView node={node} /> : null));
+registerBlock('Calendar', (node) => (node.type === 'Calendar' ? <CalendarView node={node} /> : null));
+registerBlock('WorkflowControl', (node) => (node.type === 'WorkflowControl' ? <WorkflowControlBlock node={node} /> : null));
+registerBlock('CustomView', (node) => (node.type === 'CustomView' ? <CustomViewFrame node={node} /> : null));
+registerBlock('CodeSurface', (node) => (node.type === 'CodeSurface' ? <CodeSurfaceFrame node={node} /> : null));

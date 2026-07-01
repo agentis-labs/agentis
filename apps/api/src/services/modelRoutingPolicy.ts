@@ -221,15 +221,28 @@ export function routeModelForTask(input: ModelRoutingInput): ModelRoutingDecisio
   }
 
   const preference = tierPreferenceFor(taskClass, `${input.purpose ?? ''}\n${input.task ?? ''}`);
-  const selected = selectCandidate(candidates, preference);
+  const desiredCapability = inferDesiredCapability({
+    task: input.task,
+    purpose: input.purpose,
+    requiredAffordances: input.requiredAffordances,
+  });
+  const selected = selectCandidate(candidates, preference, desiredCapability);
   const selectedTier = selected.tier ?? inferModelTierFromId(selected.model);
-  const avoided = candidates.find((candidate) =>
+  const selectedHasCapability = Boolean(desiredCapability && (selected.capabilityHints ?? []).includes(desiredCapability));
+  const generalAvoided = candidates.find((candidate) =>
+    candidate !== selected
+    && desiredCapability
+    && !(candidate.capabilityHints ?? []).includes(desiredCapability)
+    && (candidate.tier ?? inferModelTierFromId(candidate.model)) === 'flagship');
+  const tierAvoided = candidates.find((candidate) =>
     candidate !== selected
     && (candidate.tier ?? inferModelTierFromId(candidate.model)) === 'flagship'
     && selectedTier !== 'flagship');
-  const reason = avoided
-    ? `${taskClass} does not need flagship capacity; selected ${selected.model} instead of higher-cost ${avoided.model}.`
-    : `${taskClass} routed to the minimum sufficient ${selectedTier} candidate.`;
+  const reason = selectedHasCapability && generalAvoided
+    ? `${taskClass} is ${desiredCapability}-specialized; selected ${selected.model} (a ${desiredCapability} model) instead of the general ${generalAvoided.model}.`
+    : tierAvoided
+      ? `${taskClass} does not need flagship capacity; selected ${selected.model} instead of higher-cost ${tierAvoided.model}.`
+      : `${taskClass} routed to the minimum sufficient ${selectedTier} candidate.`;
 
   return {
     taskClass,
@@ -324,7 +337,7 @@ function fallbackCandidatesFor(runtime: string | null, currentModel: string | nu
   const lower = `${runtime ?? ''} ${currentModel ?? ''}`.toLowerCase();
   if (lower.includes('claude') || lower.includes('anthropic')) {
     return [
-      fallbackCandidate('claude-sonnet-4-6', runtime, 'balanced'),
+      fallbackCandidate('claude-sonnet-5', runtime, 'balanced'),
       fallbackCandidate('claude-haiku-4-5', runtime, 'fast'),
       fallbackCandidate('claude-opus-4-8', runtime, 'flagship'),
       fallbackCandidate('claude-opus-4-7', runtime, 'flagship'),
@@ -359,11 +372,45 @@ function fallbackCandidate(model: string, runtime: string | null, tier: ModelTie
     verified: false,
     costRank: costRankForTier(tier),
     latencyRank: latencyRankForTier(tier),
+    // Carry the capability hints so a code/vision task can prefer the SPECIALIZED
+    // model (e.g. gpt-5.3-codex) over a higher-cost general flagship.
+    capabilityHints: routingMetadataForModelId(model).capabilityHints,
   };
 }
 
-function selectCandidate(candidates: ModelRoutingCandidate[], preference: ModelTier[]): ModelRoutingCandidate {
+/**
+ * The specialized capability a task most wants, if any. A coding task should run
+ * on a CODE-specialized model (a "*-codex" variant) rather than the general
+ * flagship; an image task wants a vision model. Returns null when no specialization
+ * is implied (the tier preference alone decides).
+ */
+export function inferDesiredCapability(input: {
+  task?: string | null;
+  purpose?: string | null;
+  requiredAffordances?: string[];
+}): 'code' | 'vision' | null {
+  const text = `${input.purpose ?? ''}\n${input.task ?? ''}`.toLowerCase();
+  const affordances = (input.requiredAffordances ?? []).map((a) => a.toLowerCase());
+  if (affordances.some((a) => /\bcode|coding|developer|engineer|file_system|filesystem|terminal|git\b/.test(a))) return 'code';
+  if (matchesAny(text, VISION_SIGNALS)) return 'vision';
+  if (matchesAny(text, CODE_SIGNALS)) return 'code';
+  return null;
+}
+
+function selectCandidate(
+  candidates: ModelRoutingCandidate[],
+  preference: ModelTier[],
+  desiredCapability?: 'code' | 'vision' | null,
+): ModelRoutingCandidate {
   const ranked = [...candidates].sort((a, b) => {
+    // Capability first: a code/vision task prefers a SPECIALIZED model over a
+    // higher-tier general one (e.g. gpt-5.3-codex over gpt-5.5 for coding). Among
+    // matched (or unmatched) candidates, the tier preference + cost still decide.
+    if (desiredCapability) {
+      const aCap = (a.capabilityHints ?? []).includes(desiredCapability) ? 0 : 1;
+      const bCap = (b.capabilityHints ?? []).includes(desiredCapability) ? 0 : 1;
+      if (aCap !== bCap) return aCap - bCap;
+    }
     const tierA = a.tier ?? inferModelTierFromId(a.model);
     const tierB = b.tier ?? inferModelTierFromId(b.model);
     const tierDelta = preferenceIndex(preference, tierA) - preferenceIndex(preference, tierB);
@@ -534,6 +581,38 @@ const HIGH_RISK_SIGNALS = [
   /\blegal\b/,
   /\bcompliance\b/,
   /\bfinancial advice\b/,
+];
+
+const CODE_SIGNALS = [
+  /\bcode\b/,
+  /\bcoding\b/,
+  /\brefactor\b/,
+  /\bdebug\b/,
+  /\bimplement\b/,
+  /\bfunction\b/,
+  /\bcompile\b/,
+  /\blint\b/,
+  /\bpull request\b/,
+  /\bunit test\b/,
+  /\bprogram(ming)?\b/,
+  /\bscript\b/,
+  /\btypescript\b/,
+  /\bjavascript\b/,
+  /\bpython\b/,
+  /\bclass\b/,
+  /\bmodule\b/,
+  /\brepo(sitory)?\b/,
+  /\bcodebase\b/,
+];
+
+const VISION_SIGNALS = [
+  /\bimage\b/,
+  /\bscreenshot\b/,
+  /\bvisual\b/,
+  /\bphoto\b/,
+  /\bpicture\b/,
+  /\bocr\b/,
+  /\bdiagram\b/,
 ];
 
 const COMPLEXITY_SIGNALS = [

@@ -10,14 +10,19 @@
  *
  * All edits map to the existing `PATCH /v1/apps/:id` contract; no new fields.
  */
-import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
   Boxes,
   FileText,
   Image as ImageIcon,
   Loader2,
+  Play,
   Plus,
+  RefreshCw,
   Save,
   Settings,
   ShieldCheck,
@@ -28,7 +33,55 @@ import {
 } from 'lucide-react';
 import type { AppRecord, AppSurface } from '@agentis/core';
 import type { AppUpdatePayload } from '../../lib/appsApi';
+import { api, apiErrorMessage } from '../../lib/api';
+import { openRunModal } from '../../lib/runModal';
+import { useToast } from '../shared/Toast';
 import { nestedDomainOptions } from '../shared/DomainToolbar';
+
+/** App-level run analytics — shape of `GET /v1/apps/:id/analytics`. */
+interface AppAnalytics {
+  runs: number;
+  successRate: number | null;
+  avgDurationMs: number | null;
+  avgCostCents: number;
+  totalCostCents: number;
+  metered: boolean;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  totalTokens: number;
+  avgTokensPerRun: number;
+  perWorkflow: Array<{
+    workflowId: string;
+    title: string;
+    runs: number;
+    successRate: number | null;
+    totalTokens: number;
+    totalCostCents: number;
+  }>;
+}
+
+/** A field of a workflow's input contract — drives the on-demand Run inputs form. */
+interface RunInputField {
+  key: string;
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'any';
+  required?: boolean;
+  description?: string;
+}
+
+/** Coerce the form's string values to the contract's declared types. */
+function coerceRunInputs(fields: RunInputField[], values: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of fields) {
+    const raw = values[f.key] ?? '';
+    if (raw === '' && !f.required) continue;
+    if (f.type === 'number') out[f.key] = raw === '' ? null : Number(raw);
+    else if (f.type === 'boolean') out[f.key] = raw === 'true' || raw === '1';
+    else if (f.type === 'array' || f.type === 'object') {
+      try { out[f.key] = JSON.parse(raw); } catch { out[f.key] = raw; }
+    } else out[f.key] = raw;
+  }
+  return out;
+}
 
 /** Domain (or Subdomain) the App can be organized under. */
 export interface AppEngineDomain {
@@ -46,12 +99,13 @@ export interface AppEngineAgent {
   role?: string | null;
 }
 
-type AppEnginePage = 'overview' | 'identity' | 'access' | 'advanced';
+type AppEnginePage = 'overview' | 'analytics' | 'identity' | 'access' | 'advanced';
 type Audience = AppRecord['policy']['audience'][number];
 type CapabilityGrant = AppRecord['policy']['grants'][number];
 
 const ENGINE_PAGES: Array<{ id: AppEnginePage; label: string; icon: ReactNode }> = [
   { id: 'overview', label: 'Overview', icon: <Settings size={13} /> },
+  { id: 'analytics', label: 'Analytics', icon: <BarChart3 size={13} /> },
   { id: 'identity', label: 'Identity', icon: <ImageIcon size={13} /> },
   { id: 'access', label: 'Access', icon: <ShieldCheck size={13} /> },
   { id: 'advanced', label: 'Advanced', icon: <SlidersHorizontal size={13} /> },
@@ -96,6 +150,9 @@ export function AppEngineModal({
   const [grants, setGrants] = useState<CapabilityGrant[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [analytics, setAnalytics] = useState<AppAnalytics | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -115,7 +172,30 @@ export function AppEngineModal({
     setGrants(app.policy.grants);
     setError(null);
     setSaving(false);
+    setAnalytics(null);
+    setAnalyticsError(null);
   }, [app, open]);
+
+  const appId = app?.id ?? null;
+  const loadAnalytics = useCallback(async () => {
+    if (!appId) return;
+    setAnalyticsLoading(true);
+    setAnalyticsError(null);
+    try {
+      setAnalytics(await api<AppAnalytics>(`/v1/apps/${appId}/analytics`));
+    } catch {
+      setAnalytics(null);
+      setAnalyticsError('Could not load app analytics right now.');
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }, [appId]);
+
+  // Lazy-load analytics the first time the operator opens that page.
+  useEffect(() => {
+    if (!open || page !== 'analytics' || analytics || analyticsLoading) return;
+    void loadAnalytics();
+  }, [open, page, analytics, analyticsLoading, loadAnalytics]);
 
   if (!open || !app) return null;
 
@@ -264,6 +344,15 @@ export function AppEngineModal({
                   {shareable ? 'Public link enabled' : 'Workspace only'}; {customCode === 'allowed' ? 'custom-coded views allowed' : 'custom code off'}
                 </InfoPanel>
               </div>
+            )}
+
+            {page === 'analytics' && (
+              <AppAnalyticsPanel
+                analytics={analytics}
+                loading={analyticsLoading}
+                error={analyticsError}
+                onRefresh={() => void loadAnalytics()}
+              />
             )}
 
             {page === 'identity' && (
@@ -476,6 +565,239 @@ function EngineStat({ label, value }: { label: string; value: string }) {
       <div className="mt-1 truncate text-[16px] font-semibold text-text-primary">{value}</div>
     </div>
   );
+}
+
+/**
+ * App-level analytics — a rollup across every workflow the app owns. Tokens are
+ * the headline signal (most runtimes are subscription harnesses with no $ cost);
+ * the per-workflow table shows where consumption concentrates.
+ */
+function AppAnalyticsPanel({
+  analytics,
+  loading,
+  error,
+  onRefresh,
+}: {
+  analytics: AppAnalytics | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const toast = useToast();
+  const [launching, setLaunching] = useState<string | null>(null);
+  // When a workflow declares an input contract, collect the inputs first so an
+  // input-requiring run isn't blocked by the run-gate; otherwise run directly.
+  const [runForm, setRunForm] = useState<{ workflowId: string; title: string; fields: RunInputField[] } | null>(null);
+  const [formValues, setFormValues] = useState<Record<string, string>>({});
+
+  // Fire the run + open the live, streaming run view (pain: "no option to run a
+  // workflow" + the blackbox) — the endpoint returns a runId immediately and
+  // openRunModal subscribes to its realtime room.
+  const submitRun = useCallback(
+    async (workflowId: string, inputs: Record<string, unknown>) => {
+      setLaunching(workflowId);
+      try {
+        const res = await api<{ runId: string }>(`/v1/workflows/${workflowId}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ inputs }),
+        });
+        openRunModal({ runId: res.runId, workflowId, source: 'app_engine' });
+        setRunForm(null);
+      } catch (err) {
+        toast.error('Could not start run', apiErrorMessage(err));
+      } finally {
+        setLaunching(null);
+      }
+    },
+    [toast],
+  );
+
+  const onRunClick = useCallback(
+    async (workflowId: string, title: string) => {
+      setLaunching(workflowId);
+      try {
+        const { workflow } = await api<{ workflow: { graph?: { inputContract?: { fields?: RunInputField[] } } } }>(
+          `/v1/workflows/${workflowId}`,
+        );
+        const fields = workflow?.graph?.inputContract?.fields ?? [];
+        if (fields.length > 0) {
+          setFormValues({});
+          setRunForm({ workflowId, title, fields });
+          setLaunching(null);
+          return;
+        }
+      } catch {
+        /* fall through to a plain run — the run-gate will report any missing input */
+      }
+      await submitRun(workflowId, {});
+    },
+    [submitRun],
+  );
+  if (loading && !analytics) {
+    return (
+      <div className="flex items-center gap-2 py-6 text-[12px] text-text-muted">
+        <Loader2 size={14} className="animate-spin" /> Loading app analytics…
+      </div>
+    );
+  }
+  if (error && !analytics) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2.5 text-[12px] text-danger">
+        <span>{error}</span>
+        <button type="button" onClick={onRefresh} className="rounded-btn p-1 hover:bg-danger/15" aria-label="Retry">
+          <RefreshCw size={13} />
+        </button>
+      </div>
+    );
+  }
+  if (!analytics) return null;
+  const successLabel = analytics.successRate == null ? '–' : `${Math.round(analytics.successRate * 100)}%`;
+  return (
+    <div className="space-y-4">
+      {runForm ? (
+        <div className="rounded-xl border border-accent/30 bg-accent-soft/20 p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <Play size={13} className="text-accent" />
+            <span className="flex-1 truncate text-[12px] font-semibold text-text-primary">Run “{runForm.title}” — inputs</span>
+          </div>
+          <div className="space-y-2">
+            {runForm.fields.map((f) => (
+              <label key={f.key} className="block">
+                <span className="text-[11px] font-medium text-text-secondary">
+                  {f.key}{f.required ? ' *' : ''} <span className="text-text-muted">({f.type})</span>
+                </span>
+                <input
+                  value={formValues[f.key] ?? ''}
+                  onChange={(e) => setFormValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                  placeholder={f.description ?? (f.type === 'array' || f.type === 'object' ? 'JSON' : f.type)}
+                  className="mt-0.5 w-full rounded-btn border border-line bg-canvas px-2 py-1 text-[12px] text-text-primary outline-none focus:border-accent"
+                />
+              </label>
+            ))}
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <button type="button" onClick={() => setRunForm(null)} className="rounded-btn px-2.5 py-1 text-[11px] text-text-muted hover:bg-surface-2">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => submitRun(runForm.workflowId, coerceRunInputs(runForm.fields, formValues))}
+              disabled={launching === runForm.workflowId}
+              className="inline-flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-white hover:bg-accent/90 disabled:opacity-50"
+            >
+              {launching === runForm.workflowId ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+              Run
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div className="flex items-center gap-2">
+        <BarChart3 size={14} className="text-accent" />
+        <span className="flex-1 text-[12px] font-semibold text-text-primary">Run analytics — all workflows</span>
+        <button
+          type="button"
+          onClick={onRefresh}
+          aria-label="Refresh analytics"
+          className="rounded-btn p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        >
+          <RefreshCw size={13} className={loading ? 'animate-spin' : undefined} />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <EngineStat label="Runs" value={String(analytics.runs)} />
+        <EngineStat label="Success" value={successLabel} />
+        <EngineStat label="Avg duration" value={formatDurationShort(analytics.avgDurationMs)} />
+      </div>
+
+      <div className="rounded-xl border border-accent/25 bg-accent-soft/30 p-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-accent">Tokens consumed</span>
+          <span className="text-[11px] text-text-muted">~{formatTokens(analytics.avgTokensPerRun)}/run</span>
+        </div>
+        <div className="mt-1 text-[24px] font-semibold leading-tight text-text-primary">{formatTokens(analytics.totalTokens)}</div>
+        <div className="mt-1.5 flex items-center gap-4 text-[12px] text-text-secondary">
+          <span className="inline-flex items-center gap-1"><ArrowDownRight size={13} className="text-text-muted" /> {formatTokens(analytics.totalTokensIn)} in</span>
+          <span className="inline-flex items-center gap-1"><ArrowUpRight size={13} className="text-text-muted" /> {formatTokens(analytics.totalTokensOut)} out</span>
+        </div>
+      </div>
+
+      {analytics.metered ? (
+        <div className="grid grid-cols-2 gap-2">
+          <EngineStat label="Avg cost / run" value={`$${(analytics.avgCostCents / 100).toFixed(3)}`} />
+          <EngineStat label="Total cost" value={`$${(analytics.totalCostCents / 100).toFixed(2)}`} />
+        </div>
+      ) : (
+        <div className="rounded-xl border border-line bg-canvas/45 px-3 py-2 text-[11.5px] text-text-muted">
+          Subscription runtime — cost is not metered. Tokens above are the spend signal.
+        </div>
+      )}
+
+      <div>
+        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-text-muted">Per workflow</div>
+        {analytics.perWorkflow.length === 0 ? (
+          <div className="rounded-card border border-dashed border-line px-3 py-2 text-[11px] text-text-muted">
+            This app has no workflows yet.
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-line">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="bg-canvas/45 text-left text-[10px] uppercase tracking-wider text-text-muted">
+                  <th className="px-3 py-1.5 font-medium">Workflow</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Runs</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Success</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Tokens</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics.perWorkflow.map((wf) => (
+                  <tr key={wf.workflowId} className="border-t border-line/70">
+                    <td className="max-w-0 truncate px-3 py-1.5 text-text-primary" title={wf.title}>{wf.title}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">{wf.runs}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">
+                      {wf.successRate == null ? '–' : `${Math.round(wf.successRate * 100)}%`}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-text-secondary">{formatTokens(wf.totalTokens)}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() => onRunClick(wf.workflowId, wf.title)}
+                        disabled={launching === wf.workflowId}
+                        className="inline-flex items-center gap-1 rounded-btn border border-accent/40 bg-accent-soft/40 px-2 py-1 text-[11px] font-medium text-accent hover:bg-accent-soft disabled:opacity-50"
+                        aria-label={`Run ${wf.title}`}
+                        title={`Run ${wf.title} now`}
+                      >
+                        {launching === wf.workflowId ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+                        Run
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value < 1_000) return String(Math.round(value));
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`;
+}
+
+/** Short human duration for the analytics tiles: 49800 → "49.8s", 125000 → "2.1m". */
+function formatDurationShort(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return '–';
+  if (ms < 1_000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  return `${(ms / 60_000).toFixed(1)}m`;
 }
 
 function InfoPanel({ title, children, className }: { title: string; children: ReactNode; className?: string }) {

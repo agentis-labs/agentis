@@ -23,12 +23,21 @@
 
 import type { AgentAdapter, ChatMessage } from '@agentis/core';
 import { parseGeneric } from './evaluatorRuntime.js';
+import { estimateTokens } from './agentSession.js';
+
+/** Model token consumption for a completion — exact when reported, else estimated. */
+export interface CompletionUsage {
+  tokensIn: number;
+  tokensOut: number;
+}
 
 export interface StructuredCompleter {
   /** A short label for the resolved source, used in inspectable build traces. */
   readonly label?: string;
   /** The last failure reason, when a call returned null. */
   readonly lastError?: string | null;
+  /** Token usage of the most recent completion (estimated for chat-only runtimes). */
+  readonly lastUsage?: CompletionUsage | null;
   completeStructured<T extends Record<string, unknown>>(args: StructuredCompletionArgs): Promise<T | null>;
 }
 
@@ -69,14 +78,18 @@ export async function completeStructuredViaAdapter<T extends Record<string, unkn
     timeoutMs?: number;
     onProgress?: (progress: StructuredCompletionProgress) => void;
   },
-): Promise<{ value: T | null; error: string | null }> {
-  if (!adapter.chat) return { value: null, error: 'the agent runtime does not support chat completions' };
+): Promise<{ value: T | null; error: string | null; usage: CompletionUsage }> {
+  // No runtime exposes exact usage through the universal chat() stream, so we
+  // estimate from prompt + accumulated output text. Tracked across attempts so a
+  // retried completion still attributes the tokens the harness actually spent.
+  const usage: CompletionUsage = { tokensIn: 0, tokensOut: 0 };
+  if (!adapter.chat) return { value: null, error: 'the agent runtime does not support chat completions', usage };
   const attempts = Math.max(1, Math.min(args.maxAttempts ?? 3, 5));
   let user = args.user;
   let lastError: string | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     // Stop before starting another (billable) attempt once the turn is canceled.
-    if (args.signal?.aborted) return { value: null, error: 'canceled' };
+    if (args.signal?.aborted) return { value: null, error: 'canceled', usage };
     let text = '';
     let errored = false;
     let adapterError: string | null = null;
@@ -127,32 +140,36 @@ export async function completeStructuredViaAdapter<T extends Record<string, unkn
       }
       if (stallTimer) clearTimeout(stallTimer);
       args.signal?.removeEventListener('abort', abortFromParent);
+      // Attribute the tokens this attempt spent (input prompt + emitted output).
+      // Retries accumulate — the harness billed each attempt.
+      usage.tokensIn += estimateTokens(args.system) + estimateTokens(user);
+      usage.tokensOut += estimateTokens(text);
     } catch (err) {
       lastError = (err as Error).message;
-      if (args.signal?.aborted) return { value: null, error: 'canceled' };
+      if (args.signal?.aborted) return { value: null, error: 'canceled', usage };
       if (attempt >= attempts - 1 || !isTransientRuntimeError(lastError)) {
-        return { value: null, error: lastError };
+        return { value: null, error: lastError, usage };
       }
       user = retryPrompt(args.user, lastError);
       continue;
     }
     if (errored) {
       lastError = adapterError ?? 'the agent runtime returned an error';
-      if (args.signal?.aborted) return { value: null, error: 'canceled' };
+      if (args.signal?.aborted) return { value: null, error: 'canceled', usage };
       if (attempt < attempts - 1 && isTransientRuntimeError(lastError)) {
         user = retryPrompt(args.user, lastError);
         continue;
       }
-      return { value: null, error: lastError };
+      return { value: null, error: lastError, usage };
     }
     const parsed = parseGeneric(text) as T | null;
-    if (parsed) return { value: parsed, error: null };
+    if (parsed) return { value: parsed, error: null, usage };
     lastError = text.trim().length === 0
       ? 'the agent runtime returned no content'
       : 'the response was not parseable as a JSON object';
     user = retryPrompt(args.user, lastError);
   }
-  return { value: null, error: lastError };
+  return { value: null, error: lastError, usage };
 }
 
 function retryPrompt(base: string, err: string): string {
@@ -163,6 +180,7 @@ function retryPrompt(base: string, err: string): string {
 export class AdapterStructuredCompleter implements StructuredCompleter {
   readonly label: string;
   lastError: string | null = null;
+  lastUsage: CompletionUsage | null = null;
   /** Default per-call timeout, sized to the adapter's latency profile. */
   readonly #defaultTimeoutMs: number;
   constructor(
@@ -186,6 +204,7 @@ export class AdapterStructuredCompleter implements StructuredCompleter {
       timeoutMs: args.timeoutMs ?? this.#defaultTimeoutMs,
     });
     this.lastError = result.error;
+    this.lastUsage = result.usage;
     return result.value;
   }
 }
@@ -197,6 +216,7 @@ export class AdapterStructuredCompleter implements StructuredCompleter {
 export class FallbackStructuredCompleter implements StructuredCompleter {
   readonly label: string;
   lastError: string | null = null;
+  lastUsage: CompletionUsage | null = null;
   constructor(private readonly sources: StructuredCompleter[]) {
     this.label = sources.map((source) => source.label ?? 'runtime').join(' → ');
   }
@@ -204,6 +224,7 @@ export class FallbackStructuredCompleter implements StructuredCompleter {
   async completeStructured<T extends Record<string, unknown>>(args: StructuredCompletionArgs): Promise<T | null> {
     for (const source of this.sources) {
       const value = await source.completeStructured<T>(args);
+      this.lastUsage = source.lastUsage ?? null;
       if (value) return value;
       this.lastError = source.lastError ?? 'runtime returned no structured result';
       if (args.signal?.aborted) return null;

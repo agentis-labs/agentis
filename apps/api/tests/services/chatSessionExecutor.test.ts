@@ -251,6 +251,27 @@ describe('ChatSessionExecutor', () => {
     expect(adapter.calls[1]!.some((message) => message.role === 'tool' && String(message.content).includes('ship chat loop'))).toBe(true);
   });
 
+  it('emits live "Using <tool>" activity cards for the marker-protocol tool round', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'tool_call', id: 'tool_1', name: 'agentis.plan', args: { goal: 'x' } };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'done' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'plan this', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_1',
+    }));
+
+    const cards = deltas.filter((d): d is Extract<ChatDelta, { type: 'activity' }> =>
+      d.type === 'activity' && d.id === 'chat-tool-tool_1');
+    expect(cards.some((c) => c.status === 'running' && /Using plan/.test(c.label))).toBe(true);
+    expect(cards.some((c) => c.status === 'success' && /Used plan/.test(c.label))).toBe(true);
+  });
+
   it('stops a runaway tool loop via the progress monitor, not a wall clock', async () => {
     // The model issues the SAME tool call with identical args every round — a
     // classic loop. There is no turn time limit anymore; the progress monitor must
@@ -401,7 +422,11 @@ describe('ChatSessionExecutor', () => {
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
 
-  it('answers marker-protocol (CLI) agents through the orchestrator runtime fast path', async () => {
+  it('answers marker-protocol (CLI) agents on their OWN runtime, never silently swapping to the orchestrator', async () => {
+    // The agent's declared runtime is authoritative. Even with an orchestrator
+    // runtime configured, a chat-capable harness answers itself — so that when
+    // its gateway is down the real error surfaces instead of a different brain
+    // silently impersonating it (e.g. a Hermes agent answered by Codex).
     const cliAdapter: AgentAdapter = {
       adapterType: 'codex',
       async connect() {},
@@ -416,12 +441,12 @@ describe('ChatSessionExecutor', () => {
         return { interactiveChat: true, toolCalling: true, toolForwarding: 'marker_protocol' as const };
       },
       async *chat() {
-        yield { type: 'text', delta: 'FROM_SLOW_CLI' };
+        yield { type: 'text', delta: 'FROM_AGENT_RUNTIME' };
         yield { type: 'done', finishReason: 'stop' as const };
       },
     };
     const runtime = new FakeChatAdapter(async function* () {
-      yield { type: 'text', delta: 'FROM_FAST_RUNTIME' };
+      yield { type: 'text', delta: 'FROM_ORCHESTRATOR' };
       yield { type: 'done', finishReason: 'stop' };
     });
     ChatSessionExecutor.configure({ orchestratorRuntime: runtime });
@@ -433,12 +458,132 @@ describe('ChatSessionExecutor', () => {
       conversationId: 'conv_fast',
     }));
 
-    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_FAST_RUNTIME' });
-    expect(deltas.some((delta) => delta.type === 'text' && delta.delta === 'FROM_SLOW_CLI')).toBe(false);
-    expect(runtime.calls).toHaveLength(1);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_AGENT_RUNTIME' });
+    expect(deltas.some((delta) => delta.type === 'text' && delta.delta === 'FROM_ORCHESTRATOR')).toBe(false);
+    expect(runtime.calls).toHaveLength(0);
   });
 
-  it('uses task-aware model routing before invoking the chat fast path', async () => {
+  it('fails a CLI-harness turn FAST with an attributed error when its runtime is unhealthy (no freeze)', async () => {
+    // The agent's own harness is down. A bounded preflight health probe must
+    // surface an immediate, attributed error instead of entering the harness and
+    // sitting in its long startup/first-event budget (the "thinking…" freeze).
+    let chatCalls = 0;
+    const downHarness: AgentAdapter = {
+      adapterType: 'hermes_agent',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: false, error: 'hermes acp gateway not reachable', checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: true, toolCalling: true, toolForwarding: 'mcp_native' as const };
+      },
+      async *chat() {
+        chatCalls += 1;
+        yield { type: 'text', delta: 'SHOULD_NOT_REACH_HARNESS' };
+        yield { type: 'done', finishReason: 'stop' as const };
+      },
+    };
+
+    const deltas = await collect(ChatSessionExecutor.turn(downHarness, [], 'hi', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_down',
+      userId: 'user_1',
+      conversationId: 'conv_down',
+    }));
+
+    expect(chatCalls).toBe(0);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
+    const failure = deltas.find((d) => d.type === 'tool_result' && d.error);
+    expect(failure).toBeTruthy();
+    expect((failure as { error: string }).error).toContain('hermes_agent runtime is unavailable');
+    expect((failure as { error: string }).error).toContain('hermes acp gateway not reachable');
+  });
+
+  it('works when turn() is DETACHED from the class and re-bound (broadcast/channel dispatch path)', async () => {
+    // The broadcast + channel dispatchers store `ChatSessionExecutor.turn` in a
+    // variable and call it. `turn` is a STATIC method that reads static private
+    // fields via `this`, so an unbound reference throws "Receiver must be class
+    // ChatSessionExecutor" and every dispatched turn dies before producing output.
+    // The dispatchers must `.bind(ChatSessionExecutor)`; this guards that contract.
+    const detachedTurn = ChatSessionExecutor.turn.bind(ChatSessionExecutor);
+    const downHarness: AgentAdapter = {
+      adapterType: 'hermes_agent',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: false, error: 'runtime offline', checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: true, toolCalling: true, toolForwarding: 'mcp_native' as const };
+      },
+      async *chat() {
+        yield { type: 'text', delta: 'unreached' };
+        yield { type: 'done', finishReason: 'stop' as const };
+      },
+    };
+
+    const deltas = await collect(detachedTurn(downHarness, [], 'hi', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_detached',
+      userId: 'user_1',
+      conversationId: 'conv_detached',
+    }));
+
+    // Reached the executor (static-private access succeeded) instead of throwing
+    // the receiver error — surfaced as the normal attributed-unavailable result.
+    const failure = deltas.find((d) => d.type === 'tool_result' && d.error) as { error: string } | undefined;
+    expect(failure?.error).toContain('runtime is unavailable');
+    expect(failure?.error ?? '').not.toContain('Receiver must be class');
+  });
+
+  it('PROCEEDS into the harness when the preflight probe merely TIMED OUT (ambiguous, not down)', async () => {
+    // A slow-to-probe-but-working runtime (e.g. Hermes Python cold-start under
+    // load) reports an AMBIGUOUS timeout. That must NOT nuke the turn — the real
+    // chat path bounds its own failure, so we proceed and let it answer.
+    let chatCalls = 0;
+    const slowProbe: AgentAdapter = {
+      adapterType: 'hermes_agent',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: false, timedOut: true, error: 'hermes probe timed out', checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: true, toolCalling: true, toolForwarding: 'mcp_native' as const };
+      },
+      async *chat() {
+        chatCalls += 1;
+        yield { type: 'text', delta: 'REAL_ANSWER' };
+        yield { type: 'done', finishReason: 'stop' as const };
+      },
+    };
+
+    const deltas = await collect(ChatSessionExecutor.turn(slowProbe, [], 'hi', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_slow',
+      userId: 'user_1',
+      conversationId: 'conv_slow',
+    }));
+
+    expect(chatCalls).toBe(1);
+    expect(deltas.some((d) => d.type === 'text' && d.delta === 'REAL_ANSWER')).toBe(true);
+    expect(deltas.some((d) => d.type === 'tool_result' && d.error)).toBe(false);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('does not divert a chat-capable agent through task-aware routing', async () => {
+    // The model router's resolveRouted (used to pick a streaming runtime) must
+    // NOT be consulted to swap a chat-capable agent away from its own runtime.
     const cliAdapter: AgentAdapter = {
       adapterType: 'claude_code',
       async connect() {},
@@ -453,7 +598,7 @@ describe('ChatSessionExecutor', () => {
         return { interactiveChat: true, toolCalling: true, toolForwarding: 'marker_protocol' as const };
       },
       async *chat() {
-        yield { type: 'text', delta: 'FROM_SLOW_CLI' };
+        yield { type: 'text', delta: 'FROM_AGENT_RUNTIME' };
         yield { type: 'done', finishReason: 'stop' as const };
       },
     };
@@ -461,6 +606,7 @@ describe('ChatSessionExecutor', () => {
       yield { type: 'text', delta: 'FROM_ROUTED_RUNTIME' };
       yield { type: 'done', finishReason: 'stop' };
     });
+    let resolveRoutedCalls = 0;
     class RecordingRouter extends OrchestratorModelRouter {
       decision: ModelRoutingDecision | null = null;
       override route(args: Parameters<OrchestratorModelRouter['route']>[0]): ModelRoutingDecision {
@@ -474,6 +620,7 @@ describe('ChatSessionExecutor', () => {
         return this.decision;
       }
       override resolveRouted(args: Parameters<OrchestratorModelRouter['resolveRouted']>[0]): AgentAdapter | undefined {
+        resolveRoutedCalls += 1;
         this.route(args);
         return runtime;
       }
@@ -491,10 +638,48 @@ describe('ChatSessionExecutor', () => {
       conversationId: 'conv_routed',
     }));
 
-    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_ROUTED_RUNTIME' });
+    // The agent answered itself; the routed runtime was never used to swap it.
+    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_AGENT_RUNTIME' });
+    expect(deltas.some((delta) => delta.type === 'text' && delta.delta === 'FROM_ROUTED_RUNTIME')).toBe(false);
+    expect(runtime.calls).toHaveLength(0);
+    expect(resolveRoutedCalls).toBe(0);
+  });
+
+  it('falls back to the orchestrator — disclosed — only when the agent has NO interactive chat', async () => {
+    // An agent whose adapter cannot chat (workflow-only) must still be able to
+    // answer a turn via the orchestrator, but the substitution is surfaced so the
+    // operator is never led to believe the agent's own runtime replied.
+    const workflowOnly: AgentAdapter = {
+      adapterType: 'hermes_agent',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: true, checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: false, toolCalling: true, toolForwarding: 'marker_protocol' as const };
+      },
+    };
+    const runtime = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'FROM_ORCHESTRATOR' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    ChatSessionExecutor.configure({ orchestratorRuntime: runtime });
+
+    const deltas = await collect(ChatSessionExecutor.turn(workflowOnly, [], 'hi', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_fallback',
+    }));
+
+    expect(deltas).toContainEqual({ type: 'text', delta: 'FROM_ORCHESTRATOR' });
     expect(runtime.calls).toHaveLength(1);
-    expect(router.decision?.selectedModel).toBe('claude-sonnet-4-6');
-    expect(router.decision?.explicitPin).toBe(false);
+    // Disclosed: a user-visible activity announces the fallback substitution.
+    expect(deltas.some((d) => d.type === 'activity' && /fallback runtime/i.test(d.label))).toBe(true);
   });
 
   it('gives a CLI harness a realistic per-round timeout when it answers directly (no runtime)', async () => {
@@ -533,6 +718,39 @@ describe('ChatSessionExecutor', () => {
     expect(seenOptions[0]?.latencyClass).toBe('interactive');
     expect(seenOptions[0]?.timeoutMs).toBe(240_000);
     expect(seenOptions[0]?.timeoutMs).not.toBe(15_000);
+  });
+
+  it('keeps lightweight social chat on a short harness round budget', async () => {
+    const seenOptions: Array<ChatInvocationOptions | undefined> = [];
+    const cliAdapter: AgentAdapter = {
+      adapterType: 'hermes_agent',
+      async connect() {},
+      async disconnect() {},
+      async healthCheck() {
+        return { isHealthy: true, checkedAt: new Date().toISOString() };
+      },
+      onEvent() {},
+      async dispatchTask() {},
+      async cancelTask() {},
+      capabilities() {
+        return { interactiveChat: true, toolCalling: true, toolForwarding: 'marker_protocol' as const };
+      },
+      async *chat(_messages, _tools, options) {
+        seenOptions.push(options);
+        yield { type: 'text', delta: "I'm good." };
+        yield { type: 'done', finishReason: 'stop' as const };
+      },
+    };
+
+    await collect(ChatSessionExecutor.turn(cliAdapter, [], 'how are you?', {
+      workspaceId: 'ws_1',
+      agentId: 'agent_1',
+      userId: 'user_1',
+      conversationId: 'conv_lightweight_harness',
+    }));
+
+    expect(seenOptions[0]?.latencyClass).toBe('interactive');
+    expect(seenOptions[0]?.timeoutMs).toBe(30_000);
   });
 
   it('does not divert native adapters when an orchestrator runtime is configured', async () => {

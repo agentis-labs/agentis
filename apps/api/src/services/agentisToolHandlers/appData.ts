@@ -33,13 +33,6 @@ import { generateSurfaceView, generateSurfacePatch } from '../surfaceGenerator.j
 import { resolveSynthesisCompleter } from './build.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';
 
-function resolveAppId(args: Record<string, unknown>, ctx: AgentisToolContext): string {
-  if (typeof args.appId === 'string' && args.appId.trim()) return args.appId;
-  if (ctx.viewport?.resourceKind === 'app' && ctx.viewport.resourceId) return ctx.viewport.resourceId;
-  // Ambient App for the turn — a resident channel agent's App (Living Apps Phase 0).
-  if (typeof ctx.appId === 'string' && ctx.appId.trim()) return ctx.appId;
-  throw new AgentisError('VALIDATION_FAILED', 'no App in context — pass appId (or open the app first)');
-}
 
 // §1.3 — the Datastore→Brain bridge must not dump raw record fields (PII/secrets)
 // into durable, recall-injected memory. We mask secret-like keys and obvious PII
@@ -80,9 +73,51 @@ function obj(value: unknown, name: string): Record<string, unknown> {
 
 const appIdProp = { appId: { type: 'string', description: 'Target App id. Omit to use the App currently open.' } } as const;
 
+// Advertised shapes MUST match the enforced zod (datastore.ts) — a loose schema
+// here makes the agent send the wrong shape and hit INTERNAL_TOOL_ERROR. These
+// mirror `querySortSchema` / `queryFilterSchema` exactly. (Drift is asserted in
+// agentisDataToolContract.test.ts.)
+const sortProp = {
+  sort: {
+    type: 'array',
+    description: 'Sort order (highest priority first). Each entry is an OBJECT, not a string. Example: [{ "field": "createdAt", "dir": "desc" }].',
+    items: {
+      type: 'object',
+      properties: { field: { type: 'string' }, dir: { type: 'string', enum: ['asc', 'desc'] } },
+      required: ['field'],
+    },
+  },
+} as const;
+const filterProp = {
+  filter: {
+    type: 'object',
+    description: 'Field → match. A bare value means equality; an operator uses { "op": "eq|ne|gt|gte|lt|lte|contains|in", "value": ... }. Example: { "status": "open", "score": { "op": "gte", "value": 8 } }.',
+  },
+} as const;
+
 export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   const stores: AppStores = buildAppStores({ db: deps.db, bus: deps.bus });
   const { store, data, surfaces } = stores;
+
+  /**
+   * Resolve the target App for a data/surface tool call. Order: explicit `appId`
+   * arg → the App the operator is viewing → the turn's ambient App. When none of
+   * those apply, resolve UNAMBIGUOUSLY (the common single-App workspace) instead of
+   * making the agent hunt for it; otherwise fail with the exact appIds to choose
+   * from so the agent's next call is correct (n8n "tell me what to fill" ergonomics).
+   */
+  const resolveAppId = (args: Record<string, unknown>, ctx: AgentisToolContext): string => {
+    if (typeof args.appId === 'string' && args.appId.trim()) return args.appId.trim();
+    if (ctx.viewport?.resourceKind === 'app' && ctx.viewport.resourceId) return ctx.viewport.resourceId;
+    if (typeof ctx.appId === 'string' && ctx.appId.trim()) return ctx.appId.trim();
+    const apps = store.list(ctx.workspaceId, {});
+    if (apps.length === 1) return apps[0]!.id;
+    if (apps.length === 0) {
+      throw new AgentisError('VALIDATION_FAILED', 'no App in context and this workspace has no Apps yet — create one (agentis.app.create) or pass appId.');
+    }
+    const list = apps.slice(0, 10).map((app) => `${app.name} (appId: ${app.id})`).join('; ');
+    throw new AgentisError('VALIDATION_FAILED', `no App in context — pass "appId". Available apps: ${list}.`);
+  };
 
   registry.registerMany([
     {
@@ -164,7 +199,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.app.scaffold',
         family: 'app',
         description:
-          'Set up an App\'s DATA model and kick off its interface. Defines the datastore `collections`, then: if a separate design model is configured it drafts a starter surface; otherwise it returns a DESIGN BRIEF and you author the console yourself with agentis.ui.render (the better result — you understand the domain). Either way, treat any starter as a starting point and enrich it into a real operating console via ui.render / ui.patch — do not ship the generic default. Use when the operator asks for an app with an interface (CRM, dashboard, tracker, pipeline, board, portal, console). An App with logic but no UI/data is INCOMPLETE.',
+          'Set up an App\'s DATA model and kick off its interface. Defines the datastore `collections`, then: if a separate design model is configured it drafts a starter surface; otherwise it returns a DESIGN BRIEF and you author the interface yourself with agentis.ui.render (the better result — you understand the domain). Either way, treat any starter as a starting point and enrich it into a real operating interface via ui.render / ui.patch — do not ship the generic default. Use when the operator asks for an app with an interface (CRM, dashboard, tracker, pipeline, board, portal, interface). An App with logic but no UI/data is INCOMPLETE.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -196,7 +231,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         }
 
         // 2) Author the surface. The capable AGENT that just designed this domain
-        //    should author the console itself — it understands the operating model
+        //    should author the interface itself — it understands the operating model
         //    a schema-only scaffold never could. So when no SEPARATE design model
         //    is configured, return a design brief and let the agent author via
         //    ui.render (the powerful path). A configured design model may draft a
@@ -213,10 +248,10 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
             source: 'agent_author' as const,
             authorYourself: true,
             directive:
-              `Data is ready. Now AUTHOR the operating console for "${prompt}" by calling agentis.ui.render — compose a bespoke surface from the full grammar ` +
-              `(KPIStrip / Hero / Tabs / Split / DataBoard / StatusBoard / Timeline / Funnel / Gauge / ProgressBar / Callout / Chart / Table / Form / AgentConsole / ActivityStream) ` +
-              `bound to these collections: ${names}. Lead with the KPIs that matter, then the pipeline/board, the gates/approvals queues, validation status, and an operator rail ` +
-              `(AgentConsole + ActivityStream) in a Split. Declare every button/form action first with agentis.ui.action_schema (kind: workflow | tool | data). Do NOT render a generic card list.`,
+              `Data is ready. Now AUTHOR the operating interface for "${prompt}" by calling agentis.ui.render — compose a bespoke surface from the full grammar ` +
+              `(KPIStrip / Hero / Tabs / Split / DataBoard / StatusBoard / Timeline / Funnel / Gauge / ProgressBar / Callout / Chart / Table / Form / ActivityStream) ` +
+              `bound to these collections: ${names}. Lead with the KPIs that matter, then the pipeline/board, the gates/approvals queues, validation status, and an activity rail ` +
+              `(ActivityStream) in a Split. Declare every button/form action first with agentis.ui.action_schema (kind: workflow | tool | data). Do NOT render a generic card list.`,
           };
         }
 
@@ -297,8 +332,8 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.data.query',
         family: 'app',
-        description: 'Query App collection records. Filter ops: eq/ne/gt/gte/lt/lte/contains/in, or a bare value for equality.',
-        inputSchema: { type: 'object', properties: { ...appIdProp, collection: { type: 'string' }, filter: { type: 'object' }, sort: { type: 'array' }, limit: { type: 'number' }, cursor: { type: 'string' } }, required: ['collection'] },
+        description: 'Query App collection records. Filter ops: eq/ne/gt/gte/lt/lte/contains/in, or a bare value for equality. Sort entries are objects: { "field", "dir" }.',
+        inputSchema: { type: 'object', properties: { ...appIdProp, collection: { type: 'string' }, ...filterProp, ...sortProp, limit: { type: 'number' }, cursor: { type: 'string' } }, required: ['collection'] },
         mutating: false,
         autoExecute: true,
       },
@@ -354,14 +389,14 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.ui.render',
         family: 'app',
         description:
-          'THE way to build a powerful App interface: YOU design and author the surface as a typed ViewNode tree — a bespoke operating console, not a generic card list. You know the domain you just built, so compose a real console from the full grammar:\n' +
+          'THE way to build a powerful App interface: YOU design and author the surface as a typed ViewNode tree — a bespoke operating interface, not a generic card list. You know the domain you just built, so compose a real interface from the full grammar:\n' +
           '• Headline metrics — KPIStrip (multiple labelled values + deltas + sparks), Metric, Gauge, ProgressBar, Callout.\n' +
           '• Layout — Hero (title banner), Tabs, Accordion, Split (main + right rail, ratio), Toolbar, Stack/Row/Grid, Divider.\n' +
           '• Data, bound to collections via { bind: { collection, query?, sort?, limit?, live? } } — DataBoard (kanban by groupBy), Table (columns + rowActions), List, StatusBoard, Timeline, Funnel, Calendar, Inbox, Chart (line/bar/area/pie).\n' +
-          '• Agent-native — AgentConsole (operator command line), ActivityStream (your live work feed), Narrative, ConversationThread, ChatThread.\n' +
+          '• Agent-native — ActivityStream (your live work feed), Narrative, ConversationThread, ChatThread.\n' +
           '• Rich content — DocumentViewer, CodeViewer, MediaGallery, MapView, Image, Avatar, Badge. CodeSurface/CustomView render your own sandboxed JS/HTML for anything bespoke.\n' +
           '• Inputs — Form (fields + submit action), Button (action). Declare every button/form action first with ui.action_schema (kind: workflow | tool | data).\n' +
-          'Compose for the operating model you designed: lead with the KPIs that matter, then the pipeline/board, gates/approvals queues, validation status, and an operator rail (AgentConsole + ActivityStream) in a Split. Replaces the surface view. Prefer this over a generic scaffold — a capable agent authoring the console directly is how Agentis ships powerful apps.',
+          'Compose for the operating model you designed: lead with the KPIs that matter, then the pipeline/board, gates/approvals queues, validation status, and an activity rail (ActivityStream) in a Split. Replaces the surface view. Prefer this over a generic scaffold — a capable agent authoring the interface directly is how Agentis ships powerful apps.',
         inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, view: { type: 'object' } }, required: ['surface', 'view'] },
         mutating: true,
         autoExecute: true,
@@ -426,7 +461,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.ui.perform_region',
         family: 'app',
         description:
-          'PERFORM a transient region into a stable AgentRegion slot on a surface, live — the console composes itself. Use to push an unprompted panel into the operator\'s view when you notice something (e.g. render a "churn risk" panel into the "attention" region because 12 deals stalled at pricing). The frame stays stable; this child is ephemeral and dismissable by the operator — UNLESS you pass pin:true (then it freezes into the stored surface). ALWAYS pass a short `reason` (it is shown to the operator as "added because …"). Pass clear:true to dismiss a region. The surface must already contain an AgentRegion with this `region` id (render the frame with one first).',
+          'PERFORM a transient region into a stable AgentRegion slot on a surface, live — the interface composes itself. Use to push an unprompted panel into the operator\'s view when you notice something (e.g. render a "churn risk" panel into the "attention" region because 12 deals stalled at pricing). The frame stays stable; this child is ephemeral and dismissable by the operator — UNLESS you pass pin:true (then it freezes into the stored surface). ALWAYS pass a short `reason` (it is shown to the operator as "added because …"). Pass clear:true to dismiss a region. The surface must already contain an AgentRegion with this `region` id (render the frame with one first).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -483,13 +518,13 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       // Living Apps Phase 2 — the resident agent FLAGS a thread for the operator
       // instead of interrupting. Use when you hit something only a human can decide
       // ("the customer wants a discount I'm not authorized to give", "this looks
-      // like a complaint that needs a manager"). The App console shows a count + a
+      // like a complaint that needs a manager"). The App interface shows a count + a
       // ◆ marker on the thread; the operator clears it by stepping in. Pass clear:true
       // to withdraw the flag once it's resolved. Targets the current thread.
       definition: {
         id: 'agentis.conversation.flag_needs_attention',
         family: 'app',
-        description: 'Flag the CURRENT conversation as needing the human operator (you do not interrupt — you raise a hand). Use when a decision is above your authority or a situation needs a person ("wants a discount I can\'t approve", "angry customer asking for a manager"). The App console surfaces it as a count + a marker. Pass clear:true to withdraw the flag once resolved.',
+        description: 'Flag the CURRENT conversation as needing the human operator (you do not interrupt — you raise a hand). Use when a decision is above your authority or a situation needs a person ("wants a discount I can\'t approve", "angry customer asking for a manager"). The App interface surfaces it as a count + a marker. Pass clear:true to withdraw the flag once resolved.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -519,5 +554,11 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         return { conversationId, needsAttention: !clear, reason: clear ? null : reason };
       },
     },
-  ]);
+  ], { defaultMcpExposed: true });
+  // ^ Every tool in this family is an agent-facing App build/operate tool (create,
+  //   define data, render/patch/declare-actions on surfaces, insert/query records).
+  //   MCP-native harnesses build apps with exactly these, so expose the whole family
+  //   over MCP — not just the in-process chat. Previously ui.render / ui.action_schema /
+  //   data.* were registered but NOT mcpExposed, so an MCP agent could scaffold + compose
+  //   but never RENDER the first surface — a dead end. (Explicit per-entry flags win.)
 }

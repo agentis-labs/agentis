@@ -23,6 +23,8 @@ import type { Logger } from '../logger.js';
 /** Minimal LLM surface — `EvaluatorRuntime` satisfies this. */
 export interface StructuredLlm {
   readonly lastError?: string | null;
+  /** Token usage of the last completion (exact when metered, estimated otherwise). */
+  readonly lastUsage?: { tokensIn: number; tokensOut: number } | null;
   completeStructured<T extends Record<string, unknown>>(args: {
     system: string;
     user: string;
@@ -50,6 +52,8 @@ export interface AgentToolLoopArgs {
   workflowId?: string;
   /** The concrete agent — scopes the Brain's agent-memory tools. */
   agentId?: string;
+  /** The run's operator — actor context for `agentis.*` platform tools (E2). */
+  userId?: string;
   /**
    * Explicit tool manifest to grant the agent. Defaults to the role's static
    * tools; pass the specialist's effective toolbox (incl. the universal default
@@ -94,6 +98,9 @@ export interface AgentToolLoopResult {
   steps: AgentToolLoopStep[];
   stoppedReason: 'final' | 'max_steps' | 'no_decision' | 'cancelled';
   toolCalls: number;
+  /** Total model token consumption across every step of the loop. */
+  tokensIn: number;
+  tokensOut: number;
   error?: string;
 }
 
@@ -120,12 +127,19 @@ export class AgentToolLoop {
     const steps: AgentToolLoopStep[] = [];
     const transcript: string[] = [];
     let toolCalls = 0;
+    // Accumulate token consumption across every model call so the engine can
+    // attribute the node's real (or estimated) spend. Captured after each call.
+    const usage = { tokensIn: 0, tokensOut: 0 };
+    const captureUsage = () => {
+      const u = this.deps.llm.lastUsage;
+      if (u) { usage.tokensIn += u.tokensIn; usage.tokensOut += u.tokensOut; }
+    };
 
     const system = this.#systemPrompt(args.role, tools, extraTools, args.runtimeAffordances ?? [], args.systemPreamble);
 
     for (let i = 0; i < maxSteps; i += 1) {
       if (args.signal?.aborted) {
-        return { output: '', steps, stoppedReason: 'cancelled', toolCalls, error: 'Run cancelled' };
+        return { output: '', steps, stoppedReason: 'cancelled', toolCalls, ...usage, error: 'Run cancelled' };
       }
       const remaining = maxSteps - i;
       const user = this.#userPrompt(args.task, transcript, remaining);
@@ -135,11 +149,12 @@ export class AgentToolLoop {
         maxTokens: 900,
         ...(args.signal ? { signal: args.signal } : {}),
       });
+      captureUsage();
 
       if (!decision) {
         const error = this.deps.llm.lastError ?? 'model returned no structured decision';
         this.deps.logger?.warn('agent_tool_loop.no_decision', { role: args.role, step: i, error });
-        return { output: lastObservationText(steps) ?? '', steps, stoppedReason: 'no_decision', toolCalls, error };
+        return { output: lastObservationText(steps) ?? '', steps, stoppedReason: 'no_decision', toolCalls, ...usage, error };
       }
 
       const thought = typeof decision.thought === 'string' ? decision.thought : undefined;
@@ -149,7 +164,7 @@ export class AgentToolLoop {
         const output = Object.prototype.hasOwnProperty.call(decision, 'output') ? decision.output : '';
         steps.push({ thought });
         args.onStep?.({ index: i, phase: 'final', thought, observation: output });
-        return { output, steps, stoppedReason: 'final', toolCalls };
+        return { output, steps, stoppedReason: 'final', toolCalls, ...usage };
       }
 
       const tool = typeof decision.tool === 'string' ? decision.tool : undefined;
@@ -167,7 +182,11 @@ export class AgentToolLoop {
       toolCalls += 1;
       args.onStep?.({ index: i, phase: 'tool_call', thought, tool, args: toolArgs });
       const res = isBridged
-        ? await this.deps.runtime.executeBridged(args.workspaceId, tool, toolArgs)
+        ? await this.deps.runtime.executeBridged(args.workspaceId, tool, toolArgs, {
+            userId: args.userId,
+            agentId: args.agentId,
+            workflowId: args.workflowId,
+          })
         : await this.deps.runtime.execute(args.workspaceId, tool as AgentTool, toolArgs, args.role, {
             workflowId: args.workflowId,
             agentId: args.agentId,
@@ -186,7 +205,7 @@ export class AgentToolLoop {
 
     // Out of steps — make one final synthesis call so the loop always produces an answer.
     if (args.signal?.aborted) {
-      return { output: '', steps, stoppedReason: 'cancelled', toolCalls, error: 'Run cancelled' };
+      return { output: '', steps, stoppedReason: 'cancelled', toolCalls, ...usage, error: 'Run cancelled' };
     }
     const finalUser = this.#userPrompt(args.task, transcript, 0);
     const final = await this.deps.llm.completeStructured<StepDecision>({
@@ -195,6 +214,7 @@ export class AgentToolLoop {
       maxTokens: 900,
       ...(args.signal ? { signal: args.signal } : {}),
     });
+    captureUsage();
     const output = final && Object.prototype.hasOwnProperty.call(final, 'output')
       ? final.output
       : (lastObservationText(steps) ?? '');
@@ -203,6 +223,7 @@ export class AgentToolLoop {
       steps,
       stoppedReason: 'max_steps',
       toolCalls,
+      ...usage,
       ...(isPresentOutput(output) ? {} : { error: this.deps.llm.lastError ?? 'agent exhausted the tool loop without output' }),
     };
   }

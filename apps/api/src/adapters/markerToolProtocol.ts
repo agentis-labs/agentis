@@ -141,19 +141,42 @@ export function stripProcessNoise(text: string): string {
 
 /**
  * Shared system-prompt block instructing a CLI runtime how to emit tool calls.
- * Kept here so Codex and Claude Code stay in lockstep with the parser above.
+ * Kept here so every marker-protocol adapter (Codex, Claude Code, Hermes) stays
+ * in lockstep with the parser above.
+ *
+ * IMPORTANT — stay TRUTHFUL about the environment. These harnesses run locally on
+ * the operator's machine and DO have their own tools and filesystem. An earlier
+ * version asserted "there is NO local filesystem", which (a) is false and (b)
+ * directly contradicts what the runtime can plainly see — a safety-aligned model
+ * then treats the whole block as a prompt-injection attempt and refuses it.
+ * Agentis is a neutral platform: it offers its platform tools as an ADDITIONAL
+ * capability and lets the agent be whatever the operator configured; it does not
+ * lie about, or fight, the runtime's native environment.
  */
-export function buildMarkerToolPrompt(tools: ToolDefinition[]): string {
+export function buildMarkerToolPrompt(tools: ToolDefinition[], opts?: { compact?: boolean }): string {
+  // Compact rendering: one line per tool (name + param keys + description), no
+  // pretty-printed JSON schema or examples. Used where the whole prompt must stay
+  // small — e.g. Hermes, whose CLI takes the prompt as an inline `-q` argument
+  // bounded by the OS command-line limit. Keeps every tool + its argument names
+  // (enough to call by marker) at a fraction of the size.
+  const toolBlock = opts?.compact
+    ? tools.map(compactToolLine).join('\n')
+    : stableJson(tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        examples: (tool as ToolDefinition & { examples?: unknown }).examples ?? [],
+        parameters: tool.parameters,
+      })));
   return [
     'Agentis interactive chat session.',
     '',
-    'You ARE Agentis. Act through Agentis tools when a tool matches the operator request.',
-    'Never tell the operator to paste JSON somewhere or run something themselves — you run it.',
+    'You also have the Agentis platform tools listed below. Use them when a tool matches the operator request.',
+    'Never tell the operator to paste JSON somewhere or run a platform action themselves — you run it.',
     '',
-    'CRITICAL — NO LOCAL ENVIRONMENT:',
-    '- There is NO local repository, codebase, or filesystem here for you to inspect.',
-    '- Do NOT run shell commands, ripgrep/grep/find, file reads, or web/code searches. They will fail or hang and waste the operator\'s time.',
-    '- The ONLY way to do anything is the AGENTIS_TOOL_CALL protocol below. Decide from the conversation and the tool list, then call the tool immediately.',
+    'AGENTIS PLATFORM TOOLS:',
+    '- To act on the Agentis platform — its workflows, data, agents, channels, and memory — use the AGENTIS_TOOL_CALL protocol below. That is the only way to reach platform state.',
+    '- These platform tools are IN ADDITION to whatever native tools your runtime already gives you; they do not replace them. Use whichever fits the request.',
+    '- When the request calls for a platform action, decide from the conversation and the tool list and call the tool immediately.',
     '',
     'TOOL CALL PROTOCOL (this CLI runtime has no native function calling):',
     '- To call a tool, output exactly one line: AGENTIS_TOOL_CALL {"name":"tool.name","arguments":{ ... }}',
@@ -164,13 +187,19 @@ export function buildMarkerToolPrompt(tools: ToolDefinition[]): string {
     '- Only answer in plain prose (no marker) when the request truly needs no tool.',
     '',
     'Available tools:',
-    stableJson(tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      examples: (tool as ToolDefinition & { examples?: unknown }).examples ?? [],
-      parameters: tool.parameters,
-    }))),
+    toolBlock,
   ].join('\n');
+}
+
+/** One compact `- name(arg1, arg2): description` line for a tool. */
+function compactToolLine(tool: ToolDefinition): string {
+  const params = tool.parameters && typeof tool.parameters === 'object'
+    ? (tool.parameters as { properties?: Record<string, unknown> }).properties
+    : undefined;
+  const keys = params && typeof params === 'object' ? Object.keys(params) : [];
+  const sig = keys.length > 0 ? `(${keys.join(', ')})` : '';
+  const description = (tool.description ?? '').replace(/\s+/g, ' ').trim();
+  return `- ${tool.name}${sig}${description ? `: ${description}` : ''}`;
 }
 
 /**

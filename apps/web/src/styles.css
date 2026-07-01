@@ -26,6 +26,7 @@
   --color-accent-hover: #22c55e;
   --color-accent-soft: rgba(74, 222, 128, 0.1);
   --color-accent-muted: rgba(74, 222, 128, 0.25);
+  --color-on-accent: #ffffff;
   --color-success: #4ade80;
   --color-success-soft: rgba(74, 222, 128, 0.1);
   --color-danger: #ef4444;
@@ -91,6 +92,7 @@
   --color-accent-hover: #065f38;
   --color-accent-soft: rgba(8, 116, 67, 0.1);
   --color-accent-muted: rgba(8, 116, 67, 0.24);
+  --color-on-accent: #ffffff;
   --color-success: #087443;
   --color-success-soft: rgba(8, 116, 67, 0.1);
   --color-danger: #b63d4d;
@@ -132,6 +134,22 @@
   --color-terminal-text: #86efac;
   --rf-canvas: var(--color-canvas);
 }
+
+/* ── Agentic App design-language panels ──────────────────────────────
+   Driven by the `--s-*` vars the renderer sets on the surface root from the
+   resolved DesignLanguage (see designLanguage.ts). One class, many looks. */
+.s-panel {
+  background: var(--s-card-bg, var(--color-surface));
+  border: var(--s-card-border, 1px solid var(--color-line));
+  border-radius: var(--s-radius, 12px);
+  box-shadow: var(--s-card-shadow, var(--shadow-card));
+}
+.s-tile {
+  background: var(--s-kpi-bg, var(--color-surface-2));
+  border: var(--s-card-border, 1px solid var(--color-line));
+  border-radius: var(--s-radius, 12px);
+}
+.s-round { border-radius: var(--s-radius, 12px); }
 
 html, body, #root {
   height: 100%;

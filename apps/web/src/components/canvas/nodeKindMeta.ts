@@ -72,8 +72,8 @@ export const NODE_KIND_META: Record<string, NodeKindMeta> = {
   planner: { label: 'Planner', glyph: '⊹', category: 'intelligence' },
   evaluator: { label: 'Evaluator', glyph: '⊨', category: 'intelligence' },
   guardrails: { label: 'Guardrails', glyph: '⊘', category: 'intelligence' },
-  // Knowledge & enrichment
-  knowledge: { label: 'Knowledge', glyph: '◇', category: 'knowledge' },
+  // Knowledge Base (RAG over uploaded docs) — distinct from the Brain (memory).
+  knowledge: { label: 'Knowledge search', glyph: '◇', category: 'knowledge' },
   artifact_collect: { label: 'Collect artifacts', glyph: '⊡', category: 'knowledge' },
   // Output surface
   return_output: { label: 'Return output', glyph: '▣', category: 'output' },

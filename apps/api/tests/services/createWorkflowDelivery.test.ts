@@ -307,7 +307,7 @@ describe('createWorkflowFromDescription — model-assisted creation', () => {
     })).rejects.toMatchObject({ code: 'WORKFLOW_SYNTHESIS_UNAVAILABLE' });
 
     const saved = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, 'workflow-protected')).get()!;
-    expect(synthesisCalls).toBe(2);
+    expect(synthesisCalls).toBe(3); // bounded self-correction passes (raised 2 → 3)
     expect(saved.title).toBe('Protected Workflow');
     expect(saved.description).toBe('Keep this graph intact');
     expect(saved.graph).toEqual(existing);

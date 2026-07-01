@@ -25,6 +25,9 @@ export interface AuditRecordInput {
   inputSummary?: string | null;
   outputSummary?: string | null;
   costCents?: number | null;
+  /** Real model token consumption attributed to this entry (terminal node entry). */
+  tokensIn?: number | null;
+  tokensOut?: number | null;
 }
 
 export class AuditTrailService {
@@ -46,6 +49,8 @@ export class AuditTrailService {
         inputSummary: clip(entry.inputSummary),
         outputSummary: clip(entry.outputSummary),
         costCents: entry.costCents ?? null,
+        tokensIn: entry.tokensIn ?? null,
+        tokensOut: entry.tokensOut ?? null,
         at: new Date().toISOString(),
       }).run();
     } catch (err) {

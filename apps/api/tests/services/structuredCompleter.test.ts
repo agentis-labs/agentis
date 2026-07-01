@@ -49,7 +49,8 @@ describe('completeStructuredViaAdapter', () => {
       timeoutMs: 12_345,
     });
 
-    expect(result).toEqual({ value: { status: 'ok' }, error: null });
+    expect(result).toMatchObject({ value: { status: 'ok' }, error: null });
+    expect(result.usage).toMatchObject({ tokensIn: expect.any(Number), tokensOut: expect.any(Number) });
     expect(invocation).toMatchObject({
       latencyClass: 'structured',
       toolMode: 'caller_loop',
@@ -104,7 +105,7 @@ describe('completeStructuredViaAdapter', () => {
     });
 
     expect(calls).toBe(2);
-    expect(result).toEqual({ value: { status: 'recovered' }, error: null });
+    expect(result).toMatchObject({ value: { status: 'recovered' }, error: null });
   });
 
   it('returns the runtime error after the bounded transient retry is exhausted', async () => {
@@ -130,7 +131,7 @@ describe('completeStructuredViaAdapter', () => {
     });
 
     expect(calls).toBe(2);
-    expect(result).toEqual({ value: null, error: 'Codex request timed out' });
+    expect(result).toMatchObject({ value: null, error: 'Codex request timed out' });
   });
 
   it('does not retry a non-transient adapter exception', async () => {
@@ -147,7 +148,7 @@ describe('completeStructuredViaAdapter', () => {
     });
 
     expect(calls).toBe(1);
-    expect(result).toEqual({ value: null, error: 'invalid runtime configuration' });
+    expect(result).toMatchObject({ value: null, error: 'invalid runtime configuration' });
   });
 });
 

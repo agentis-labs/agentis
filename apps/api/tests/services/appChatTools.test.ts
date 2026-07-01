@@ -40,6 +40,21 @@ const exec = (toolId: string, args: Record<string, unknown>, c: AgentisToolConte
   registry.execute({ id: 'r', toolId, arguments: args }, c);
 
 describe('chat-driven App build', () => {
+  it('exposes the whole App-builder family to MCP-native harnesses (ui.render/action_schema/data.* must be reachable)', () => {
+    // Regression: an MCP-native agent (codex/claude/cursor) reads tools from the
+    // mcpOnly catalog. ui.render / ui.action_schema / data.* were registered but
+    // NOT mcpExposed, so the agent could scaffold + compose but never RENDER the
+    // first surface — a dead end. The whole family must be MCP-exposed.
+    const mcpIds = new Set(registry.catalog({ mcpOnly: true }).tools.map((t) => t.id));
+    for (const id of [
+      'agentis.ui.render', 'agentis.ui.patch', 'agentis.ui.action_schema',
+      'agentis.data.define_collection', 'agentis.data.insert', 'agentis.data.query',
+      'agentis.app.list',
+    ]) {
+      expect(mcpIds.has(id), `${id} must be MCP-exposed`).toBe(true);
+    }
+  });
+
   it('builds a full data-bound app via registry tools', async () => {
     const created = await exec('agentis.app.create', { name: 'Sales CRM' });
     expect(created.ok).toBe(true);
@@ -61,7 +76,7 @@ describe('chat-driven App build', () => {
     expect((q.output as { rows: unknown[] }).rows).toHaveLength(1);
   });
 
-  it('scaffold defines the data model and briefs the AGENT to author the console (no weak auto-surface)', async () => {
+  it('scaffold defines the data model and briefs the AGENT to author the interface (no weak auto-surface)', async () => {
     const appId = ((await exec('agentis.app.create', { name: 'Fashion CRM' })).output as { appId: string }).appId;
 
     const res = await exec('agentis.app.scaffold', {
@@ -73,7 +88,7 @@ describe('chat-driven App build', () => {
     const out = res.output as { surface: string; collectionsDefined: string[]; source: string; authorYourself?: boolean; directive?: string };
     // Data IS defined...
     expect(out.collectionsDefined).toContain('leads');
-    // ...but with no separate design model, the agent is told to author the console
+    // ...but with no separate design model, the agent is told to author the interface
     // itself (a schema-only scaffold is never shipped as the "stupid standard version").
     expect(out.source).toBe('agent_author');
     expect(out.authorYourself).toBe(true);
@@ -82,7 +97,7 @@ describe('chat-driven App build', () => {
     const before = ctx.db.select({ view: schema.appSurfaces.viewJson }).from(schema.appSurfaces).where(eq(schema.appSurfaces.appId, appId)).get();
     expect(before).toBeUndefined();
 
-    // The agent authors a real console bound to the data — the powerful path.
+    // The agent authors a real interface bound to the data — the powerful path.
     const rendered = await exec('agentis.ui.render', {
       appId,
       surface: 'home',

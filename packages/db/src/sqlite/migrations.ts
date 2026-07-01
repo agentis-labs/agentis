@@ -2424,4 +2424,18 @@ ALTER TABLE conversations ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE conversations ADD COLUMN needs_attention_reason TEXT;
 `,
   },
+  {
+    version: 105,
+    name: 'audit_entry_token_usage',
+    sql: `
+-- Real per-node token consumption, recorded on the terminal node.completed audit
+-- entry so workflow/app analytics can SUM tokens (and existing cost_cents) from a
+-- single sink with no double counting. Every agent execution path (session /
+-- tool-loop / dispatch) writes here — exact when the runtime reports usage,
+-- estimated from prompt+output text otherwise. ADDITIVE nullable columns; every
+-- existing row stays unchanged. Mirrored in src/sqlite/schema.ts (auditEntries).
+ALTER TABLE audit_entries ADD COLUMN tokens_in INTEGER;
+ALTER TABLE audit_entries ADD COLUMN tokens_out INTEGER;
+`,
+  },
 ];

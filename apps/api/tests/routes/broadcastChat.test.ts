@@ -111,4 +111,63 @@ describe('Global Chat (broadcast room)', () => {
       ctx.close();
     }
   });
+
+  it('posts an honest system notice (never silence) when the agent turn errors with no text', async () => {
+    const ctx = await createTestContext();
+    seedAgent(ctx, 'Hermes');
+    const runTurn = (async function* (): AsyncIterable<ChatDelta> {
+      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: 'hermes runtime is unavailable' };
+      yield { type: 'done', finishReason: 'error' };
+    }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn;
+
+    const dispatcher = new BroadcastDispatcher({
+      db: ctx.db, adapters: fakeAdapters(), conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
+      bus: ctx.bus, logger: ctx.logger, runTurn,
+    });
+    const app = ctx.buildApp([
+      { path: '/v1/rooms', app: buildRoomRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, broadcast: dispatcher }) },
+    ]);
+    try {
+      await app.request('/v1/rooms/__broadcast__/messages', {
+        method: 'POST', headers: ctx.authHeaders,
+        body: JSON.stringify({ contentType: 'text', content: { text: '@hermes say hi' } }),
+      });
+      let notice: { authorType: string; content: { text?: string } } | undefined;
+      for (let i = 0; i < 40 && !notice; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        notice = (await listMessages(app, ctx.authHeaders)).find((m) => m.authorType === 'system');
+      }
+      expect(notice?.content.text).toContain("couldn't reply");
+      expect(notice?.content.text).toContain('hermes runtime is unavailable');
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it('posts a "not connected" notice when a mentioned agent has no interactive runtime', async () => {
+    const ctx = await createTestContext();
+    seedAgent(ctx, 'Hermes');
+    const adaptersNoChat: any = { get: (agentId: string) => ({ agentId, adapterType: 'http', adapter: {} }) };
+    const dispatcher = new BroadcastDispatcher({
+      db: ctx.db, adapters: adaptersNoChat, conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
+      bus: ctx.bus, logger: ctx.logger,
+    });
+    const app = ctx.buildApp([
+      { path: '/v1/rooms', app: buildRoomRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, broadcast: dispatcher }) },
+    ]);
+    try {
+      await app.request('/v1/rooms/__broadcast__/messages', {
+        method: 'POST', headers: ctx.authHeaders,
+        body: JSON.stringify({ contentType: 'text', content: { text: '@hermes say hi' } }),
+      });
+      let notice: { authorType: string; content: { text?: string } } | undefined;
+      for (let i = 0; i < 40 && !notice; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        notice = (await listMessages(app, ctx.authHeaders)).find((m) => m.authorType === 'system');
+      }
+      expect(notice?.content.text).toContain("isn't connected to an interactive runtime");
+    } finally {
+      ctx.close();
+    }
+  });
 });

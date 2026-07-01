@@ -37,6 +37,7 @@ import type {
 } from '../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 import type { ArtifactService } from './artifactService.js';
+import type { ChannelAccess, ChannelRecipient } from './channelAccess.js';
 
 export interface ChannelBridgeDeps {
   db: AgentisSqliteDb;
@@ -84,6 +85,8 @@ export interface CreateConnectionInput {
 export interface UpdateConnectionTargetsInput {
   defaultChatId?: string | null;
   targetAliases?: Record<string, string | null>;
+  /** Who the agent replies to, and the per-recipient/anyone rules (CHANNEL-ACCESS-10x). */
+  access?: ChannelAccess | null;
 }
 
 export interface PublicConnection {
@@ -96,6 +99,7 @@ export interface PublicConnection {
   status: string;
   defaultChatId: string | null;
   targetAliases: Record<string, string>;
+  access: ChannelAccess | null;
   transport: string | null;
   mode: string | null;
   transportStatus: string | null;
@@ -137,6 +141,7 @@ type ChannelConnectionRow = typeof schema.channelConnections.$inferSelect;
 type ChannelSettings = {
   defaultChatId?: string;
   targetAliases?: Record<string, string>;
+  access?: ChannelAccess;
   transport?: 'polling' | 'webhook' | 'gateway';
   mode?: 'qr_local' | 'cloud';
   phoneNumberId?: string;
@@ -381,6 +386,25 @@ export class ChannelBridge {
         else delete targetAliases[alias];
       }
       settings.targetAliases = targetAliases;
+    }
+    if ('access' in input) {
+      if (!input.access) {
+        delete settings.access;
+      } else {
+        const recipients = (input.access.recipients ?? [])
+          .map((r): ChannelRecipient => ({
+            handle: (r.handle ?? '').trim(),
+            ...(r.name?.trim() ? { name: r.name.trim() } : {}),
+            ...(r.rules?.trim() ? { rules: r.rules.trim() } : {}),
+          }))
+          .filter((r) => r.handle.length > 0);
+        settings.access = {
+          recipients,
+          answerAnyone: Boolean(input.access.answerAnyone),
+          ...(input.access.anyoneRules?.trim() ? { anyoneRules: input.access.anyoneRules.trim() } : {}),
+          ...(input.access.unknownReply ? { unknownReply: input.access.unknownReply } : {}),
+        };
+      }
     }
     this.deps.db
       .update(schema.channelConnections)
@@ -1028,6 +1052,7 @@ export class ChannelBridge {
   #normalizeTargetForKind(kind: ChannelKind, target: string): string {
     const trimmed = target.trim();
     if (!trimmed) throw new AgentisError('VALIDATION_FAILED', 'channel destination is required');
+    if (kind === 'telegram') return this.#normalizeTelegramTarget(trimmed);
     if (kind !== 'whatsapp') return trimmed;
     if (/@(s\.whatsapp\.net|g\.us|newsletter)$/i.test(trimmed)) return trimmed;
     const digits = trimmed.replace(/[^\d]/g, '');
@@ -1038,6 +1063,20 @@ export class ChannelBridge {
       );
     }
     return `${digits}@s.whatsapp.net`;
+  }
+
+  /**
+   * Telegram targets are numeric chat IDs (negative for groups/supergroups) or a
+   * public @username. Operators routinely paste the labelled value the Telegram
+   * UI shows (e.g. "ID: 7905735992") — strip the surrounding label so we store
+   * the bare ID, otherwise sendMessage fails with "chat not found". Only a label
+   * that wraps a single id is stripped, so @usernames and other forms pass through
+   * untouched.
+   */
+  #normalizeTelegramTarget(value: string): string {
+    if (value.startsWith('@')) return value;
+    const match = value.match(/^[^\d-]*(-?\d+)$/);
+    return match ? match[1]! : value;
   }
 
   async #telegramSelfTargetCheck(row: ChannelConnectionRow, chatId: string): Promise<ChannelHealthCheck | null> {
@@ -1236,6 +1275,7 @@ export class ChannelBridge {
       status: row.status,
       defaultChatId: settings.defaultChatId ?? null,
       targetAliases: settings.targetAliases ?? {},
+      access: settings.access ?? null,
       transport: settings.transport ?? null,
       mode: settings.mode ?? null,
       transportStatus: settings.transportStatus ?? null,

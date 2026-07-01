@@ -19,10 +19,12 @@ type Emphasis = NonNullable<StyleIntent['emphasis']>;
 // ── Box / container intent ──────────────────────────────────
 
 const ELEVATION: Record<Elevation, string> = {
+  // `raised` is the premium panel — its look is driven by the active design
+  // language's `--s-*` vars (radius / bg / border / shadow), not fixed tokens.
   flat: '',
-  raised: 'bg-surface border border-line rounded-card shadow-card',
-  inset: 'bg-canvas border border-line rounded-card',
-  outline: 'border border-line rounded-card bg-surface/40',
+  raised: 's-panel',
+  inset: 'bg-canvas border border-line s-round',
+  outline: 'border border-line s-round bg-surface/40',
 };
 
 const PAD_COMFORTABLE: Record<Pad, string> = { none: '', sm: 'p-2', md: 'p-4', lg: 'p-6', xl: 'p-8' };

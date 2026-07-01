@@ -727,3 +727,73 @@ describe('/v1/apps package install', () => {
     expect(upgrade.status).toBe(422);
   });
 });
+
+describe('App workflow control plane (E0)', () => {
+  function seedWorkflow(appId: string, title: string, triggerType: string | null): string {
+    const id = randomUUID();
+    ctx.db.insert(schema.workflows).values({
+      id,
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      appId,
+      title,
+      description: `${title} description`,
+      graph: {
+        version: 1,
+        nodes: triggerType
+          ? [{ id: 't', type: 'trigger', title: 'T', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType } }]
+          : [],
+        edges: [],
+      },
+    }).run();
+    return id;
+  }
+
+  it("lists an App's workflows with purpose, order, and trigger kind", async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Lead Engine' }).id;
+    const w1 = seedWorkflow(appId, 'Discovery', 'cron');
+    const w2 = seedWorkflow(appId, 'Outreach', 'manual');
+
+    const res = await app().request(`/v1/apps/${appId}/workflows`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const { data } = await res.json() as { data: Array<{ id: string; triggerKind: string | null; purpose: string | null; enabled: boolean }> };
+    const ids = data.map((w) => w.id);
+    expect(ids).toContain(w1);
+    expect(ids).toContain(w2);
+    const discovery = data.find((w) => w.id === w1)!;
+    expect(discovery.triggerKind).toBe('cron');
+    expect(discovery.purpose).toBe('Discovery description');
+    expect(data.every((w) => w.enabled === true)).toBe(true);
+  });
+
+  it('updates a workflow binding (order + purpose) and reflects it in the ordered list', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Ordered App' }).id;
+    const a = seedWorkflow(appId, 'A', 'manual');
+    const b = seedWorkflow(appId, 'B', 'manual');
+
+    await app().request(`/v1/apps/${appId}/workflows/${a}/binding`, {
+      method: 'PATCH', headers: ctx.authHeaders, body: JSON.stringify({ order: 2, purpose: 'runs second' }),
+    });
+    await app().request(`/v1/apps/${appId}/workflows/${b}/binding`, {
+      method: 'PATCH', headers: ctx.authHeaders, body: JSON.stringify({ order: 1, purpose: 'runs first' }),
+    });
+
+    const res = await app().request(`/v1/apps/${appId}/workflows`, { headers: ctx.authHeaders });
+    const { data } = await res.json() as { data: Array<{ id: string; purpose: string | null }> };
+    expect(data.map((w) => w.id)).toEqual([b, a]); // sorted by order ascending
+    expect(data[0]!.purpose).toBe('runs first');
+  });
+
+  it('refuses to run a workflow that is not part of the app', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'X' }).id;
+    const otherAppId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Y' }).id;
+    const foreign = seedWorkflow(otherAppId, 'Foreign', 'manual');
+    const res = await app().request(`/v1/apps/${appId}/workflows/${foreign}/run`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({}),
+    });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});

@@ -51,9 +51,11 @@ import { linkAbortSignal } from './abort.js';
 import {
   chatHardCeilingMs,
   clampChatTimeout,
+  createChatQueue,
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
   type CliChatPart,
 } from './cliChatRuntime.js';
+import { runtimeProgressActivity } from './runtimeProgress.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
 
@@ -243,6 +245,15 @@ export class AntigravityAdapter implements AgentAdapter {
     env?: Record<string, string>;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /**
+     * Live-stream callbacks. agy emits nothing to stdout, but it writes its
+     * conversation transcript progressively while it works (verified: rows appear
+     * mid-run). When these are set we tail that file and surface per-step model
+     * reasoning + tool actions as they happen — the same live trace Codex gives —
+     * instead of only revealing the final answer after exit.
+     */
+    onThought?: (text: string) => void;
+    onActivity?: (delta: Extract<ChatDelta, { type: 'activity' }>) => void;
   }): Promise<{ text: string; error?: string }> {
     const binary = this.opts.binaryPath || 'agy';
     const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(input.env ?? {}) });
@@ -252,6 +263,39 @@ export class AntigravityAdapter implements AgentAdapter {
     const unlink = linkAbortSignal(input.signal, controller);
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
+    const streaming = Boolean(input.onThought || input.onActivity);
+    // Tail state: the conversation dir agy created for this turn, the model steps
+    // we have already surfaced, and the last reasoning text (so a replace-in-place
+    // thought row only re-emits when it actually changes).
+    let tailTimer: NodeJS.Timeout | undefined;
+    let convDir: string | null = null;
+    let lastThought = '';
+    const emittedActivity = new Set<number>();
+    const pollTranscript = () => {
+      try {
+        if (!convDir) {
+          const id = newestNewConversation(brainDir, before);
+          if (id) convDir = join(brainDir, id);
+        }
+        if (!convDir) return;
+        for (const row of readTranscriptRows(convDir)) {
+          if (String(row.source ?? '').toUpperCase() !== 'MODEL') continue;
+          const thinking = firstString(row.thinking);
+          if (input.onThought && thinking && thinking !== lastThought) {
+            lastThought = thinking;
+            input.onThought(thinking);
+          }
+          const step = typeof row.step_index === 'number' ? row.step_index : -1;
+          if (input.onActivity && step >= 0 && !emittedActivity.has(step)) {
+            const activity = transcriptRowActivity(row, step);
+            if (activity) { emittedActivity.add(step); input.onActivity(activity); }
+          }
+        }
+      } catch {
+        // A transient read while agy rewrites the file must never break the turn.
+      }
+    };
+    const stopTail = () => { if (tailTimer) { clearInterval(tailTimer); tailTimer = undefined; } };
     return new Promise((resolve) => {
       let child: ReturnType<typeof spawn>;
       try {
@@ -268,6 +312,10 @@ export class AntigravityAdapter implements AgentAdapter {
         timer = setTimeout(() => { timedOut = true; controller.abort(); }, input.timeoutMs);
         timer.unref?.();
       }
+      if (streaming) {
+        tailTimer = setInterval(pollTranscript, 350);
+        tailTimer.unref?.();
+      }
       let stderrText = '';
       let stdoutText = '';
       child.stderr?.on('data', (d) => {
@@ -277,11 +325,12 @@ export class AntigravityAdapter implements AgentAdapter {
       });
       child.stdout?.on('data', (d) => { stdoutText = `${stdoutText}${String(d)}`.slice(-65536); });
       child.on('error', (err) => {
-        unlink(); if (timer) clearTimeout(timer);
+        unlink(); stopTail(); if (timer) clearTimeout(timer);
         resolve({ text: '', error: timedOut ? `Antigravity (agy) timed out` : `antigravity_error: ${err.message}` });
       });
       child.on('exit', (code) => {
-        unlink(); if (timer) clearTimeout(timer);
+        unlink(); stopTail(); if (timer) clearTimeout(timer);
+        pollTranscript(); // final sweep for any rows written just before exit
         // Read stdout synchronously (it's fully delivered by exit time).
         const parsed = extractStdoutAnswer(stdoutText);
         if (code !== 0) {
@@ -310,12 +359,13 @@ export class AntigravityAdapter implements AgentAdapter {
     tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
-    // agy is NOT a streaming-to-stdout CLI (see #runAgy / the file header): we run
-    // one `--print` turn and read the answer back from its conversation transcript,
-    // then yield it as a single text delta (plus any Agentis marker tool calls).
-    // Non-streaming, but it actually returns the answer — the honest best for agy
-    // v1.0.13 without a PTY. The full history travels in the stdin prompt, so a
-    // fresh conversation per turn is fine.
+    // agy emits nothing to stdout (see #runAgy / the file header), so the final
+    // answer is still read back from its transcript after exit. But that same
+    // transcript is written progressively WHILE agy works, so we tail it live and
+    // stream per-step reasoning + tool actions as the run unfolds — the same live
+    // trace Codex gives, instead of a silent "waiting for agent output" until the
+    // very end. The full history travels in the stdin prompt, so a fresh
+    // conversation per turn is fine.
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
       : options?.latencyClass === 'interactive'
@@ -325,32 +375,64 @@ export class AntigravityAdapter implements AgentAdapter {
           : DEFAULT_CHAT_TURN_TIMEOUT_MS;
     const timeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
     const hardCeilingMs = chatHardCeilingMs(timeoutMs, 'AGENTIS_ANTIGRAVITY_CHAT_HARD_CEILING_MS');
+    const sessionKey = options?.sessionKey?.trim() || 'default';
+    const queue = createChatQueue();
 
-    const result = await this.#runAgy({
-      args: buildAntigravityArgs(this.opts, options?.preferredModel),
-      stdin: buildAntigravityChatPrompt(messages, tools),
-      cwd: this.opts.cwd,
-      signal: options?.signal,
-      timeoutMs: hardCeilingMs > 0 ? hardCeilingMs : timeoutMs,
+    queue.push({
+      type: 'activity',
+      id: `antigravity-runtime-${sessionKey}`,
+      label: 'Starting Antigravity',
+      detail: 'Running the turn and streaming its reasoning live.',
+      phase: 'runtime',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      agentId: this.opts.agentId,
     });
 
-    if (result.error) {
-      yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: result.error };
-      yield { type: 'done', finishReason: 'error' };
-      return;
-    }
-    // The agent may have answered with Agentis tool-call markers — split them out
-    // so the platform executes them, exactly like the other CLI adapters.
-    const { cleaned, calls } = extractMarkerToolCalls(result.text);
-    const body = (cleaned || result.text).trim();
-    if (body) yield { type: 'text', delta: body };
-    for (const call of calls) {
-      yield { type: 'tool_call', id: randomUUID(), name: call.name, args: call.args };
-    }
-    if (!body && calls.length === 0) {
-      this.opts.logger.warn('antigravity.chat.empty_answer', {});
-    }
-    yield { type: 'done', finishReason: calls.length > 0 ? 'tool_calls' : 'stop' };
+    void (async () => {
+      try {
+        const result = await this.#runAgy({
+          args: buildAntigravityArgs(this.opts, options?.preferredModel),
+          stdin: buildAntigravityChatPrompt(messages, tools),
+          cwd: this.opts.cwd,
+          signal: options?.signal,
+          timeoutMs: hardCeilingMs > 0 ? hardCeilingMs : timeoutMs,
+          onThought: (text) => queue.push(runtimeProgressActivity({
+            id: `antigravity-thought-${sessionKey}`,
+            runtimeName: 'Antigravity',
+            text,
+            reasoning: true,
+            agentId: this.opts.agentId,
+          })),
+          onActivity: (delta) => queue.push(delta),
+        });
+
+        if (result.error) {
+          queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: result.error });
+          queue.push({ type: 'done', finishReason: 'error' });
+          return;
+        }
+        // The agent may have answered with Agentis tool-call markers — split them
+        // out so the platform executes them, exactly like the other CLI adapters.
+        const { cleaned, calls } = extractMarkerToolCalls(result.text);
+        const body = (cleaned || result.text).trim();
+        if (body) queue.push({ type: 'text', delta: body });
+        for (const call of calls) {
+          queue.push({ type: 'tool_call', id: randomUUID(), name: call.name, args: call.args });
+        }
+        if (!body && calls.length === 0) {
+          this.opts.logger.warn('antigravity.chat.empty_answer', {});
+        }
+        queue.push({ type: 'done', finishReason: calls.length > 0 ? 'tool_calls' : 'stop' });
+      } catch (err) {
+        queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: `antigravity_chat_failed: ${(err as Error).message}` });
+        queue.push({ type: 'done', finishReason: 'error' });
+      } finally {
+        queue.close();
+      }
+    })();
+
+    yield* queue.iterate();
   }
 
   #emit(event: NormalizedAgentEvent): void {
@@ -552,6 +634,56 @@ function newestNewConversation(brainDir: string, before: Set<string>): string | 
     }
   } catch { /* ignore */ }
   return best?.id ?? null;
+}
+
+/** Parse every JSONL row of a conversation's full transcript (best-effort). */
+function readTranscriptRows(convDir: string): Array<Record<string, unknown>> {
+  const file = join(convDir, '.system_generated', 'logs', 'transcript_full.jsonl');
+  let raw: string;
+  try { raw = readFileSync(file, 'utf8'); } catch { return []; }
+  const rows: Array<Record<string, unknown>> = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
+    } catch {
+      // A half-written final line during a live tail — skip; we re-read next tick.
+    }
+  }
+  return rows;
+}
+
+/**
+ * Surface a non-reasoning transcript row (agy's own tool / command / action) as a
+ * live activity step, or null when the row is plain model narration (reasoning is
+ * streamed separately as a thought). Tolerant of agy's evolving row vocabulary.
+ */
+function transcriptRowActivity(
+  row: Record<string, unknown>,
+  step: number,
+): Extract<ChatDelta, { type: 'activity' }> | null {
+  const type = String(row.type ?? '').toUpperCase();
+  const isToolish = /TOOL|ACTION|COMMAND|EXEC|FUNCTION/.test(type);
+  if (!isToolish) return null;
+  const name = prettyToolName(firstString(row.tool_name, row.name, row.tool) ?? humanizeAgyRowType(type));
+  const done = String(row.status ?? '').toUpperCase() === 'DONE';
+  return {
+    type: 'activity',
+    id: `antigravity-step-${step}`,
+    phase: 'tool',
+    status: done ? 'success' : 'running',
+    label: `${done ? 'Used' : 'Using'} ${name}`,
+    ...(done ? { completedAt: new Date().toISOString() } : { startedAt: new Date().toISOString() }),
+  };
+}
+
+function humanizeAgyRowType(type: string): string {
+  const lower = type.toLowerCase();
+  if (lower.includes('command') || lower.includes('exec')) return 'a command';
+  if (lower.includes('tool') || lower.includes('function')) return 'a tool';
+  return 'an action';
 }
 
 /** The final model answer from a conversation's full transcript. */

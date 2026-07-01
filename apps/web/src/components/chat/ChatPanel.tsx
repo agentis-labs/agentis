@@ -24,8 +24,9 @@ import { usePrimaryChatScopes } from './usePrimaryChatScopes';
 import { clearDraft } from './Composer';
 import { RoomCreateDialog } from './RoomCreateDialog';
 
-const MIN_DOCKED_WIDTH = 360;
+const MIN_DOCKED_WIDTH = 320;
 const MAX_DOCKED_WIDTH = 720;
+const DOCKED_WIDTH_CSS = (width: number) => `clamp(${MIN_DOCKED_WIDTH}px, ${width}px, min(${MAX_DOCKED_WIDTH}px, calc(100vw - 2rem)))`;
 
 function pathToContext(path: string): string {
   if (path === '/' || path === '/home') return 'Home';
@@ -136,7 +137,8 @@ export function ChatPanel() {
 
   function updateDockedWidth(pointerX: number) {
     const width = window.innerWidth - pointerX;
-    setDockedWidth(Math.min(MAX_DOCKED_WIDTH, Math.max(MIN_DOCKED_WIDTH, width)));
+    const max = Math.min(MAX_DOCKED_WIDTH, Math.max(MIN_DOCKED_WIDTH, window.innerWidth - 32));
+    setDockedWidth(Math.min(max, Math.max(MIN_DOCKED_WIDTH, width)));
   }
 
   function requestNewChat() {
@@ -170,7 +172,7 @@ export function ChatPanel() {
               ? 'opacity-100'
               : 'animate-slide-in-right border-l border-line opacity-100',
         )}
-        style={isFullscreen ? undefined : { width: state === 'hidden' ? 0 : `${dockedWidth}px`, maxWidth: '100vw' }}
+        style={isFullscreen ? undefined : { width: state === 'hidden' ? 0 : DOCKED_WIDTH_CSS(dockedWidth), maxWidth: 'calc(100vw - 2rem)' }}
         role={isFullscreen ? 'dialog' : 'complementary'}
         aria-label="Chat panel"
         aria-modal={isFullscreen ? true : undefined}

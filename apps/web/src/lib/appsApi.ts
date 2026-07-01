@@ -12,6 +12,9 @@ import type {
   CollectionInfo,
   AppManifestEnvelope,
   AppInstallPreview,
+  AppWorkflowSummary,
+  AppWorkflowBinding,
+  UpdateAppWorkflowBindingInput,
   SurfaceAction,
   ViewNode,
 } from '@agentis/core';
@@ -23,17 +26,6 @@ export interface GeneratedSurface {
   actions: SurfaceAction[];
   /** `model` when the agent authored it; `fallback` for the deterministic scaffold. */
   source: 'model' | 'fallback';
-}
-
-/** The agent operating an App — drives the AgentConsole presence + command line. */
-export interface AppOperator {
-  agentId: string;
-  name: string;
-  status: 'online' | 'busy' | 'offline' | 'error' | string;
-  colorHex: string | null;
-  role: 'operator' | 'worker' | string;
-  /** True when a command can be dispatched (a workflow + engine are wired). */
-  canCommand: boolean;
 }
 
 /** One seat in an App's cast (the Team strip — Phase R birth-staff). */
@@ -73,88 +65,6 @@ export interface AppConversationMessage {
   role: 'user' | 'agent' | 'system';
   content: string;
   at: string;
-}
-
-/** A contact in the App's pipeline (Phase 3 — the relationship entity). */
-export interface AppContact {
-  id: string;
-  appId: string;
-  channelKind: string | null;
-  handle: string | null;
-  displayName: string | null;
-  stage: string | null;
-  goal: string | null;
-  outcome: string | null;
-  lastTouchAt: string | null;
-  nextTouchAt: string | null;
-}
-
-/** A graded lesson the resident agent banked from a won/lost relationship (Phase M2). */
-export interface AppLearnedLesson {
-  id: string;
-  title: string;
-  summary: string;
-  outcome: string | null;
-  createdAt: string;
-}
-
-/** An ability that graduated from recurring winning patterns (Phase M2). */
-export interface AppLearnedAbility {
-  id: string;
-  name: string;
-  domainTag: string | null;
-  compileStatus: string;
-  createdAt: string;
-}
-
-export interface AppLearnings {
-  appId: string;
-  ownerAgentId: string | null;
-  lessons: AppLearnedLesson[];
-  abilities: AppLearnedAbility[];
-}
-
-/** A rehearsal guardrail/expectation the operator declares for a scenario (G8). */
-export interface SimulatorCheck {
-  id: string;
-  label: string;
-  pattern: string;
-}
-
-export interface SimulatorScenario {
-  name: string;
-  persona: { name: string; prompt: string };
-  goal: string;
-  customerTurns?: string[];
-  maxTurns?: number;
-  goalSignals?: string[];
-  guardrails?: SimulatorCheck[];
-  expectations?: SimulatorCheck[];
-}
-
-export interface SimulatedTurn {
-  index: number;
-  customer: string;
-  agent: string;
-  toolCalls: string[];
-  error?: string;
-}
-
-export interface SimulationResult {
-  appId: string;
-  agentId: string;
-  scenario: { name: string; persona: string; goal: string };
-  transcript: SimulatedTurn[];
-  score: {
-    score: number;
-    goalReached: boolean;
-    guardrailViolations: Array<{ id: string; label: string; turnIndex: number; excerpt: string }>;
-    missedExpectations: Array<{ id: string; label: string }>;
-    checks: Array<{ id: string; label: string; passed: boolean; detail?: string }>;
-    findings: string[];
-    judge: { score: number; verdict: string; reasoning: string } | null;
-  };
-  generated: boolean;
 }
 
 interface Wrapped<T> {
@@ -217,8 +127,7 @@ export const appsApi = {
       method: 'POST', body: JSON.stringify(body),
     }).then((r) => r.data),
 
-  // Operator (the agentic core)
-  operator: (id: string) => api<Wrapped<AppOperator | null>>(`/v1/apps/${id}/operator`).then((r) => r.data),
+  // Team and conversations
   team: (id: string) => api<Wrapped<AppTeam>>(`/v1/apps/${id}/team`).then((r) => r.data),
   conversations: (id: string) => api<Wrapped<AppConversation[]>>(`/v1/apps/${id}/conversations`).then((r) => r.data),
   conversationMessages: (id: string, conversationId: string) =>
@@ -238,15 +147,6 @@ export const appsApi = {
       { method: 'POST', body: JSON.stringify({ active, reason: reason ?? null }) },
     ).then((r) => r.data),
 
-  // Relationship pipeline (Phase 3) — contacts grouped by stage, each with a goal + next-touch.
-  contacts: (id: string) => api<Wrapped<AppContact[]>>(`/v1/apps/${id}/contacts`).then((r) => r.data),
-  // Learnings (Phase M2) — recent graded lessons + graduated abilities.
-  learnings: (id: string) => api<Wrapped<AppLearnings>>(`/v1/apps/${id}/learnings`).then((r) => r.data),
-  // Rehearsal (G8) — drive a synthetic customer through a scenario and score the run.
-  simulate: (id: string, scenario: SimulatorScenario, agentId?: string) =>
-    api<Wrapped<SimulationResult>>(`/v1/apps/${id}/simulate`, {
-      method: 'POST', body: JSON.stringify({ scenario, ...(agentId ? { agentId } : {}) }),
-    }).then((r) => r.data),
   // Live co-presence (G9) — heartbeat while viewing; leave on unmount. Ephemeral.
   presence: (id: string, conversationId?: string | null) =>
     api<Wrapped<{ viewers: AppPresenceViewer[] }>>(`/v1/apps/${id}/presence`, {
@@ -285,7 +185,17 @@ export const appsApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }).then((r) => r.data),
-  listWorkflowIds: (id: string) => api<Wrapped<string[]>>(`/v1/apps/${id}/workflows`).then((r) => r.data),
+  /** Workflow control plane (E0): the App's workflows with purpose/order/trigger/last-run. */
+  listWorkflows: (id: string) => api<Wrapped<AppWorkflowSummary[]>>(`/v1/apps/${id}/workflows`).then((r) => r.data),
+  /** Start one of the App's workflows; returns the new run id (202). */
+  runAppWorkflow: (id: string, workflowId: string) =>
+    api<Wrapped<{ runId: string }>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/run`, { method: 'POST' }).then((r) => r.data),
+  /** Update an App→workflow binding (purpose/order/enabled/dependsOn). */
+  updateWorkflowBinding: (id: string, workflowId: string, binding: UpdateAppWorkflowBindingInput) =>
+    api<Wrapped<AppWorkflowBinding>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/binding`, {
+      method: 'PATCH',
+      body: JSON.stringify(binding),
+    }).then((r) => r.data),
   adoptWorkflow: (id: string, workflowId: string) =>
     api<Wrapped<string[]>>(`/v1/apps/${id}/workflows`, {
       method: 'POST',

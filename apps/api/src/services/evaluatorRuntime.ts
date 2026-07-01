@@ -66,6 +66,8 @@ export class EvaluatorRuntime {
   #maxTokensField: 'max_tokens' | 'max_completion_tokens' = 'max_tokens';
   /** The last failure reason, exposed so callers can surface the real error. */
   #lastError: string | null = null;
+  /** Real token usage from the most recent backend call (this path is metered). */
+  #lastUsage: { tokensIn: number; tokensOut: number } | null = null;
 
   constructor(private readonly opts: EvaluatorRuntimeOptions) {
     this.#fetch = opts.fetchImpl ?? fetch;
@@ -75,6 +77,11 @@ export class EvaluatorRuntime {
   /** The last failure reason from a completion that returned null, or null. */
   get lastError(): string | null {
     return this.#lastError;
+  }
+
+  /** Exact token usage reported by the backend on the most recent call, or null. */
+  get lastUsage(): { tokensIn: number; tokensOut: number } | null {
+    return this.#lastUsage;
   }
 
   async evaluate(args: EvaluateArgs): Promise<EvaluatorVerdict> {
@@ -229,11 +236,17 @@ export class EvaluatorRuntime {
       }
 
       if (res.ok) {
-        const parsed = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const parsed = (await res.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
         const content = parsed.choices?.[0]?.message?.content;
         if (typeof content !== 'string') {
           throw new AgentisError('INTEGRATION_OPERATION_FAILED', 'model backend returned no content');
         }
+        this.#lastUsage = parsed.usage
+          ? { tokensIn: parsed.usage.prompt_tokens ?? 0, tokensOut: parsed.usage.completion_tokens ?? 0 }
+          : null;
         return content;
       }
 

@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
+import clsx from 'clsx';
 import { createInProcessAppClient } from '@agentis/app-client';
 import type { AppSurface } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
@@ -16,7 +17,7 @@ import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { RuntimeProvider, ViewRenderer, useDataRevision } from './ViewRenderer';
 
 export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?: string }) {
-  const [surface, setSurface] = useState<AppSurface | null>(null);
+  const [surfaces, setSurfaces] = useState<AppSurface[] | null>(null);
   const [allowCustomCode, setAllowCustomCode] = useState(false);
   const [uiState, setUiState] = useState<Record<string, unknown>>({});
   const uiStateRef = useRef(uiState);
@@ -37,12 +38,11 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
     let cancelled = false;
     setError(null);
     Promise.all([appsApi.get(appId), appsApi.listSurfaces(appId)])
-      .then(([app, surfaces]) => {
+      .then(([app, list]) => {
         if (cancelled) return;
         setAllowCustomCode(app.policy.customCode === 'allowed');
-        const match = surfaces.find((s) => s.name === activeSurfaceName) ?? surfaces[0] ?? null;
-        setSurface(match);
-        if (!match) setError('This app has no surface yet. Ask the agent to render one.');
+        setSurfaces(list);
+        if (list.length === 0) setError('This app has no surface yet. Ask the agent to render one.');
       })
       .catch((err) => {
         if (!cancelled) setError(apiErrorMessage(err));
@@ -50,7 +50,14 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
     return () => {
       cancelled = true;
     };
-  }, [activeSurfaceName, appId, reloadKey]);
+  }, [appId, reloadKey]);
+
+  // Derive the active surface from the loaded list — switching tabs is instant
+  // (no re-fetch); a SURFACE_RENDER/PATCH event bumps reloadKey to refresh views.
+  const surface = useMemo(
+    () => (surfaces ?? []).find((s) => s.name === activeSurfaceName) ?? surfaces?.[0] ?? null,
+    [surfaces, activeSurfaceName],
+  );
 
   const onSurfaceEvent = useCallback(
     (env: RealtimeEnvelope) => {
@@ -140,11 +147,37 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
   }
   return (
     <RuntimeProvider value={ctx}>
-      <div className="w-full p-4 sm:p-6">
-        {surface.view ? <ViewRenderer node={surface.view} /> : <p className="text-text-muted">Empty surface.</p>}
+      <div className="w-full">
+        {surfaces && surfaces.length > 1 ? (
+          <nav className="flex items-center gap-1 overflow-x-auto border-b border-line px-4 sm:px-6" aria-label="App surfaces">
+            {surfaces.map((s) => {
+              const active = s.name === surface.name;
+              return (
+                <button
+                  key={s.name}
+                  type="button"
+                  onClick={() => setActiveSurfaceName(s.name)}
+                  aria-current={active ? 'page' : undefined}
+                  className={clsx('-mb-px shrink-0 border-b-2 px-3 py-2.5 text-[13px] transition-colors', active ? 'border-accent text-text-primary' : 'border-transparent text-text-muted hover:text-text-secondary')}
+                >
+                  {surfaceLabel(s.name)}
+                </button>
+              );
+            })}
+          </nav>
+        ) : null}
+        <div className="w-full p-4 sm:p-6">
+          {surface.view ? <ViewRenderer node={surface.view} /> : <p className="text-text-muted">Empty surface.</p>}
+        </div>
       </div>
     </RuntimeProvider>
   );
+}
+
+/** Humanize a surface name for the nav tab ("lead_inbox" → "Lead inbox"). */
+function surfaceLabel(name: string): string {
+  const s = name.replace(/[_-]+/g, ' ').trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function getPath(source: Record<string, unknown>, path: string): unknown {

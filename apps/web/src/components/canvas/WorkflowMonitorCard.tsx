@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -66,6 +68,10 @@ interface WorkflowAnalytics {
   avgDurationMs: number | null;
   avgCostCents: number;
   totalCostCents: number;
+  /** Whether real $ cost was recorded (false for subscription CLI runtimes). */
+  metered: boolean;
+  totalTokensIn: number;
+  totalTokensOut: number;
   totalTokens: number;
   avgTokensPerRun: number;
   byStatus: Record<string, number>;
@@ -980,14 +986,18 @@ function AnalyticsDetails({
         <span className="flex-1 text-[11px] font-medium text-text-primary">Run analytics</span>
         <RefreshButton label="Refresh workflow analytics" onClick={onRefresh} />
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <Metric label="Runs" value={String(analytics.runs)} />
-        <Metric label="Success" value={analytics.successRate == null ? '-' : `${Math.round(analytics.successRate * 100)}%`} />
+        <Metric label="Success" value={analytics.successRate == null ? '–' : `${Math.round(analytics.successRate * 100)}%`} />
         <Metric label="Avg duration" value={formatDuration(analytics.avgDurationMs)} />
-        <Metric label="Avg cost" value={`$${(analytics.avgCostCents / 100).toFixed(3)}`} />
-        <Metric label="Tokens" value={analytics.totalTokens.toLocaleString()} />
-        <Metric label="Avg tokens" value={analytics.avgTokensPerRun.toLocaleString()} />
       </div>
+      <TokenSummary
+        total={analytics.totalTokens}
+        tokensIn={analytics.totalTokensIn}
+        tokensOut={analytics.totalTokensOut}
+        perRun={analytics.avgTokensPerRun}
+      />
+      <CostSummary metered={analytics.metered} avgCostCents={analytics.avgCostCents} totalCostCents={analytics.totalCostCents} />
       {Object.keys(analytics.byStatus).length > 0 && (
         <div className="border-t border-white/10 pt-2">
           <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-text-muted">Run outcomes</div>
@@ -1072,6 +1082,66 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="mt-0.5 text-[13px] font-semibold text-text-primary">{value}</div>
     </div>
   );
+}
+
+/**
+ * Token consumption — the headline analytics signal. One tile replaces the old
+ * confusing "Tokens" + "Avg tokens" pair: a big total, the in/out split, and the
+ * per-run average folded in as a caption.
+ */
+function TokenSummary({
+  total,
+  tokensIn,
+  tokensOut,
+  perRun,
+}: {
+  total: number;
+  tokensIn: number;
+  tokensOut: number;
+  perRun: number;
+}) {
+  return (
+    <div className="rounded-lg border border-accent/25 bg-accent-soft/30 px-3 py-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-accent">Tokens consumed</span>
+        <span className="text-[10px] text-text-muted">~{formatTokens(perRun)}/run</span>
+      </div>
+      <div className="mt-0.5 text-[20px] font-semibold leading-tight text-text-primary">{formatTokens(total)}</div>
+      <div className="mt-1 flex items-center gap-3 text-[10.5px] text-text-secondary">
+        <span className="inline-flex items-center gap-1"><ArrowDownRight size={11} className="text-text-muted" /> {formatTokens(tokensIn)} in</span>
+        <span className="inline-flex items-center gap-1"><ArrowUpRight size={11} className="text-text-muted" /> {formatTokens(tokensOut)} out</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Cost is meaningful only on metered (API-key) runtimes. Subscription CLI
+ * harnesses (Codex / Claude / Antigravity) have no per-run dollar cost, so we
+ * say so honestly instead of showing a misleading $0.000.
+ */
+function CostSummary({ metered, avgCostCents, totalCostCents }: { metered: boolean; avgCostCents: number; totalCostCents: number }) {
+  if (!metered) {
+    return (
+      <div className="rounded-lg border border-white/10 bg-surface/40 px-3 py-2 text-[10.5px] text-text-muted">
+        Subscription runtime — cost not metered. Tokens above are the spend signal.
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <Metric label="Avg cost / run" value={`$${(avgCostCents / 100).toFixed(3)}`} />
+      <Metric label="Total cost" value={`$${(totalCostCents / 100).toFixed(2)}`} />
+    </div>
+  );
+}
+
+/** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value < 1_000) return String(Math.round(value));
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`;
 }
 
 function formatRunStatus(status: string): string {

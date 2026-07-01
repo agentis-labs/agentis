@@ -105,11 +105,14 @@ export class BroadcastDispatcher {
     agentId: string;
     userMessage: string;
   }): Promise<void> {
+    const name = this.#agentName(args.agentId);
     const reg = this.deps.adapters.get(args.agentId);
     if (!reg?.adapter?.chat) {
-      // Not wired into an interactive harness — stay quiet rather than spam the
-      // room with a capability error on every mention.
+      // Not wired into an interactive harness. Don't stay silent — the operator
+      // @mentioned this agent and deserves to know why nothing came back.
       this.deps.logger.info('broadcast.dispatch.skipped_no_chat', { agentId: args.agentId });
+      this.#postLine(args.workspaceId, args.roomId, 'system', null,
+        `⚠️ ${name} isn't connected to an interactive runtime, so it can't answer in Global Chat.`);
       return;
     }
 
@@ -131,23 +134,61 @@ export class BroadcastDispatcher {
       maxTurns: 4,
     };
 
-    const runTurn = this.deps.runTurn ?? ChatSessionExecutor.turn;
+    // `turn` is a STATIC method that reads static private fields via `this`, so it
+    // must keep its class as the receiver. Calling a bare `ChatSessionExecutor.turn`
+    // reference unbound throws "Receiver must be class ChatSessionExecutor" — which
+    // is exactly what made every Global Chat turn fail. Bind it. (A test override is
+    // a plain function and needs no binding.)
+    const runTurn = this.deps.runTurn ?? ChatSessionExecutor.turn.bind(ChatSessionExecutor);
     let reply = '';
+    let adapterError = '';
+    let sawConfirmation = false;
+    let finishReason: string | undefined;
     try {
       for await (const delta of runTurn(reg.adapter, history, args.userMessage, turnContext)) {
         if (delta.type === 'text') reply += delta.delta;
-        if (delta.type === 'done') break;
+        else if (delta.type === 'confirmation_required') sawConfirmation = true;
+        else if (delta.type === 'tool_result' && delta.error) adapterError = delta.error;
+        else if (delta.type === 'done') { finishReason = delta.finishReason; break; }
       }
     } catch (error) {
-      this.deps.logger.error('broadcast.dispatch.turn_error', {
-        agentId: args.agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      adapterError = error instanceof Error ? error.message : String(error);
+      this.deps.logger.error('broadcast.dispatch.turn_error', { agentId: args.agentId, error: adapterError });
     }
 
     const text = reply.trim();
-    if (!text) return;
-    this.#postAgentReply(args.workspaceId, args.roomId, args.agentId, text);
+    if (text) {
+      this.#postLine(args.workspaceId, args.roomId, 'agent', args.agentId, text);
+      return;
+    }
+
+    // The turn produced no answer text. NEVER leave the operator wondering —
+    // post an honest, scoped notice about WHY (the whole point of the feature is
+    // that an @mention does something visible).
+    if (sawConfirmation) {
+      this.#postLine(args.workspaceId, args.roomId, 'system', null,
+        `🔒 ${name} needs to run a tool that requires your approval — open its direct chat to approve it (Global Chat can't show approval prompts).`);
+    } else if (adapterError || finishReason === 'error') {
+      this.#postLine(args.workspaceId, args.roomId, 'system', null,
+        `⚠️ ${name} couldn't reply: ${trimReason(adapterError) || 'its runtime returned an error.'}`);
+    } else {
+      this.#postLine(args.workspaceId, args.roomId, 'system', null,
+        `${name} didn't have anything to add.`);
+    }
+  }
+
+  /** Agent display name for an operator-facing notice; falls back gracefully. */
+  #agentName(agentId: string): string {
+    try {
+      const row = this.deps.db
+        .select({ name: schema.agents.name })
+        .from(schema.agents)
+        .where(eq(schema.agents.id, agentId))
+        .get();
+      return row?.name?.trim() || 'The agent';
+    } catch {
+      return 'The agent';
+    }
   }
 
   /** Recent room lines as chat history (operator → user, agent → assistant). */
@@ -175,14 +216,20 @@ export class BroadcastDispatcher {
     return history;
   }
 
-  #postAgentReply(workspaceId: string, roomId: string, agentId: string, text: string): void {
+  #postLine(
+    workspaceId: string,
+    roomId: string,
+    authorType: 'agent' | 'system',
+    authorId: string | null,
+    text: string,
+  ): void {
     const now = new Date().toISOString();
     const message = {
       id: randomUUID(),
       roomId,
       workspaceId,
-      authorType: 'agent' as const,
-      authorId: agentId,
+      authorType,
+      authorId,
       contentType: 'text' as const,
       content: { text } as Record<string, unknown>,
       replyToId: null,
@@ -202,6 +249,12 @@ export class BroadcastDispatcher {
 
 function normalizeHandle(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** Keep an operator-facing failure reason short and single-line. */
+function trimReason(reason: string): string {
+  const value = reason.trim().replace(/\s+/g, ' ');
+  return value.length > 200 ? `${value.slice(0, 199)}…` : value;
 }
 
 function roomMessageText(content: unknown): string {

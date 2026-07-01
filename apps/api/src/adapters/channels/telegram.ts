@@ -19,6 +19,22 @@ import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInbo
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
+/**
+ * Effective Telegram inbound transport for a connection.
+ *
+ * Long polling needs no public URL, so a self-hosted / local install (no
+ * AGENTIS_PUBLIC_URL) defaults to polling and "just works" with zero extra
+ * config; a deployment that has a public URL defaults to the webhook. An
+ * explicit operator choice ('polling' | 'webhook') always wins. This is the
+ * single source of truth shared by the ChannelConnectionSupervisor (which boots
+ * the live poll loop) and the ChannelBridge diagnostics, so they never disagree
+ * about which transport a Telegram connection uses.
+ */
+export function resolveTelegramTransport(opts: { explicit?: string | null; hasPublicUrl: boolean }): 'polling' | 'webhook' {
+  if (opts.explicit === 'polling' || opts.explicit === 'webhook') return opts.explicit;
+  return opts.hasPublicUrl ? 'webhook' : 'polling';
+}
+
 export class TelegramChannelAdapter implements ChannelAdapter {
   readonly kind = 'telegram' as const;
 

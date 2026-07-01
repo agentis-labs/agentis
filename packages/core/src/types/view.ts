@@ -60,8 +60,19 @@ export const accentSchema = z.enum([
 export type AccentName = z.infer<typeof accentSchema>;
 
 /** Per-surface look preset (read from the ROOT node's style). */
-export const surfaceThemeSchema = z.enum(['console', 'analytics', 'product', 'editorial']);
+export const surfaceThemeSchema = z.enum(['operations', 'analytics', 'product', 'editorial']);
 export type SurfaceTheme = z.infer<typeof surfaceThemeSchema>;
+
+/**
+ * Per-surface DESIGN LANGUAGE (root-only) — a named bundle of visual decisions
+ * (radii, shadow/elevation, card treatment, gradient policy, type scale, palette)
+ * that the renderer lowers to scoped CSS variables. Where `theme` sets density +
+ * default accent + width, `design` sets the *look*: the same ViewNode tree renders
+ * in genuinely different, all-premium styles. Absent → `operations` (elevated).
+ * Agents pick an id from this enum — never raw CSS (same contract as StyleIntent).
+ */
+export const designLanguageSchema = z.enum(['operations', 'aurora', 'soft', 'editorial', 'console']);
+export type DesignLanguage = z.infer<typeof designLanguageSchema>;
 
 /**
  * Optional, enum-bounded visual intent attachable to any node. The renderer
@@ -82,6 +93,8 @@ export const styleIntentSchema = z.object({
   scroll: z.boolean().optional(),
   /** Root-only: the surface look preset. */
   theme: surfaceThemeSchema.optional(),
+  /** Root-only: the surface design language (look bundle → scoped CSS vars). */
+  design: designLanguageSchema.optional(),
   /** Root-only: information density. */
   density: z.enum(['comfortable', 'compact']).optional(),
 });
@@ -158,7 +171,6 @@ type ViewNodeBase =
   | { type: 'Badge'; value: Bindable; tone?: 'neutral' | 'success' | 'warning' | 'danger' }
   | { type: 'Divider' }
   // ── Agent-native composites — what makes a surface an *Agentic* App ──
-  | { type: 'AgentConsole'; title?: string; prompt?: string }
   | { type: 'ActivityStream'; title?: string; limit?: number }
   | { type: 'DataBoard'; bind: DataBind; groupBy: string; titleField?: string }
   // chronological events — static items or bound to a collection
@@ -195,6 +207,10 @@ type ViewNodeBase =
   | { type: 'Calendar'; title?: string; bind?: DataBind; dateField?: string; labelField?: string; events?: Array<{ date: string; label: string; tone?: Tone }> }
   // Radial gauge for a single metric.
   | { type: 'Gauge'; label?: string; value: Bindable; max?: number; tone?: Tone }
+  // Workflow control plane (Agentic-Apps) — the App's OWN workflows with purpose,
+  // order, trigger kind, last run, and a run/pause control per row. App-scoped: it
+  // reads the current App from the runtime (no bind), so an agent just drops it in.
+  | { type: 'WorkflowControl'; title?: string }
   /**
    * Escape hatch (§4.5/§4.6) — agent-written HTML/JS rendered in a hardened,
    * null-origin sandboxed iframe. NO network egress (CSP connect-src 'none');
@@ -219,8 +235,15 @@ export type ViewNode = ViewNodeBase & { style?: StyleIntent };
 // changing the discriminated-union shape the renderer switches on.
 const styled = { style: styleIntentSchema.optional() } as const;
 
+// IMPORTANT: a DISCRIMINATED union on `type`, not a plain `z.union`. A plain union
+// validates a malformed node against EVERY member and aggregates `unionErrors`
+// recursively — for a recursive tree that is O(members^depth), so one bad deep
+// view tree produces a multi-hundred-MB ZodError and OOM-kills the process
+// (observed: a 408-level-nested error blob → "JavaScript heap out of memory").
+// A discriminated union reads `type` and validates ONLY that branch → linear, and
+// an unknown/missing `type` yields a single bounded discriminator error.
 export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
-  z.union([
+  z.discriminatedUnion('type', [
     z.object({ type: z.literal('Stack'), gap: z.number().optional(), children: z.array(viewNodeSchema), ...styled }),
     z.object({ type: z.enum(['Row', 'Grid']), gap: z.number().optional(), widths: z.array(z.number().positive()).optional(), columns: z.number().int().positive().max(12).optional(), children: z.array(viewNodeSchema), ...styled }),
     z.object({ type: z.enum(['Card', 'Section']), title: z.string().optional(), children: z.array(viewNodeSchema), ...styled }),
@@ -257,7 +280,6 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     z.object({ type: z.literal('Button'), label: z.string(), action: actionRefSchema, variant: z.enum(['primary', 'secondary', 'danger']).optional(), ...styled }),
     z.object({ type: z.literal('Badge'), value: bindableSchema, tone: z.enum(['neutral', 'success', 'warning', 'danger']).optional(), ...styled }),
     z.object({ type: z.literal('Divider'), ...styled }),
-    z.object({ type: z.literal('AgentConsole'), title: z.string().optional(), prompt: z.string().optional(), ...styled }),
     z.object({ type: z.literal('ActivityStream'), title: z.string().optional(), limit: z.number().int().positive().max(100).optional(), ...styled }),
     z.object({ type: z.literal('DataBoard'), bind: dataBindSchema, groupBy: z.string().min(1), titleField: z.string().optional(), ...styled }),
     z.object({ type: z.literal('Timeline'), title: z.string().optional(), items: z.array(z.object({ title: z.string(), detail: z.string().optional(), at: z.string().optional(), tone: toneSchema.optional() })).optional(), bind: dataBindSchema.optional(), titleField: z.string().optional(), detailField: z.string().optional(), atField: z.string().optional(), ...styled }),
@@ -276,6 +298,7 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     z.object({ type: z.literal('Funnel'), title: z.string().optional(), stages: z.array(z.object({ label: z.string(), value: z.number() })).optional(), bind: dataBindSchema.optional(), labelField: z.string().optional(), valueField: z.string().optional(), ...styled }),
     z.object({ type: z.literal('Calendar'), title: z.string().optional(), bind: dataBindSchema.optional(), dateField: z.string().optional(), labelField: z.string().optional(), events: z.array(z.object({ date: z.string(), label: z.string(), tone: toneSchema.optional() })).optional(), ...styled }),
     z.object({ type: z.literal('Gauge'), label: z.string().optional(), value: bindableSchema, max: z.number().positive().optional(), tone: toneSchema.optional(), ...styled }),
+    z.object({ type: z.literal('WorkflowControl'), title: z.string().optional(), ...styled }),
     z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
     z.object({ type: z.literal('CodeSurface'), code: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
   ]) as z.ZodType<ViewNode>,

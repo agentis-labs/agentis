@@ -52,7 +52,7 @@ describe('OrchestratorModelRouter', () => {
     });
 
     expect(router.profile('conversation')?.model).toBe('claude-opus-4-8');
-    expect(routed.profile?.model).toBe('claude-sonnet-4-6');
+    expect(routed.profile?.model).toBe('claude-sonnet-5');
     expect(routed.decision.explicitPin).toBe(false);
     expect(routed.decision.modelTier).toBe('balanced');
     expect(routed.decision.alternatives.some((alt) => alt.model === 'claude-opus-4-8')).toBe(true);
@@ -97,7 +97,7 @@ describe('OrchestratorModelRouter', () => {
     const adapter = router.resolveForAgent('agent_1', 'ws_1', 'Write a short welcome email.');
     const context = await adapter?.getRuntimeContext?.();
 
-    expect(context?.currentModel).toBe('claude-sonnet-4-6');
+    expect(context?.currentModel).toBe('claude-sonnet-5');
   });
 
   it('per-role override: planning and synthesis target different models', () => {
@@ -198,7 +198,7 @@ describe('OrchestratorModelRouter', () => {
     expect(router.profile('synthesis', 'ws-1')?.model).toBe('claude-opus-4-8');
     expect(routed.profile).toEqual({
       baseUrl: 'https://api.example.com/v1',
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       apiKey: 'k',
     });
     expect(routed.decision.explicitPin).toBe(false);

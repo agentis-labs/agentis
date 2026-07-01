@@ -41,8 +41,6 @@ describe('generateSurfaceView', () => {
     const result = await generateSurfaceView({ prompt: 'something', collections: [], workspaceId: 'ws-1' });
     expect(result.source).toBe('fallback');
     expect(result.actions).toEqual([]);
-    // Operator-centric by default: the agent's presence + live activity lead the surface.
-    expect(JSON.stringify(result.view)).toContain('AgentConsole');
     expect(JSON.stringify(result.view)).toContain('ActivityStream');
   });
 

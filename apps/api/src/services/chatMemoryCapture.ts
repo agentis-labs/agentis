@@ -7,6 +7,7 @@ import type { MemoryStore } from './memoryStore.js';
 import type { PeerProfileService } from './peerProfileService.js';
 import type { SessionMomentService } from './sessionMomentService.js';
 import { classifyPacer } from './brainPacer.js';
+import { extractOperatorCandidates } from './brainFormation.js';
 import { looksSensitive } from './brainText.js';
 
 type CapturedMemoryKind = 'fact' | 'preference' | 'rule' | 'lesson';
@@ -71,9 +72,6 @@ export class ChatMemoryCaptureService {
     const userMessage = args.userMessage.trim();
     if (!userMessage) return result;
 
-    const signals = extractOperatorSignals(userMessage, displayName(args));
-    result.signals = signals.length;
-
     try {
       result.peerUpdateJobIds.push(...this.#enqueuePeerUpdates(args));
     } catch (err) {
@@ -84,15 +82,10 @@ export class ChatMemoryCaptureService {
       });
     }
 
+    // The full turn is kept as an episodic trace (session search / peer profiles);
+    // durable memory is formed below, so we no longer auto-promote moments here.
     try {
-      result.sessionMomentId = this.#captureSessionMoment(args, signals);
-      if (result.sessionMomentId && signals.length === 0 && this.deps.sessionMoments) {
-        result.promotedSessionMoments = this.deps.sessionMoments.promoteEligible({
-          workspaceId: args.workspaceId,
-          sessionId: args.conversationId,
-          queue: this.deps.brainQueue,
-        }).enqueued;
-      }
+      result.sessionMomentId = this.#captureSessionMoment(args, []);
     } catch (err) {
       this.deps.logger.warn('chat.memory_capture.session_moment_failed', {
         workspaceId: args.workspaceId,
@@ -101,24 +94,71 @@ export class ChatMemoryCaptureService {
       });
     }
 
-    for (const signal of signals) {
-      try {
-        const memoryId = this.#writeWorkspaceMemory(args, signal);
-        if (memoryId) result.workspaceMemoryIds.push(memoryId);
-      } catch (err) {
-        this.deps.logger.warn('chat.memory_capture.workspace_memory_failed', {
-          workspaceId: args.workspaceId,
-          conversationId: args.conversationId,
-          message: (err as Error).message,
-        });
+    if (this.deps.brainQueue) {
+      // PRIMARY PATH — route the turn through the SAME formation pipeline runs use
+      // (cognitive promotion queue → SharedIntelligence.promote → FormationJudge):
+      // the operator's words are mined permissively (extractOperatorCandidates) and
+      // reconciled against existing memory (ADD/UPDATE/NOOP), so restating a rule
+      // UPDATEs it instead of writing a duplicate, and durable even without a model.
+      const operatorCandidates = extractOperatorCandidates(userMessage);
+      result.signals = operatorCandidates.length;
+      if (operatorCandidates.length > 0) {
+        try {
+          this.deps.brainQueue.enqueue({
+            workspaceId: args.workspaceId,
+            itemType: 'atom_promotion',
+            priority: 'normal',
+            payload: {
+              workspaceId: args.workspaceId,
+              agentId: args.agentId,
+              // Operator statements belong to the workspace mind (all agents recall
+              // them); the judge may still scope a memory to the agent.
+              scopeId: null,
+              memoryPolicy: 'form',
+              originSurface: 'operator_chat',
+              operatorText: userMessage,
+              taskOutput: (args.assistantMessage ?? '').trim(),
+              taskTitle: `Operator chat${args.userDisplayName ? ` with ${args.userDisplayName}` : ''}`,
+              taskInput: {
+                source: 'operator_chat',
+                conversationId: args.conversationId,
+                activeWorkflowId: args.activeWorkflowId ?? null,
+                activeNodeId: args.activeNodeId ?? null,
+              },
+            },
+          });
+        } catch (err) {
+          this.deps.logger.warn('chat.memory_capture.formation_enqueue_failed', {
+            workspaceId: args.workspaceId,
+            conversationId: args.conversationId,
+            message: (err as Error).message,
+          });
+        }
       }
-
+    } else {
+      // FALLBACK (no promotion queue wired) — preserve durable capture with the
+      // legacy regex extractor + direct write so chat never silently stops learning.
+      const signals = extractOperatorSignals(userMessage, displayName(args));
+      result.signals = signals.length;
+      for (const signal of signals) {
+        try {
+          const memoryId = this.#writeWorkspaceMemory(args, signal);
+          if (memoryId) result.workspaceMemoryIds.push(memoryId);
+        } catch (err) {
+          this.deps.logger.warn('chat.memory_capture.workspace_memory_failed', {
+            workspaceId: args.workspaceId,
+            conversationId: args.conversationId,
+            message: (err as Error).message,
+          });
+        }
+      }
     }
 
     if (
       result.peerUpdateJobIds.length > 0 ||
       result.sessionMomentId ||
-      result.workspaceMemoryIds.length > 0
+      result.workspaceMemoryIds.length > 0 ||
+      result.signals > 0
     ) {
       this.deps.logger.info('chat.memory_capture.completed', {
         workspaceId: args.workspaceId,
@@ -126,9 +166,8 @@ export class ChatMemoryCaptureService {
         conversationId: args.conversationId,
         peerUpdates: result.peerUpdateJobIds.length,
         sessionMoment: Boolean(result.sessionMomentId),
-        promotedSessionMoments: result.promotedSessionMoments,
+        formationEnqueued: Boolean(this.deps.brainQueue),
         workspaceMemories: result.workspaceMemoryIds.length,
-        signals: result.signals,
       });
     }
 

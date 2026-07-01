@@ -30,6 +30,7 @@ import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt, formatToolManifestAwareness } from './markerToolProtocol.js';
+import { toolActivityLabel } from './runtimeProgress.js';
 import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
 import { linkAbortSignal } from './abort.js';
 import {
@@ -215,12 +216,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const unlinkAbort = linkAbortSignal(task.signal, ctrl);
     this.#inFlight.set(task.taskId, ctrl);
     const bin = this.opts.binaryPath ?? 'claude';
+    // See chat(): no default turn cap (Codex parity); pass `--max-turns` only when
+    // the operator explicitly configured one, so the engine — not an arbitrary CLI
+    // flag — owns when a node stops.
+    const dispatchTurnCap = typeof this.opts.maxTurns === 'number' && this.opts.maxTurns > 0 ? this.opts.maxTurns : null;
     const args = [
       '--print',
       '--output-format=stream-json',
       '--verbose',
       '--include-partial-messages',
-      `--max-turns=${this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24}`,
+      ...(dispatchTurnCap ? [`--max-turns=${dispatchTurnCap}`] : []),
       '--dangerously-skip-permissions',
       ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
@@ -274,12 +279,20 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       this.#inFlight.delete(task.taskId);
       if (timeout) clearTimeout(timeout);
     });
-    child.stderr?.on('data', (d) =>
-      this.opts.logger.warn('claude_code.stderr', { data: String(d).slice(0, 512) }),
-    );
+    let stderrTail = '';
+    child.stderr?.on('data', (d) => {
+      const chunk = String(d);
+      stderrTail = `${stderrTail}${chunk}`.slice(-4096);
+      this.opts.logger.warn('claude_code.stderr', { data: chunk.slice(0, 512) });
+    });
 
     let buffer = '';
     let lastOutput: Record<string, unknown> | undefined;
+    // The real failure cause, captured from the stream so a workflow agent_task
+    // fails HONESTLY (e.g. "stopped at its tool-turn limit") instead of the opaque
+    // "claude_code exited 1" — which the engine's self-heal and the operator need
+    // to recover correctly.
+    let dispatchError = '';
     let turns = 0;
     child.stdout?.on('data', (chunk) => {
       buffer += String(chunk);
@@ -290,6 +303,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         if (!line) continue;
         try {
           const ev = JSON.parse(line) as { type: string; [k: string]: unknown };
+          const streamErr = claudeStreamError(ev);
+          if (streamErr) dispatchError = streamErr;
           if (ev.type === 'assistant' || ev.type === 'thinking') {
             turns += 1;
             this.#emit({
@@ -346,7 +361,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
           timestamp: at(),
         });
       } else {
-        this.#emitFailure(task, `claude_code exited ${code}`);
+        const detail = dispatchError.trim() || stderrTail.trim();
+        this.#emitFailure(task, enrichClaudeFailure(detail || `Claude Code exited ${code}`, this.opts.env));
       }
     });
 
@@ -374,15 +390,20 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ?? (this.opts.sessionStore && this.opts.workspaceId
         ? this.opts.sessionStore.get(this.opts.workspaceId, this.opts.agentId, sessionKey)?.runtimeSessionId
         : undefined);
-    const maxTurns = options?.latencyClass === 'interactive'
-      ? Math.min(this.opts.maxTurns ?? 4, 4)
-      : this.opts.maxTurns ?? CONSTANTS.AGENT_TASK_MAX_TURNS_DEFAULT ?? 24;
+    // NO default `--max-turns`. Codex passes no turn cap and never fails on one;
+    // Claude Code's `--max-turns` turns into `error_max_turns` → exit 1 → a hard
+    // FAILED that throws the work away, and raising the number only moves the wall.
+    // So we pass it ONLY when the operator explicitly configured one (and even then
+    // hitting it is a soft, resumable stop — see cliChatRuntime). Unset = run to
+    // completion like Codex; runaway is bounded by the chat loop's idle/hard ceiling
+    // + ChatProgressMonitor and, on dispatch, the engine's node ceilings.
+    const turnCap = typeof this.opts.maxTurns === 'number' && this.opts.maxTurns > 0 ? this.opts.maxTurns : null;
     const args = [
       '--print',
       '--output-format=stream-json',
       '--verbose',
       '--include-partial-messages',
-      `--max-turns=${maxTurns}`,
+      ...(turnCap ? [`--max-turns=${turnCap}`] : []),
       '--dangerously-skip-permissions',
       ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
@@ -681,7 +702,18 @@ function claudeStreamError(ev: { [k: string]: unknown }): string | null {
     ev.text,
     ev.content,
   ) ?? extractClaudeText(ev);
-  return `${status}${message || 'Claude Code reported an error.'}`.trim();
+  if (message) return `${status}${message}`.trim();
+  // No message text — Claude Code's terminal `result` event carries the cause in
+  // `subtype` instead (e.g. `error_max_turns`). Derive a real, actionable message
+  // from it rather than the useless "Claude Code reported an error.".
+  if (subtype === 'error_max_turns') {
+    const turns = typeof ev.num_turns === 'number' ? ev.num_turns : undefined;
+    return `Claude Code stopped at its tool-turn limit${turns ? ` (${turns} turns)` : ''} before finishing the task — raise the agent's max turns (or narrow the request).`;
+  }
+  if (subtype.startsWith('error')) {
+    return `${status}Claude Code error: ${subtype.replace(/_/g, ' ')}.`.trim();
+  }
+  return `${status}Claude Code reported an error.`.trim();
 }
 
 function interpretClaudeStreamEvent(event: Record<string, unknown> | null): ClaudeChatPart[] {
@@ -728,10 +760,10 @@ function interpretClaudeContentBlock(block: Record<string, unknown>): ClaudeChat
 /** A live activity step for one of Claude Code's own (Bash/Read/MCP) tool uses. */
 function claudeToolActivity(b: Record<string, unknown>): Extract<ChatDelta, { type: 'activity' }> {
   const id = `claude-${String(b.id ?? randomUUID())}`;
-  const raw = firstString(b.name, b.tool) ?? 'a tool';
-  // MCP tools arrive namespaced as `mcp__agentis__build_workflow`; show the verb.
-  const pretty = raw.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ').trim() || 'a tool';
-  return { type: 'activity', id, phase: 'tool', status: 'running', label: `Using ${pretty}`, startedAt: new Date().toISOString() };
+  // Show the tool AND its real input (the command, query, path, …) — Codex-level
+  // legibility instead of a bare "Using a tool".
+  const input = b.input ?? b.parameters ?? b.arguments ?? objectOf(b.tool_use)?.input;
+  return { type: 'activity', id, phase: 'tool', status: 'running', label: toolActivityLabel('Using', firstString(b.name, b.tool), input), startedAt: new Date().toISOString() };
 }
 
 function buildClaudeCodeChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], mcpNative = false): string {

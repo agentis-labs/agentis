@@ -54,8 +54,9 @@ export function buildRunRoutes(deps: {
       .all();
     const workflowsById = loadWorkflowMap(deps.db, ws.workspaceId, rows.map((row) => row.workflowId));
     const agentsById = loadAgentMap(deps.db, ws.workspaceId, collectRunAgentIds(rows));
+    const tokenUsageMap = loadBatchRunTokenUsage(deps.db, ws.workspaceId, rows.map((row) => row.id));
     return c.json({
-      runs: rows.map((row) => presentRunSummary(row, workflowsById.get(row.workflowId ?? ''), agentsById)),
+      runs: rows.map((row) => presentRunSummary(row, workflowsById.get(row.workflowId ?? ''), agentsById, tokenUsageMap.get(row.id))),
     });
   });
 
@@ -74,8 +75,9 @@ export function buildRunRoutes(deps: {
       .all();
     const workflowsById = loadWorkflowMap(deps.db, ws.workspaceId, rows.map((row) => row.workflowId));
     const agentsById = loadAgentMap(deps.db, ws.workspaceId, collectRunAgentIds(rows));
+    const tokenUsageMap = loadBatchRunTokenUsage(deps.db, ws.workspaceId, rows.map((row) => row.id));
     return c.json({
-      runs: rows.map((row) => presentRunSummary(row, workflowsById.get(row.workflowId ?? ''), agentsById)),
+      runs: rows.map((row) => presentRunSummary(row, workflowsById.get(row.workflowId ?? ''), agentsById, tokenUsageMap.get(row.id))),
     });
   });
   // Per-node run history — one call backs the canvas node card's
@@ -353,6 +355,7 @@ function presentRunSummary(
   run: WorkflowRunRow,
   workflow: WorkflowRow | undefined,
   agentsById: Map<string, { id: string; name: string }>,
+  tokenUsage?: { tokensIn: number; tokensOut: number },
 ) {
   const state = run.runState as WorkflowRunState;
   const graph = resolveRunGraph(run, workflow);
@@ -387,6 +390,11 @@ function presentRunSummary(
     failureReason: failedNodeId ? state.nodeStates?.[failedNodeId]?.error ?? null : null,
     selfHealIncident,
     agents: collectRunAgents(state, agentsById),
+    tokenUsage: {
+      input: tokenUsage?.tokensIn ?? 0,
+      output: tokenUsage?.tokensOut ?? 0,
+      total: (tokenUsage?.tokensIn ?? 0) + (tokenUsage?.tokensOut ?? 0),
+    },
   };
 }
 
@@ -473,6 +481,27 @@ function loadRunTokenUsage(db: AgentisSqliteDb, workspaceId: string, runId: stri
     .where(and(eq(schema.agentSessions.workspaceId, workspaceId), eq(schema.agentSessions.runId, runId)))
     .get();
   return { tokensIn: Number(row?.tokensIn ?? 0), tokensOut: Number(row?.tokensOut ?? 0) };
+}
+
+function loadBatchRunTokenUsage(db: AgentisSqliteDb, workspaceId: string, runIds: string[]): Map<string, { tokensIn: number; tokensOut: number }> {
+  if (runIds.length === 0) return new Map();
+  const rows = db.select({
+    runId: schema.agentSessions.runId,
+    tokensIn: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensIn}), 0)`,
+    tokensOut: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensOut}), 0)`,
+  })
+    .from(schema.agentSessions)
+    .where(and(eq(schema.agentSessions.workspaceId, workspaceId), inArray(schema.agentSessions.runId, runIds)))
+    .groupBy(schema.agentSessions.runId)
+    .all();
+  
+  const map = new Map<string, { tokensIn: number; tokensOut: number }>();
+  for (const row of rows) {
+    if (row.runId) {
+      map.set(row.runId, { tokensIn: Number(row.tokensIn), tokensOut: Number(row.tokensOut) });
+    }
+  }
+  return map;
 }
 
 function buildRunNodes(graph: WorkflowGraph, state: WorkflowRunState) {

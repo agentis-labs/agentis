@@ -144,6 +144,26 @@ describe('POST /v1/channels', () => {
     }
   });
 
+  it('normalizes a labelled Telegram chat id (e.g. "ID: 7905735992") to the bare id', async () => {
+    const agentId = seedAgent();
+    const res = await app().request('/v1/channels', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        kind: 'telegram',
+        name: 'Tg labelled',
+        agentId,
+        token: 'super-secret-bot-token',
+        defaultChatId: 'ID: 7905735992',
+        runInitialTest: false,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { connection: { defaultChatId: string | null } };
+    // The label must be stripped, otherwise sendMessage fails with "chat not found".
+    expect(body.connection.defaultChatId).toBe('7905735992');
+  });
+
   it('does not auto-test WhatsApp QR-local connections before login', async () => {
     bridge.setPersistentTransport(fakePersistentTransport());
     const agentId = seedAgent();

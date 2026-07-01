@@ -70,6 +70,32 @@ export interface AgentToolRuntimeDeps {
   appSurfaces?: AppSurfaceStore;
   /** Resolve an App id from the running workflow when `context.appId` is unset. */
   resolveAppIdForWorkflow?: (workspaceId: string, workflowId: string) => string | undefined;
+  /**
+   * Platform tool bridge (AGENT-WORKFLOW-CAPABILITY-10X E2) — exposes the
+   * `agentis.*` integration catalog (channels, cooperation, app management, …) to
+   * the in-engine agent loop ALONGSIDE the AgentTool enum, so a workflow agent is
+   * a full Agentis citizen, not a starved toolbox. Lazily wired in bootstrap after
+   * the tool registry is built; the safe set + recursion blocklist live there.
+   */
+  platformTools?: PlatformToolBridge;
+}
+
+/** Run context an `agentis.*` platform tool needs when called from a workflow agent. */
+export interface PlatformToolCallContext {
+  workspaceId: string;
+  userId?: string;
+  agentId?: string;
+  workflowId?: string;
+  appId?: string;
+}
+
+export interface PlatformToolBridge {
+  /** The safe platform tools offered to a workflow agent (id + arg-hinted description). */
+  list(): Array<{ id: string; description: string }>;
+  /** Whether `toolId` is a platform tool this bridge owns. */
+  has(toolId: string): boolean;
+  /** Execute a platform tool with the workflow agent's run context. */
+  execute(toolId: string, args: Record<string, unknown>, ctx: PlatformToolCallContext): Promise<AgentToolResult>;
 }
 
 const SECRET_RE = /(^|\/)\.env(\.|$)|(^|\/)\.git\//i;
@@ -137,8 +163,38 @@ export class AgentToolRuntime {
     }
   }
 
-  /** Execute a bridged (`mcp__*`) tool. The loop gates which ids it offers. */
-  async executeBridged(workspaceId: string, toolId: string, args: Record<string, unknown>): Promise<AgentToolResult> {
+  /**
+   * The `agentis.*` platform integration tools a workflow agent may call (E2),
+   * offered to the loop alongside the static manifest + MCP bridged tools. Empty
+   * when no platform bridge is wired (e.g. minimal test engines).
+   */
+  listPlatformTools(): Array<{ id: string; description: string }> {
+    return this.deps.platformTools?.list() ?? [];
+  }
+
+  /**
+   * Execute a bridged tool. Routes platform (`agentis.*`) ids to the platform tool
+   * bridge with the agent's run context (so channels/app/data tools resolve their
+   * App + actor), and everything else (`mcp__*`) to the MCP bridge.
+   */
+  async executeBridged(
+    workspaceId: string,
+    toolId: string,
+    args: Record<string, unknown>,
+    context: { userId?: string; agentId?: string; workflowId?: string } = {},
+  ): Promise<AgentToolResult> {
+    if (this.deps.platformTools?.has(toolId)) {
+      const appId = context.workflowId
+        ? this.deps.resolveAppIdForWorkflow?.(workspaceId, context.workflowId)
+        : undefined;
+      return this.deps.platformTools.execute(toolId, args, {
+        workspaceId,
+        userId: context.userId,
+        agentId: context.agentId,
+        workflowId: context.workflowId,
+        appId,
+      });
+    }
     if (!this.deps.mcpBridge) return { ok: false, error: 'MCP tool bridge is not wired in this runtime' };
     const res = await this.deps.mcpBridge.call(workspaceId, toolId, args);
     if (res.ok) return { ok: true, result: res.result };

@@ -8,6 +8,7 @@ import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import {
   AdapterStructuredCompleter,
+  type CompletionUsage,
   type StructuredCompleter,
   type StructuredCompletionArgs,
 } from './structuredCompleter.js';
@@ -65,6 +66,7 @@ export class WorkspaceHarnessRuntimeResolver {
 export class WorkspaceHarnessStructuredCompleter implements StructuredCompleter {
   readonly label = 'workspace orchestrator harness';
   lastError: string | null = null;
+  lastUsage: CompletionUsage | null = null;
 
   constructor(private readonly resolver: WorkspaceHarnessRuntimeResolver) {}
 
@@ -81,6 +83,7 @@ export class WorkspaceHarnessStructuredCompleter implements StructuredCompleter 
     );
     const result = await delegate.completeStructured<T>(args);
     this.lastError = delegate.lastError;
+    this.lastUsage = delegate.lastUsage;
     return result;
   }
 }

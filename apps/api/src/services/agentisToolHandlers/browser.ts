@@ -45,7 +45,7 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
         const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : 'Screenshot';
         // When the agent is operating on an App surface, file the screenshot under
         // that App so it shows in the App's "Data & Assets" library.
-        const appId = ctx.viewport?.resourceKind === 'app' ? ctx.viewport.resourceId ?? null : null;
+        const appId = ctx.appId ?? (ctx.viewport?.resourceKind === 'app' ? ctx.viewport.resourceId ?? null : null);
         const artifact = deps.artifacts.persist({
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
@@ -53,6 +53,7 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
           title,
           name: `${slugify(title)}.png`,
           content: dataUrl,
+          runId: ctx.runId ?? null,
           agentId: ctx.agentId ?? null,
           appId,
           conversationId: ctx.conversationId ?? null,

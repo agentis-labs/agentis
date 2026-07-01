@@ -1,4 +1,8 @@
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ChatDelta, ChatMessage, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
@@ -94,6 +98,43 @@ describe('AntigravityAdapter', () => {
     expect(deltas).toContainEqual({ type: 'text', delta: 'pong' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
+
+  it('streams live per-step reasoning from the agy transcript while the turn runs', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const home = mkdtempSync(join(tmpdir(), 'agy-home-'));
+    const brainDir = join(home, 'brain');
+    mkdirSync(brainDir, { recursive: true });
+    const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test', env: { ANTIGRAVITY_HOME: home } });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'write a poem' }], [], { latencyClass: 'interactive' })) deltas.push(delta);
+    })();
+
+    // Let #runAgy snapshot the (empty) brain dir before agy "creates" its own.
+    await new Promise((r) => setTimeout(r, 60));
+    // Mid-run: agy writes a conversation transcript with a MODEL planner step that
+    // carries reasoning — exactly what we tail and stream live.
+    const logsDir = join(brainDir, randomUUID(), '.system_generated', 'logs');
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(logsDir, 'transcript_full.jsonl'),
+      `${JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'write a poem' })}\n`
+      + `${JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', thinking: 'Planning the poem structure and imagery.', content: 'Here is a short poem about the sea.' })}\n`,
+      'utf8');
+
+    // Wait past the 350ms tail interval so the poller surfaces the thought.
+    await new Promise((r) => setTimeout(r, 700));
+    const thought = deltas.find((d): d is Extract<ChatDelta, { type: 'activity' }> =>
+      d.type === 'activity' && d.id === 'antigravity-thought-default');
+    expect(thought).toBeDefined();           // live reasoning streamed mid-run
+    expect(deltas.some((d) => d.type === 'done')).toBe(false); // before the turn ended
+
+    // Finish: the final answer is read back from the same transcript.
+    child.emit('exit', 0);
+    await consume;
+    expect(deltas.some((d) => d.type === 'text' && /poem/i.test((d as Extract<ChatDelta, { type: 'text' }>).delta))).toBe(true);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  }, 10_000);
 
   it('decodes a not-signed-in exit into an actionable `agy` sign-in hint', async () => {
     const child = fakeChildProcess();

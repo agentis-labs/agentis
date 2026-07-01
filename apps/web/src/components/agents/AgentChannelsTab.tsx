@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, Plug, RefreshCcw, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, Plug, Plus, RefreshCcw, Trash2, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
@@ -32,6 +32,18 @@ interface ChannelHealth {
   lastTestAt?: string;
 }
 
+interface ChannelRecipient {
+  handle: string;
+  name?: string;
+  rules?: string;
+}
+interface ChannelAccess {
+  recipients?: ChannelRecipient[];
+  answerAnyone?: boolean;
+  anyoneRules?: string;
+  unknownReply?: 'ignore' | 'decline';
+}
+
 interface ChannelConnection {
   id: string;
   agentId: string;
@@ -39,6 +51,7 @@ interface ChannelConnection {
   name: string;
   status: ChannelStatus;
   defaultChatId: string | null;
+  access?: ChannelAccess | null;
   targetAliases?: Record<string, string>;
   transport?: string | null;
   mode?: string | null;
@@ -142,6 +155,7 @@ function ProviderCard({
   const [verifyToken, setVerifyToken] = useState('');
   const [qr, setQr] = useState<QrState | null>(null);
   const [lastHealth, setLastHealth] = useState<ChannelHealth | null>(null);
+  const [access, setAccess] = useState<ChannelAccess>({ recipients: [], answerAnyone: false });
 
   const health = lastHealth ?? connection?.health ?? EMPTY_HEALTH;
   const qrConnId = qr?.connectionId;
@@ -151,6 +165,7 @@ function ProviderCard({
   useEffect(() => {
     setLastHealth(null);
     setChatId(connection?.defaultChatId ?? '');
+    setAccess(connection?.access ?? { recipients: [], answerAnyone: false });
   }, [connection?.id, connection?.status, connection?.defaultChatId]);
 
   useEffect(() => {
@@ -306,7 +321,13 @@ function ProviderCard({
         method: 'PATCH',
         body: JSON.stringify({
           defaultChatId: chatId.trim() || null,
-          ...(chatId.trim() ? { targetAliases: { me: chatId.trim(), default: chatId.trim() } } : {}),
+          access: {
+            recipients: (access.recipients ?? [])
+              .map((r) => ({ handle: r.handle.trim(), name: r.name?.trim() || undefined, rules: r.rules?.trim() || undefined }))
+              .filter((r) => r.handle.length > 0),
+            answerAnyone: Boolean(access.answerAnyone),
+            anyoneRules: access.anyoneRules?.trim() || undefined,
+          },
         }),
       });
       setLastHealth(result.health);
@@ -351,6 +372,8 @@ function ProviderCard({
             busy={busy === 'target'}
             onChange={setChatId}
             onSave={() => void saveTargets()}
+            access={access}
+            onAccessChange={setAccess}
           />
           <HealthDetails health={health} />
           <div className="mt-3 flex flex-wrap gap-2">
@@ -563,28 +586,107 @@ function TargetEditor({
   busy,
   onChange,
   onSave,
+  access,
+  onAccessChange,
 }: {
   provider: Provider;
   value: string;
   busy: boolean;
   onChange: (value: string) => void;
   onSave: () => void;
+  access: ChannelAccess;
+  onAccessChange: (access: ChannelAccess) => void;
 }) {
+  const recipients = access.recipients ?? [];
+  const setRecipient = (i: number, patch: Partial<ChannelRecipient>) =>
+    onAccessChange({ ...access, recipients: recipients.map((r, idx) => (idx === i ? { ...r, ...patch } : r)) });
+  const addRecipient = () => onAccessChange({ ...access, recipients: [...recipients, { handle: '' }] });
+  const removeRecipient = (i: number) => onAccessChange({ ...access, recipients: recipients.filter((_, idx) => idx !== i) });
+
   return (
-    <div className="mt-3 flex flex-col gap-2 rounded-input border border-line bg-surface-2 px-3 py-2 sm:flex-row sm:items-end">
-      <div className="min-w-0 flex-1">
-        <ConnectField label={provider.kind === 'whatsapp' ? 'Default recipient' : 'Default target'} hint={targetHint(provider.kind)}>
-          <input
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            placeholder={targetPlaceholder(provider.kind)}
+    <div className="mt-3 flex flex-col gap-3 rounded-input border border-line bg-surface-2 px-3 py-3">
+      <ConnectField
+        label={provider.kind === 'whatsapp' ? 'Default recipient (you)' : 'Default target (you)'}
+        hint="You — full access, no rules needed."
+      >
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={targetPlaceholder(provider.kind)}
+          className={INPUT_CLS}
+        />
+      </ConnectField>
+
+      <div>
+        <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-text-muted">
+          People with rules
+        </span>
+        <div className="flex flex-col gap-2">
+          {recipients.map((r, i) => (
+            <div key={i} className="rounded-input border border-line bg-surface-1 p-2">
+              <div className="flex items-center gap-2">
+                <input
+                  value={r.handle}
+                  onChange={(event) => setRecipient(i, { handle: event.target.value })}
+                  placeholder={targetPlaceholder(provider.kind)}
+                  className={INPUT_CLS}
+                />
+                <input
+                  value={r.name ?? ''}
+                  onChange={(event) => setRecipient(i, { name: event.target.value })}
+                  placeholder="Name"
+                  className={INPUT_CLS}
+                  style={{ maxWidth: '140px' }}
+                />
+                <button
+                  type="button"
+                  aria-label="Remove person"
+                  onClick={() => removeRecipient(i)}
+                  className="shrink-0 px-1 text-text-muted hover:text-danger"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+              <textarea
+                value={r.rules ?? ''}
+                onChange={(event) => setRecipient(i, { rules: event.target.value })}
+                placeholder="Rules in plain words — e.g. My assistant. Can check my calendar and answer questions, but don't send money or delete anything."
+                rows={2}
+                className={`${INPUT_CLS} mt-2`}
+              />
+            </div>
+          ))}
+        </div>
+        <Button size="sm" variant="ghost" iconLeft={<Plus size={12} />} onClick={addRecipient} className="mt-2">
+          Add person
+        </Button>
+      </div>
+
+      <label className="flex items-center gap-2 text-[12px] text-text-secondary">
+        <input
+          type="checkbox"
+          checked={Boolean(access.answerAnyone)}
+          onChange={(event) => onAccessChange({ ...access, answerAnyone: event.target.checked })}
+        />
+        Reply to anyone else
+      </label>
+      {access.answerAnyone && (
+        <ConnectField label="Rules for anyone not listed" hint="How should the agent behave with people you haven't listed?">
+          <textarea
+            value={access.anyoneRules ?? ''}
+            onChange={(event) => onAccessChange({ ...access, anyoneRules: event.target.value })}
+            rows={3}
+            placeholder="You're answering on my behalf. Be friendly and helpful, never share my personal details, and don't take any actions — take a message and let me know."
             className={INPUT_CLS}
           />
         </ConnectField>
+      )}
+
+      <div className="flex justify-end">
+        <Button size="sm" variant="secondary" disabled={busy} onClick={onSave}>
+          {busy ? 'Saving...' : 'Save'}
+        </Button>
       </div>
-      <Button size="sm" variant="secondary" disabled={busy} onClick={onSave}>
-        {busy ? 'Saving...' : 'Save'}
-      </Button>
     </div>
   );
 }

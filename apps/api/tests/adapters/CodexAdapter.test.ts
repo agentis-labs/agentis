@@ -701,6 +701,33 @@ describe('CodexAdapter', () => {
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   }, 10_000);
 
+  it('does not claim the runtime "is working" before it has produced any output', async () => {
+    // A turn that opens but stays TOTALLY silent (no stdout, no stderr) — e.g. a
+    // hung/unreachable model — must not be narrated as "is working". The heartbeat
+    // tells the truth: still waiting, no output yet.
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({ agentId: 'agent-1', logger, binaryPath: 'codex-test', model: 'gpt-5.5', env: { OPENAI_API_KEY: 'test-key' } });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'hi' }], [], { latencyClass: 'interactive', timeoutMs: 50 })) deltas.push(delta);
+    })();
+
+    await new Promise((r) => setTimeout(r, 5200)); // past the 5s heartbeat cadence, still silent
+
+    const heartbeat = deltas.find((d): d is Extract<ChatDelta, { type: 'activity' }> =>
+      d.type === 'activity' && /no output yet/i.test(d.label));
+    expect(heartbeat).toBeDefined();
+    expect(deltas.some((d) => d.type === 'activity' && /is working/i.test(d.label))).toBe(false);
+    expect(deltas.some((d) => d.type === 'done')).toBe(false);
+
+    // Once real output arrives, the heartbeat flips to the working narration.
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n');
+    child.emit('exit', 0);
+    await consume;
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  }, 10_000);
+
   it('opts into the native browser: loads the user config, keeps its MCP backend, declares the affordance', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);

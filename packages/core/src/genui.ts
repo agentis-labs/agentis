@@ -18,11 +18,10 @@ export interface BuiltSurface {
   archetype: Archetype;
 }
 
-const OPERATOR_RAIL: ViewNode = {
+const ACTIVITY_RAIL: ViewNode = {
   type: 'Stack',
   gap: 12,
   children: [
-    { type: 'AgentConsole' },
     { type: 'ActivityStream', title: 'Live activity' },
   ],
 };
@@ -114,7 +113,7 @@ function analyticsView(ctx: Ctx): BuiltSurface {
       ...(ctx.numberFields.length > 1 ? { series: ctx.numberFields.slice(0, 3).map((y) => ({ y, label: humanize(y) })) } : {}),
     }],
   };
-  const rail: ViewNode = { ...OPERATOR_RAIL, style: { span: 1 } };
+  const rail: ViewNode = { ...ACTIVITY_RAIL, style: { span: 1 } };
   const records: ViewNode = {
     type: 'Tabs',
     tabs: [
@@ -126,9 +125,10 @@ function analyticsView(ctx: Ctx): BuiltSurface {
     view: {
       type: 'Stack',
       gap: 16,
-      style: { theme: 'analytics' },
+      style: { theme: 'analytics', design: 'aurora' },
       children: [
         { type: 'Hero', title: humanize(ctx.name) },
+        { type: 'WorkflowControl' },
         { type: 'Grid', columns: 3, gap: 16, children: [chartCard, rail] },
         records,
       ],
@@ -151,10 +151,10 @@ function pipelineView(ctx: Ctx): BuiltSurface {
     view: {
       type: 'Stack',
       gap: 16,
-      style: { theme: 'product' },
+      style: { theme: 'product', design: 'soft' },
       children: [
         { type: 'Hero', title: humanize(ctx.name) },
-        { type: 'Split', ratio: 3, left: main, right: OPERATOR_RAIL },
+        { type: 'Split', ratio: 3, left: main, right: ACTIVITY_RAIL },
       ],
     },
     actions: insertAction(ctx),
@@ -183,10 +183,11 @@ function operationsView(ctx: Ctx): BuiltSurface {
     view: {
       type: 'Stack',
       gap: 16,
-      style: { theme: 'console' },
+      style: { theme: 'operations', design: 'operations' },
       children: [
         { type: 'Hero', title: humanize(ctx.name) },
-        { type: 'Split', ratio: 2, left: main, right: OPERATOR_RAIL },
+        { type: 'WorkflowControl' },
+        { type: 'Split', ratio: 2, left: main, right: ACTIVITY_RAIL },
       ],
     },
     actions: insertAction(ctx),
@@ -199,10 +200,10 @@ function emptyView(): BuiltSurface {
     view: {
       type: 'Stack',
       gap: 16,
-      style: { theme: 'console' },
+      style: { theme: 'operations', design: 'aurora' },
       children: [
         { type: 'Hero', title: 'Your app' },
-        OPERATOR_RAIL,
+        ACTIVITY_RAIL,
       ],
     },
     actions: [],

@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { ZodError } from 'zod';
 import {
   AgentisError,
   type AgentisToolCallRequest,
@@ -83,9 +84,22 @@ export class AgentisToolRegistry {
     this.#tools.set(definition.id, { definition, handler: handler as AgentisToolHandler });
   }
 
-  /** Bulk register; useful for handler families. */
-  registerMany(entries: Array<{ definition: AgentisToolDefinition; handler: AgentisToolHandler }>): void {
-    for (const e of entries) this.register(e.definition, e.handler);
+  /**
+   * Bulk register; useful for handler families. `defaultMcpExposed` exposes the
+   * whole family to MCP-native harnesses (codex/claude/cursor) unless an entry
+   * sets `mcpExposed` explicitly — so a family of agent tools doesn't have to
+   * repeat the flag on every definition (and can't silently forget it).
+   */
+  registerMany(
+    entries: Array<{ definition: AgentisToolDefinition; handler: AgentisToolHandler }>,
+    opts: { defaultMcpExposed?: boolean } = {},
+  ): void {
+    for (const e of entries) {
+      const definition = opts.defaultMcpExposed && e.definition.mcpExposed === undefined
+        ? { ...e.definition, mcpExposed: true }
+        : e.definition;
+      this.register(definition, e.handler);
+    }
   }
 
   /** Returns true if the tool exists. */
@@ -165,9 +179,14 @@ export class AgentisToolRegistry {
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
-      // Domain errors carry codes; unknown errors are mapped to INTERNAL_TOOL_ERROR.
-      const code = err instanceof AgentisError ? err.code : 'INTERNAL_TOOL_ERROR';
-      const message = err instanceof Error ? err.message : 'unknown error';
+      // A handler-side zod failure (e.g. `dataQuerySchema.parse`) is a CONTRACT
+      // problem, not an internal crash. Render it as an instructive validation
+      // error naming the offending field + shape so the agent's retry is correct —
+      // never dump the raw multi-line ZodError JSON (which is what taught agents
+      // nothing and burned retries).
+      const zodMessage = err instanceof ZodError ? formatZodIssues(req.toolId, err) : null;
+      const code = zodMessage ? 'VALIDATION_FAILED' : err instanceof AgentisError ? err.code : 'INTERNAL_TOOL_ERROR';
+      const message = zodMessage ?? (err instanceof Error ? err.message : 'unknown error');
       this.#logger.warn('tool.execute_failed', { toolId: req.toolId, code, message, caller: ctx.caller });
       return {
         id: callId,
@@ -184,4 +203,21 @@ export class AgentisToolRegistry {
   size(): number {
     return this.#tools.size;
   }
+}
+
+/**
+ * Render a handler-side ZodError as one concise, actionable line the agent can
+ * act on — "<field path>: <what was expected vs received>" — instead of the raw
+ * multi-line JSON. This is what lets a CLI harness self-correct its next call.
+ */
+function formatZodIssues(toolId: string, err: ZodError): string {
+  const parts = err.issues.slice(0, 4).map((issue) => {
+    const path = issue.path.length > 0 ? issue.path.join('.') : '(root)';
+    if (issue.code === 'invalid_type') {
+      return `${path}: expected ${issue.expected}, received ${issue.received}`;
+    }
+    return `${path}: ${issue.message}`;
+  });
+  const more = err.issues.length > parts.length ? ` (+${err.issues.length - parts.length} more)` : '';
+  return `${toolId}: invalid arguments — ${parts.join('; ')}${more}. Fix the named field(s) and retry.`;
 }

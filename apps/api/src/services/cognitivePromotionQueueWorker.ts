@@ -51,6 +51,8 @@ export interface AtomPromotionPayload {
   adapterType?: string | null;
   taskInput?: unknown;
   taskOutput: unknown;
+  /** Authoritative operator speech (user side of a chat turn), mined permissively. */
+  operatorText?: string | null;
   /** Human-readable task label for the Formation Judge. */
   taskTitle?: string | null;
   /** Write-policy resolved at enqueue time: 'form' | 'episodic_only' | 'none'. */
@@ -258,6 +260,7 @@ export class CognitivePromotionQueueWorker {
           adapterType: p.adapterType ?? null,
           taskInput: p.taskInput,
           taskOutput: p.taskOutput,
+          operatorText: p.operatorText ?? null,
           taskTitle: p.taskTitle ?? null,
           memoryPolicy: p.memoryPolicy ?? 'form',
           originSurface: (p.originSurface as never) ?? 'run_completion',

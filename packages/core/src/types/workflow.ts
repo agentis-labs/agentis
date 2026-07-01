@@ -525,10 +525,14 @@ export interface KnowledgeNodeConfig {
 }
 
 /**
- * knowledge_ingest — the write-side twin of the `knowledge` node. Delegates to
- * the same `KnowledgeBaseService` the retrieval node reads from, so anything a
- * workflow produces (a fetched doc, a parsed spreadsheet, a transform result)
- * becomes semantically recallable by future agents and `knowledge` nodes.
+ * knowledge_ingest — the write-side twin of the `knowledge` node, into the
+ * Knowledge Base (`KnowledgeBaseService`, RAG docs — NOT the Brain memory).
+ *
+ * @deprecated For AUTHORING. Writing knowledge/memory should not be a hand-wired
+ * graph node: the Brain (memory) fills automatically from chat + completed runs,
+ * and agents write to the Knowledge Base on purpose via the `agentis.knowledge.write`
+ * tool. This kind is retained only so pre-existing graphs keep executing; it is no
+ * longer offered in the node palette or the synthesis catalog. Do not add new uses.
  */
 export interface KnowledgeIngestNodeConfig {
   kind: 'knowledge_ingest';

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Controls,
+  ControlButton,
   Handle,
   Panel,
   Position,
@@ -16,7 +17,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
-import { Loader2, Plus, RotateCcw } from 'lucide-react';
+import { Loader2, Plus, LayoutGrid } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useAgentInstallSession } from '../../hooks/useBackgroundInstall';
 import { dismissInstallSession, type InstallSession } from '../../lib/backgroundInstall';
@@ -135,6 +136,15 @@ export function AgentHierarchyCanvas({
   const flowRef = useRef<ReactFlowInstance<Node<AgentNodeData>, Edge> | null>(null);
 
   useEffect(() => {
+    // If there is any agent (other than ghost) that doesn't have a canvas position saved,
+    // automatically run resetLayout to calculate and save the layout.
+    const hasUnplaced = agents.some((agent) => !agent.isGhost && !isPosition(agent.canvasPosition));
+    if (hasUnplaced && agents.length > 0 && !resettingLayout) {
+      void resetLayout();
+    }
+  }, [agents, resettingLayout]);
+
+  useEffect(() => {
     setNodes(graph.nodes);
     setEdges(graph.edges);
     const signature = graph.nodes
@@ -235,12 +245,17 @@ export function AgentHierarchyCanvas({
         className="bg-canvas"
       >
         <Background color="#23252d" gap={28} />
-        <Controls position="bottom-right" className="!border-line !bg-surface-2" />
-        <Panel position="top-right" className="pointer-events-auto m-3">
-          <button type="button" onClick={() => void resetLayout()} disabled={resettingLayout} aria-label="Reset layout" className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface-2/95 px-3 text-xs font-medium text-text-secondary shadow-card backdrop-blur-xl hover:bg-surface-3 hover:text-text-primary disabled:opacity-50">
-            <RotateCcw size={13} /> {resettingLayout ? 'Resetting...' : 'Reset layout'}
-          </button>
-        </Panel>
+        <Controls position="bottom-right" className="!border-line !bg-surface-2">
+          <ControlButton
+            type="button"
+            onClick={() => void resetLayout()}
+            disabled={resettingLayout}
+            title="Tidy layout"
+            aria-label="Tidy layout"
+          >
+            <LayoutGrid size={14} className={clsx(resettingLayout && "animate-spin")} />
+          </ControlButton>
+        </Controls>
       </ReactFlow>
       {visibleAgents.length === 0 && (
         <div className="pointer-events-none absolute inset-x-0 top-12 z-10 flex justify-center px-4">

@@ -154,6 +154,9 @@ export class WhatsAppSession {
     if (!this.#sock || this.#status !== 'open') {
       throw new Error(`whatsapp session ${this.opts.connectionId} is not open (status=${this.#status})`);
     }
+    // Reply to the exact JID the message came from (baileys threads it back to the
+    // same chat — including `@lid` chats). Do NOT remap LID→PN: that resolves to a
+    // different identity and lands the reply in a phantom chat.
     await this.#sock.sendMessage(jid, { text });
   }
 
@@ -262,7 +265,24 @@ export class WhatsAppSession {
     if (!key || key.fromMe) return; // ignore our own echoes
     const remoteJid: string | undefined = key.remoteJid;
     if (!remoteJid || remoteJid === 'status@broadcast') return;
-    const externalId = String(key.id ?? `${remoteJid}:${msg.messageTimestamp ?? Date.now()}`);
+    // baileys 7.x addresses many 1:1 chats by a hidden LID (`<id>@lid`). The same
+    // message carries the sender's real phone-number JID in `remoteJidAlt` (from
+    // the stanza's sender_pn). Key the chat off the PN so the conversation uses a
+    // real number and replies thread back to the user's normal WhatsApp chat —
+    // replying to the raw @lid lands in a phantom chat. Non-LID chats are
+    // unchanged, and we fall back to the LID if no PN alt is present.
+    const remoteJidAlt: string | undefined = key.remoteJidAlt;
+    const chatJid = remoteJid.endsWith('@lid') && remoteJidAlt && remoteJidAlt.includes('@s.whatsapp.net')
+      ? remoteJidAlt.replace(/:\d+@/, '@')
+      : remoteJid;
+    if (chatJid !== remoteJid) {
+      this.opts.logger.info('whatsapp.lid_mapped_to_pn', { connectionId: this.opts.connectionId, lid: remoteJid, repliesTo: chatJid });
+    } else if (remoteJid.endsWith('@lid')) {
+      // LID chat with no phone-number alt in the stanza — we can only reply to the
+      // LID, which may not thread. Surface it so the cause is visible if it recurs.
+      this.opts.logger.warn('whatsapp.lid_no_pn_alt', { connectionId: this.opts.connectionId, lid: remoteJid });
+    }
+    const externalId = String(key.id ?? `${chatJid}:${msg.messageTimestamp ?? Date.now()}`);
     const from = msg.pushName ? String(msg.pushName) : undefined;
 
     let body = extractWhatsAppText(msg.message);
@@ -316,7 +336,7 @@ export class WhatsAppSession {
     }
 
     if (!body) return; // nothing usable (non-text, no transcription/description/extraction)
-    this.opts.onInbound({ externalId, chatId: remoteJid, body, ...(from ? { from } : {}) });
+    this.opts.onInbound({ externalId, chatId: chatJid, body, ...(from ? { from } : {}) });
   }
 
   async #onQr(qr: string): Promise<void> {

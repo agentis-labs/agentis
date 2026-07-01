@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ChatDelta, ChatMessage } from '@agentis/core';
+import type { ChatDelta, ChatMessage, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
 import { ClaudeCodeAdapter } from '../../src/adapters/ClaudeCodeAdapter.js';
 import type { Logger } from '../../src/logger.js';
 
@@ -20,6 +20,26 @@ const logger: Logger = {
 describe('ClaudeCodeAdapter chat', () => {
   beforeEach(() => {
     spawnMock.mockReset();
+  });
+
+  it('fails a dispatched agent_task with an HONEST classified reason, not the opaque "exited 1"', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test', maxTurns: 4 });
+    const events: NormalizedAgentEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    const task: NormalizedTask = {
+      taskId: 'node-1', runId: 'run-1', workflowId: 'wf-1', nodeId: 'node-1',
+      title: 'Fix the workflow', description: 'fix it', inputData: {}, scratchpadSnapshot: {}, capabilityTags: [], timeoutMs: 10_000,
+    };
+    await adapter.dispatchTask(task);
+    child.stdout.write('{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":4}\n');
+    child.emit('exit', 1);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const failure = events.find((e) => e.eventType === 'task.failed') as { error?: string } | undefined;
+    expect(failure?.error).toMatch(/tool-turn limit/i);
+    expect(failure?.error).not.toMatch(/^claude_code exited/);
   });
 
   it('reports marker-protocol tool capability', () => {
@@ -102,7 +122,7 @@ describe('ClaudeCodeAdapter chat', () => {
     expect(stdin).toContain('name: Researcher');
   });
 
-  it('streams harness tool use while keeping raw reasoning private', async () => {
+  it('streams REAL reasoning text + the tool with its input as live activity (Codex-level legibility)', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
@@ -117,13 +137,107 @@ describe('ClaudeCodeAdapter chat', () => {
     child.emit('exit', 0);
     await consume;
 
-    // Raw thinking stays private; the harness's own Bash → a live activity step
-    // (NOT an executable tool_call); answer → text.
+    // Reasoning is surfaced as a runtime activity carrying the ACTUAL thought (not a
+    // canned phase), never as raw answer text or an executable tool_call.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
-    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'tool', status: 'running', label: 'Using Bash' }));
+    expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && /check the files/i.test(d.label))).toBe(true);
+    // The harness's own Bash → a live activity step showing the real command.
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'tool', status: 'running', label: 'Using Bash: ls' }));
     expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'It is a TypeScript repo.' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+  });
+
+  it('redacts reasoning to a phase when AGENTIS_REDACT_REASONING is set', async () => {
+    const prev = process.env.AGENTIS_REDACT_REASONING;
+    process.env.AGENTIS_REDACT_REASONING = '1';
+    try {
+      const child = fakeChildProcess();
+      spawnMock.mockReturnValue(child);
+      const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+      const deltas: ChatDelta[] = [];
+      const consume = (async () => {
+        for await (const delta of adapter.chat([{ role: 'user', content: 'look around' }], [])) deltas.push(delta);
+      })();
+      child.stdout.write('{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Let me read the repository files."},{"type":"text","text":"done"}]}}\n');
+      child.emit('exit', 0);
+      await consume;
+      // Real thought withheld; a high-level phase shown instead.
+      expect(deltas.some((d) => d.type === 'activity' && /read the repository files/i.test(d.label))).toBe(false);
+      expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && /reviewing|reasoning|workspace/i.test(d.label))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AGENTIS_REDACT_REASONING;
+      else process.env.AGENTIS_REDACT_REASONING = prev;
+    }
+  });
+
+  it('passes NO --max-turns by default (Codex parity), and only when the operator set one', async () => {
+    const noCapChild = fakeChildProcess();
+    spawnMock.mockReturnValue(noCapChild);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const consume = collectDeltas(adapter.chat([{ role: 'user', content: 'hi' }], []));
+    noCapChild.stdout.write('{"type":"result","result":"ok"}\n');
+    noCapChild.emit('exit', 0);
+    await consume;
+    const noCapArgs = spawnMock.mock.calls[0]![1] as string[];
+    expect(noCapArgs.some((a) => a.startsWith('--max-turns'))).toBe(false);
+
+    spawnMock.mockReset();
+    const capChild = fakeChildProcess();
+    spawnMock.mockReturnValue(capChild);
+    const capped = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test', maxTurns: 12 });
+    const consume2 = collectDeltas(capped.chat([{ role: 'user', content: 'hi' }], []));
+    capChild.stdout.write('{"type":"result","result":"ok"}\n');
+    capChild.emit('exit', 0);
+    await consume2;
+    const cappedArgs = spawnMock.mock.calls[0]![1] as string[];
+    expect(cappedArgs).toContain('--max-turns=12');
+  });
+
+  it('preserves a streamed partial answer when the process exits non-zero (no lost work)', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const d of adapter.chat([{ role: 'user', content: 'do work' }], [])) deltas.push(d);
+    })();
+    // Real answer text streamed, then a non-zero exit (crash/limit) — the work must
+    // survive as a resumable answer, not vanish into a red error.
+    child.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the half-finished result."}]}}\n');
+    child.emit('exit', 1);
+    await consume;
+
+    const text = deltas.filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text').map((d) => d.delta).join(' ');
+    expect(text).toContain('Here is the half-finished result.');
+    expect(text).toMatch(/continue/i);
+    expect(deltas.some((d) => d.type === 'tool_result' && (d as { error?: string }).error)).toBe(false);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'max_turns' });
+  });
+
+  it('treats a turn-limit stop as a SOFT, resumable stop — not a hard FAILED', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const d of adapter.chat([{ role: 'user', content: 'fix the workflow' }], [])) deltas.push(d);
+    })();
+
+    // Claude Code's terminal result on a turn-budget exhaustion: is_error with the
+    // cause in `subtype`, no message field. Exit 1.
+    child.stdout.write('{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":24}\n');
+    child.emit('exit', 1);
+    await consume;
+
+    // NOT a hard error: no tool_result error, and the turn ends as a guardrail
+    // pause (max_turns) with an actionable, resumable note — work is never thrown away.
+    expect(deltas.some((d) => d.type === 'tool_result' && d.name === 'adapter.chat' && (d as { error?: string }).error)).toBe(false);
+    const text = deltas.filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text').map((d) => d.delta).join(' ');
+    expect(text).toMatch(/tool-turn limit/i);
+    expect(text).toMatch(/continue/i);
+    expect(text).not.toContain('reported an error');
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'max_turns' });
   });
 
   it('parses current partial stream events into live progress and tool activity', async () => {
@@ -142,15 +256,13 @@ describe('ClaudeCodeAdapter chat', () => {
     child.emit('exit', 0);
     await consume;
 
-    expect(deltas).toContainEqual(expect.objectContaining({
-      type: 'activity',
-      phase: 'runtime',
-      label: 'Reviewing workspace context',
-    }));
+    // Reasoning shows the REAL thought (operator-facing), and the tool card shows
+    // the real input (the file being read) — Codex-level legibility.
+    expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && /inspect the workspace files/i.test(d.label))).toBe(true);
     expect(deltas).toContainEqual(expect.objectContaining({
       type: 'activity',
       phase: 'tool',
-      label: 'Using Read',
+      label: 'Using Read: README.md',
     }));
     expect(deltas).toContainEqual({ type: 'text', delta: 'I found the answer.' });
   });

@@ -39,7 +39,16 @@ export interface RunPublishedWorkflowResult {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-export async function runPublishedWorkflow(args: RunPublishedWorkflowArgs): Promise<RunPublishedWorkflowResult> {
+/**
+ * Start a run and return its id immediately, WITHOUT awaiting completion. The
+ * engine keeps ticking the run to terminal in the background. This is the async
+ * primitive behind a live "Run" affordance: the caller gets a `runId` it can
+ * subscribe to (REALTIME_ROOMS.run) instead of blocking on the whole run — which
+ * is what turned the App interface into a black-box spinner.
+ */
+export async function startPublishedWorkflow(
+  args: Omit<RunPublishedWorkflowArgs, 'timeoutMs'>,
+): Promise<{ runId: string }> {
   validateWorkflowGraph(args.graph, { currentWorkflowId: args.workflowId });
   const runId = randomUUID();
   const inputs = args.inputs ?? {};
@@ -63,7 +72,11 @@ export async function runPublishedWorkflow(args: RunPublishedWorkflowArgs): Prom
     initialState,
     graph: args.graph,
   });
+  return { runId };
+}
 
+export async function runPublishedWorkflow(args: RunPublishedWorkflowArgs): Promise<RunPublishedWorkflowResult> {
+  const { runId } = await startPublishedWorkflow(args);
   const final = await awaitRun(args.db, runId, args.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const terminal = isTerminal(final.status);
   const succeeded = final.status === 'COMPLETED' || final.status === 'COMPLETED_WITH_CONTRACT_VIOLATION';

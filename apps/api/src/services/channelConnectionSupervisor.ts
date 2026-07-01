@@ -15,8 +15,9 @@
  *   - Surface login QR + status for the connect UI, mirror status into the row.
  *
  * Persistent vs webhook is decided per connection: WhatsApp is always persistent;
- * Telegram is persistent only when `settings.transport === 'polling'` (otherwise
- * the webhook adapter handles it).
+ * Telegram is persistent when it resolves to long polling — explicitly, or by
+ * default when no public URL is configured (see `resolveTelegramTransport`); the
+ * webhook adapter handles Telegram only when a public URL makes a webhook viable.
  */
 
 import path from 'node:path';
@@ -32,6 +33,7 @@ import type { ConversationStore } from './conversationStore.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 import { WhatsAppSession } from '../adapters/channels/whatsappSession.js';
 import { TelegramSession } from '../adapters/channels/telegramSession.js';
+import { resolveTelegramTransport } from '../adapters/channels/telegram.js';
 import { DiscordSession } from '../adapters/channels/discordSession.js';
 import { useVaultAuthState } from '../adapters/channels/whatsappVaultAuthState.js';
 
@@ -51,6 +53,8 @@ export interface ChannelConnectionSupervisorDeps {
   conversations: ConversationStore;
   /** Root data dir; WhatsApp auth state is stored beneath it. */
   dataDir: string;
+  /** Is a public webhook URL configured? Telegram defaults to long polling when not. */
+  hasPublicWebhookUrl?: () => boolean;
   dispatcher?: ChannelTurnDispatcher;
   /** Optional voice-note transcription for inbound audio (WhatsApp). */
   transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
@@ -65,10 +69,6 @@ export interface LoginState {
   qr?: string;
   qrDataUrl?: string;
   selfId?: string;
-}
-
-function telegramIsPolling(settings: unknown): boolean {
-  return Boolean(settings && typeof settings === 'object' && (settings as { transport?: string }).transport === 'polling');
 }
 
 function discordIsGateway(settings: unknown): boolean {
@@ -91,10 +91,22 @@ export class ChannelConnectionSupervisor {
     this.#dispatcher = dispatcher;
   }
 
+  /** Is a public webhook URL configured? Drives the Telegram polling default. */
+  #hasPublicWebhookUrl(): boolean {
+    return this.deps.hasPublicWebhookUrl ? this.deps.hasPublicWebhookUrl() : Boolean(process.env.AGENTIS_PUBLIC_URL);
+  }
+
+  /** Telegram runs here (long polling) when it resolves to polling — explicitly, or
+   *  by default on a local install with no public URL. */
+  #telegramIsPolling(settings: unknown): boolean {
+    const explicit = settings && typeof settings === 'object' ? (settings as { transport?: string }).transport : undefined;
+    return resolveTelegramTransport({ explicit, hasPublicUrl: this.#hasPublicWebhookUrl() }) === 'polling';
+  }
+
   /** Does outbound for this connection route through a live session? */
   handles(conn: PersistentRef): boolean {
     if (conn.kind === 'whatsapp') return whatsappIsQrLocal(conn.settings);
-    if (conn.kind === 'telegram') return telegramIsPolling(conn.settings);
+    if (conn.kind === 'telegram') return this.#telegramIsPolling(conn.settings);
     if (conn.kind === 'discord') return discordIsGateway(conn.settings);
     return false;
   }
@@ -108,7 +120,7 @@ export class ChannelConnectionSupervisor {
   onCreated(conn: PersistentRef): void {
     // Token-authenticated live sessions (Telegram polling, Discord gateway) can
     // start immediately. WhatsApp starts via explicit QR login (startLogin).
-    const startsOnCreate = (conn.kind === 'telegram' && telegramIsPolling(conn.settings))
+    const startsOnCreate = (conn.kind === 'telegram' && this.#telegramIsPolling(conn.settings))
       || (conn.kind === 'discord' && discordIsGateway(conn.settings));
     if (startsOnCreate) {
       void this.ensureSession(conn.id).start().catch((err) => {

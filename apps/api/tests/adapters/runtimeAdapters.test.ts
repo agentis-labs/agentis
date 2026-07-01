@@ -39,7 +39,8 @@ describe('runtime adapter protocol parsing', () => {
     expect(part.kind).toBe('activity');
     if (part.kind !== 'activity') throw new Error('expected activity');
     expect(part.delta.id).toBe('cursor-call-1');
-    expect(part.delta.label).toBe('Using read');
+    // The tool card now shows the real input (the file being read), like Codex.
+    expect(part.delta.label).toBe('Using read: README.md');
   });
 
   it('normalizes OpenAI-compatible HTTP chat deltas', () => {

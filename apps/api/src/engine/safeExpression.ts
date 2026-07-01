@@ -71,6 +71,16 @@ export function evaluateExpression<T = unknown>(
       const $input = input;
       const $json = input;
       const $ctx = ctx;
+      // Unified Agentis Expression Contract (AEC): the same names resolve in
+      // transform/filter/code, router/edge conditions, and {{= …}} templates.
+      // The router runtime aliases input ≡ inputs ≡ output ≡ inputData, so the
+      // transform sandbox mirrors that — any condition-valid expression is also
+      // transform-valid, killing the "inputs is not defined" failure class.
+      // Address a specific upstream node with the portable nodes["id"].field.
+      const inputs = input;
+      const $inputs = input;
+      const output = input;
+      const $output = input;
       const nodes = ctx.nodes || {};
       const trigger = ctx.trigger || {};
       const scratchpad = ctx.scratchpad || {};
@@ -125,6 +135,54 @@ function runExpressionScript(
       }) as string | undefined;
     }
     throw err;
+  }
+}
+
+/**
+ * Static + probe analysis of an expression for the BUILD-TIME gate (Phase 1) and
+ * deterministic self-heal (Phase 2). We evaluate the expression once against an
+ * EMPTY context and classify any failure:
+ *
+ *   - `blocked`   — security static guard hit (real problem, block).
+ *   - `syntax`    — neither expression nor function-body form parses (block).
+ *   - `reference` — a top-level identifier is not defined (e.g. `payload`,
+ *                   `dat`): a contract violation that dies at runtime (block).
+ *   - `runtime`   — a data-dependent error (reading a prop of undefined on the
+ *                   empty sample). NOT a contract bug — callers ignore it, which
+ *                   is what keeps this gate free of false positives.
+ *
+ * Because an undefined *identifier* is dereferenced before any data access, the
+ * `reference` class reliably catches exactly the "X is not defined" failures the
+ * unified contract is meant to prevent, without flagging legitimate code that
+ * merely assumes its real input has fields.
+ */
+export type ExpressionDiagnostic =
+  | { ok: true }
+  | { ok: false; kind: 'blocked' | 'syntax' | 'reference' | 'runtime'; identifier?: string; message: string };
+
+export function analyzeExpression(
+  expression: string,
+  sample: SafeExpressionContext = { input: {}, ctx: {} },
+): ExpressionDiagnostic {
+  if (typeof expression !== 'string' || !expression.trim()) {
+    return { ok: false, kind: 'syntax', message: 'empty expression' };
+  }
+  try {
+    staticGuard(expression);
+  } catch (err) {
+    return { ok: false, kind: 'blocked', message: (err as Error).message };
+  }
+  try {
+    evaluateExpression(expression, sample, { timeoutMs: 1_000 });
+    return { ok: true };
+  } catch (err) {
+    const message = (err as Error).message;
+    const ref = message.match(/(\$?[A-Za-z_][\w$]*) is not defined/);
+    if (ref) return { ok: false, kind: 'reference', identifier: ref[1]!, message };
+    if (/Unexpected (token|identifier|end)|Invalid or unexpected token|missing\b|Unterminated|is not valid/i.test(message)) {
+      return { ok: false, kind: 'syntax', message };
+    }
+    return { ok: false, kind: 'runtime', message };
   }
 }
 

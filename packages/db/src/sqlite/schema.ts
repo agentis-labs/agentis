@@ -447,6 +447,12 @@ export const auditEntries = sqliteTable('audit_entries', {
   inputSummary: text('input_summary'),
   outputSummary: text('output_summary'),
   costCents: integer('cost_cents'),
+  // Real model token consumption for this node, recorded on the single terminal
+  // (`node.completed`) entry per node so analytics can SUM without double counting.
+  // Populated by every agent execution path (session / tool-loop / dispatch);
+  // exact when the runtime reports usage, estimated otherwise. Migration v105.
+  tokensIn: integer('tokens_in'),
+  tokensOut: integer('tokens_out'),
   at: text('at').notNull().default(isoNow() as unknown as string),
 });
 

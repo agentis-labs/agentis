@@ -339,10 +339,10 @@ export interface HermesAgentAdapterConfig {
   cwd?: string;
   model?: string;
   /**
-   * `acp` is the default persistent streaming transport. Set `cli` only for
-   * compatibility with Hermes builds that cannot run ACP.
+   * `cli` is the default stable chat transport. `acp` forces the persistent
+   * streaming transport; `auto` tries ACP first and falls back to CLI if it stalls.
    */
-  chatTransport?: 'cli' | 'acp';
+  chatTransport?: 'cli' | 'acp' | 'auto';
   maxTurns?: number;
   extraArgs?: string[];
   env?: Record<string, string>;
@@ -372,6 +372,14 @@ export interface AdapterHealthStatus {
   isHealthy: boolean;
   latencyMs?: number;
   error?: string;
+  /**
+   * True when the probe could NOT reach a verdict in time (the binary spawned but
+   * did not respond within the deadline) — as opposed to a definitive failure
+   * (spawn error, non-zero exit). Callers should treat this as "unknown", not
+   * "down": a slow-to-probe runtime (e.g. a Python harness cold-starting under
+   * load) is often fully able to serve a turn.
+   */
+  timedOut?: boolean;
   checkedAt: string;
 }
 

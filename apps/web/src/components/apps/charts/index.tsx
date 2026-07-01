@@ -5,7 +5,7 @@
  * SVG geometry, token-driven colours. Supports line / area / bar / stacked-bar /
  * pie / donut and a tiny inline Sparkline. Reused by the code-surface tier.
  */
-import { useId } from 'react';
+import { useId, useState, type MouseEvent } from 'react';
 import type { AccentName } from '@agentis/core';
 import { accentColor, seriesColor } from '../theme';
 
@@ -25,6 +25,8 @@ export interface DataChartProps {
   height?: number;
   legend?: boolean;
   curve?: 'linear' | 'smooth';
+  /** Design-language policy: suppress gradient area fills when false (e.g. editorial). Default true. */
+  gradientFill?: boolean;
 }
 
 const W = 640;
@@ -104,11 +106,12 @@ function linearPath(pts: Array<[number, number]>): string {
 }
 
 function CartesianChart(props: DataChartProps) {
-  const { rows, x, series, chartType, stacked, area, legend, curve, height } = props;
+  const { rows, x, series, chartType, stacked, area, legend, curve, height, gradientFill } = props;
   const H = height ?? 200;
   const innerW = W - PAD.l - PAD.r;
   const innerH = H - PAD.t - PAD.b;
   const gradId = useId();
+  const [hover, setHover] = useState<number | null>(null);
 
   const categories = rows.map((r) => String(r[x] ?? ''));
   const n = categories.length;
@@ -138,9 +141,20 @@ function CartesianChart(props: DataChartProps) {
   const y = (v: number): number => PAD.t + innerH * (1 - (v - yMin) / (yMax - yMin));
   const ticks = niceTicks(yMin, yMax);
   const labelStep = Math.max(1, Math.ceil(n / 8));
+  // Hover crosshair + tooltip: the SVG stretches only on X (viewBox H = pixel H),
+  // so the mouse-x fraction maps linearly to a category and the tooltip can be
+  // placed by percentage — no ref/measure needed.
+  const onMove = (e: MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const vbX = ((e.clientX - rect.left) / rect.width) * W;
+    setHover(Math.max(0, Math.min(n - 1, Math.round((vbX - PAD.l) / bw - 0.5))));
+  };
+  const tipLeft = hover != null ? Math.max(12, Math.min(88, (cx(hover) / W) * 100)) : 0;
 
   return (
-    <div className="rounded-card border border-line bg-surface p-3">
+    <div className="s-panel p-3">
+      <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }} role="img" preserveAspectRatio="none">
         {/* gridlines + y labels */}
         {ticks.map((t, i) => (
@@ -163,7 +177,7 @@ function CartesianChart(props: DataChartProps) {
             const pts = rows.map((r, i) => [cx(i), y(num(r[s.y]))] as [number, number]);
             const d = curve === 'smooth' ? smoothPath(pts) : linearPath(pts);
             const baseline = y(Math.max(0, yMin));
-            const fillArea = area || chartType === 'area';
+            const fillArea = (area || chartType === 'area') && gradientFill !== false;
             return (
               <g key={s.y}>
                 {fillArea && pts.length > 0 ? (
@@ -178,15 +192,42 @@ function CartesianChart(props: DataChartProps) {
                   </>
                 ) : null}
                 <path d={d} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
-                {pts.map((p, i) => (
-                  <circle key={i} cx={p[0]} cy={p[1]} r={2.5} fill={color}>
-                    <title>{`${categories[i] ?? ''}: ${fmt(num(rows[i]?.[s.y]))}`}</title>
-                  </circle>
-                ))}
+                {pts.map((p, i) => {
+                  const isLast = i === pts.length - 1;
+                  return (
+                    <g key={i}>
+                      {isLast ? <circle cx={p[0]} cy={p[1]} r={6} fill={color} opacity={0.18} /> : null}
+                      <circle cx={p[0]} cy={p[1]} r={isLast ? 3.5 : 2.5} fill={isLast ? 'var(--color-surface)' : color} stroke={color} strokeWidth={isLast ? 2 : 0}>
+                        <title>{`${categories[i] ?? ''}: ${fmt(num(rows[i]?.[s.y]))}`}</title>
+                      </circle>
+                    </g>
+                  );
+                })}
               </g>
             );
           })}
+        {hover != null ? (
+          <>
+            <line x1={cx(hover)} x2={cx(hover)} y1={PAD.t} y2={H - PAD.b} stroke="var(--color-line-strong)" strokeWidth={1} strokeDasharray="3 3" />
+            {!isBar ? series.map((s, si) => (
+              <circle key={`h-${s.y}`} cx={cx(hover)} cy={y(num(rows[hover]?.[s.y]))} r={3.5} fill="var(--color-surface)" stroke={seriesColor(si, s.color)} strokeWidth={2} />
+            )) : null}
+          </>
+        ) : null}
       </svg>
+        {hover != null ? (
+          <div className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 rounded-card border border-line-strong bg-glass px-2.5 py-1.5 text-[11px] shadow-dropdown" style={{ left: `${tipLeft}%` }}>
+            <div className="mb-0.5 font-medium text-text-primary">{categories[hover]}</div>
+            {series.map((s, si) => (
+              <div key={`t-${s.y}`} className="flex items-center gap-1.5 text-text-secondary">
+                <span className="h-2 w-2 rounded-full" style={{ background: seriesColor(si, s.color) }} />
+                <span>{s.label ?? s.y}</span>
+                <span className="ml-2 tabular-nums text-text-primary">{fmt(num(rows[hover]?.[s.y]))}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
       {legend !== false && series.length > 1 ? <Legend series={series} /> : null}
     </div>
   );
@@ -265,7 +306,7 @@ function PieChart({ rows, x, series, chartType, height, legend }: DataChartProps
   });
 
   return (
-    <div className="flex flex-wrap items-center gap-4 rounded-card border border-line bg-surface p-3">
+    <div className="s-panel flex flex-wrap items-center gap-4 p-3">
       <svg viewBox={`0 0 ${R * 2 + 16} ${H}`} style={{ height: H, width: R * 2 + 16 }} role="img">
         {arcs.map((a, i) => (
           <path key={i} d={a.d} fill={a.color} stroke="var(--color-surface)" strokeWidth={1.5}>

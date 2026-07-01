@@ -107,26 +107,32 @@ describe('ChatMemoryCaptureService', () => {
     expect(result.signals).toBe(3);
     expect(result.peerUpdateJobIds).toHaveLength(2);
     expect(result.sessionMomentId).toBeTruthy();
-    expect(result.promotedSessionMoments).toBe(0);
-    expect(result.workspaceMemoryIds).toHaveLength(3);
-
-    // §B4 — workspace memory now lives in memory_episodes (plane-tagged).
-    const workspaceMemory = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
-      .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
-    expect(workspaceMemory.map((row) => (row.metadata as Record<string, unknown>).memoryKind as string).sort()).toEqual(['fact', 'preference', 'rule']);
-    expect(workspaceMemory.map((row) => row.summary).join('\n')).toContain('TypeScript');
-
-    // Operator preferences must NOT be copied into the agent's private brain
-    // (memory_episodes scoped to the agent). They live once in workspace memory.
-    const agentScoped = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.scopeId, agentId)).all();
-    expect(agentScoped).toHaveLength(0);
+    // Durable memory now forms ASYNC through the SAME formation pipeline runs use
+    // (cognitive promotion queue → FormationJudge / durable operator fallback), so
+    // it is enqueued — not written inline.
+    expect(result.workspaceMemoryIds).toHaveLength(0);
 
     const queued = ctx.db.select().from(schema.cognitivePromotionQueue).where(eq(schema.cognitivePromotionQueue.workspaceId, ctx.workspace.id)).all();
     expect(queued.filter((row) => row.itemType === 'peer_update')).toHaveLength(2);
-    expect(queued.filter((row) => row.itemType === 'atom_promotion')).toHaveLength(0);
+    expect(queued.filter((row) => row.itemType === 'atom_promotion')).toHaveLength(1);
 
-    await queue.poll();
-    await queue.poll();
+    // Drain the queue (1 atom_promotion + 2 peer_update).
+    for (let i = 0; i < 5; i += 1) await queue.poll();
+
+    // The operator's three statements are durably captured in the WORKSPACE mind.
+    // No model is wired here, so the durable operator fallback writes them as
+    // `operator_write` atoms (scopeId null) — reconciled, not duplicated.
+    const formed = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => row.source === 'operator_write');
+    const formedText = formed.map((row) => row.summary).join('\n');
+    expect(formedText).toContain('TypeScript');
+    expect(formedText).toContain('English');
+    expect(formedText).toContain('founder');
+
+    // Operator statements live in the workspace mind, not copied into the agent's
+    // private brain (memory_episodes scoped to the agent).
+    const agentScoped = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.scopeId, agentId)).all();
+    expect(agentScoped).toHaveLength(0);
 
     const peerProfiles = ctx.db.select().from(schema.peerProfiles).where(eq(schema.peerProfiles.peerId, ctx.user.id)).all();
     expect(peerProfiles).toHaveLength(1);
@@ -136,6 +142,46 @@ describe('ChatMemoryCaptureService', () => {
 
     const conclusions = ctx.db.select().from(schema.peerProfileConclusions).where(eq(schema.peerProfileConclusions.subjectPeerId, ctx.user.id)).all();
     expect(conclusions.map((row) => row.content).join('\n')).toContain('Always respond in English');
+  });
+
+  it('reconciles a restated rule instead of duplicating it (the "asked twice" fix)', async () => {
+    const agentId = seedAgent();
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const conversation = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+    });
+    const { queue, service } = buildCaptureStack();
+    const turn = (userMessage: string, assistantMessage: string) => service.captureTurn({
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      userId: ctx.user.id,
+      agentId,
+      userDisplayName: ctx.user.displayName,
+      userMessage,
+      assistantMessage,
+      finishReason: 'stop',
+    });
+    const drain = async () => { for (let i = 0; i < 4; i += 1) await queue.poll(); };
+    const operatorMemories = () => ctx.db.select().from(schema.memoryEpisodes)
+      .where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => row.source === 'operator_write');
+
+    await turn('Always use HTTPS for API endpoints.', 'Understood.');
+    await drain();
+    expect(operatorMemories()).toHaveLength(1);
+
+    // Restating the SAME rule must NOT create a second row — it reconciles.
+    await turn('Always use HTTPS for API endpoints.', 'Got it.');
+    await drain();
+    expect(operatorMemories()).toHaveLength(1);
+
+    // A genuinely different rule is a new memory (not over-collapsed).
+    await turn('Never log customer PII.', 'Acknowledged.');
+    await drain();
+    expect(operatorMemories()).toHaveLength(2);
   });
 
   it('does not capture a question as a preference', async () => {

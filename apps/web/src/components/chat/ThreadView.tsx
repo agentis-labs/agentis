@@ -22,6 +22,7 @@ import { AgentTurnTrace } from './AgentTurnTrace';
 import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessage } from './messageModel';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
+import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -158,6 +159,26 @@ function createClientTurnId(): string {
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** Normalize an @handle the same way the backend broadcast dispatcher does. */
+function normalizeAgentHandle(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** Resolve @handles in `text` to known agent ids (mirrors the server's matcher). */
+function resolveMentionedAgentIds(text: string, agentMap: Record<string, { name: string }>): string[] {
+  const handles = new Set<string>();
+  for (const match of text.matchAll(/@([a-z0-9._-]{2,40})/gi)) {
+    const handle = normalizeAgentHandle(match[1] ?? '');
+    if (handle) handles.add(handle);
+  }
+  if (handles.size === 0) return [];
+  const ids: string[] = [];
+  for (const [id, agent] of Object.entries(agentMap)) {
+    if (handles.has(normalizeAgentHandle(agent.name))) ids.push(id);
+  }
+  return ids;
+}
+
 function normalizeAgentMessage(message: AgentMsg): ChatMessage {
   return {
     id: message.id,
@@ -195,40 +216,6 @@ function extractArtifactIdsFromRoomContent(contentType: string | undefined, cont
     ids.add(content.artifactId);
   }
   return [...ids];
-}
-
-function collectArtifactIds(value: unknown, out: Set<string>): void {
-  if (!value) return;
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectArtifactIds(item, out));
-    return;
-  }
-  if (typeof value !== 'object') return;
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === 'artifactId' && typeof nested === 'string' && nested.trim()) {
-      out.add(nested.trim());
-      continue;
-    }
-    if (key === 'artifactIds' && Array.isArray(nested)) {
-      nested.forEach((item) => {
-        if (typeof item === 'string' && item.trim()) out.add(item.trim());
-      });
-      continue;
-    }
-    if ((key === 'ref' || key === 'url') && typeof nested === 'string') {
-      const artifactId = artifactIdFromRef(nested);
-      if (artifactId) out.add(artifactId);
-    }
-    collectArtifactIds(nested, out);
-  }
-}
-
-function artifactIdFromRef(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (/^artifact:/i.test(trimmed)) return trimmed.slice('artifact:'.length).trim() || null;
-  const match = trimmed.match(/^(?:https?:\/\/[^/]+)?\/v1\/artifacts\/([0-9a-f-]{36})(?:[/?#].*)?$/i);
-  return match?.[1] ?? null;
 }
 
 function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
@@ -284,7 +271,7 @@ function runtimeCapabilityWarning(runtime: AgentRuntimeInfo | null): { title: st
 
 function defaultRuntimeModel(adapterType?: string | null): string | null {
   if (adapterType === 'codex') return 'gpt-5.5';
-  if (adapterType === 'claude_code') return 'claude-sonnet-4-6';
+  if (adapterType === 'claude_code') return 'claude-sonnet-5';
   if (adapterType === 'cursor') return 'auto';
   if (adapterType === 'hermes_agent') return 'hermes-auto';
   if (adapterType === 'openclaw') return 'gateway-default';
@@ -336,6 +323,12 @@ export function ThreadView({
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
   const [agentTyping, setAgentTyping] = useState(false);
+  // Global Chat loading state: which @mentioned agents we're still waiting on for
+  // a reply. Set when the operator posts a mention; an agent is cleared once its
+  // reply (posted after the mention) shows up. A safety timer caps the wait.
+  const [pendingResponders, setPendingResponders] = useState<string[]>([]);
+  const broadcastPostAtRef = useRef<string | null>(null);
+  const broadcastPendingTimerRef = useRef<number | null>(null);
   const [composerInitialText, setComposerInitialText] = useState(initialDraft ?? '');
   // Per-conversation permission mode (ask | plan | auto). Sticky locally so the
   // composer reflects the operator's choice across reloads; also persisted
@@ -380,7 +373,7 @@ export function ThreadView({
     isAtBottom,
     scrollToBottom,
     suppressNextScroll,
-  } = useAutoScroll(messages.length, agentTyping);
+  } = useAutoScroll(messages.length, agentTyping || pendingResponders.length > 0);
 
   const querySuffix = conversationId ? `?conversationId=${conversationId}` : '';
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
@@ -437,8 +430,12 @@ export function ThreadView({
         listInteractions({ limit: PAGE_SIZE, before: before?.createdAt }).catch(() => ({ events: [] }))
       ]);
       const roomMessages = (data.messages ?? []).map(normalizeRoomMessage);
+      // The interaction feed re-reports agent-authored room messages (same id) as
+      // `kind:'message'` events. Drop those so a reply already shown as a room
+      // message isn't rendered a SECOND time; keep interactions from other rooms.
+      const roomMsgIds = new Set((data.messages ?? []).map((m) => m.id));
       const interactionMessages = (interactions.events ?? [])
-        .filter((e) => e.kind === 'message')
+        .filter((e) => e.kind === 'message' && !roomMsgIds.has(e.id))
         .map(normalizeInteractionMessage);
       return sortMessages([...roomMessages, ...interactionMessages]);
     }
@@ -661,6 +658,20 @@ export function ThreadView({
     setLoadedConversationId(conversationId ?? null);
   }, [kind, id, conversationId]);
 
+  // Reset the Global Chat "responding…" indicator when switching threads, and
+  // clear its safety timer on unmount.
+  useEffect(() => {
+    setPendingResponders([]);
+    broadcastPostAtRef.current = null;
+    if (broadcastPendingTimerRef.current) {
+      window.clearTimeout(broadcastPendingTimerRef.current);
+      broadcastPendingTimerRef.current = null;
+    }
+  }, [kind, id]);
+  useEffect(() => () => {
+    if (broadcastPendingTimerRef.current) window.clearTimeout(broadcastPendingTimerRef.current);
+  }, []);
+
   // Drop any "agent working" progress card we own when leaving this thread
   // (switching agents or unmounting). The
   // server turn keeps running and its result still arrives via realtime, but
@@ -757,15 +768,43 @@ export function ThreadView({
     }
   });
 
-  // Specifically for __broadcast__, we also want to merge in live interaction events.
-  // When an activity or generic room message occurs, we do a quick fetch of the latest interactions to merge them.
-  useRealtime(['activity.created', 'room.message.sent', 'room.message.received'], () => {
+  // Global Chat (__broadcast__) is a virtual view over a real backing room, so a
+  // posted agent reply only renders through the primary room-message handler if
+  // the backing room id has resolved AND matches — a fragile, race-prone path that
+  // left agent @mention replies invisible. These same room.message.* events DO
+  // reach this workspace-scoped handler reliably, so here we authoritatively
+  // REFETCH the room's own messages (the agent replies the broadcast dispatcher
+  // posts) plus the latest interaction events, and merge. This guarantees a reply
+  // appears without depending on live event-payload matching.
+  useRealtime(['activity.created', REALTIME_EVENTS.ROOM_MESSAGE_SENT, REALTIME_EVENTS.ROOM_MESSAGE_RECEIVED], () => {
     if (id !== '__broadcast__') return;
-    void listInteractions({ limit: 10 }).then((res) => {
+    void Promise.all([
+      api<{ messages: RoomMsg[] }>(`/v1/rooms/__broadcast__/messages?limit=${PAGE_SIZE}`)
+        .then((res) => res.messages ?? [])
+        .catch(() => [] as RoomMsg[]),
+      listInteractions({ limit: 10 }).then((res) => res.events ?? []).catch(() => []),
+    ]).then(([roomMessages, events]) => {
+      const roomMsgIds = new Set(roomMessages.map((m) => m.id));
+      // Clear the "responding…" indicator for any mentioned agent whose reply has
+      // now landed (an agent room message dated after the operator's mention).
+      const postAt = broadcastPostAtRef.current;
+      if (postAt) {
+        const replied = new Set(
+          roomMessages
+            .filter((m) => m.authorType === 'agent' && m.authorId && m.createdAt >= postAt)
+            .map((m) => m.authorId as string),
+        );
+        if (replied.size > 0) setPendingResponders((prev) => prev.filter((agentId) => !replied.has(agentId)));
+      }
       setMessages((current) => {
         let updated = [...current];
-        for (const event of res.events) {
-          if (event.kind === 'message') {
+        for (const message of roomMessages) {
+          updated = upsertMessage(updated, normalizeRoomMessage(message));
+        }
+        for (const event of events) {
+          // Skip interaction 'message' events that ARE these room messages (same
+          // id) — they'd render a duplicate bubble. Keep agent chatter elsewhere.
+          if (event.kind === 'message' && !roomMsgIds.has(event.id)) {
             updated = mergeMessage(updated, normalizeInteractionMessage(event));
           }
         }
@@ -931,6 +970,17 @@ export function ThreadView({
         });
         const message = res.message;
         if (message) setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(message)));
+        // Global Chat: show a "responding…" indicator for each @mentioned agent
+        // until its reply lands (the dispatch is async and can take a while).
+        if (id === '__broadcast__') {
+          const responders = resolveMentionedAgentIds(value, agentMap);
+          if (responders.length > 0) {
+            broadcastPostAtRef.current = new Date().toISOString();
+            setPendingResponders(responders);
+            if (broadcastPendingTimerRef.current) window.clearTimeout(broadcastPendingTimerRef.current);
+            broadcastPendingTimerRef.current = window.setTimeout(() => setPendingResponders([]), 180_000);
+          }
+        }
       } catch (error) {
         toast.error('Failed to send', apiErrorMessage(error));
       }
@@ -1447,6 +1497,15 @@ export function ThreadView({
             <span>{name} is thinking…</span>
           </div>
         )}
+        {kind === 'room' && pendingResponders.length > 0 && (
+          <div className="mt-2 flex items-center gap-2 px-1 text-[11px] italic text-text-muted">
+            <TypingDots />
+            <span>
+              {pendingResponders.map((agentId) => agentMap[agentId]?.name ?? 'agent').join(', ')}
+              {pendingResponders.length > 1 ? ' are responding…' : ' is responding…'}
+            </span>
+          </div>
+        )}
         {stepTrack && stepTrack.steps.length > 0 && (streamingAgentActive || agentTyping) && (
           <div className="mt-2 rounded-xl border border-line/60 bg-surface-2/40 px-3 py-2 shadow-sm transition-colors duration-150 hover:border-line">
             <StepTrack track={stepTrack} />
@@ -1695,69 +1754,7 @@ function MessageBubble({
   );
 }
 
-type ChatArtifact = {
-  id: string;
-  type: 'html' | 'image' | 'document' | 'code' | 'data';
-  title: string;
-  content: string;
-};
 
-/**
- * Artifact previews need to load through `api()` so requests carry the
- * workspace Bearer token instead of opening raw `/v1/artifacts/:id` links.
- */
-function ChatArtifactAttachments({ artifactIds }: { artifactIds: string[] }) {
-  const artifactKey = artifactIds.join(',');
-  const [artifacts, setArtifacts] = useState<ChatArtifact[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!artifactIds.length) {
-      setArtifacts([]);
-      return () => { cancelled = true; };
-    }
-    void Promise.all(
-      artifactIds.map(async (id) => {
-        const response = await api<{ artifact: ChatArtifact }>(`/v1/artifacts/${encodeURIComponent(id)}`);
-        return response.artifact;
-      }),
-    ).then((loaded) => {
-      if (!cancelled) setArtifacts(loaded);
-    }).catch(() => {
-      if (!cancelled) setArtifacts([]);
-    });
-    return () => { cancelled = true; };
-  }, [artifactKey]); // artifactKey is the stable identity of the requested artifacts.
-
-  if (!artifacts.length) return null;
-  return (
-    <div className="mb-2 grid gap-2 sm:grid-cols-2">
-      {artifacts.map((artifact) => {
-        const image = artifact.type === 'image' && artifact.content.startsWith('data:image/');
-        return (
-          <Link
-            key={artifact.id}
-            to={`/artifacts?open=${encodeURIComponent(artifact.id)}`}
-            className="group overflow-hidden rounded-lg border border-line bg-canvas/50 text-left transition hover:border-accent/50 hover:bg-canvas"
-          >
-            {image && (
-              <img
-                src={artifact.content}
-                alt={artifact.title}
-                className="max-h-64 w-full bg-canvas object-contain"
-              />
-            )}
-            <div className="flex min-w-0 items-center gap-2 px-2.5 py-2 text-[11px]">
-              <FileText size={13} className="shrink-0 text-accent" />
-              <span className="truncate font-medium text-text-primary">{artifact.title}</span>
-              <span className="ml-auto shrink-0 uppercase tracking-wide text-text-muted">{artifact.type}</span>
-            </div>
-          </Link>
-        );
-      })}
-    </div>
-  );
-}
 
 function ConfirmationCard({
   data,

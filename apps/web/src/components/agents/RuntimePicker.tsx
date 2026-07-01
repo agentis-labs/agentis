@@ -29,6 +29,7 @@ export interface RuntimeConfig {
   hermesBinaryPath: string;
   hermesCwd: string;
   hermesModel: string;
+  hermesChatTransport: string;
   hermesMaxTurns: string;
   hermesExtraArgs: string;
   hermesEnv: string;
@@ -93,6 +94,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   hermesBinaryPath: '',
   hermesCwd: '',
   hermesModel: '',
+  hermesChatTransport: 'cli',
   hermesMaxTurns: '24',
   hermesExtraArgs: '',
   hermesEnv: '',
@@ -461,9 +463,10 @@ function ConnectionDetailsAccordion({
               <Field label="Model"><input value={config.httpModel} onChange={(event) => setConfig('httpModel', event.target.value)} placeholder="provider-default" className={inputCls} /></Field>
             </div>
           ) : adapterType === 'hermes_agent' ? (
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-4">
               <Field label="Binary path"><input value={config.hermesBinaryPath} onChange={(event) => setConfig('hermesBinaryPath', event.target.value)} placeholder="hermes" className={inputCls} /></Field>
               <Field label="Working directory"><input value={config.hermesCwd} onChange={(event) => setConfig('hermesCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
+              <Field label="Transport"><select value={config.hermesChatTransport} onChange={(event) => setConfig('hermesChatTransport', event.target.value)} className={inputCls}><option value="cli">CLI</option><option value="acp">ACP</option><option value="auto">Auto</option></select></Field>
               <Field label="Timeout (s)"><input value={config.hermesTimeoutSec} onChange={(event) => setConfig('hermesTimeoutSec', event.target.value)} inputMode="numeric" placeholder="120" className={inputCls} /></Field>
             </div>
           ) : adapterType === 'claude_code' ? (
@@ -654,6 +657,7 @@ function AdapterConfigFields({
       <div className="grid gap-3 md:grid-cols-5">
         <Field label="Binary path"><input value={config.hermesBinaryPath} onChange={(event) => setConfig('hermesBinaryPath', event.target.value)} placeholder="hermes" className={inputCls} /></Field>
         <Field label="Working directory"><input value={config.hermesCwd} onChange={(event) => setConfig('hermesCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
+        <Field label="Transport"><select value={config.hermesChatTransport} onChange={(event) => setConfig('hermesChatTransport', event.target.value)} className={inputCls}><option value="cli">CLI</option><option value="acp">ACP</option><option value="auto">Auto</option></select></Field>
         <Field label="Max turns"><input value={config.hermesMaxTurns} onChange={(event) => setConfig('hermesMaxTurns', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
         <Field label="Extra args"><input value={config.hermesExtraArgs} onChange={(event) => setConfig('hermesExtraArgs', event.target.value)} placeholder="--flag value" className={inputCls} /></Field>
         <Field label="Env"><textarea value={config.hermesEnv} onChange={(event) => setConfig('hermesEnv', event.target.value)} placeholder="{}" className={textareaCls} /></Field>
@@ -743,7 +747,7 @@ function Field({ label, children, hint }: { label: string; children: React.React
 export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<string, unknown>): RuntimeConfig {
   const base = { ...DEFAULT_RUNTIME_CONFIG };
   if (adapterType === 'openclaw') return { ...base, openclawGatewayId: stringOf(stored.gatewayId), openclawGatewayUrl: stringOf(stored.gatewayUrl), openclawModel: stringOf(stored.model), openclawDeviceTokenCredentialId: stringOf(stored.deviceTokenCredentialId), openclawAgentName: stringOf(stored.agentName), openclawSessionKeyStrategy: stringOf(stored.sessionKeyStrategy, DEFAULT_RUNTIME_CONFIG.openclawSessionKeyStrategy), openclawSessionKey: stringOf(stored.sessionKey), openclawTimeoutSec: stringOf(stored.timeoutSec, DEFAULT_RUNTIME_CONFIG.openclawTimeoutSec), openclawPayloadTemplate: jsonText(stored.payloadTemplate) };
-  if (adapterType === 'hermes_agent') return { ...base, hermesBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), hermesCwd: stringOf(stored.cwd), hermesModel: stringOf(stored.model), hermesMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.hermesMaxTurns), hermesExtraArgs: arrayText(stored.extraArgs), hermesEnv: jsonText(stored.env), hermesTimeoutSec: stringOf(stored.timeoutSec), hermesGraceSec: stringOf(stored.graceSec) };
+  if (adapterType === 'hermes_agent') return { ...base, hermesBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), hermesCwd: stringOf(stored.cwd), hermesModel: stringOf(stored.model), hermesChatTransport: stringOf(stored.chatTransport, DEFAULT_RUNTIME_CONFIG.hermesChatTransport), hermesMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.hermesMaxTurns), hermesExtraArgs: arrayText(stored.extraArgs), hermesEnv: jsonText(stored.env), hermesTimeoutSec: stringOf(stored.timeoutSec), hermesGraceSec: stringOf(stored.graceSec) };
   if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeSkipPermissions: boolText(stored.dangerouslySkipPermissions, DEFAULT_RUNTIME_CONFIG.claudeSkipPermissions), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'codex') return { ...base, codexBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), codexCwd: stringOf(stored.cwd), codexModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.codexModel), codexMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.codexMaxTurns), codexReasoningEffort: stringOf(stored.modelReasoningEffort), codexFastMode: boolText(stored.fastMode, DEFAULT_RUNTIME_CONFIG.codexFastMode), codexBrowser: boolText(stored.browser, DEFAULT_RUNTIME_CONFIG.codexBrowser), codexBypassApprovalsAndSandbox: 'true', codexExtraArgs: arrayText(stored.extraArgs), codexEnv: jsonText(stored.env), codexTimeoutSec: stringOf(stored.timeoutSec) };
   if (adapterType === 'cursor') return { ...base, cursorBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), cursorCwd: stringOf(stored.cwd), cursorModel: stringOf(stored.model, DEFAULT_RUNTIME_CONFIG.cursorModel), cursorExtraArgs: arrayText(stored.extraArgs), cursorEnv: jsonText(stored.env), cursorTimeoutSec: stringOf(stored.timeoutSec) };
@@ -753,7 +757,7 @@ export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<s
 
 export function runtimeConfigToAdapterConfig(adapterType: AdapterType, config: RuntimeConfig): Record<string, unknown> {
   if (adapterType === 'openclaw') return compact({ gatewayId: config.openclawGatewayId, gatewayUrl: normalizeGatewayUrl(config.openclawGatewayUrl), model: config.openclawModel, agentName: config.openclawAgentName, deviceTokenCredentialId: config.openclawDeviceTokenCredentialId, sessionKeyStrategy: config.openclawSessionKeyStrategy, sessionKey: config.openclawSessionKey, timeoutSec: positiveNumber(config.openclawTimeoutSec), payloadTemplate: jsonObject(config.openclawPayloadTemplate) });
-  if (adapterType === 'hermes_agent') return compact({ binaryPath: config.hermesBinaryPath, command: config.hermesBinaryPath, cwd: config.hermesCwd, model: config.hermesModel, maxTurns: positiveNumber(config.hermesMaxTurns), extraArgs: splitArgs(config.hermesExtraArgs), env: jsonStringRecord(config.hermesEnv), timeoutSec: positiveNumber(config.hermesTimeoutSec), graceSec: positiveNumber(config.hermesGraceSec) });
+  if (adapterType === 'hermes_agent') return compact({ binaryPath: config.hermesBinaryPath, command: config.hermesBinaryPath, cwd: config.hermesCwd, model: config.hermesModel, chatTransport: config.hermesChatTransport, maxTurns: positiveNumber(config.hermesMaxTurns), extraArgs: splitArgs(config.hermesExtraArgs), env: jsonStringRecord(config.hermesEnv), timeoutSec: positiveNumber(config.hermesTimeoutSec), graceSec: positiveNumber(config.hermesGraceSec) });
   if (adapterType === 'claude_code') return compact({ binaryPath: config.claudeBinaryPath, command: config.claudeBinaryPath, cwd: config.claudeCwd, model: config.claudeModel, maxTurns: positiveNumber(config.claudeMaxTurns), allowedTools: splitCsv(config.claudeAllowedTools), dangerouslySkipPermissions: boolValue(config.claudeSkipPermissions), extraArgs: splitArgs(config.claudeExtraArgs), env: jsonStringRecord(config.claudeEnv), timeoutSec: positiveNumber(config.claudeTimeoutSec) });
   if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), browser: boolValue(config.codexBrowser), dangerouslyBypassApprovalsAndSandbox: true, extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
   if (adapterType === 'cursor') return compact({ binaryPath: config.cursorBinaryPath, command: config.cursorBinaryPath, cwd: config.cursorCwd, model: config.cursorModel, extraArgs: splitArgs(config.cursorExtraArgs), env: jsonStringRecord(config.cursorEnv), timeoutSec: positiveNumber(config.cursorTimeoutSec) });

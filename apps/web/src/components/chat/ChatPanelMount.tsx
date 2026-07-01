@@ -67,7 +67,7 @@ function ChatPanelFallback({ width, fullscreen }: { width: number; fullscreen?: 
       className={fullscreen
         ? 'fixed inset-3 z-50 flex min-w-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-modal md:inset-5'
         : 'relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden border-l border-line bg-surface'}
-      style={fullscreen ? undefined : { width: `min(${width}px, 100vw)`, maxWidth: '100vw' }}
+      style={fullscreen ? undefined : { width: `clamp(320px, ${width}px, min(720px, calc(100vw - 2rem)))`, maxWidth: 'calc(100vw - 2rem)' }}
       role="complementary"
       aria-label="Chat panel"
     >

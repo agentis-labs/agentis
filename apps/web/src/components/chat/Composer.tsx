@@ -509,7 +509,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
             return (
               <div
                 key={att.id}
-                className="group relative flex min-w-0 items-center gap-2 rounded-lg border border-line bg-canvas/40 p-1.5 pr-2.5 text-xs text-text-secondary shadow-sm transition hover:border-accent/40"
+                className="group relative flex min-w-0 items-center gap-2 rounded-lg border border-line bg-canvas/40 p-1.5 pr-2.5 text-xs text-text-secondary shadow-sm transition hover:border-accent/40 animate-in fade-in zoom-in-95 duration-200"
               >
                 {isImage && att.url ? (
                   <img
@@ -561,6 +561,12 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
           value={text}
           onChange={onChange}
           onKeyDown={onKeyDown}
+          onPaste={(e) => {
+            if (e.clipboardData.files && e.clipboardData.files.length > 0) {
+              e.preventDefault();
+              handleFiles(e.clipboardData.files);
+            }
+          }}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           rows={1}

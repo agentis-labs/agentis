@@ -27,6 +27,7 @@ import {
 import type { EmbeddingProviderRegistry } from './embeddingProviderRegistry.js';
 import {
   extractCandidateStatements,
+  extractOperatorCandidates,
   isRejectable,
   scoreStatement,
   FormationJudge,
@@ -34,6 +35,7 @@ import {
   type FormationNeighbor,
   type FormedMemory,
   type MemoryWritePolicy,
+  type ScoredStatement,
 } from './brainFormation.js';
 import type { StructuredCompleter } from './structuredCompleter.js';
 import {
@@ -81,6 +83,14 @@ export interface CollectiveCognitivePromotionInput {
   scopeId?: string | null;
   taskInput?: unknown;
   taskOutput: unknown;
+  /**
+   * Authoritative operator speech (the user side of a chat turn). When set with
+   * `originSurface: 'operator_chat'`, it is mined with the permissive operator
+   * gate (`extractOperatorCandidates`) so terse/first-person statements survive,
+   * and — even without a Formation Judge — is committed as durable operator
+   * memory rather than ephemeral staging.
+   */
+  operatorText?: string | null;
   /** Human-readable task label, used by the Formation Judge for context. */
   taskTitle?: string | null;
   /**
@@ -381,7 +391,16 @@ export class SharedIntelligenceService {
       return { created, reinforced: 0, linked: 0 };
     }
 
-    const candidates = extractCandidateStatements(input.taskOutput);
+    // Authoritative operator chat is mined permissively (terse/first-person
+    // statements survive) and merged with any strict candidates from the
+    // assistant side; everything else uses the strict agent-output gate.
+    const operatorChat = input.originSurface === 'operator_chat';
+    const candidates: ScoredStatement[] = operatorChat
+      ? dedupeCandidates([
+        ...extractOperatorCandidates(typeof input.operatorText === 'string' ? input.operatorText : ''),
+        ...extractCandidateStatements(input.taskOutput),
+      ])
+      : extractCandidateStatements(input.taskOutput);
     if (candidates.length === 0) return ZERO;
 
     const existing = this.#loadEpisodeVectors(input.workspaceId, input.scopeId ?? null);
@@ -421,7 +440,11 @@ export class SharedIntelligenceService {
     let reinforced = 0;
     let linked = 0;
     for (const cand of candidates) {
-      const r = await this.#stageOrReinforce(input, cand, provider, adapterType, existing);
+      // Operator chat is authoritative → durable even without a judge; agent
+      // output stays ephemeral until reinforced.
+      const r = operatorChat
+        ? await this.#commitOperatorMemory(input, cand, provider, adapterType, existing)
+        : await this.#stageOrReinforce(input, cand, provider, adapterType, existing);
       created += r.created;
       reinforced += r.reinforced;
       linked += r.linked;
@@ -650,6 +673,61 @@ export class SharedIntelligenceService {
         formationMode: 'staged',
         ttlExpiresAt: ttlIso(routing.stagedTtlDays),
         taskInputPreview: compactValue(input.taskInput),
+        embeddingProvider: provider.dimension,
+      },
+    });
+    if (vec) this.#applyEmbedding(episode.id, vec);
+    this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
+    existing.push({ id: episode.id, vec, text: `${episode.title}\n${episode.summary}` });
+    return { created: 1, reinforced: 0, linked: 0 };
+  }
+
+  /**
+   * Durable commit for authoritative OPERATOR memory when no Formation Judge is
+   * available (no model). Unlike `#stageOrReinforce` (ephemeral, decaying), the
+   * operator is the source of truth, so we write a CONSOLIDATED, non-expiring
+   * `operator`-sourced atom — preserving the pre-existing "operator chat is
+   * durable" behavior — while still reinforcing a near-duplicate instead of
+   * writing a second copy (the dedup the regex path lacked).
+   */
+  async #commitOperatorMemory(
+    input: CollectiveCognitivePromotionInput,
+    cand: { text: string; score: number },
+    provider: EmbeddingProvider,
+    adapterType: string | null,
+    existing: EpisodeVector[],
+  ): Promise<{ created: number; reinforced: number; linked: number }> {
+    let vec: number[] | null = null;
+    try { vec = await embedText(provider, cand.text); } catch { /* embedding optional */ }
+    const best = vec ? bestCosine(existing, vec) : bestLexical(existing, cand.text);
+    if (best && best.score >= EMBED_HIGH_SIMILARITY) {
+      const node = this.reinforceAtom(input.workspaceId, 'episode', best.entry.id, {
+        agentId: input.agentId ?? null, adapterType, runId: input.runId ?? null, scopeId: input.scopeId ?? null,
+      });
+      if (node) {
+        this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_REINFORCED, node);
+        return { created: 0, reinforced: 1, linked: 0 };
+      }
+    }
+    const pacer = classifyPacer({ text: cand.text, surface: 'operator_chat', episodeType: 'decision' });
+    const episode = this.episodes.write({
+      workspaceId: input.workspaceId,
+      scopeId: input.scopeId ?? null,
+      agentId: input.agentId ?? null,
+      type: 'decision',
+      title: titleFromFact(cand.text),
+      summary: cand.text,
+      source: 'operator_write',
+      confidence: 0.85,
+      importance: 0.8,
+      trust: 0.9,
+      tags: ['operator_signal', 'consolidated', `pacer:${pacer.pacerClass}`],
+      outcomeStatus: 'mixed',
+      metadata: {
+        origin: 'operator_chat',
+        pacerClass: pacer.pacerClass,
+        originSurface: 'operator_chat',
+        formationMode: 'operator_durable',
         embeddingProvider: provider.dimension,
       },
     });
@@ -2900,6 +2978,18 @@ function outcomeFor(type: RuntimeEpisodeType): 'good' | 'bad' | 'mixed' {
 function titleFromFact(fact: string): string {
   const clean = fact.replace(/^[-*\d.)\s]+/, '').trim();
   return truncate(clean, 92);
+}
+
+/** Dedupe scored statements by normalized text, keeping the highest score. */
+function dedupeCandidates(candidates: ScoredStatement[]): ScoredStatement[] {
+  const byKey = new Map<string, ScoredStatement>();
+  for (const candidate of candidates) {
+    const key = candidate.text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!key) continue;
+    const prev = byKey.get(key);
+    if (!prev || candidate.score > prev.score) byKey.set(key, candidate);
+  }
+  return [...byKey.values()];
 }
 
 function relationFor(fact: string, target: string): KnowledgeLinkRelation {

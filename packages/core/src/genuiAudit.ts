@@ -10,7 +10,7 @@
  * hand-authored via ui_render) passes through it. Mirrors the workflow robustness
  * auditor pattern.
  */
-import type { SurfaceTheme, ViewNode } from './types/view.js';
+import type { DesignLanguage, SurfaceTheme, ViewNode } from './types/view.js';
 
 export interface AuditResult {
   view: ViewNode;
@@ -119,7 +119,21 @@ function inferTheme(view: ViewNode): SurfaceTheme {
   const json = JSON.stringify(view);
   if (json.includes('"DataBoard"') || json.includes('"Inbox"') || json.includes('"ChatThread"')) return 'product';
   if (json.includes('"Chart"') || json.includes('"KPIStrip"') || json.includes('"Gauge"')) return 'analytics';
-  return 'console';
+  return 'operations';
+}
+
+/**
+ * The premium design language a theme leads with (kept in sync with the web
+ * `theme.ts` PRESETS). Guarantees every surface gets a non-flat look even when
+ * the model omits `design`. The operator can still override it.
+ */
+function inferDesign(theme: SurfaceTheme): DesignLanguage {
+  switch (theme) {
+    case 'analytics': return 'aurora';
+    case 'product': return 'soft';
+    case 'editorial': return 'editorial';
+    default: return 'operations';
+  }
 }
 
 /**
@@ -137,6 +151,14 @@ export function repairSurface(view: ViewNode | null | undefined, opts: { collect
   if (!out.style?.theme) {
     out = { ...out, style: { ...out.style, theme: inferTheme(out) } } as ViewNode;
     ctx.fixes.push('set root theme');
+  }
+
+  // Guarantee a premium design language so no surface renders flat — inferred
+  // from the (now-guaranteed) theme. Honors any language the model already chose.
+  if (!out.style?.design) {
+    const theme = out.style?.theme ?? inferTheme(out);
+    out = { ...out, style: { ...out.style, design: inferDesign(theme) } } as ViewNode;
+    ctx.fixes.push('set root design language');
   }
 
   return { view: out, fixes: ctx.fixes };

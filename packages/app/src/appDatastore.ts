@@ -480,7 +480,9 @@ function indexedLookupValues(raw: unknown): unknown[] | null {
 function indexedValuePredicate(values: unknown[]): SQL {
   const clauses = values.filter(isIndexableScalar).map((value) => {
     if (typeof value === 'number') return sql`${schema.appRecordIndex.valueNumber} = ${value}`;
-    if (typeof value === 'boolean') return sql`${schema.appRecordIndex.valueBoolean} = ${value}`;
+    // better-sqlite3 cannot bind a raw boolean ("can only bind numbers, strings,
+    // bigints, buffers, and null"); the index column stores 0/1, so bind 0/1.
+    if (typeof value === 'boolean') return sql`${schema.appRecordIndex.valueBoolean} = ${value ? 1 : 0}`;
     return sql`${schema.appRecordIndex.valueText} = ${String(value)}`;
   });
   if (clauses.length === 0) return sql`1 = 0`;

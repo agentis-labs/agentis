@@ -25,7 +25,7 @@ export interface ValidateWorkflowGraphOptions {
  *  would die at run time with "unknown op X" can never be persisted or run. */
 const STORE_OPS = new Set(['get', 'set', 'delete', 'increment', 'append', 'get_all']);
 
-const SUPPORTED_NODE_KINDS = new Set([
+export const SUPPORTED_NODE_KINDS = new Set([
   'trigger',
   'agent_task',
   'agent_session',

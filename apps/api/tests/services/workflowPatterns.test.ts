@@ -4,7 +4,10 @@
  * that signal-driven suggestion maps to the right patterns.
  */
 import { describe, expect, it } from 'vitest';
+import type { WorkflowGraph } from '@agentis/core';
 import { WORKFLOW_PATTERNS, getWorkflowPattern, suggestPatterns } from '../../src/services/workflowPatterns.js';
+import { evalCondition } from '../../src/engine/SafeConditionParser.js';
+import { validateGraphExpressions } from '../../src/engine/validateExpressions.js';
 
 describe('workflow pattern library', () => {
   it('exposes the named robust patterns', () => {
@@ -52,4 +55,35 @@ describe('workflow pattern library', () => {
     const ids = suggestPatterns({ iterative: true }).map((p) => p.id);
     expect(ids).toContain('convergence-loop');
   });
+});
+
+// WORKFLOW-RELIABILITY P4.2 — the blocks the planner composes from must be
+// dry-run clean, or a pattern teaches the very expression-contract bug this
+// program removes.
+const conditionScope = {
+  input: {}, inputs: {}, output: {}, trigger: {}, nodes: {}, scratchpad: {}, store: {}, workspace: {}, run: {}, loop: {},
+};
+
+describe('workflow pattern library is self-verifying', () => {
+  for (const pattern of WORKFLOW_PATTERNS) {
+    it(`${pattern.id}: every router condition parses under the safe-condition grammar`, () => {
+      for (const node of pattern.nodes) {
+        if (node.config.kind !== 'router') continue;
+        const branches = (node.config as { branches?: Array<{ condition?: string }> }).branches ?? [];
+        for (const branch of branches) {
+          if (typeof branch.condition === 'string' && branch.condition.trim()) {
+            expect(() => evalCondition(branch.condition!, conditionScope)).not.toThrow();
+          }
+        }
+      }
+    });
+
+    it(`${pattern.id}: every JS / {{=}} expression is on-contract`, () => {
+      const graph = {
+        nodes: pattern.nodes.map((n) => ({ id: n.id, type: n.config.kind, title: n.title, position: { x: 0, y: 0 }, config: n.config })),
+        edges: [],
+      } as unknown as WorkflowGraph;
+      expect(validateGraphExpressions(graph)).toEqual([]);
+    });
+  }
 });

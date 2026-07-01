@@ -34,6 +34,43 @@ describe('modelRoutingPolicy', () => {
     expect(decision.source).toBe('explicit_pin');
   });
 
+  it('routes a coding task to a code-specialized model instead of the general flagship', () => {
+    const decision = routeModelForTask({
+      task: 'Refactor the auth module and fix the failing unit tests in the typescript codebase.',
+      purpose: 'agent_task',
+      runtime: 'codex',
+      currentModel: 'gpt-5.5',
+    });
+
+    expect(decision.selectedModel).toContain('codex');
+    expect(decision.selectedModel).not.toBe('gpt-5.5');
+    expect(decision.reason.toLowerCase()).toContain('code');
+    expect(decision.alternatives.some((alt) => alt.model === 'gpt-5.5')).toBe(true);
+  });
+
+  it('prefers a code model when the task declares code capability tags', () => {
+    const decision = routeModelForTask({
+      task: 'Implement the feature.',
+      purpose: 'agent_task',
+      runtime: 'openai',
+      currentModel: 'gpt-5.5',
+      requiredAffordances: ['coding', 'fileSystem'],
+    });
+
+    expect(decision.selectedModel).toContain('codex');
+  });
+
+  it('does NOT divert non-code work to a code model (capability is task-driven)', () => {
+    const decision = routeModelForTask({
+      task: 'Write a friendly announcement about our new pricing.',
+      purpose: 'conversation',
+      runtime: 'openai',
+      currentModel: 'gpt-5.5',
+    });
+
+    expect(decision.selectedModel).not.toContain('codex');
+  });
+
   it('keeps unknown custom models selectable with safe balanced metadata', () => {
     const decision = routeModelForTask({
       task: 'Write a concise announcement.',

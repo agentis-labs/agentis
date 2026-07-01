@@ -111,6 +111,22 @@ function agentGraph(): WorkflowGraph {
   };
 }
 
+/** An agent_task explicitly PINNED to a specific agentId (for binding checks). */
+function pinnedAgentGraph(agentId: string): WorkflowGraph {
+  return {
+    version: 1,
+    nodes: [
+      { id: 'trigger', type: 'trigger', title: 'Input', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+      {
+        id: 'draft', type: 'agent_task', title: 'Draft Digest', position: { x: 200, y: 0 },
+        config: { kind: 'agent_task', agentId, prompt: 'Draft a digest.', capabilityTags: [], inputKeys: [], outputKeys: ['subject'] },
+      },
+    ],
+    edges: [{ id: 'edge', source: 'trigger', target: 'draft' }],
+    viewport: { x: 0, y: 0, zoom: 1 },
+  };
+}
+
 function graph(expression: string): WorkflowGraph {
   return {
     version: 1,
@@ -336,6 +352,36 @@ describe('preflightWorkflow', () => {
         declaredOutputKeys: ['subject', 'htmlBody'],
       },
     });
+  });
+
+  it('warns when an agent node is pinned to a non-functional (no-runtime) agent', async () => {
+    const ctx = await createTestContext();
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Claude Code', adapterType: 'http', capabilityTags: [], config: {}, runtimeModel: null, role: 'worker', status: 'offline',
+    }).run();
+    const report = preflightWorkflow({ db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'wf-pin', graph: pinnedAgentGraph(agentId) });
+    const issue = report.issues.find((i) => i.nodeId === 'draft' && i.code === 'AGENT_NO_RUNTIME');
+    expect(issue?.severity).toBe('warning');
+    expect(issue?.message).toContain('no connected runtime');
+  });
+
+  it('warns when an agent node is pinned to an agent that no longer exists', async () => {
+    const ctx = await createTestContext();
+    const report = preflightWorkflow({ db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'wf-missing', graph: pinnedAgentGraph(randomUUID()) });
+    expect(report.issues.some((i) => i.nodeId === 'draft' && i.code === 'AGENT_NOT_FOUND')).toBe(true);
+  });
+
+  it('does not warn when the pinned agent has a working model', async () => {
+    const ctx = await createTestContext();
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Orchy', adapterType: 'codex', capabilityTags: [], config: { model: 'gpt-5' }, runtimeModel: 'gpt-5', role: 'orchestrator', status: 'online',
+    }).run();
+    const report = preflightWorkflow({ db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'wf-ok', graph: pinnedAgentGraph(agentId) });
+    expect(report.issues.some((i) => i.code === 'AGENT_NO_RUNTIME' || i.code === 'AGENT_NOT_FOUND')).toBe(false);
   });
 
   it('returns cached reports without rerunning the graph', async () => {

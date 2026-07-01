@@ -65,6 +65,21 @@ describe('evaluateExpression', () => {
     });
   });
 
+  it('accepts the `inputs`/`output` aliases (AEC) so condition-valid expressions also run as transforms', () => {
+    // Regression: the doctrine teaches `inputs[...]` for routers; an agent that
+    // carried it into a transform used to die with "inputs is not defined".
+    // The unified contract aliases inputs ≡ output ≡ input (router runtime parity).
+    expect(evaluateExpression('({ rejected: inputs.candidates.filter((c) => c.score < 0.5) })', {
+      input: { candidates: [{ score: 0.2 }, { score: 0.9 }] },
+    })).toEqual({ rejected: [{ score: 0.2 }] });
+    expect(evaluateExpression('({ echoed: output.value })', { input: { value: 7 } })).toEqual({ echoed: 7 });
+    // The portable per-node accessor still works alongside the alias.
+    expect(evaluateExpression('({ prior: inputs.value, byId: nodes.fetch.count })', {
+      input: { value: 1 },
+      ctx: { nodes: { fetch: { count: 3 } } },
+    })).toEqual({ prior: 1, byId: 3 });
+  });
+
   it('allows realistic transforms to exceed the old fixed 250ms deadline', () => {
     expect(evaluateExpression(
       'const until = Date.now() + 350; while (Date.now() < until) {} return { count: input.items.length };',

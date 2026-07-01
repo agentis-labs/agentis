@@ -214,8 +214,8 @@ export function AgentsPage() {
   }, [selectedDomainId, spaces]);
 
   const domainAgentsForCanvas = useMemo(() => {
-    // Hierarchy canvas shows only the orchestrator + managers structure.
-    const fleet = agents.filter((agent) => !isSpecialistRole(agent.role));
+    // Hierarchy canvas shows orchestrators, managers, and specialists.
+    const fleet = agents;
     if (selectedDomainId === 'all') return fleet;
     return fleet.filter((agent) => {
       if (agent.role === 'orchestrator') return true;
@@ -226,7 +226,6 @@ export function AgentsPage() {
 
   const filteredAgents = useMemo(() => {
     return agents.filter((a) => {
-      if (isSpecialistRole(a.role)) return false;
       if (selectedDomainId === 'unassigned' && a.spaceId) return false;
       if (selectedDomainId !== 'all' && selectedDomainId !== 'unassigned' && a.spaceId !== selectedDomainId) return false;
       if (!passesFilter(a, filter)) return false;
@@ -242,6 +241,7 @@ export function AgentsPage() {
   const grouped = useMemo(() => {
     const bySpace = new Map<string, AgentRow[]>();
     for (const a of filteredAgents) {
+      if (isSpecialistRole(a.role)) continue;
       const k = a.spaceId ?? '__ungrouped__';
       if (!bySpace.has(k)) bySpace.set(k, []);
       bySpace.get(k)!.push(a);
@@ -249,8 +249,10 @@ export function AgentsPage() {
     return bySpace;
   }, [filteredAgents]);
 
+  const tableSpecialists = useMemo(() => filteredAgents.filter(a => isSpecialistRole(a.role)), [filteredAgents]);
+
   const total = agents.filter((a) => !isSpecialistRole(a.role)).length;
-  const filteredCount = Array.from(grouped.values()).reduce((s, arr) => s + arr.length, 0);
+  const filteredCount = filteredAgents.length;
   const managers = useMemo(() => agents.filter((agent) => agent.role === 'manager'), [agents]);
 
   const specialistList = useMemo(() => {
@@ -420,26 +422,17 @@ export function AgentsPage() {
             variant="page"
           />
         ) : view === 'fleet' ? (
-          <div className="flex h-full min-h-0 flex-col">
-            <div className="min-h-0 flex-1">
-              <AgentHierarchyCanvas
-                agents={domainAgentsForCanvas}
-                filter={filter}
-                search={search}
-                onClearFilters={() => { setSearch(''); setFilter('all'); setSelectedDomainId('all'); }}
-                onChanged={() => void refresh()}
-                onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
-                selectedAgent={selectedAgent}
-                onCloseSelection={() => setSelectedAgent(null)}
-                onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
-              />
-            </div>
-            <SpecialistBench
-              specialists={specialistList}
-              total={specialistCount}
-              onCreate={() => { setCreatingPreset({ role: 'worker' }); setCreating(true); }}
-            />
-          </div>
+          <AgentHierarchyCanvas
+            agents={domainAgentsForCanvas}
+            filter={filter}
+            search={search}
+            onClearFilters={() => { setSearch(''); setFilter('all'); setSelectedDomainId('all'); }}
+            onChanged={() => void refresh()}
+            onSelect={(agent) => setSelectedAgent(agent as unknown as AgentRow)}
+            selectedAgent={selectedAgent}
+            onCloseSelection={() => setSelectedAgent(null)}
+            onGhostCreate={(preset) => { setCreatingPreset(preset); setCreating(true); }}
+          />
         ) : filteredCount === 0 ? (
           <EmptyState
             icon={<SearchX size={48} />}
@@ -449,20 +442,32 @@ export function AgentsPage() {
             variant="page"
           />
         ) : (
-          Array.from(grouped.entries()).map(([spaceKey, list]) => {
-            const space = spaces.find((s) => s.id === spaceKey);
-            const groupLabel = space?.name ?? (spaceKey === '__ungrouped__' ? 'Ungrouped' : 'Other');
-            return (
-              <div key={spaceKey} className="mb-8 last:mb-0">
-                <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                  {space?.colorHex && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: space.colorHex }} />}
-                  {groupLabel}
-                  <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">· {list.length}</span>
+          <>
+            {Array.from(grouped.entries()).map(([spaceKey, list]) => {
+              const space = spaces.find((s) => s.id === spaceKey);
+              const groupLabel = space?.name ?? (spaceKey === '__ungrouped__' ? 'Ungrouped' : 'Other');
+              return (
+                <div key={spaceKey} className="mb-8 last:mb-0">
+                  <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                    {space?.colorHex && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: space.colorHex }} />}
+                    {groupLabel}
+                    <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">· {list.length}</span>
+                  </div>
+                  <AgentTable rows={list} spaces={spaces} onSelect={(id) => nav(`/agents/${id}`)} />
                 </div>
-                <AgentTable rows={list} spaces={spaces} onSelect={(id) => nav(`/agents/${id}`)} />
+              );
+            })}
+            {tableSpecialists.length > 0 && (
+              <div key="specialists" className="mb-8 last:mb-0">
+                <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                  <Sparkles size={12} className="text-text-muted" />
+                  Specialist Bench
+                  <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">· {tableSpecialists.length}</span>
+                </div>
+                <AgentTable rows={tableSpecialists} spaces={spaces} onSelect={(id) => nav(`/agents/${id}`)} />
               </div>
-            );
-          })
+            )}
+          </>
         )}
       </div>
 
@@ -652,67 +657,6 @@ function AgentFleetHeaderControls({
         )}
       </label>
     </div>
-  );
-}
-
-function SpecialistBench({
-  specialists,
-  total,
-  onCreate,
-}: {
-  specialists: AgentRow[];
-  total: number;
-  onCreate: () => void;
-}) {
-  const nav = useNavigate();
-  const visible = specialists.slice(0, 8);
-  return (
-    <section className="shrink-0 border-t border-line bg-surface/95 px-4 py-2.5">
-      <div className="flex items-center gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <Sparkles size={13} className="text-text-muted" />
-          <span className="text-[12px] font-semibold text-text-primary">Specialist bench</span>
-          <span className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">{total}</span>
-        </div>
-        <button
-          type="button"
-          onClick={onCreate}
-          className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary"
-        >
-          <Plus size={12} /> Add specialist
-        </button>
-      </div>
-      {total === 0 ? (
-        <div className="mt-2 rounded-md border border-dashed border-line bg-canvas px-3 py-2 text-[11px] text-text-muted">
-          No specialists yet. Add focused expert roles for orchestration and workflow tasks.
-        </div>
-      ) : (
-        <div className="mt-2 flex gap-2 overflow-x-auto pb-0.5">
-          {visible.map((agent) => (
-            <button
-              key={agent.id}
-              type="button"
-              onClick={() => nav(`/agents/${agent.id}`)}
-              className="group flex h-14 min-w-[210px] max-w-[240px] items-center gap-2 rounded-md border border-line bg-canvas px-2.5 text-left transition-colors hover:border-line-strong hover:bg-surface-2"
-            >
-              <Avatar name={agent.name} imageUrl={agent.avatarUrl ?? undefined} size={28} />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] font-semibold text-text-primary">{agent.name}</span>
-                <span className="mt-0.5 block truncate text-[10px] text-text-muted">
-                  {labelize(agent.role === 'worker' ? 'specialist' : (agent.role ?? 'specialist'))} · {agentHarnessLabel(agent)}
-                </span>
-              </span>
-              <StatusBadge status={agent.status ?? 'offline'} size="sm" />
-            </button>
-          ))}
-          {total > visible.length && (
-            <div className="flex h-14 min-w-[96px] items-center justify-center rounded-md border border-line bg-canvas text-[11px] text-text-muted">
-              +{total - visible.length} more
-            </div>
-          )}
-        </div>
-      )}
-    </section>
   );
 }
 

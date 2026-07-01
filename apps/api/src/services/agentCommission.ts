@@ -262,7 +262,7 @@ export async function registerAdapter(
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
-      maxTurns: numberOf(config.maxTurns),
+      maxTurns: nativeTurnCap(),
       modelReasoningEffort: reasoningEffortOf(config.modelReasoningEffort),
       fastMode: booleanOf(config.fastMode),
       dangerouslyBypassApprovalsAndSandbox: config.dangerouslyBypassApprovalsAndSandbox === undefined ? undefined : booleanOf(config.dangerouslyBypassApprovalsAndSandbox),
@@ -305,7 +305,7 @@ export async function registerAdapter(
       cwd: stringOf(config.cwd) ?? undefined,
       model: stringOf(config.model) ?? undefined,
       chatTransport: hermesChatTransportOf(config.chatTransport),
-      maxTurns: numberOf(config.maxTurns),
+      maxTurns: nativeTurnCap(),
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
       timeoutSec: numberOf(config.timeoutSec),
@@ -345,7 +345,7 @@ export async function registerAdapter(
     binaryPath: cliCommandFromConfig(config) ?? undefined,
     cwd: stringOf(config.cwd) ?? undefined,
     model: stringOf(config.model) ?? undefined,
-    maxTurns: numberOf(config.maxTurns),
+    maxTurns: nativeTurnCap(),
     allowedTools: stringArrayOf(config.allowedTools),
     dangerouslySkipPermissions: booleanOf(config.dangerouslySkipPermissions),
     extraArgs: stringArrayOf(config.extraArgs),
@@ -495,6 +495,21 @@ function numberOf(value: unknown): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/**
+ * Native CLI turn cap for harness agents — deliberately NOT derived from the
+ * stored per-agent `config.maxTurns`.
+ *
+ * That field shipped as a baked default (`24`) on every agent and made Claude
+ * Code / Hermes fail a long run mid-task with a fatal `error_max_turns` — while
+ * Codex ignored the same value and ran to completion (which is why Codex "just
+ * worked"). We now match Codex: by DEFAULT there is no native turn cap, so an
+ * agent keeps going until the task is done. Runaways are bounded by `timeoutSec`;
+ * a power user who genuinely wants a hard turn ceiling sets `AGENTIS_AGENT_MAX_TURNS`.
+ */
+function nativeTurnCap(): number | undefined {
+  return numberOf(process.env.AGENTIS_AGENT_MAX_TURNS);
+}
+
 function stringArrayOf(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const entries = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
@@ -532,9 +547,9 @@ function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high
   return effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' ? effort : undefined;
 }
 
-function hermesChatTransportOf(value: unknown): 'cli' | 'acp' | 'auto' {
+function hermesChatTransportOf(value: unknown): 'cli' | 'acp' | 'auto' | undefined {
   const transport = stringOf(value);
-  return transport === 'cli' || transport === 'acp' || transport === 'auto' ? transport : 'auto';
+  return transport === 'cli' || transport === 'acp' || transport === 'auto' ? transport : undefined;
 }
 
 function sessionKeyStrategyOf(value: unknown): 'issue' | 'fixed' | 'run' | undefined {

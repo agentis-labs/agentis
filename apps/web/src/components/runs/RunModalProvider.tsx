@@ -22,6 +22,8 @@ import {
   RotateCcw,
   Square,
   X,
+  ArrowDownRight,
+  ArrowUpRight,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { REALTIME_EVENTS } from '@agentis/core';
@@ -90,6 +92,7 @@ interface RunSummary {
   failedNode?: string;
   failedNodeId?: string;
   failureReason?: string | null;
+  tokenUsage?: { input: number; output: number; total: number };
 }
 
 interface LedgerEntry {
@@ -451,6 +454,16 @@ function RunModal() {
                 <Metric label="Duration" value={formatDuration(run.durationMs)} />
                 <Metric label="Trigger" value={run.triggeredBy ?? 'manual'} />
                 <Metric label="Nodes" value={String(run.nodes.length)} />
+                {run.tokenUsage && (
+                  <div className="rounded-card border border-line bg-surface-1 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wider text-text-muted">Tokens consumed</div>
+                    <div className="mt-1 truncate text-[13px] font-semibold text-text-primary">{formatTokens(run.tokenUsage.total)}</div>
+                    <div className="mt-1 flex items-center gap-3 text-[10.5px] text-text-secondary">
+                      <span className="inline-flex items-center gap-1"><ArrowDownRight size={10} className="text-text-muted" /> {formatTokens(run.tokenUsage.input)} in</span>
+                      <span className="inline-flex items-center gap-1"><ArrowUpRight size={10} className="text-text-muted" /> {formatTokens(run.tokenUsage.output)} out</span>
+                    </div>
+                  </div>
+                )}
               </div>
               {activity.length > 0 && (
                 <div className="mt-4">
@@ -552,6 +565,15 @@ function RunHistoryList({
                 {run.failedNode ? `Failed at ${run.failedNode}` : run.currentStep ?? relativeTime(run.startedAt ?? run.createdAt)}
               </div>
             </div>
+            {run.tokenUsage && (
+              <div className="flex flex-col items-end pr-3">
+                <div className="text-[13px] font-semibold text-text-primary">{formatTokens(run.tokenUsage.total)} <span className="text-[10px] font-normal text-text-muted">tokens</span></div>
+                <div className="flex items-center gap-2 text-[10px] text-text-muted mt-0.5">
+                  <span className="inline-flex items-center gap-0.5"><ArrowDownRight size={10} /> {formatTokens(run.tokenUsage.input)}</span>
+                  <span className="inline-flex items-center gap-0.5"><ArrowUpRight size={10} /> {formatTokens(run.tokenUsage.output)}</span>
+                </div>
+              </div>
+            )}
             <Button variant="ghost" size="sm" iconRight={<ArrowRight size={12} />} onClick={() => onInspect(run)}>
               Inspect
             </Button>
@@ -1122,4 +1144,11 @@ function formatJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value < 1_000) return String(Math.round(value));
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`;
 }

@@ -73,8 +73,8 @@ const SECTIONS: PaletteSection[] = [
     tier: 'intel',
     title: 'Intelligence',
     nodes: [
-      { type: 'agent_task',  label: 'Agent',       glyph: '◎', description: 'Dispatch a task to a routed agent', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
-      { type: 'agent_session', label: 'Agent Session', glyph: '◉', description: 'Persistent agent that thinks, uses tools, and can pause for events/approvals', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
+      { type: 'agent_task',  label: 'Agent',       glyph: '◎', description: 'A tool-using agent for one focused mission (set Persistent in config for long, delegating, multi-step work)', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
+      { type: 'agent_session', label: 'Agent · persistent', glyph: '◉', description: 'The same agent kept alive across steps — keeps memory, delegates to sub-agents, awaits events, pauses for approval', defaults: { capabilityTags: [], prompt: '', inputKeys: [], outputKeys: [] } },
       { type: 'extension_task',  label: 'Extension',       glyph: '⬡', description: 'Run a typed deterministic extension operation', defaults: { operationName: 'execute', inputMapping: {}, outputMapping: {} } },
       { type: 'agent_swarm', label: 'Agent Swarm', glyph: '⨳', description: 'Parallel agent fan-out over an array', defaults: { capabilityTags: [], maxParallel: 3, mergeStrategy: 'collect_all', inputArrayPath: '', prompt: '', outputKey: 'results' } },
       { type: 'dynamic_swarm', label: 'Dynamic Swarm', glyph: '⧉', description: 'A planner decomposes a goal into tasks, then specialists run them in parallel', defaults: { goal: '', maxTasks: 5, maxParallel: 3, mergeStrategy: 'collect_all', outputKey: 'results', capabilityTags: [] } },
@@ -85,10 +85,13 @@ const SECTIONS: PaletteSection[] = [
   },
   {
     tier: 'knowledge',
-    title: 'Brain',
+    title: 'Knowledge Base',
     nodes: [
-      { type: 'knowledge',         label: 'Brain',             glyph: '◇', description: 'Retrieve relevant context from the workspace Brain', defaults: { queryMode: 'static', topK: 5, retrievalMode: 'contextual' } },
-      { type: 'knowledge_ingest',  label: 'Save to Brain',     glyph: '◆', description: 'Write upstream content into the workspace Brain', defaults: { contentPath: '', mimeType: 'text/markdown' } },
+      // The Knowledge Base is RAG over uploaded/ingested documents — distinct from
+      // the Brain (the agents' learned memory, which fills automatically from chat
+      // and runs, never via a hand-wired node). `knowledge_ingest` is intentionally
+      // NOT offered here: writing memory is automatic + agent-tool driven.
+      { type: 'knowledge',         label: 'Knowledge search',  glyph: '◇', description: 'Retrieve relevant passages from the workspace Knowledge Base (uploaded docs / RAG)', defaults: { queryMode: 'static', topK: 5, retrievalMode: 'contextual' } },
       { type: 'artifact_collect',  label: 'Artifact Collect',  glyph: '⛁', description: 'Package generated artifacts into a versioned collection', defaults: { collectionName: 'Untitled', versioned: true } },
     ],
   },

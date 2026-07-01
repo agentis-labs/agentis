@@ -14,7 +14,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
-  AlertTriangle,
   ArrowLeft,
   BrainCircuit,
   Boxes,
@@ -28,7 +27,6 @@ import {
   MoreVertical,
   Pencil,
   Plus,
-  Radio,
   Save,
   Settings,
   Sparkles,
@@ -39,14 +37,16 @@ import {
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
-import type { AppRecord, AppSurface, CollectionInfo, SurfaceAction, SurfaceKind, ViewNode } from '@agentis/core';
+import type { AppRecord, AppSurface, CollectionInfo, DesignLanguage, SurfaceAction, SurfaceKind, ViewNode } from '@agentis/core';
+import { DESIGN_LANGUAGES } from '../components/apps/designLanguage';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { api, apiErrorMessage, apiText } from '../lib/api';
+import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
 import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
 import { AppTeamStrip } from '../components/apps/AppTeamStrip';
-import { PipelinePanel, LearningsPanel, RehearsalPanel } from '../components/apps/AppConsolePanels';
 import { AppEngineModal, type AppEngineDomain, type AppEngineAgent } from '../components/apps/AppEngineModal';
 import { SurfaceCanvas } from '../components/apps/SurfaceCanvas';
 import {
@@ -73,7 +73,7 @@ import { WorkflowCanvasPage, WorkflowBrainTab } from './WorkflowCanvasPage';
 import { SegmentedControl, type SegmentDef } from '../components/shared/SegmentedControl';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 
-type AppFacet = 'console' | 'interface' | 'workflow' | 'data' | 'brain';
+type AppFacet = 'interface' | 'workflow' | 'data' | 'brain';
 
 interface WorkflowRef {
   id: string;
@@ -85,11 +85,19 @@ function workflowFilename(title: string): string {
 }
 
 const FACETS: ReadonlyArray<SegmentDef<AppFacet>> = [
-  { value: 'console', label: 'Console', icon: <Radio size={13} /> },
   { value: 'interface', label: 'Interface', icon: <LayoutGrid size={13} /> },
   { value: 'workflow', label: 'Workflow', icon: <WorkflowIcon size={13} /> },
   { value: 'data', label: 'Data', icon: <Database size={13} /> },
   { value: 'brain', label: 'Brain', icon: <BrainCircuit size={13} /> },
+];
+
+// When the orchestrator builds/edits a workflow, these arrive on the workspace
+// room. The App view reacts so a created/edited workflow shows up LIVE instead of
+// only after a manual reload.
+const BUILD_REVEAL_EVENTS = [
+  REALTIME_EVENTS.WORKFLOW_BUILD_PHASE,
+  REALTIME_EVENTS.CANVAS_NODE_PLACED,
+  REALTIME_EVENTS.CANVAS_BUILD_COMPLETE,
 ];
 
 export function AppEditorPage() {
@@ -107,6 +115,10 @@ export function AppEditorPage() {
   const [status, setStatus] = useState<string | null>(null);
 
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  // Bumped when a build of the shown workflow completes, to hard-refresh the
+  // embedded canvas onto the final persisted graph even if its own live link
+  // missed the stream.
+  const [canvasReloadKey, setCanvasReloadKey] = useState(0);
   const [selectedSurface, setSelectedSurface] = useState<string | null>(null);
   const [surfaceDraft, setSurfaceDraft] = useState('');
   const [surfaceActionsDraft, setSurfaceActionsDraft] = useState<SurfaceAction[]>([]);
@@ -136,24 +148,18 @@ export function AppEditorPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [appRow, surfaceRows, collectionRows, workflowIds] = await Promise.all([
+      const [appRow, surfaceRows, collectionRows, workflowSummaries] = await Promise.all([
         appsApi.get(id),
         appsApi.listSurfaces(id),
         appsApi.listCollections(id),
-        appsApi.listWorkflowIds(id),
+        appsApi.listWorkflows(id),
       ]);
-      const workflowRefs = await Promise.all(
-        workflowIds.map((wfId) =>
-          api<{ workflow: WorkflowRef }>(`/v1/workflows/${wfId}`)
-            .then((r) => ({ id: r.workflow.id, title: r.workflow.title }))
-            .catch(() => null),
-        ),
-      );
       setApp(appRow);
       setNameDraft(appRow.name);
       setSurfaces(surfaceRows);
       setCollections(collectionRows);
-      const refs = workflowRefs.filter((w): w is WorkflowRef => Boolean(w));
+      // The control-plane summary already carries id + title — no per-workflow fetch.
+      const refs: WorkflowRef[] = workflowSummaries.map((w) => ({ id: w.id, title: w.title }));
       setWorkflows(refs);
       setSelectedWorkflowId((current) =>
         current && refs.some((workflow) => workflow.id === current) ? current : refs[0]?.id ?? null,
@@ -169,6 +175,35 @@ export function AppEditorPage() {
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Keep the workspace room subscription alive so live build events reach us.
+  useEffect(() => rtSubscribe('workspace', {}), []);
+
+  // Live build reveal — the core fix for "when the agent creates things it does
+  // not update in realtime". When the orchestrator builds or edits a workflow
+  // this App owns, select it and switch to the Workflow facet so the operator
+  // watches it stream node-by-node; on completion, refresh so a brand-new
+  // workflow appears in the switcher with its final graph.
+  const revealedBuildRef = useRef<string | null>(null);
+  useRealtime(BUILD_REVEAL_EVENTS, (env: RealtimeEnvelope) => {
+    const payload = (env.payload ?? {}) as { workflowId?: string; appId?: string };
+    const wfId = payload.workflowId;
+    if (!wfId) return;
+    const known = workflows.some((w) => w.id === wfId);
+    if (!known && payload.appId !== id) return; // not this App's build
+    setSelectedWorkflowId(wfId);
+    // Reveal the Workflow facet ONCE per build so we don't yank the operator back
+    // on every phase if they navigate away while it streams.
+    if (revealedBuildRef.current !== wfId) {
+      revealedBuildRef.current = wfId;
+      setFacet('workflow');
+    }
+    if (env.event === REALTIME_EVENTS.CANVAS_BUILD_COMPLETE) {
+      void load();
+      setCanvasReloadKey((k) => k + 1);
+      revealedBuildRef.current = null; // let the next build reveal again
+    }
+  });
 
   // Deep-link from the /home canvas highlight ("Settings") opens straight into
   // the engine modal so Domain/Owner is one click away. Consume the flag once.
@@ -498,9 +533,9 @@ export function AppEditorPage() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-w-0 flex-col">
       {/* Slim command strip — mirrors the workflow canvas chrome. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-line bg-surface px-4 py-2">
+      <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-4 py-2">
         <button
           onClick={() => navigate('/apps')}
           className="inline-flex items-center gap-1 text-[12px] text-text-muted transition-colors hover:text-text-primary"
@@ -532,7 +567,7 @@ export function AppEditorPage() {
             className="h-7 rounded-md border border-line bg-surface-2 px-2 text-[13px] font-medium text-text-primary focus:border-accent focus:outline-none"
           />
         ) : (
-          <button onClick={() => setEditingName(true)} className="rounded-md px-1.5 py-0.5 text-[13px] font-medium text-text-primary hover:bg-surface-2">
+          <button onClick={() => setEditingName(true)} className="max-w-[min(22rem,45vw)] truncate rounded-md px-1.5 py-0.5 text-[13px] font-medium text-text-primary hover:bg-surface-2">
             {app.name}
           </button>
         )}
@@ -548,15 +583,13 @@ export function AppEditorPage() {
         <span className="text-[11px] text-text-muted">v{app.version} · {app.status}</span>
         <div className="mx-1 h-4 w-px bg-line" />
         <AppTeamStrip appId={app.id} />
-        <NeedsYouBadge appId={app.id} onClick={() => setFacet('console')} />
-
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex min-w-0 items-center justify-end gap-2">
           {status ? <span className="max-w-[180px] truncate text-[11px] text-text-muted">{status}</span> : null}
-          <SegmentedControl segments={FACETS} value={facet} onChange={setFacet} size="sm" className="whitespace-nowrap" />
+          <SegmentedControl segments={FACETS} value={facet} onChange={setFacet} size="sm" className="min-w-0 flex-wrap justify-end" />
           <button
             type="button"
             onClick={() => void exportApp()}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line px-2.5 text-[12px] text-text-secondary transition-colors hover:bg-canvas hover:text-text-primary"
+            className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-line px-2.5 text-[12px] text-text-secondary transition-colors hover:bg-canvas hover:text-text-primary"
           >
             <Upload size={13} /> Export
           </button>
@@ -565,11 +598,11 @@ export function AppEditorPage() {
 
       {/* Facet body — each fills the remaining height. */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {facet === 'console' && <ConsoleFacet appId={id} />}
         {facet === 'workflow' && (
           <WorkflowFacet
             workflows={workflows}
             selectedId={selectedWorkflowId}
+            reloadKey={canvasReloadKey}
             busy={busy?.startsWith('workflow') ?? false}
             onSelect={setSelectedWorkflowId}
             onAdd={() => void addWorkflow()}
@@ -620,68 +653,12 @@ export function AppEditorPage() {
   );
 }
 
-// ── Needs-you badge (Living Apps Phase 2) ────────────────────
-// A calm count of threads the resident agent flagged for the operator. Clicking it
-// opens the Console facet. Renders nothing when no thread needs attention.
-
-function NeedsYouBadge({ appId, onClick }: { appId: string; onClick: () => void }) {
-  const [count, setCount] = useState(0);
-  const [reason, setReason] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      appsApi.conversations(appId).then((rows) => {
-        if (cancelled) return;
-        const flagged = rows.filter((r) => r.needsAttention);
-        setCount(flagged.length);
-        setReason(flagged[0]?.needsAttentionReason ?? null);
-      }).catch(() => {});
-    };
-    load();
-    // Light poll so a freshly-flagged thread surfaces without a manual reload.
-    const timer = window.setInterval(load, 20000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [appId]);
-
-  if (count === 0) return null;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={reason ? `Needs you: ${reason}` : `${count} ${count === 1 ? 'thread needs' : 'threads need'} you`}
-      className="inline-flex h-6 items-center gap-1 rounded-full border border-warn/30 bg-warn-soft px-2 text-[11px] font-medium text-warn transition-colors hover:bg-warn/20"
-    >
-      <AlertTriangle size={11} />
-      {count} need{count === 1 ? 's' : ''} you
-    </button>
-  );
-}
-
-// ── Console facet (Living Apps §6) — the operator's glanceable lenses ─────────
-// Pipeline (the relationship), Learnings (what the agent learned), Rehearsal
-// (drive a scenario against the resident agent before it talks to real money).
-// All three bind shipped APIs; calm, minimal, no forty knobs.
-
-function ConsoleFacet({ appId }: { appId: string }) {
-  return (
-    <div className="h-full overflow-y-auto p-4">
-      <div className="mx-auto grid max-w-[1100px] grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="flex flex-col gap-4">
-          <PipelinePanel appId={appId} />
-          <LearningsPanel appId={appId} />
-        </div>
-        <RehearsalPanel appId={appId} />
-      </div>
-    </div>
-  );
-}
-
 // ── Workflow facet — switcher + the real embedded canvas ─────
 
 function WorkflowFacet({
   workflows,
   selectedId,
+  reloadKey,
   busy,
   onSelect,
   onAdd,
@@ -692,6 +669,8 @@ function WorkflowFacet({
 }: {
   workflows: WorkflowRef[];
   selectedId: string | null;
+  /** Bumped after a build completes so the embedded canvas remounts onto the latest persisted graph. */
+  reloadKey: number;
   busy: boolean;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -796,6 +775,18 @@ function WorkflowFacet({
               </button>
             )}
             {renamingId !== wf.id ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => startRename(wf)}
+                className="rounded-btn p-1 text-text-muted opacity-0 hover:bg-canvas hover:text-text-primary group-hover:opacity-100 disabled:cursor-wait disabled:opacity-50"
+                title={`Rename ${wf.title}`}
+                aria-label={`Rename ${wf.title}`}
+              >
+                <Pencil size={11} />
+              </button>
+            ) : null}
+            {renamingId !== wf.id ? (
               <DropdownMenu.Root open={menuOpenId === wf.id} onOpenChange={(open) => setMenuOpenId(open ? wf.id : null)}>
                 <DropdownMenu.Trigger asChild>
                   <button
@@ -873,7 +864,7 @@ function WorkflowFacet({
         </button>
       </div>
       <div className="min-h-0 flex-1">
-        {selectedId ? <WorkflowCanvasPage key={selectedId} embedded workflowId={selectedId} /> : null}
+        {selectedId ? <WorkflowCanvasPage key={`${selectedId}:${reloadKey}`} embedded workflowId={selectedId} /> : null}
       </div>
     </div>
   );
@@ -1051,6 +1042,17 @@ function InterfaceFacet({
                 </button>
               )}
               {renamingSurface !== surface.name ? (
+                <button
+                  type="button"
+                  onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
+                  className="rounded-btn p-1 text-text-muted opacity-0 hover:bg-canvas hover:text-text-primary group-hover:opacity-100"
+                  title={`Rename ${surface.name}`}
+                  aria-label={`Rename ${surface.name}`}
+                >
+                  <Pencil size={11} />
+                </button>
+              ) : null}
+              {renamingSurface !== surface.name ? (
                 <DropdownMenu.Root open={menuOpenSurface === surface.name} onOpenChange={(open) => setMenuOpenSurface(open ? surface.name : null)}>
                   <DropdownMenu.Trigger asChild>
                     <button
@@ -1137,13 +1139,23 @@ function InterfaceFacet({
             <select
               aria-label="Surface theme"
               value={view.style?.theme ?? 'analytics'}
-              onChange={(event) => setView({ ...view, style: { ...view.style, theme: event.target.value as 'console' | 'analytics' | 'product' | 'editorial' } })}
+              onChange={(event) => setView({ ...view, style: { ...view.style, theme: event.target.value as 'operations' | 'analytics' | 'product' | 'editorial' } })}
               className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
             >
-              <option value="console">Console</option>
+              <option value="operations">Operations</option>
               <option value="analytics">Analytics</option>
               <option value="product">Product</option>
               <option value="editorial">Editorial</option>
+            </select>
+            <select
+              aria-label="Surface design language"
+              title="Design language — the whole look (radii, elevation, gradients, type scale)"
+              value={view.style?.design ?? ''}
+              onChange={(event) => setView({ ...view, style: { ...view.style, ...(event.target.value ? { design: event.target.value as DesignLanguage } : { design: undefined }) } })}
+              className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+            >
+              <option value="">Auto (by theme)</option>
+              {DESIGN_LANGUAGES.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
             </select>
             <select
               aria-label="Surface density"

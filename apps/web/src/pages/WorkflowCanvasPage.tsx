@@ -1563,7 +1563,21 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     && ['pending', 'running', 'waiting', 'paused'].includes(activeRunStatus);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
+      {/* Embedded (App Workflow facet) hides the header below, which is where Run
+          lives — so surface a first-class Run control on the canvas itself. It
+          opens the same inputs-aware run dialog and live run inspector. */}
+      {embedded && wf ? (
+        <button
+          type="button"
+          onClick={() => setRunDialogOpen(true)}
+          disabled={running}
+          className="absolute bottom-4 right-4 z-30 inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[12px] font-semibold text-white shadow-lg transition-colors hover:bg-accent/90 disabled:opacity-60"
+          title="Run this workflow"
+        >
+          <Play size={14} /> {running ? 'Running…' : 'Run workflow'}
+        </button>
+      ) : null}
       {/* Header — one slim command strip above the canvas. Hidden when embedded
           in the App editor, which provides its own header + facet tabs. */}
       <div className={clsx('flex shrink-0 items-center gap-2 border-b border-line bg-surface px-4 py-2', embedded && 'hidden')}>

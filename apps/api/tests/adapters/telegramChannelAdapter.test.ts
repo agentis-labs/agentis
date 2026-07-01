@@ -6,7 +6,23 @@
  * fetch (no network).
  */
 import { describe, it, expect } from 'vitest';
-import { TelegramChannelAdapter } from '../../src/adapters/channels/telegram.js';
+import { TelegramChannelAdapter, resolveTelegramTransport } from '../../src/adapters/channels/telegram.js';
+
+describe('resolveTelegramTransport()', () => {
+  it('defaults to long polling on a local install with no public URL (zero-config)', () => {
+    expect(resolveTelegramTransport({ hasPublicUrl: false })).toBe('polling');
+    expect(resolveTelegramTransport({ explicit: null, hasPublicUrl: false })).toBe('polling');
+  });
+
+  it('defaults to webhook when a public URL is configured', () => {
+    expect(resolveTelegramTransport({ hasPublicUrl: true })).toBe('webhook');
+  });
+
+  it('honours an explicit operator choice regardless of public URL', () => {
+    expect(resolveTelegramTransport({ explicit: 'webhook', hasPublicUrl: false })).toBe('webhook');
+    expect(resolveTelegramTransport({ explicit: 'polling', hasPublicUrl: true })).toBe('polling');
+  });
+});
 
 describe('TelegramChannelAdapter', () => {
   describe('verify()', () => {

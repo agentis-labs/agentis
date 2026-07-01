@@ -13,7 +13,6 @@ describe('back-compat (old trees parse unchanged)', () => {
       gap: 16,
       children: [
         { type: 'Heading', value: 'Operator' },
-        { type: 'AgentConsole' },
         { type: 'ActivityStream', title: 'Live activity' },
         { type: 'Card', title: 'Add to leads', children: [{ type: 'Form', fields: [{ key: 'name', type: 'text' }], submit: { action: 'create_leads' } }] },
         { type: 'Table', bind: { collection: 'leads', live: true }, columns: [{ key: 'name' }] },
@@ -29,7 +28,7 @@ describe('style intent is accepted on any node', () => {
   it('accepts bounded style on layout and content nodes', () => {
     expect(viewNodeSchema.parse({ type: 'Card', children: [], style: { elevation: 'raised', pad: 'lg', tone: 'danger' } })).toMatchObject({ style: { elevation: 'raised' } });
     expect(viewNodeSchema.parse({ type: 'Heading', value: 'Hi', style: { size: 'xl', emphasis: 'strong' } })).toMatchObject({ type: 'Heading' });
-    expect(viewNodeSchema.parse({ type: 'Stack', children: [], style: { theme: 'console', density: 'compact' } })).toMatchObject({ style: { theme: 'console' } });
+    expect(viewNodeSchema.parse({ type: 'Stack', children: [], style: { theme: 'operations', density: 'compact' } })).toMatchObject({ style: { theme: 'operations' } });
   });
 
   it('rejects out-of-bounds style enums (no raw CSS)', () => {
@@ -118,7 +117,7 @@ describe('collectionsInView — read authz over the new nodes', () => {
 
 describe('surfaceThemeOf', () => {
   it('reads the theme from the root node style', () => {
-    expect(surfaceThemeOf({ type: 'Stack', children: [], style: { theme: 'console' } })).toBe('console');
+    expect(surfaceThemeOf({ type: 'Stack', children: [], style: { theme: 'operations' } })).toBe('operations');
     expect(surfaceThemeOf({ type: 'Stack', children: [] })).toBeUndefined();
     expect(surfaceThemeOf(null)).toBeUndefined();
   });

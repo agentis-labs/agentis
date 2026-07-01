@@ -188,6 +188,13 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   let silenceTimer: NodeJS.Timeout | undefined;
   let timedOut = false;
   let terminalHandled = false;
+  // Honesty gate for the heartbeat. Until the child has emitted ANY real bytes
+  // (stdout or stderr), the turn has produced nothing — the harness is still
+  // spinning up or blocked waiting on its provider's first token. Claiming it
+  // "is working" in that window is a lie (e.g. a hung/unreachable model sits
+  // totally silent), so the heartbeat says it's still waiting instead. Flipped
+  // true by the first stdout line or stderr chunk below.
+  let firstOutputSeen = false;
   const armHeartbeat = () => {
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(() => {
@@ -195,7 +202,9 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       queue.push(runtimeProgressActivity({
         id: `${cfg.logTag}-heartbeat`,
         runtimeName: cfg.displayName,
-        text: `${cfg.displayName} is working — ${formatElapsed(elapsed)} elapsed`,
+        text: firstOutputSeen
+          ? `${cfg.displayName} is working — ${formatElapsed(elapsed)} elapsed`
+          : `Waiting for ${cfg.displayName} to respond — ${formatElapsed(elapsed)} so far, no output yet`,
       }));
       armHeartbeat(); // keep beating; a heartbeat is NOT real output, so silence keeps counting
     }, heartbeatMs);
@@ -226,6 +235,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   child.stderr?.on('data', (data) => {
     const chunk = String(data);
     stderrText = `${stderrText}${chunk}`.slice(-1024);
+    firstOutputSeen = true;
     // stderr output means the harness is ALIVE and working (a CLI agent prints its
     // shell/tool output here — e.g. Codex running a test or grep). It's a real
     // liveness signal, so reset the silence ceiling: a process busy on stderr but
@@ -290,6 +300,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       if (!line) continue;
       // Any processed line means the harness is alive — reset the silence ceiling
       // so an actively-streaming turn is never reaped.
+      firstOutputSeen = true;
       markAlive();
       let event: unknown;
       try {
@@ -356,8 +367,44 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       return;
     }
     if (code !== 0) {
-      const detail = (cfg.formatExitError?.(code, stderrText, stdoutError) ?? stdoutError.trim() ?? '').trim()
-        || stderrText.trim();
+      // Many CLIs report the real failure on STDOUT as plain text (e.g. Hermes
+      // prints "API call failed ... HTTP 404 ...") while their stderr tail is just
+      // a non-error line like "session_id: ...". Mine that plain stdout too and
+      // hand the adapter the richest signal as `stdoutError`, so the operator sees
+      // the actual cause instead of boilerplate.
+      const plainStdout = stripProcessNoise(lastAgentMessage || latestAssistantText || rawFallback).trim();
+      const stdoutDetail = stdoutError.trim() || plainStdout;
+      const detail = (cfg.formatExitError?.(code, stderrText, stdoutDetail) ?? '').trim()
+        || stdoutDetail
+        || stripProcessNoise(stderrText).trim();
+
+      // A working/turn LIMIT is a SOFT, resumable stop — NEVER a hard FAILED. The
+      // same is true of any non-zero exit that nonetheless produced real answer
+      // text: preserve the work and let the operator say "continue", instead of a
+      // red error that throws it away. Only a genuine zero-output failure (spawn
+      // error, auth failure, crash) stays an error.
+      // Only the STREAMED answer channels count as "work to preserve" — NOT
+      // `rawFallback`, which on a non-zero exit usually holds the error text itself
+      // (e.g. Hermes prints "API call failed … 404" to stdout). Counting that would
+      // disguise a real failure as a resumable partial answer.
+      const partial = (() => {
+        const raw = lastAgentMessage.trim() || latestAssistantText.trim();
+        if (!raw) return '';
+        const { cleaned } = extractMarkerToolCalls(raw);
+        return (cleaned || raw).trim();
+      })();
+      const hitLimit = /tool[-\s]?turn limit|max[\s_-]?turns|turn limit|reached .*limit/i.test(detail);
+      if (hitLimit || partial) {
+        if (partial) queue.push({ type: 'text', delta: partial });
+        const note = hitLimit
+          ? `${detail} Say "continue" to resume from here.`
+          : `${cfg.displayName} ended before finishing${detail ? ` (${detail})` : ''} — your progress is above; say "continue" to resume.`;
+        queue.push({ type: 'text', delta: `${partial ? '\n\n' : ''}_${note}_` });
+        queue.push({ type: 'done', finishReason: 'max_turns' });
+        queue.close();
+        return;
+      }
+
       queue.push({
         type: 'tool_result',
         id: 'adapter',

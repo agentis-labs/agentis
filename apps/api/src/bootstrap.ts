@@ -124,7 +124,7 @@ import { WorkspaceVolumeService } from './services/workspaceVolume.js';
 import { WorkspaceIntelligenceService } from './services/workspaceIntelligence.js';
 import { ExtensionLibraryService } from './services/extensionLibrary.js';
 import { AgentLibraryService } from './services/agentLibrary.js';
-import { AgentToolRuntime, type AgentToolRuntimeDeps } from './services/agentToolRuntime.js';
+import { AgentToolRuntime, type AgentToolRuntimeDeps, type PlatformToolBridge } from './services/agentToolRuntime.js';
 import { AgentSessionService } from './services/agentSession.js';
 import { AgentSessionRuntime } from './services/agentSessionRuntime.js';
 import { PlanService } from './services/planService.js';
@@ -193,6 +193,7 @@ import { EmbeddingBackfillService } from './services/embeddingBackfill.js';
 import { ConfiguredBrainEnrichmentProvider, EnrichedKnowledgeGraphWriter } from './services/brainEnrichment.js';
 import { ChatMemoryCaptureService } from './services/chatMemoryCapture.js';
 import { BrowserPool } from './services/browserPool.js';
+import { createWebSearchProvider } from './services/webSearch.js';
 import { ArtifactService } from './services/artifactService.js';
 import { McpToolBridge, computerUseServerFromEnv } from './services/mcpToolBridge.js';
 import { SpecialistAgentService } from './services/specialistAgents.js';
@@ -226,6 +227,7 @@ import { buildChannelRoutes } from './routes/channels.js';
 import { buildCommandRoutes } from './routes/command.js';
 import { buildReplayRoutes } from './routes/replay.js';
 import { buildPackageRoutes } from './routes/packages.js';
+import { buildWorkspaceBundleRoutes } from './routes/workspaceBundle.js';
 import { PackagerService } from './services/packager.js';
 import { hydrateAgentRuntimes } from './services/agentRuntimeHydrator.js';
 import { buildArtifactRoutes } from './routes/artifacts.js';
@@ -519,6 +521,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   if (computerUseServer) {
     logger.info('mcp_bridge.computer_use_enabled', { url: computerUseServer.url });
   }
+  // Zero-config web search backs the `web_search` agent tool (no API key). Every
+  // specialist's default toolbox advertises web_search; without a provider it
+  // failed "not configured", so discovery/research agents could never search.
+  const webSearchProvider = createWebSearchProvider(logger);
   const agentToolRuntimeDeps: AgentToolRuntimeDeps = {
     volume: workspaceVolume,
     knowledgeBases: knowledgeBaseService,
@@ -526,6 +532,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     agentMemory: agentMemoryService,
     memory: memoryStore,
     logger,
+    webSearch: webSearchProvider,
     browser: browserPool,
     artifacts: artifactService,
     mcpBridge: mcpToolBridge,
@@ -1045,6 +1052,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     bus,
     engine,
     adapters,
+    // Same resolver the engine uses at dispatch — lets the build connect a freshly
+    // cast specialist to the workspace's default runtime so it isn't an offline
+    // placeholder (and model routing gets real candidates).
+    resolveAgentRuntime: (workspaceId: string, agentId: string, task?: string | null, explicitModel?: string | null) =>
+      modelAssistedRuntimeEnabled(workspaceId) ? agentRuntimeResolver?.(workspaceId, agentId, task, explicitModel) : undefined,
     ledger,
     scratchpad,
     approvals,
@@ -1080,6 +1092,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   };
   registerAllTools(toolRegistry, toolHandlerDeps);
   ChatToolExecutor.configure({ registry: toolRegistry, logger });
+  // E2 (AGENT-WORKFLOW-CAPABILITY-10X) — give in-engine workflow agents the
+  // `agentis.*` integration catalog (channels, cooperation, app/data management, …)
+  // as platform tools alongside their native + MCP-bridged tools, so a workflow
+  // agent is a full Agentis citizen. Wired lazily here (the runtime holds its deps
+  // by reference) now that the registry is populated.
+  agentToolRuntimeDeps.platformTools = makeWorkflowPlatformToolBridge(toolRegistry);
   const capabilityRegistry = new CapabilityRegistry({
     db: sqlite,
     logger,
@@ -1359,6 +1377,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     vault: credentialVault,
     conversations,
     dataDir: env.AGENTIS_DATA_DIR,
+    hasPublicWebhookUrl: () => Boolean(env.AGENTIS_PUBLIC_URL),
     dispatcher: channelTurnDispatcher,
     ...(transcription.enabled ? { transcribeAudio: (bytes, mime) => transcription.transcribe({ bytes, mimeType: mime }) } : {}),
     ...(vision.enabled ? { describeImage: (bytes, mime, caption) => vision.describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }) } : {}),
@@ -1474,6 +1493,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   app.route('/v1/runs', buildAuditRoutes({ db: sqlite, auth, audit: auditTrail }));
   app.route('/v1/extensions', buildExtensionRoutes({ db: sqlite, auth, extensionLibrary, runtime: extensions, kv: extensionKv }));
   app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, bus, logger, abilities: abilityService }));
+  app.route('/v1/workspace/bundle', buildWorkspaceBundleRoutes({ db: sqlite, auth, bus, logger, abilities: abilityService, dataDir: env.AGENTIS_DATA_DIR, signer: { privateKeyPem: secrets.jwtPrivateKeyPem, publicKeyPem: secrets.jwtPublicKeyPem } }));
   app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus }));
   app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
   app.route('/v1/workspace/intelligence', buildWorkspaceIntelligenceRoutes({ db: sqlite, auth, intelligence: SharedIntelligence, backfill: embeddingBackfill, logger }));
@@ -1765,6 +1785,52 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       await new Promise<void>((resolve) => httpServer?.close(() => resolve()));
       await db.close();
       await telemetry.shutdown().catch((err) => logger.warn('agentis.shutdown.telemetry', { err: (err as Error).message }));
+    },
+  };
+}
+
+/** Platform tools a workflow agent must NOT call — recursion / run-control / spawn. */
+const WORKFLOW_AGENT_TOOL_BLOCKLIST = new Set<string>([
+  'agentis.build_workflow',
+  'agentis.workflow.patch',
+  'agentis.workflow.run',
+  'agentis.ephemeral.run',
+  'agentis.run.cancel',
+  'agentis.approval.resolve',
+]);
+
+/**
+ * The platform-tool bridge offered to in-engine workflow agents (E2). The safe set
+ * is the MCP-exposed catalog — already vetted for autonomous harness agents — minus
+ * the recursion/run-control blocklist, so an `agent_task` gains the `agentis.*`
+ * integration surface (channels, cooperation, app/data management) with the same
+ * trust boundary an mcp_native harness already gets.
+ */
+function makeWorkflowPlatformToolBridge(registry: AgentisToolRegistry): PlatformToolBridge {
+  const safeTools = () =>
+    registry.catalog({ mcpOnly: true }).tools.filter((t) => !WORKFLOW_AGENT_TOOL_BLOCKLIST.has(t.id));
+  const ids = new Set(safeTools().map((t) => t.id));
+  const describe = (t: { description: string; inputSchema: unknown }): string => {
+    const props = (t.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+    const keys = props ? Object.keys(props) : [];
+    return keys.length ? `${t.description} (args: ${keys.slice(0, 8).join(', ')})` : t.description;
+  };
+  return {
+    list: () => safeTools().map((t) => ({ id: t.id, description: describe(t) })),
+    has: (id) => ids.has(id),
+    execute: async (toolId, args, c) => {
+      const res = await registry.execute(
+        { id: randomUUID(), toolId, arguments: args },
+        {
+          workspaceId: c.workspaceId,
+          userId: c.userId ?? '',
+          agentId: c.agentId,
+          appId: c.appId ?? null,
+          caller: 'workflow',
+          executionMode: 'chat',
+        },
+      );
+      return res.ok ? { ok: true, result: res.output } : { ok: false, error: res.errorMessage ?? `tool '${toolId}' failed` };
     },
   };
 }

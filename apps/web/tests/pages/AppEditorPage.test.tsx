@@ -95,10 +95,8 @@ describe('<AppEditorPage />', () => {
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [] });
       if (path === '/v1/apps/app-1/collections' && method === 'GET') return jsonResponse({ data: [] });
-      if (path === '/v1/apps/app-1/workflows' && method === 'GET') return jsonResponse({ data: ['wf-1'] });
-      if (path === '/v1/workflows/wf-1' && method === 'GET') {
-        return jsonResponse({ workflow: { id: 'wf-1', title: 'Original workflow' } });
-      }
+      // Control-plane summary shape (E0): the page reads id + title directly, no per-workflow fetch.
+      if (path === '/v1/apps/app-1/workflows' && method === 'GET') return jsonResponse({ data: [{ id: 'wf-1', title: 'Original workflow', purpose: null, order: 0, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null }] });
       if (path === '/v1/workflows/wf-1' && method === 'PATCH') return jsonResponse({ ok: true });
       throw new Error(`Unexpected request: ${method} ${path}`);
     });
@@ -171,7 +169,7 @@ describe('<AppEditorPage />', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => {
-      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Row', children: [{ type: 'Heading', value: 'New heading' }] }] });
+      expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Heading', value: 'New heading' }] });
     });
   });
 
@@ -237,7 +235,7 @@ describe('<AppEditorPage />', () => {
     renderEditor('interface');
 
     await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    for (const name of ['Hero', 'KPI strip', 'Chart', 'Table', 'Board', 'Tabs', 'Split', 'Callout', 'Agent console', 'Code surface']) {
+    for (const name of ['Hero', 'KPI strip', 'Chart', 'Table', 'Board', 'Tabs', 'Split', 'Callout', 'Code surface']) {
       expect(screen.getByRole('button', { name })).toBeInTheDocument();
     }
   });
@@ -274,20 +272,17 @@ describe('<AppEditorPage />', () => {
     expect((await screen.findAllByText('AI heading')).length).toBeGreaterThan(0);
   });
 
-  it('renders the operator console bound to the real operator endpoint', async () => {
+  it('renders the activity stream without an operator command line', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') {
-        return jsonResponse({ data: [surfaceRow('surface', { type: 'Stack', children: [{ type: 'AgentConsole' }, { type: 'ActivityStream' }] })] });
+        return jsonResponse({ data: [surfaceRow('surface', { type: 'Stack', children: [{ type: 'ActivityStream' }] })] });
       }
       if (path === '/v1/apps/app-1/collections' && method === 'GET') return jsonResponse({ data: [] });
       if (path === '/v1/apps/app-1/workflows' && method === 'GET') return jsonResponse({ data: [] });
-      if (path === '/v1/apps/app-1/operator' && method === 'GET') {
-        return jsonResponse({ data: { agentId: 'ag1', name: 'Atlas', status: 'online', colorHex: '#10b981', role: 'operator', canCommand: true } });
-      }
       throw new Error(`Unexpected request: ${method} ${path}`);
     });
 
@@ -297,10 +292,9 @@ describe('<AppEditorPage />', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
 
-    // The operator agent's real identity is resolved from the operator endpoint.
-    expect(await screen.findByText('Atlas')).toBeInTheDocument();
-    expect(screen.getByLabelText('Direct the operator')).toBeInTheDocument();
-    expect(screen.getByText('Waiting for the operator to act…')).toBeInTheDocument();
+    expect(await screen.findByText('Live activity')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Direct the operator')).not.toBeInTheDocument();
+    expect(screen.getByText('Waiting for activity...')).toBeInTheDocument();
   });
 
   it('opens the App engine and saves identity and access settings without raw plumbing', async () => {

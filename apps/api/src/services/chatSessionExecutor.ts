@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext, AbilityRecord } from '@agentis/core';
+import type { AdapterHealthStatus, AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext, AbilityRecord } from '@agentis/core';
 import { REALTIME_EVENTS, CONSTANTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -14,6 +14,7 @@ import type { WorkspaceAwarenessService } from './workspaceAwarenessService.js';
 import type { OrchestratorModelRouter } from './orchestratorModelRouter.js';
 import type { ModelRoutingDecision } from './modelRoutingPolicy.js';
 import { recordToolCall, recordTurn } from './chatMetrics.js';
+import { toolActivityLabel } from '../adapters/runtimeProgress.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
@@ -117,9 +118,12 @@ export class ChatSessionExecutor {
   static #pendingConfirmations = new Map<string, PendingChatConfirmation>();
   /** Conversations already warned that they're on the slow CLI fast-path (warn once). */
   static #slowPathWarned = new Set<string>();
+  /** Short-TTL health probe cache (per agent) so bursty turns don't each spawn a probe. */
+  static #healthCache = new Map<string, { status: AdapterHealthStatus; expiresAt: number }>();
 
   static configure(deps: ChatSessionExecutorDeps): void {
     this.#deps = deps;
+    this.#healthCache.clear();
   }
 
   /**
@@ -134,32 +138,148 @@ export class ChatSessionExecutor {
   }
 
   /**
-   * Resolve which adapter actually answers a chat turn. Agents backed by a CLI
-   * harness are slow for conversation: a `marker_protocol` harness re-spawns per
-   * tool round, and an `mcp_native` harness cold-starts a whole agentic loop for
-   * every turn. When an `orchestratorRuntime` is configured we transparently
-   * answer BOTH kinds through it — the fast streaming path — instead. Everything
-   * else (native function-calling adapters) uses its own adapter. The swap is
-   * invisible to the operator — same persona, same context, same attribution.
+   * Resolve which adapter actually answers a chat turn.
    *
-   * NOTE: `mcp_native` was added here deliberately. Enabling MCP on a Codex /
-   * Claude Code agent flips its `toolForwarding` from `marker_protocol` to
-   * `mcp_native`; before this it silently fell through to the slow CLI path,
-   * making chat 3–4× slower after MCP was turned on. Both now fast-path.
+   * The agent's OWN declared runtime is AUTHORITATIVE. If it is chat-capable, it
+   * answers — and if its gateway/harness is unreachable, the real error surfaces
+   * (the channel/UI renders the failure) instead of a different brain silently
+   * impersonating it. We previously swapped any `marker_protocol`/`mcp_native`
+   * harness to the configured orchestrator runtime as a latency optimization,
+   * but that masked a down harness: a Hermes agent whose gateway was closed was
+   * silently answered by Codex and attributed as Hermes. That substitution is
+   * removed — a runtime you assigned must be the runtime that answers.
+   *
+   * The orchestrator runtime is used ONLY as a genuine fallback when the agent
+   * has no chat-capable adapter of its own (otherwise the turn could not be
+   * answered at all). That case is a DISCLOSED substitution: logged distinctly,
+   * and the caller flags it (`fastPath`) so the operator/console can show that a
+   * different runtime answered. It is never used to paper over a down harness.
    */
   static #resolveChatAdapter(adapter: AgentAdapter, workspaceId?: string, task?: string | null): AgentAdapter {
+    // Agent runtime is authoritative when it can chat — never swap it out.
+    const capabilities = adapter.capabilities?.();
+    if (adapter.chat && capabilities?.interactiveChat !== false) return adapter;
+
+    // Agent has no interactive chat of its own: fall back to the orchestrator so
+    // the turn can still be answered, and disclose the substitution.
     const runtime = task
       ? this.#deps.modelRouter?.resolveRouted({ role: 'conversation', workspaceId, task, purpose: 'conversation' })
         ?? this.#deps.orchestratorRuntime
         ?? this.#deps.workspaceHarnesses?.resolve(workspaceId)?.adapter
       : this.orchestratorAdapter(workspaceId);
-    if (!runtime || runtime === adapter) return adapter;
-    const forwarding = adapter.capabilities?.().toolForwarding;
-    if ((forwarding === 'marker_protocol' || forwarding === 'mcp_native') && runtime.chat) {
-      this.#deps.logger?.debug?.('chat.fast_path.engaged', { from: adapter.adapterType, forwarding });
+    if (runtime && runtime !== adapter && runtime.chat) {
+      this.#deps.logger?.info?.('chat.fallback.substituted', {
+        from: adapter.adapterType,
+        to: runtime.adapterType,
+        reason: 'agent adapter exposes no interactive chat; orchestrator runtime answering as a disclosed fallback',
+      });
       return runtime;
     }
     return adapter;
+  }
+
+  /**
+   * Bounded health probe used as a chat preflight. Races the adapter's own
+   * `healthCheck()` against a short deadline so a hung probe can't itself freeze
+   * the turn, and caches the result for a few seconds so back-to-back turns don't
+   * each spawn a process. Never throws — a thrown probe is reported as unhealthy.
+   */
+  static async #preflightHealth(adapter: AgentAdapter, agentId?: string): Promise<AdapterHealthStatus | null> {
+    const key = agentId ?? adapter.adapterType ?? 'unknown';
+    const cached = this.#healthCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.status;
+    const timeoutMs = preflightHealthTimeoutMs();
+    let timer: NodeJS.Timeout | undefined;
+    let status: AdapterHealthStatus;
+    try {
+      status = await Promise.race([
+        adapter.healthCheck(),
+        new Promise<AdapterHealthStatus>((resolve) => {
+          timer = setTimeout(() => resolve({
+            isHealthy: false,
+            // Ambiguous, not definitive: the adapter's own probe didn't return in
+            // time. Flagged so the gate treats it as "unknown" and proceeds.
+            timedOut: true,
+            error: `health check timed out after ${Math.round(timeoutMs / 1000)}s`,
+            checkedAt: new Date().toISOString(),
+          }), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (err) {
+      status = {
+        isHealthy: false,
+        error: err instanceof Error ? err.message : String(err),
+        checkedAt: new Date().toISOString(),
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    // Healthy results are cached longer than failures: a recovered runtime should
+    // be retried promptly, while a healthy one need not be re-probed every turn.
+    const ttlMs = status.isHealthy ? preflightHealthyTtlMs() : preflightUnhealthyTtlMs();
+    this.#healthCache.set(key, { status, expiresAt: Date.now() + ttlMs });
+    return status;
+  }
+
+  /**
+   * Resolve human-meaningful names behind the viewport's opaque ids so the agent
+   * knows WHAT it is looking at — the App's name and its workflows when an App is
+   * open, or a workflow's title (and owning App) when a workflow is open. Without
+   * this the prompt only carried `resourceKind=app resourceId=<uuid>`, so "fix
+   * this workflow" had nothing to resolve against and the agent burned the turn
+   * (or gave up) trying to figure out what the operator meant. The resolved facts
+   * ride on `metadata` (no type change); a single-workflow App also fills
+   * `metadata.workflowId` so it counts as "the" active workflow. Best-effort:
+   * any failure returns the viewport untouched.
+   */
+  static #resolveViewport(viewport: ViewportContext | null, workspaceId?: string): ViewportContext | null {
+    const db = this.#deps.db;
+    if (!viewport || !db || !workspaceId || !viewport.resourceId) return viewport;
+    try {
+      if (viewport.resourceKind === 'app') {
+        const app = db
+          .select({ name: schema.apps.name })
+          .from(schema.apps)
+          .where(and(eq(schema.apps.id, viewport.resourceId), eq(schema.apps.workspaceId, workspaceId)))
+          .get();
+        const workflows = db
+          .select({ id: schema.workflows.id, title: schema.workflows.title })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.appId, viewport.resourceId), eq(schema.workflows.workspaceId, workspaceId)))
+          .all();
+        if (!app && workflows.length === 0) return viewport;
+        return {
+          ...viewport,
+          metadata: {
+            ...viewport.metadata,
+            appId: viewport.resourceId,
+            appName: app?.name ?? null,
+            workflows,
+            // A one-workflow App makes that workflow unambiguously "this workflow".
+            workflowId: workflows.length === 1 ? workflows[0]!.id : viewport.metadata?.workflowId,
+          },
+        };
+      }
+      if (viewport.resourceKind === 'workflow') {
+        const wf = db
+          .select({ title: schema.workflows.title, appId: schema.workflows.appId })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.id, viewport.resourceId), eq(schema.workflows.workspaceId, workspaceId)))
+          .get();
+        if (!wf) return viewport;
+        const appName = wf.appId
+          ? db.select({ name: schema.apps.name }).from(schema.apps).where(eq(schema.apps.id, wf.appId)).get()?.name ?? null
+          : null;
+        return {
+          ...viewport,
+          metadata: { ...viewport.metadata, workflowId: viewport.resourceId, workflowTitle: wf.title, appId: wf.appId ?? null, appName },
+        };
+      }
+    } catch (err) {
+      this.#deps.logger?.warn?.('chat.viewport.resolve_failed', { err: (err as Error).message });
+    }
+    return viewport;
   }
 
   /**
@@ -167,10 +287,10 @@ export class ChatSessionExecutor {
    * approve/…) come from the static catalog; on top we surface the workspace's
    * workflows as discrete `workflow.<id>` tools so the orchestrator can call them
    * with typed parameters. The dynamic set is capped small (WORKFLOW_TOOL_CAP)
-   * and ranked by relevance — the viewport's active workflow first, then
-   * most-recently-edited — because dumping dozens of tools inflates the prompt
-   * and slows tool selection on every turn. Falls back to the static catalog if
-   * the db is unavailable or the lookup fails.
+   * and ranked by relevance — the open App's workflows and the viewport's active
+   * workflow first, then most-recently-edited — because dumping dozens of tools
+   * inflates the prompt and slows tool selection on every turn. Falls back to the
+   * static catalog if the db is unavailable or the lookup fails.
    */
   static #buildCatalog(ctx: ChatTurnContext): ToolDefinition[] {
     const db = this.#deps.db;
@@ -188,12 +308,21 @@ export class ChatSessionExecutor {
         .where(eq(schema.workflows.workspaceId, ctx.workspaceId))
         .all();
       if (rows.length === 0) return this.#filterToRegistered(CHAT_TOOL_CATALOG);
-      // The workflow the operator is currently looking at is the one they're most
-      // likely to mean — always include it, then fill the rest by recency.
+      // The workflow(s) the operator is currently looking at are the ones they're
+      // most likely to mean — always include them, then fill the rest by recency.
+      // On an App surface that's the App's whole workflow set; on a workflow
+      // surface it's the single active workflow.
       const activeWorkflowId = workflowIdFromViewport(ctx.viewport);
+      const appWorkflowIds = new Set(
+        (ctx.viewport?.metadata?.workflows as Array<{ id?: string }> | undefined)?.map((w) => w.id).filter(Boolean) as string[]
+          ?? [],
+      );
+      const priority = (id: string): boolean => id === activeWorkflowId || appWorkflowIds.has(id);
       const ranked = rows.sort((a, b) => {
-        if (a.id === activeWorkflowId) return -1;
-        if (b.id === activeWorkflowId) return 1;
+        const ap = priority(a.id);
+        const bp = priority(b.id);
+        if (ap && !bp) return -1;
+        if (bp && !ap) return 1;
         return a.updatedAt > b.updatedAt ? -1 : 1;
       });
       return this.#filterToRegistered(buildWorkspaceToolCatalog(
@@ -383,12 +512,12 @@ export class ChatSessionExecutor {
     const maxTurns = Math.max(1, Math.min(options.maxTurns ?? ctx.maxTurns ?? 5, 8));
     // High count backstop — the real governor is ChatProgressMonitor, not a cap.
     const maxToolCalls = Math.max(1, options.maxToolCalls ?? defaultMaxToolCalls());
-    const viewport = options.viewport ?? ctx.viewport ?? null;
+    const viewport = this.#resolveViewport(options.viewport ?? ctx.viewport ?? null, ctx.workspaceId);
     const expandedUserMessage = expandUserMessage(userMessage);
     // Social turns cannot need platform actions. Leaving the catalog empty also
     // lets CLI harnesses skip MCP startup, removing its process/handshake cost.
     const lightweightConversation = isLightweightConversation(userMessage);
-    const tools = options.tools ?? (lightweightConversation ? [] : this.#buildCatalog(ctx));
+    const tools = options.tools ?? (lightweightConversation ? [] : this.#buildCatalog({ ...ctx, viewport }));
     let effectiveUserMessage = expandedUserMessage;
     let brainSystemInjection: string | null = null;
     let abilitySystemInjection: string | null = null;
@@ -440,6 +569,17 @@ export class ChatSessionExecutor {
             : 'Answering on the agent\'s CLI harness (re-spawns per tool round). Optional: set a streaming Conversation model in Settings → Runtimes for a faster path.',
         });
       }
+    } else if (adapter !== agentAdapter) {
+      // Disclosed substitution: the bound agent has no chat runtime of its own,
+      // so a fallback runtime is answering. Surface it so the operator is never
+      // led to believe the agent's declared runtime replied.
+      yield this.#activity(
+        ctx,
+        'runtime',
+        'Answering on a fallback runtime',
+        `${agentAdapter.adapterType ?? 'This agent'} has no interactive chat runtime, so ${adapter.adapterType ?? 'the orchestrator'} is answering on its behalf.`,
+        'fallback-runtime',
+      );
     }
 
     const capabilities = adapter.capabilities?.();
@@ -448,6 +588,54 @@ export class ChatSessionExecutor {
       yield { type: 'text', delta: reason ?? 'This agent adapter is connected for workflow tasks, but it does not expose interactive chat yet.' };
       yield { type: 'done', finishReason: 'stop' };
       return;
+    }
+
+    // Fast preflight for the agent's OWN CLI harness. These runtimes cold-start a
+    // process and can otherwise sit in a 90–120s startup/first-event budget before
+    // surfacing a failure — what the operator sees as a frozen "thinking…". A
+    // bounded (<~6s, cached) health probe lets a down runtime fail IMMEDIATELY
+    // with an attributed error instead of hanging. Only the agent's own harness is
+    // probed; the orchestrator/native fallback streams over HTTP and fails fast on
+    // its own, so it is left untouched.
+    if (
+      adapter === agentAdapter
+      && (agentForwarding === 'marker_protocol' || agentForwarding === 'mcp_native')
+    ) {
+      const health = await this.#preflightHealth(adapter, ctx.agentId);
+      if (health && !health.isHealthy) {
+        const label = adapter.adapterType ?? 'agent';
+        const reason = health.error?.trim() || 'the runtime did not respond to a health check';
+        // A TIMEOUT is ambiguous, not a verdict: a Python harness (Hermes) cold-
+        // starts in ~4s and can blow a tight probe budget under load while still
+        // being perfectly able to serve the turn. Hard-aborting on that nukes a
+        // working agent. The original reason for blocking — a 90–120s ACP "frozen
+        // thinking" hang — is already bounded by the first-event timeout + breaker
+        // and the CLI path's own ceilings, so on an ambiguous timeout we PROCEED
+        // and let the real chat path succeed (or fail fast on its own). We still
+        // hard-fail on a DEFINITIVE failure (spawn error, non-zero exit).
+        if (health.timedOut) {
+          this.#deps.logger?.warn?.('chat.preflight.timeout_proceeding', {
+            agentId: ctx.agentId,
+            adapterType: adapter.adapterType,
+            error: reason,
+          });
+        } else {
+          this.#deps.logger?.warn?.('chat.preflight.unhealthy', {
+            agentId: ctx.agentId,
+            adapterType: adapter.adapterType,
+            error: reason,
+          });
+          yield {
+            type: 'tool_result',
+            id: 'adapter',
+            name: 'adapter.chat',
+            result: null,
+            error: `The ${label} runtime is unavailable: ${reason}`,
+          };
+          yield { type: 'done', finishReason: 'error' };
+          return;
+        }
+      }
     }
 
     yield this.#activity(ctx, 'context', 'Loading workspace context', 'Collecting viewport, memory, tools, and agent instructions.', 'context');
@@ -551,7 +739,7 @@ export class ChatSessionExecutor {
     // slice only when SharedIntelligence is not wired.
     if (brainContext) {
       agentMemory = brainContext;
-    } else if (ctx.agentId && this.#deps.agentMemory) {
+    } else if (!lightweightConversation && ctx.agentId && this.#deps.agentMemory) {
       try {
         agentMemory = this.#deps.agentMemory.contextSection(ctx.agentId, ctx.workspaceId);
       } catch (err) {
@@ -598,24 +786,42 @@ export class ChatSessionExecutor {
     // a workspace — retrievers are mostly top-K already, but this is the single
     // guarantee that they can never bloat the prompt. (Agent instructions are
     // user-authored and fixed-size, so they're left intact.)
-    const baseSystemPrompt = buildOrchestratorSystemPrompt({
-      context: { ...ctx, viewport },
-      viewport,
-      // mcp_native harnesses discover the live tool surface over MCP; injecting
-      // the full static platform manual just dilutes the agent's own identity.
-      toolSurface: capabilities?.toolForwarding === 'mcp_native' && !lightweightConversation ? 'mcp_native' : 'injected',
-      ...promptCtx,
-      ...this.#extractInlineContext(userMessage, ctx),
-      agentInstructions,
-      agentIdentity,
-      agentMemory: clampBlock(agentMemory, CONTEXT_BUDGET.agentMemory),
-      personalBrain: clampBlock(personalBrain, CONTEXT_BUDGET.personalBrain),
-      workspaceContext: clampBlock(workspaceContext, CONTEXT_BUDGET.workspaceContext),
-      channelContext,
-      situationalModel: clampBlock(situationalModel, CONTEXT_BUDGET.situationalModel),
-      responseProfile,
-      routingIntelligence: this.#deps.modelRouter?.describeRouting(ctx.workspaceId, effectiveUserMessage) ?? null,
-    });
+    const promptMeta = promptCtx as {
+      workspaceName?: string | null;
+      agentName?: string | null;
+      agentRole?: string | null;
+      agentDomain?: string | null;
+    };
+    const baseSystemPrompt = lightweightConversation
+      ? buildLightweightConversationSystemPrompt({
+        context: { ...ctx, viewport },
+        workspaceName: promptMeta.workspaceName,
+        agentName: promptMeta.agentName,
+        agentRole: promptMeta.agentRole,
+        agentDomain: promptMeta.agentDomain,
+        agentInstructions,
+        agentIdentity,
+        channelContext,
+        responseProfile,
+      })
+      : buildOrchestratorSystemPrompt({
+        context: { ...ctx, viewport },
+        viewport,
+        // mcp_native harnesses discover the live tool surface over MCP; injecting
+        // the full static platform manual just dilutes the agent's own identity.
+        toolSurface: capabilities?.toolForwarding === 'mcp_native' ? 'mcp_native' : 'injected',
+        ...promptCtx,
+        ...this.#extractInlineContext(userMessage, ctx),
+        agentInstructions,
+        agentIdentity,
+        agentMemory: clampBlock(agentMemory, CONTEXT_BUDGET.agentMemory),
+        personalBrain: clampBlock(personalBrain, CONTEXT_BUDGET.personalBrain),
+        workspaceContext: clampBlock(workspaceContext, CONTEXT_BUDGET.workspaceContext),
+        channelContext,
+        situationalModel: clampBlock(situationalModel, CONTEXT_BUDGET.situationalModel),
+        responseProfile,
+        routingIntelligence: this.#deps.modelRouter?.describeRouting(ctx.workspaceId, effectiveUserMessage) ?? null,
+      });
     // W1/W2 — the operating manual reaches CHAT agents too (not only task agents),
     // so an agent has the same agentic briefing everywhere it runs.
     let operatingManualBlock: string | null = null;
@@ -794,7 +1000,7 @@ export class ChatSessionExecutor {
     // watchdog (HermesAdapter.chat) still bounds each streaming call.
     const forwarding = adapter.capabilities?.().toolForwarding;
     const isCliHarness = forwarding === 'marker_protocol' || forwarding === 'mcp_native';
-    const modelRoundTimeoutMs = isCliHarness ? harnessRoundTimeoutMs() : INTERACTIVE_MODEL_ROUND_TIMEOUT_MS;
+    const modelRoundTimeoutMs = isCliHarness ? harnessRoundTimeoutMs(Boolean(options.lightweightConversation)) : INTERACTIVE_MODEL_ROUND_TIMEOUT_MS;
     const adapterMcpNative = forwarding === 'mcp_native';
     // Per-conversation permission mode (default ask). `auto` runs mutating tools
     // freely; `ask` confirms them; `plan` blocks them upstream (executionMode).
@@ -875,16 +1081,17 @@ export class ChatSessionExecutor {
           yield delta;
         }
         const noOutput = !assistantText.trim() && !surfacedConfirmation && finishReason !== 'error';
-        // Reasoning-only / truncated turn recovery. A reasoning model at high
-        // effort can spend its whole output budget thinking and return zero answer
-        // text (finish_reason `length`, or a clean `stop` after only `thinking`).
-        // Today that surfaces the canned "I didn't produce a reply" and silently
-        // discards the model's work — making the orchestrator unusable on
-        // follow-ups. Instead, retry ONCE with more room and an explicit nudge to
-        // write the final answer. Model-agnostic: no model-family branching, just
-        // "give it room + ask plainly", and only when the turn truly produced
-        // nothing.
-        if (noOutput && !emptyRetryUsed && (finishReason === 'length' || producedThinking)) {
+        // Empty-turn recovery. A turn can end with zero answer text in three ways:
+        // a reasoning model burned its budget thinking (`length`, or a clean `stop`
+        // after only `thinking`), OR a non-streaming CLI harness (e.g. Hermes over
+        // the marker protocol) finished its loop and exited clean WITHOUT surfacing
+        // a final answer — a bare `stop` with no text and no thinking. All three
+        // used to dump the canned "completed without returning an answer" and throw
+        // the work away. Instead retry ONCE with more room and an explicit nudge to
+        // write the answer. Model-agnostic: no model-family branching, just "give it
+        // room + ask plainly", bounded to a single extra round. `max_turns` (a real
+        // cap/pause) is deliberately excluded so we never re-burn a long budget.
+        if (noOutput && !emptyRetryUsed && (finishReason === 'length' || finishReason === 'stop' || producedThinking)) {
           emptyRetryUsed = true;
           retryMaxTokens = EMPTY_RETRY_MAX_TOKENS;
           this.#deps.logger?.warn('chat.turn.empty_recovered', {
@@ -979,6 +1186,23 @@ export class ChatSessionExecutor {
       const buildCall = batch.find((call) => call.name === 'agentis.build_workflow');
       const buildRunId = buildCall ? (ctx.runId ?? `build_${ctx.clientTurnId ?? randomUUID()}`) : null;
       const execCtx = buildRunId ? { ...ctx, runId: buildRunId } : ctx;
+      // Live "Using <tool>" cards for the marker-protocol tool round — parity with
+      // the Codex CLI's shell cards, so a multi-round agent (Hermes/Antigravity, or
+      // any marker-protocol runtime) is legible while it works instead of a silent
+      // "Waiting for model output". `build_workflow` is skipped: it streams its own
+      // richer backend narration via #streamBuildNarration below.
+      const carded = batch.filter((call) => call.name !== 'agentis.build_workflow');
+      for (const call of carded) {
+        yield {
+          type: 'activity',
+          id: `chat-tool-${call.id}`,
+          phase: 'tool',
+          status: 'running',
+          label: toolActivityLabel('Using', prettyToolLabel(call.name), call.arguments),
+          startedAt: new Date().toISOString(),
+        };
+      }
+
       // Execute all tool calls in parallel — SQLite builtins are sub-ms, HTTP
       // tools can take hundreds of ms. Parallel execution is the spec §6.2 design.
       const toolRoundStart = Date.now();
@@ -994,6 +1218,18 @@ export class ChatSessionExecutor {
       timings.toolMs += Date.now() - toolRoundStart;
 
       for (const { call, result, summarized, delta } of settled) {
+        // Close out the live card (replace-in-place by id) before its result.
+        if (call.name !== 'agentis.build_workflow') {
+          const failed = Boolean(result.error);
+          yield {
+            type: 'activity',
+            id: `chat-tool-${call.id}`,
+            phase: 'tool',
+            status: failed ? 'error' : 'success',
+            label: toolActivityLabel(failed ? 'Failed' : 'Used', prettyToolLabel(call.name), call.arguments),
+            completedAt: new Date().toISOString(),
+          };
+        }
         yield delta;
         messages.push({
           role: 'tool',
@@ -1361,11 +1597,38 @@ interface TurnTimings {
 // streaming runtime's — measured: a slow/free harness model takes ~60–115s to
 // first token even for "Hi" and is silent on stdio while the remote model runs.
 const INTERACTIVE_MODEL_ROUND_TIMEOUT_MS = 15_000;
+const LIGHTWEIGHT_HARNESS_MODEL_ROUND_TIMEOUT_MS = 30_000;
 const HARNESS_MODEL_ROUND_TIMEOUT_MS = 240_000;
-function harnessRoundTimeoutMs(): number {
+function harnessRoundTimeoutMs(lightweightConversation = false): number {
   const fromEnv = Number(process.env.AGENTIS_HARNESS_ROUND_TIMEOUT_MS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
-  return HARNESS_MODEL_ROUND_TIMEOUT_MS;
+  return lightweightConversation ? LIGHTWEIGHT_HARNESS_MODEL_ROUND_TIMEOUT_MS : HARNESS_MODEL_ROUND_TIMEOUT_MS;
+}
+
+/**
+ * Deadline for the chat preflight health probe. Short so a definitively-down
+ * runtime fails fast, but generous enough not to pre-empt a healthy Python
+ * harness (Hermes) whose `--version` cold-starts in ~4s and spikes under load —
+ * a premature cut just reads as an (ambiguous) timeout. Env-overridable.
+ */
+function preflightHealthTimeoutMs(): number {
+  const fromEnv = Number(process.env.AGENTIS_CHAT_PREFLIGHT_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return 9_000;
+}
+
+/** How long a HEALTHY preflight result is reused before re-probing. */
+function preflightHealthyTtlMs(): number {
+  const fromEnv = Number(process.env.AGENTIS_CHAT_PREFLIGHT_HEALTHY_TTL_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return 15_000;
+}
+
+/** How long an UNHEALTHY preflight result is reused before re-probing (short — recovery should be picked up quickly). */
+function preflightUnhealthyTtlMs(): number {
+  const fromEnv = Number(process.env.AGENTIS_CHAT_PREFLIGHT_UNHEALTHY_TTL_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return 5_000;
 }
 
 /**
@@ -1527,6 +1790,42 @@ function isLightweightConversation(message: string): boolean {
   return /^(?:hi|hello|hey|hiya|howdy|good (?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|got it|who are you|what are you|how are you)$/.test(text);
 }
 
+function buildLightweightConversationSystemPrompt(args: {
+  context: ChatTurnContext;
+  workspaceName?: string | null;
+  agentName?: string | null;
+  agentRole?: string | null;
+  agentDomain?: string | null;
+  agentInstructions?: string | null;
+  agentIdentity?: string | null;
+  channelContext?: { kind: string; from?: string | null; chatId?: string | null; threadId?: string | null; senderSummary?: string | null } | null;
+  responseProfile?: string | null;
+}): string {
+  const role = args.agentRole?.trim() || 'agent';
+  const rolePhrase = role === 'agent' ? 'an Agentis agent' : `a ${role} agent`;
+  const identityHeader = [
+    `You are ${args.agentName ?? 'an Agentis agent'}, ${rolePhrase}${args.agentDomain ? ` for the "${args.agentDomain}" domain` : ''} working inside the Agentis workspace "${args.workspaceName ?? args.context.workspaceId}".`,
+    'You are NOT the platform orchestrator. Stay in character: your scope, escalation rules, and operating style come from the authoritative Agentis identity/config below.',
+  ].join('\n');
+  const identity = [
+    identityHeader,
+    args.agentIdentity?.trim() || (args.agentInstructions?.trim() ? `Operating instructions:\n${args.agentInstructions.trim()}` : ''),
+  ].filter(Boolean).join('\n\n');
+  const channel = args.channelContext
+    ? [
+      `Channel: ${args.channelContext.kind}.`,
+      args.channelContext.from ? `From: ${args.channelContext.from}.` : '',
+      args.responseProfile?.trim() ?? '',
+    ].filter(Boolean).join('\n')
+    : null;
+  return [
+    clampBlock(identity, 4000),
+    'This is lightweight social chat. Answer naturally, warmly, and directly in a sentence or two.',
+    'Do not narrate platform operations, tool use, or workspace setup unless the operator asks for an action.',
+    channel,
+  ].map((value) => value?.trim()).filter(Boolean).join('\n\n');
+}
+
 /** Honest terminal messages for turns that hit a guardrail instead of a clean stop. */
 const TURN_LIMIT_MESSAGE =
   'I worked through several steps but reached the per-turn action limit before finishing. Tell me to continue and I’ll keep going from where I left off.';
@@ -1607,6 +1906,16 @@ function expandUserMessage(message: string): string {
     help: 'The operator used /help. Briefly explain what the Agentis orchestrator can do through chat.',
   };
   return mapping[command?.toLowerCase() ?? ''] ?? message;
+}
+
+/**
+ * A human label for a tool-activity card. Platform verbs read naturally
+ * (`agentis.workflow.run` → "workflow run"); a dynamic `workflow.<id>` tool is
+ * just "run workflow" since the id is meaningless to the operator.
+ */
+function prettyToolLabel(name: string): string {
+  if (name.startsWith('workflow.')) return 'run workflow';
+  return name.replace(/^agentis\./, '').replace(/[._]/g, ' ').trim() || name;
 }
 
 function summarizeToolResult(value: unknown): unknown {

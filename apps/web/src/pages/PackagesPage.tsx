@@ -37,9 +37,11 @@ import {
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { AppRecord, AppManifestEnvelope } from '@agentis/core';
+import type { AppRecord, AppManifestEnvelope, WorkspaceBundleEnvelope } from '@agentis/core';
 import { api, apiErrorMessage } from '../lib/api';
 import { appsApi } from '../lib/appsApi';
+import { isWorkspaceBundle } from '../lib/workspaceBundle';
+import { WorkspaceBundleModal } from '../components/packages/WorkspaceBundleModal';
 import {
   abilitiesApi,
   compileStatusLabel,
@@ -226,6 +228,8 @@ export function PackagesPage() {
   const [openWorkflow, setOpenWorkflow] = useState<WorkflowPackage | null>(null);
   const [openExtension, setOpenExtension] = useState<WorkspaceExtension | null>(null);
   const [extensionStudioOpen, setExtensionStudioOpen] = useState(false);
+  const [workspaceBundleOpen, setWorkspaceBundleOpen] = useState(false);
+  const [importBundle, setImportBundle] = useState<WorkspaceBundleEnvelope | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -337,6 +341,11 @@ export function PackagesPage() {
       try {
         const text = await file.text();
         const json = JSON.parse(text) as Record<string, unknown>;
+        // A whole-workspace `.agentis` bundle goes through preview+confirm, not a silent import.
+        if (isWorkspaceBundle(json)) {
+          setImportBundle(json);
+          return;
+        }
         await routeImport(file.name, json);
         toast.success('Imported', file.name);
         void refresh();
@@ -512,6 +521,9 @@ export function PackagesPage() {
           <Button variant="secondary" size="md" iconLeft={<ArrowDownToLine size={14} />} onClick={() => void handleImport()}>
             Import
           </Button>
+          <Button variant="secondary" size="md" iconLeft={<Boxes size={14} />} onClick={() => setWorkspaceBundleOpen(true)}>
+            Export workspace
+          </Button>
           <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setExtensionStudioOpen(true)}>
             New extension
           </Button>
@@ -601,6 +613,13 @@ export function PackagesPage() {
             setSearch('');
             void refresh();
           }}
+        />
+      )}
+      {(workspaceBundleOpen || importBundle) && (
+        <WorkspaceBundleModal
+          {...(importBundle ? { importEnvelope: importBundle } : {})}
+          onClose={() => { setWorkspaceBundleOpen(false); setImportBundle(null); }}
+          onImported={() => { void refresh(); }}
         />
       )}
     </div>
