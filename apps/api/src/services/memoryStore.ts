@@ -30,6 +30,13 @@ export interface MemoryWriteInput {
   source: MemoryEpisode['source'];
   title: string;
   content: string;
+  /**
+   * Long-form body stored in the episode `details` column. For a `skill` atom
+   * this is the full SKILL.md body (the procedure); `content` holds only the
+   * short description that gets embedded for search. Keeps the searchable
+   * surface cheap while the full procedure travels with the atom.
+   */
+  details?: string | null;
   trust?: number;
   importance?: number;
   tags?: string[];
@@ -47,11 +54,30 @@ export interface MemoryListArgs {
   minTrust?: number;
   /** Default 50, max 200. */
   limit?: number;
+  /** Which plane to list. Defaults to workspace memory; pass `skill_library`
+   * to list `skill`/`example` atoms. */
+  plane?: typeof WORKSPACE_MEMORY_PLANE | typeof SKILL_LIBRARY_PLANE;
 }
 
 /** Discriminator tag marking an episode as a typed workspace-memory row. */
 export const WORKSPACE_MEMORY_PLANE = 'workspace_memory';
+/**
+ * Skill-library plane: `skill` (a procedure) + `example` (its demonstrations).
+ * These ride the same episode substrate but on a SEPARATE plane so they never
+ * surface in the always-inject dispatch tier (the `episode` branch of
+ * `loadAtoms` excludes this plane). They are reached via search / skill
+ * materialization instead. See Living Skills.
+ */
+export const SKILL_LIBRARY_PLANE = 'skill_library';
 const PLANE_TAG = `plane:${WORKSPACE_MEMORY_PLANE}`;
+const SKILL_LIBRARY_PLANE_TAG = `plane:${SKILL_LIBRARY_PLANE}`;
+
+/** Which plane a typed-memory `kind` belongs to. */
+function planeForKind(kind: MemoryEpisode['kind']): { plane: string; tag: string } {
+  return kind === 'skill' || kind === 'example'
+    ? { plane: SKILL_LIBRARY_PLANE, tag: SKILL_LIBRARY_PLANE_TAG }
+    : { plane: WORKSPACE_MEMORY_PLANE, tag: PLANE_TAG };
+}
 
 /** Typed-memory `kind` → canonical episode `type`. Real kind kept in metadata. */
 const KIND_TO_TYPE: Record<string, RuntimeEpisodeType> = {
@@ -60,6 +86,10 @@ const KIND_TO_TYPE: Record<string, RuntimeEpisodeType> = {
   pattern: 'success_pattern',
   rule: 'decision',
   lesson: 'distilled_lesson',
+  // Skill-library kinds ride durable canonical types (never 'observation',
+  // which decays as an unconsolidated trace).
+  skill: 'decision',
+  example: 'success_pattern',
 };
 /** Typed-memory `source` → canonical episode `source`. Real source kept in metadata. */
 const MEM_SOURCE_TO_EPISODE: Record<string, CreateRuntimeEpisodeInput['source']> = {
@@ -97,7 +127,11 @@ export class MemoryStore {
   write(input: MemoryWriteInput): string {
     const trust = clamp01(input.trust ?? (input.source === 'seed' ? 0.9 : 0.7));
     const importance = clamp01(input.importance ?? 0.5);
-    const governing = input.source === 'operator'
+    const { plane, tag: planeTag } = planeForKind(input.kind);
+    // Skill-library atoms are NEVER constitutional/always-inject — a skill is a
+    // procedure discovered on demand, not a hard rule injected every turn.
+    const governing = plane === WORKSPACE_MEMORY_PLANE
+      && input.source === 'operator'
       && (input.kind === 'rule' || importance >= 0.8 || (input.tags ?? []).includes('charter'));
     // Built as a variable (not an object literal at the call site) so the extra
     // `governing` field — read by the store via a cast — isn't excess-property-checked.
@@ -107,13 +141,14 @@ export class MemoryStore {
       type: KIND_TO_TYPE[input.kind] ?? 'observation',
       title: input.title,
       summary: input.content,
+      details: input.details ?? null,
       source: MEM_SOURCE_TO_EPISODE[input.source] ?? 'system_write',
       confidence: trust,
       importance,
       trust,
-      tags: [...(input.tags ?? []), PLANE_TAG],
+      tags: [...(input.tags ?? []), planeTag],
       metadata: {
-        plane: WORKSPACE_MEMORY_PLANE,
+        plane,
         memoryKind: input.kind,
         memorySource: input.source,
         provenance: input.provenance ?? {},
@@ -162,13 +197,14 @@ export class MemoryStore {
 
   byId(workspaceId: string, episodeId: string): MemoryEpisode | null {
     const ep = this.episodes.byId(workspaceId, episodeId);
-    if (!ep || !ep.tags.includes(PLANE_TAG)) return null;
+    if (!ep || !hasPlaneTag(ep.tags)) return null;
     return toMemoryEpisode(ep);
   }
 
   list(args: MemoryListArgs): MemoryEpisode[] {
     const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
-    const rows = this.#planeRows(args.workspaceId, args.scopeId);
+    const planeTag = args.plane === SKILL_LIBRARY_PLANE ? SKILL_LIBRARY_PLANE_TAG : PLANE_TAG;
+    const rows = this.#planeRows(args.workspaceId, args.scopeId, planeTag);
     let episodes = rows.map(toMemoryEpisode);
     if (args.kind) episodes = episodes.filter((e) => e.kind === args.kind);
     if (args.source) episodes = episodes.filter((e) => e.source === args.source);
@@ -188,7 +224,7 @@ export class MemoryStore {
   }
 
   /** Active plane rows for a workspace/scope, newest first. */
-  #planeRows(workspaceId: string, scopeId: string | null): RuntimeEpisode[] {
+  #planeRows(workspaceId: string, scopeId: string | null, planeTag: string = PLANE_TAG): RuntimeEpisode[] {
     const conds = [
       eq(schema.memoryEpisodes.workspaceId, workspaceId),
       isNull(schema.memoryEpisodes.archivedAt),
@@ -200,13 +236,18 @@ export class MemoryStore {
       .limit(1000)
       .all()
       .map(rowToRuntimeEpisode)
-      .filter((ep) => ep.tags.includes(PLANE_TAG));
+      .filter((ep) => ep.tags.includes(planeTag));
   }
 
   #isPlaneRow(workspaceId: string, episodeId: string): boolean {
     const ep = this.episodes.byId(workspaceId, episodeId);
-    return Boolean(ep && ep.tags.includes(PLANE_TAG));
+    return Boolean(ep && hasPlaneTag(ep.tags));
   }
+}
+
+/** True when an episode belongs to any MemoryStore-managed plane. */
+function hasPlaneTag(tags: string[]): boolean {
+  return tags.includes(PLANE_TAG) || tags.includes(SKILL_LIBRARY_PLANE_TAG);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -231,7 +272,7 @@ function toMemoryEpisode(ep: RuntimeEpisode): MemoryEpisode {
     content: ep.summary,
     trust: ep.trust,
     importance: ep.importance,
-    tags: ep.tags.filter((t) => t !== PLANE_TAG),
+    tags: ep.tags.filter((t) => t !== PLANE_TAG && t !== SKILL_LIBRARY_PLANE_TAG),
     provenance,
     reinforcedAt: ep.reinforcedAt ?? null,
     createdAt: ep.createdAt,

@@ -101,8 +101,15 @@ export class ChatMemoryCaptureService {
       // reconciled against existing memory (ADD/UPDATE/NOOP), so restating a rule
       // UPDATEs it instead of writing a duplicate, and durable even without a model.
       const operatorCandidates = extractOperatorCandidates(userMessage);
-      result.signals = operatorCandidates.length;
-      if (operatorCandidates.length > 0) {
+      // BRAIN-BLUEPRINT-10X — the AGENT's own discoveries form memory too, not just
+      // operator statements. A work turn whose answer carries a learning shape
+      // ("root cause was…", "turns out…", "for future runs…") goes through the SAME
+      // formation pipeline (judge dedupes/reconciles), so what an agent learns in
+      // one run exists for the next one. This was the biggest silent leak: only
+      // operator text was ever mined, so agents never remembered their own work.
+      const agentLearning = extractAgentLearningSignal(args.assistantMessage ?? '');
+      result.signals = operatorCandidates.length + (agentLearning ? 1 : 0);
+      if (operatorCandidates.length > 0 || agentLearning) {
         try {
           this.deps.brainQueue.enqueue({
             workspaceId: args.workspaceId,
@@ -113,9 +120,9 @@ export class ChatMemoryCaptureService {
               agentId: args.agentId,
               // Operator statements belong to the workspace mind (all agents recall
               // them); the judge may still scope a memory to the agent.
-              scopeId: null,
+              scopeId: operatorCandidates.length > 0 ? null : args.agentId,
               memoryPolicy: 'form',
-              originSurface: 'operator_chat',
+              originSurface: operatorCandidates.length > 0 ? 'operator_chat' : 'agent_chat_learning',
               operatorText: userMessage,
               taskOutput: (args.assistantMessage ?? '').trim(),
               taskTitle: `Operator chat${args.userDisplayName ? ` with ${args.userDisplayName}` : ''}`,
@@ -309,6 +316,20 @@ function splitStableSignalCandidates(message: string): string[] {
     .split(/\r?\n|(?<=[.!?])\s+/)
     .map((part) => part.trim())
     .filter((part) => part.length >= 8 && part.length <= 700);
+}
+
+/**
+ * BRAIN-BLUEPRINT-10X — does the AGENT's answer carry a durable learning?
+ * Deterministic and conservative: the text must be substantive (≥120 chars — a
+ * real work summary, not chatter) AND contain an explicit learning shape. The
+ * FormationJudge downstream still reconciles/dedupes/rejects, so this gate only
+ * decides whether the turn is WORTH judging — false negatives lose a lesson,
+ * false positives cost one queue item.
+ */
+export function extractAgentLearningSignal(assistantText: string): boolean {
+  const text = (assistantText ?? '').trim();
+  if (text.length < 120) return false;
+  return /\b(root cause|the (real|actual) (problem|issue|cause) (was|is)|the fix (was|is)|turns out|discovered that|learned that|lesson[:\s]|note for (the )?future|for future runs|next time (we|i) should|going forward (we|i) (should|will|must))\b/i.test(text);
 }
 
 /**

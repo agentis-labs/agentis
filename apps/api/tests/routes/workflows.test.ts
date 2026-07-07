@@ -72,6 +72,25 @@ function seedWorkflow(graph: WorkflowGraph = trivialGraph()) {
   return id;
 }
 
+describe('GET /v1/workflows/:id/loop-status', () => {
+  it('returns the Paved Road stage + compass for a never-tested workflow', async () => {
+    const id = seedWorkflow();
+    const res = await app().request(`/v1/workflows/${id}/loop-status`, { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      stage: string;
+      stageLabel: string;
+      evidence: { dryRun: unknown; debugRun: unknown };
+      compass: { next: Array<{ tool: string; args: Record<string, unknown> }> };
+    };
+    expect(body.stage).toBe('authored');
+    expect(body.stageLabel).toBeTruthy();
+    expect(body.evidence.dryRun).toBeNull();
+    expect(body.compass.next[0]?.tool).toBe('agentis.workflow.dry_run');
+    expect(body.compass.next[0]?.args).toEqual({ workflowId: id });
+  });
+});
+
 describe('GET /v1/workflows', () => {
   it('lists workspace workflows', async () => {
     seedWorkflow();
@@ -274,9 +293,19 @@ describe('workflow deployment', () => {
       listeners: undefined,
     } as unknown as TriggerRuntime;
 
-    const publish = await app(runtime).request(`/v1/workflows/${id}/activate`, {
+    // SWIFT arming gate: an unhardened cron REFUSES to arm without an audited
+    // override — this doubles as the fence for the route's override threading.
+    const blocked = await app(runtime).request(`/v1/workflows/${id}/activate`, {
       method: 'POST',
       headers: ctx.authHeaders,
+    });
+    expect(blocked.status).not.toBe(200);
+    expect(JSON.stringify(await blocked.json())).toMatch(/BLOCKED_LIFECYCLE_NOT_HARDENED/);
+
+    const publish = await app(runtime).request(`/v1/workflows/${id}/activate`, {
+      method: 'POST',
+      headers: { ...ctx.authHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ override: { ack: 'route fixture: deployment mechanics under test' } }),
     });
 
     expect(publish.status).toBe(200);

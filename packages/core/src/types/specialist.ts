@@ -180,7 +180,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   run_code: 'Evaluate a sandboxed JS expression â€” no I/O, pure compute. args: { expression: string, input?: object }',
   git_diff: 'Show the working-tree diff (git-backed workspaces only).',
   git_status: 'Show git status (git-backed workspaces only).',
-  browser_screenshot: 'Open a real (headless) browser, render a URL or inline HTML, and capture a PNG screenshot saved as an artifact. Chat renders the artifact automatically; to send it through a channel, pass `ref` to agentis.channel.send attachments. Returns { artifactId, ref, url }. args: { url?: string, html?: string, fullPage?: boolean, viewport?: { width, height }, title?: string }',
+  browser_screenshot: 'Open a real (headless) browser, render a URL or inline HTML, and capture a PNG screenshot. Default is a transient visual check, not a saved asset. Set save:true only when the user/task intentionally wants the image kept or delivered; saved captures return { artifactId, ref, url }. args: { url?: string, html?: string, fullPage?: boolean, viewport?: { width, height }, title?: string, save?: boolean }',
   browser_navigate: 'Open a real browser, load a URL, and return its { title, text, html }. Use to read JS-rendered pages that read_url cannot. args: { url: string }',
   browser_extract_text: 'Open a real browser, load a URL (or html), and return the visible text under a CSS selector (default body). args: { url?: string, html?: string, selector?: string }',
   browser_extract_table: 'Open a real browser and parse an HTML <table> into an array of row objects. args: { url?: string, html?: string, selector?: string }',

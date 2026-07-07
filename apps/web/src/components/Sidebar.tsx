@@ -12,10 +12,12 @@ import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
   Home as HomeIcon,
+  Radar as MissionIcon,
   Bot,
   Brain as BrainIcon,
   LayoutGrid as AppsIcon,
   Library as AssetsIcon,
+  ListChecks as IssuesIcon,
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react';
@@ -32,9 +34,11 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/home', label: 'Home', icon: HomeIcon },
+  { to: '/mission', label: 'Mission', icon: MissionIcon },
   { to: '/apps', label: 'Apps', icon: AppsIcon },
   { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
   { to: '/brain', label: 'Brain', icon: BrainIcon },
+  { to: '/issues', label: 'Issues', icon: IssuesIcon },
   { to: '/assets', label: 'Assets', icon: AssetsIcon },
 ];
 

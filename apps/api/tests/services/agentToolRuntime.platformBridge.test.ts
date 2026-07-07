@@ -58,16 +58,18 @@ describe('AgentToolRuntime — platform tool bridge (E2)', () => {
       WS,
       'agentis.channel.send',
       { to: '+1', text: 'hi' },
-      { workflowId: 'wf-1', agentId: 'a-1', userId: 'u-1' },
+      { workflowId: 'wf-1', runId: 'run-1', agentId: 'a-1', userId: 'u-1', artifactPolicy: { saveScreenshots: true } },
     );
     expect(platform.ok).toBe(true);
     expect(platformCalls).toHaveLength(1);
     expect(platformCalls[0]!.ctx).toMatchObject({
       workspaceId: WS,
       workflowId: 'wf-1',
+      runId: 'run-1',
       agentId: 'a-1',
       userId: 'u-1',
       appId: 'app-1',
+      artifactPolicy: { saveScreenshots: true },
     });
 
     // A non-platform (mcp__*) id still goes to the MCP bridge.

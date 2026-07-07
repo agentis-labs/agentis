@@ -8,11 +8,13 @@ import { BrainView } from '../components/brain/BrainView';
 import { ConfigDrawer } from '../components/brain/ConfigDrawer';
 import { InsightsTab } from '../components/brain/InsightsTab';
 import { KnowledgeTab } from '../components/knowledge/KnowledgeTab';
+import { SkillsTab } from '../components/brain/SkillsTab';
+import { ExamplesTab } from '../components/brain/ExamplesTab';
 import { PersonalBrainPanel } from '../components/brain/PersonalBrainPanel';
 import { AgentBrainPanel } from '../components/brain/AgentBrainPanel';
 import { BrainSectionNav } from '../components/brain/BrainSectionNav';
 
-type BrainTab = 'map' | 'knowledge' | 'insights';
+type BrainTab = 'map' | 'knowledge' | 'skills' | 'examples' | 'insights';
 type BrainScope = 'workspace' | 'agent' | 'personal';
 
 interface IntelligenceStatus {
@@ -30,6 +32,8 @@ function destination(pathname: string, search: string): { tab: BrainTab; canonic
   if (raw === 'documents' || raw === 'bases' || raw === 'knowledge') {
     return { tab: 'knowledge', canonical: '/brain?tab=knowledge' };
   }
+  if (raw === 'skills') return { tab: 'skills', canonical: '/brain?tab=skills' };
+  if (raw === 'examples') return { tab: 'examples', canonical: '/brain?tab=examples' };
   if (raw === 'health' || raw === 'config' || raw === 'disputes' || raw === 'memory' || raw === 'episodes' || raw === 'insights') {
     return { tab: 'insights', canonical: '/brain?tab=insights' };
   }
@@ -118,6 +122,8 @@ export function UnifiedBrainPage() {
         {scope === 'agent' && <AgentBrainPanel />}
         {scope === 'workspace' && tab === 'map' && <BrainView onManage={() => changeTab('knowledge')} onOpenConfig={() => setConfigDrawerOpen(true)} />}
         {scope === 'workspace' && tab === 'knowledge' && <KnowledgeTab />}
+        {scope === 'workspace' && tab === 'skills' && <SkillsTab />}
+        {scope === 'workspace' && tab === 'examples' && <ExamplesTab />}
         {scope === 'workspace' && tab === 'insights' && <InsightsTab onOpenConfig={() => setConfigDrawerOpen(true)} />}
       </div>
       <ConfigDrawer

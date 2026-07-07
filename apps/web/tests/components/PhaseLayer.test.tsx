@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type React from 'react';
-import { PhaseLayer, stripPhasePrefix } from '../../src/components/canvas/PhaseLayer';
+import { PhaseLayer, stripPhasePrefix, derivePhaseStatus, type PhaseNode } from '../../src/components/canvas/PhaseLayer';
 
 vi.mock('@xyflow/react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@xyflow/react')>();
@@ -56,6 +56,19 @@ describe('PhaseLayer', () => {
     expect(screen.getByTitle(/1 node still need setup/i)).toBeInTheDocument();
   });
 
+  it('shows the finished ✓ once every node in the phase completed (the missing icon)', () => {
+    render(
+      <PhaseLayer
+        phases={[{ id: 'p1', name: 'Curation', color: '#059669', nodeIds: ['c1', 'c2'] }]}
+        nodes={[
+          { id: 'c1', position: { x: 0, y: 80 }, width: 240, height: 64, data: { liveStatus: 'completed' } },
+          { id: 'c2', position: { x: 320, y: 80 }, width: 240, height: 64, data: { liveStatus: 'completed' } },
+        ]}
+      />,
+    );
+    expect(screen.getByTitle('Phase completed')).toBeInTheDocument();
+  });
+
   it('keeps the readable header above the node layer without drawing a chip border', () => {
     render(
       <PhaseLayer
@@ -74,14 +87,47 @@ describe('PhaseLayer', () => {
     const band = screen.getByTestId('phase-band');
     expect(header).toHaveStyle({ zIndex: '6' });
     expect(header.firstElementChild).not.toHaveClass('border');
-    expect(Number.parseFloat(band.getAttribute('style')?.match(/height:\s*([0-9.]+)px/i)?.[1] ?? '0')).toBeGreaterThan(240);
-    const headerY = Number.parseFloat(header.getAttribute('style')?.match(/translate\([^,]+,\s*([0-9.-]+)px\)/i)?.[1] ?? '80');
-    expect(headerY).toBeLessThan(-20);
+    // Compact-card geometry: header room + card + bottom padding, and nothing
+    // like the retired multi-section card heights.
+    const bandHeight = Number.parseFloat(band.getAttribute('style')?.match(/height:\s*([0-9.]+)px/i)?.[1] ?? '0');
+    expect(bandHeight).toBeGreaterThan(90);
+    expect(bandHeight).toBeLessThan(160);
+    // The header renders inside the band's reserved room above the card (node
+    // top sits at y=80 in this fixture).
+    const headerY = Number.parseFloat(header.getAttribute('style')?.match(/translate\([^,]+,\s*([0-9.-]+)px\)/i)?.[1] ?? '999');
+    expect(headerY).toBeLessThan(80);
   });
 
   it('strips a numbered phase prefix from names', () => {
     expect(stripPhasePrefix('Phase 3 · Curation')).toBe('Curation');
     expect(stripPhasePrefix('Phase 4 - Seed and Validate')).toBe('Seed and Validate');
     expect(stripPhasePrefix('Finalization')).toBe('Finalization');
+  });
+});
+
+describe('derivePhaseStatus (drives Live / Error / ✓ per phase)', () => {
+  const node = (id: string, liveStatus?: NonNullable<PhaseNode['data']>['liveStatus'], pendingConfig?: boolean): PhaseNode => ({
+    id,
+    position: { x: 0, y: 0 },
+    data: { ...(liveStatus ? { liveStatus } : {}), ...(pendingConfig ? { pendingConfig } : {}) },
+  });
+
+  it('is completed ONLY when every member completed', () => {
+    expect(derivePhaseStatus([node('a', 'completed'), node('b', 'completed')]).status).toBe('completed');
+  });
+  it('is running when any member is running/retry/waiting', () => {
+    expect(derivePhaseStatus([node('a', 'completed'), node('b', 'running')]).status).toBe('running');
+    expect(derivePhaseStatus([node('a', 'retry')]).status).toBe('running');
+    expect(derivePhaseStatus([node('a', 'waiting')]).status).toBe('running');
+  });
+  it('failed wins over running/completed', () => {
+    expect(derivePhaseStatus([node('a', 'running'), node('b', 'failed')]).status).toBe('failed');
+  });
+  it('is idle (no premature ✓) until every node has reported', () => {
+    expect(derivePhaseStatus([]).status).toBe('idle');
+    expect(derivePhaseStatus([node('a', 'completed'), node('b')]).status).toBe('idle');
+  });
+  it('counts members needing config', () => {
+    expect(derivePhaseStatus([node('a', undefined, true), node('b', undefined, true), node('c', 'completed')]).pending).toBe(2);
   });
 });

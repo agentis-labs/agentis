@@ -19,6 +19,7 @@ import type { BrowserPool, BrowserRenderOptions } from './browserPool.js';
 import type { ArtifactService } from './artifactService.js';
 import type { McpToolBridge, BridgedToolSpec } from './mcpToolBridge.js';
 import type { Logger } from '../logger.js';
+import { shouldPersistScreenshot, type ArtifactRetentionPolicy } from './artifactRetentionPolicy.js';
 
 export interface AgentToolResult {
   ok: boolean;
@@ -34,6 +35,10 @@ export interface AgentToolContext {
   agentId?: string;
   /** The Agentic App this agent is operating; scopes data_* and ui_* tools (§4/§5). */
   appId?: string;
+  /** The concrete workflow run this tool call belongs to. */
+  runId?: string;
+  /** Per-task asset retention policy. Defaults to intentional-only persistence. */
+  artifactPolicy?: ArtifactRetentionPolicy | null;
   /**
    * Explicit granted manifest. When set, a tool is permitted if it's in this set
    * OR the role's static manifest — so a custom/generated specialist with the
@@ -86,7 +91,9 @@ export interface PlatformToolCallContext {
   userId?: string;
   agentId?: string;
   workflowId?: string;
+  runId?: string;
   appId?: string;
+  artifactPolicy?: ArtifactRetentionPolicy | null;
 }
 
 export interface PlatformToolBridge {
@@ -181,7 +188,7 @@ export class AgentToolRuntime {
     workspaceId: string,
     toolId: string,
     args: Record<string, unknown>,
-    context: { userId?: string; agentId?: string; workflowId?: string } = {},
+    context: { userId?: string; agentId?: string; workflowId?: string; runId?: string; artifactPolicy?: ArtifactRetentionPolicy | null } = {},
   ): Promise<AgentToolResult> {
     if (this.deps.platformTools?.has(toolId)) {
       const appId = context.workflowId
@@ -192,7 +199,9 @@ export class AgentToolRuntime {
         userId: context.userId,
         agentId: context.agentId,
         workflowId: context.workflowId,
+        runId: context.runId,
         appId,
+        artifactPolicy: context.artifactPolicy,
       });
     }
     if (!this.deps.mcpBridge) return { ok: false, error: 'MCP tool bridge is not wired in this runtime' };
@@ -325,11 +334,13 @@ export class AgentToolRuntime {
         const opts = browserOptsFromArgs(args, { requireTarget: true });
         const png = await browser.screenshot(opts);
         const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
-        if (!this.deps.artifacts) {
-          // No artifact store wired — still return the image inline so the caller isn't blocked.
-          return { mimeType: 'image/png', dataUrl };
+        if (!this.deps.artifacts || !shouldPersistScreenshot(args, context.artifactPolicy)) {
+          // Visual checks are usually task-local observations. Return the image
+          // inline unless the call/task explicitly marks it as a durable asset.
+          return { saved: false, mimeType: 'image/png', dataUrl };
         }
         const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : 'Screenshot';
+        const appId = this.#optionalAppId(workspaceId, context);
         const artifact = this.deps.artifacts.persist({
           workspaceId,
           type: 'image',
@@ -338,9 +349,11 @@ export class AgentToolRuntime {
           content: dataUrl,
           agentId: context.agentId ?? null,
           workflowId: context.workflowId ?? null,
+          runId: context.runId ?? null,
+          appId: appId ?? null,
           savedBy: 'browser_screenshot',
         });
-        return { artifactId: artifact.id, ref: artifact.ref, url: artifact.url, mimeType: 'image/png' };
+        return { saved: true, artifactId: artifact.id, ref: artifact.ref, url: artifact.url, mimeType: 'image/png' };
       }
       case 'browser_navigate': {
         const browser = this.#requireBrowser();
@@ -520,12 +533,18 @@ export class AgentToolRuntime {
 
   /** Resolve the App the agent is operating: explicit context, else derived from the workflow. */
   #requireAppId(workspaceId: string, context: AgentToolContext): string {
+    const appId = this.#optionalAppId(workspaceId, context);
+    if (appId) return appId;
+    throw new AgentisError('VALIDATION_FAILED', 'this tool requires an Agentic App context (no appId resolved)');
+  }
+
+  #optionalAppId(workspaceId: string, context: Pick<AgentToolContext, 'appId' | 'workflowId'>): string | undefined {
     if (context.appId) return context.appId;
     if (context.workflowId && this.deps.resolveAppIdForWorkflow) {
       const appId = this.deps.resolveAppIdForWorkflow(workspaceId, context.workflowId);
       if (appId) return appId;
     }
-    throw new AgentisError('VALIDATION_FAILED', 'this tool requires an Agentic App context (no appId resolved)');
+    return undefined;
   }
 }
 

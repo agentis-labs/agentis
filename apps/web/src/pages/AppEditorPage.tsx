@@ -40,6 +40,7 @@ import clsx from 'clsx';
 import type { AppRecord, AppSurface, CollectionInfo, DesignLanguage, SurfaceAction, SurfaceKind, ViewNode } from '@agentis/core';
 import { DESIGN_LANGUAGES } from '../components/apps/designLanguage';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
+import { useAgentisStore } from '../store/agentisStore';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api, apiErrorMessage, apiText } from '../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
@@ -47,6 +48,8 @@ import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
 import { AppTeamStrip } from '../components/apps/AppTeamStrip';
+import { AppLearningsPanel } from '../components/apps/AppLearningsPanel';
+import { AppDataGrid } from '../components/apps/AppDataGrid';
 import { AppEngineModal, type AppEngineDomain, type AppEngineAgent } from '../components/apps/AppEngineModal';
 import { SurfaceCanvas } from '../components/apps/SurfaceCanvas';
 import {
@@ -161,6 +164,11 @@ export function AppEditorPage() {
       // The control-plane summary already carries id + title — no per-workflow fetch.
       const refs: WorkflowRef[] = workflowSummaries.map((w) => ({ id: w.id, title: w.title }));
       setWorkflows(refs);
+      // Register real names so id-only surfaces (the "Viewing" pill) can resolve
+      // "App · <name>" instead of showing the raw app/workflow id.
+      const { registerResourceName } = useAgentisStore.getState();
+      registerResourceName('app', appRow.id, appRow.name);
+      for (const w of refs) registerResourceName('workflow', w.id, w.title);
       setSelectedWorkflowId((current) =>
         current && refs.some((workflow) => workflow.id === current) ? current : refs[0]?.id ?? null,
       );
@@ -1471,35 +1479,34 @@ function surfaceNodeLabel(node: ViewNode): string {
 }
 
 function DataFacet({ collections, appId }: { collections: CollectionInfo[]; appId: string }) {
+  const [view, setView] = useState<'records' | 'assets'>('records');
   return (
-    <main className="h-full min-h-0 overflow-auto p-6">
-      <section className="mb-8">
-        <div className="mb-4">
-          <h2 className="text-[15px] font-semibold text-text-primary">Collections</h2>
-          <p className="mt-1 text-[12px] text-text-muted">Typed datastore collections owned by this App.</p>
-        </div>
-        {collections.length === 0 ? (
-          <FacetEmpty icon={<Database size={30} />} title="No collections yet" body="Collections defined by agents or app actions appear here, each a typed table the Interface can bind to." />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center gap-1 border-b border-line bg-surface px-3 py-1.5">
+        {(['records', 'assets'] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            onClick={() => setView(v)}
+            className={clsx(
+              'rounded-btn px-3 py-1 text-[12px] font-medium capitalize',
+              view === v ? 'bg-accent/10 text-accent' : 'text-text-secondary hover:bg-surface-2',
+            )}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+      <div className="min-h-0 flex-1">
+        {view === 'records' ? (
+          <AppDataGrid appId={appId} collections={collections} />
         ) : (
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-            {collections.map((collection) => (
-              <div key={collection.id} className="rounded-card border border-line bg-surface p-4">
-                <div className="text-[14px] font-semibold text-text-primary">{collection.name}</div>
-                <div className="mt-1 text-[12px] text-text-muted">{collection.schema.fields.length} fields</div>
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {collection.schema.fields.slice(0, 8).map((field) => (
-                    <span key={field.key} className="rounded-full border border-line bg-canvas px-2 py-0.5 text-[10px] text-text-secondary">
-                      {field.key}:{field.type}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
+          <main className="h-full overflow-auto p-6">
+            <AppAssets appId={appId} />
+          </main>
         )}
-      </section>
-      <AppAssets appId={appId} />
-    </main>
+      </div>
+    </div>
   );
 }
 
@@ -1575,7 +1582,16 @@ function AppAssets({ appId }: { appId: string }) {
 function BrainFacet({ app }: { app: AppRecord }) {
   // Scoped to the App, not a single workflow: this is the memory the operator
   // forms and the records promoted via data_promote_memory (AGENTIC-APPS-10X §5.4).
-  return <WorkflowBrainTab workflow={{ id: app.id, title: app.name }} kind="app" />;
+  // The learnings panel above surfaces "what this agent learned" (Phase M2) so the
+  // improvement loop is visible, not just recorded.
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <AppLearningsPanel appId={app.id} />
+      <div className="min-h-0 flex-1">
+        <WorkflowBrainTab workflow={{ id: app.id, title: app.name }} kind="app" />
+      </div>
+    </div>
+  );
 }
 
 // ── Shared helpers ───────────────────────────────────────────

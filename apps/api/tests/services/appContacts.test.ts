@@ -94,6 +94,24 @@ describe('ProactiveFollowupService.sweep', () => {
     expect(svc.get(ctx.workspace.id, contactId)?.nextTouchAt).toBeNull();
   });
 
+  it('feeds the subject stage + learned facts into the follow-up (informed, not canned)', async () => {
+    const { svc, contactId } = seedDueContactWithThread();
+    svc.update(ctx.workspace.id, contactId, { stage: 'qualified', data: { budget: '40k', timeline: 'Q3' } });
+    svc.update(ctx.workspace.id, contactId, { nextTouchAt: '2020-01-01T00:00:00.000Z' }); // re-arm the cleared clock
+    const dispatched: ChannelTurnInput[] = [];
+    const proactive = new ProactiveFollowupService({
+      db: ctx.db, contacts: svc, logger: ctx.logger,
+      dispatcher: { dispatch: async (input) => { dispatched.push(input); return { replied: true }; } },
+    });
+
+    await proactive.sweep();
+    expect(dispatched).toHaveLength(1);
+    const text = dispatched[0]?.text ?? '';
+    expect(text).toMatch(/stage: qualified/i);
+    expect(text).toMatch(/budget: 40k/);
+    expect(text).toMatch(/timeline: Q3/);
+  });
+
   it('does not barge into a thread a human has taken over', async () => {
     const { svc } = seedDueContactWithThread({ handoff: 'human' });
     const dispatched: ChannelTurnInput[] = [];

@@ -28,7 +28,7 @@ import type {
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { resolveClaudeBinary, resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt, formatToolManifestAwareness } from './markerToolProtocol.js';
 import { toolActivityLabel } from './runtimeProgress.js';
 import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
@@ -99,7 +99,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       return cached.health;
     }
     const result = await probeCliRuntime({
-      binary: this.opts.binaryPath ?? 'claude',
+      binary: resolveClaudeBinary(this.opts.binaryPath),
       cwd: this.opts.cwd,
       env: this.opts.env,
       logger: this.opts.logger,
@@ -109,7 +109,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     let health = result.health;
     const auth = result.health.isHealthy
       ? await probeClaudeAuthStatus({
-        binary: this.opts.binaryPath ?? 'claude',
+        binary: resolveClaudeBinary(this.opts.binaryPath),
         cwd: this.opts.cwd,
         env: this.opts.env,
         logger: this.opts.logger,
@@ -215,7 +215,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const ctrl = new AbortController();
     const unlinkAbort = linkAbortSignal(task.signal, ctrl);
     this.#inFlight.set(task.taskId, ctrl);
-    const bin = this.opts.binaryPath ?? 'claude';
+    const bin = resolveClaudeBinary(this.opts.binaryPath);
     // See chat(): no default turn cap (Codex parity); pass `--max-turns` only when
     // the operator explicitly configured one, so the engine — not an arbitrary CLI
     // flag — owns when a node stops.
@@ -229,6 +229,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       '--dangerously-skip-permissions',
       ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
+      // Headless isolation — the Codex `--ignore-user-config` parity. Use ONLY the
+      // Agentis-mounted MCP server below and IGNORE the operator's personal
+      // `~/.claude` / project `.mcp.json` MCP servers (e.g. Gmail/Drive/Calendar or
+      // a browser server). Those often need interactive auth or aren't reachable in
+      // a headless spawn, so the agent hangs forever at "Using a tool" waiting on
+      // one. Agent tools flow ONLY through Agentis, never the operator's own config.
+      '--strict-mcp-config',
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
       ...(this.opts.extraArgs ?? []),
@@ -239,8 +246,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     try {
       const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
       // Isolated per-task directory when the engine allocated one (parallel swarm
-      // subtask); otherwise the adapter's single-agent configured cwd.
-      const spawnCwd = task.workdir ?? this.opts.cwd;
+      // subtask); otherwise the adapter's single-agent configured cwd. Re-validate
+      // (and re-create) it every spawn: a managed home can vanish after the adapter
+      // was registered, and a missing cwd makes a present binary throw ENOENT.
+      const spawnCwd = resolveSpawnCwd(task.workdir ?? this.opts.cwd, { create: true });
       const target = resolveSpawnTarget(bin, args, spawnCwd ?? process.cwd(), env);
       child = spawn(target.command, target.args, {
         cwd: spawnCwd,
@@ -408,6 +417,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
       ...(storedSession ? ['--resume', storedSession] : []),
+      // Headless isolation — the Codex `--ignore-user-config` parity. Use ONLY the
+      // Agentis-mounted MCP server below and IGNORE the operator's personal
+      // `~/.claude` / project `.mcp.json` MCP servers (e.g. Gmail/Drive/Calendar or
+      // a browser server). Those often need interactive auth or aren't reachable in
+      // a headless spawn, so the agent hangs forever at "Using a tool" waiting on
+      // one. Agent tools flow ONLY through Agentis, never the operator's own config.
+      '--strict-mcp-config',
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
       ...(this.opts.extraArgs ?? []),
@@ -444,7 +460,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     };
 
     yield* runCliChatTurn({
-      binary: this.opts.binaryPath ?? 'claude',
+      binary: resolveClaudeBinary(this.opts.binaryPath),
       args,
       cwd: this.opts.cwd,
       env: this.opts.env,
@@ -511,14 +527,15 @@ async function probeClaudeAuthStatus(args: {
   logger: Logger;
 }): Promise<{ fatal: boolean; detail: string } | null> {
   const env = withExpandedPath({ ...process.env, ...(args.env ?? {}) });
-  const target = resolveSpawnTarget(args.binary, ['auth', 'status', '--json'], args.cwd ?? process.cwd(), env);
+  const cwd = resolveSpawnCwd(args.cwd);
+  const target = resolveSpawnTarget(args.binary, ['auth', 'status', '--json'], cwd ?? process.cwd(), env);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   timeout.unref?.();
   try {
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(target.command, target.args, {
-        cwd: args.cwd,
+        cwd,
         env,
         windowsHide: true,
         signal: controller.signal,

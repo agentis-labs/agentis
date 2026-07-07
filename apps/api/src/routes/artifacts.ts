@@ -9,7 +9,7 @@ import type { AuthService } from '../services/auth.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
-import { deriveArtifactOrigin } from '../services/artifactService.js';
+import { deriveArtifactOrigin, type ArtifactService } from '../services/artifactService.js';
 
 const ARTIFACT_ORIGINS = ['agent', 'app', 'workflow', 'channel', 'manual'] as const;
 
@@ -31,7 +31,7 @@ const createArtifactSchema = z.object({
 const updateArtifactSchema = createArtifactSchema.partial();
 const pinSchema = z.object({ pinned: z.boolean().default(true) });
 
-export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus }) {
+export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus; artifacts: ArtifactService }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -93,6 +93,34 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
   app.get('/:id', (c) => {
     const ws = getWorkspace(c);
     return c.json({ artifact: loadArtifact(deps.db, ws.workspaceId, c.req.param('id')) });
+  });
+
+  // Raw bytes for an artifact — streams content-addressed blobs (`asset://`),
+  // decodes inline `data:` URLs, or serves text. This is what lets the Assets
+  // library render real media (images/video) that lives on the asset store.
+  app.get('/:id/content', async (c) => {
+    const ws = getWorkspace(c);
+    const artifact = loadArtifact(deps.db, ws.workspaceId, c.req.param('id'));
+    const bytes = await deps.artifacts.resolveBytes(ws.workspaceId, `artifact:${artifact.id}`);
+    const disposition = c.req.query('download') === '1' ? 'attachment' : 'inline';
+    return c.body(bytes.buffer as any, 200, {
+      'Content-Type': bytes.mimeType,
+      'Content-Disposition': `${disposition}; filename="${encodeURIComponent(bytes.filename)}"`,
+      'Cache-Control': 'private, max-age=86400',
+    });
+  });
+
+  // Thumbnail — for images, the image itself (browsers scale it). Non-images
+  // return 404 so the web falls back to a type icon (keeps the grid light).
+  app.get('/:id/thumbnail', async (c) => {
+    const ws = getWorkspace(c);
+    const artifact = loadArtifact(deps.db, ws.workspaceId, c.req.param('id'));
+    if (artifact.type !== 'image') return c.json({ error: 'no thumbnail' }, 404);
+    const bytes = await deps.artifacts.resolveBytes(ws.workspaceId, `artifact:${artifact.id}`);
+    return c.body(bytes.buffer as any, 200, {
+      'Content-Type': bytes.mimeType,
+      'Cache-Control': 'private, max-age=86400',
+    });
   });
 
   app.patch('/:id', async (c) => {

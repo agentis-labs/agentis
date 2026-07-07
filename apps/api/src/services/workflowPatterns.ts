@@ -119,11 +119,11 @@ export const WORKFLOW_PATTERNS: WorkflowPattern[] = [
   },
   {
     id: 'convergence-loop',
-    title: 'Convergence loop (iterate until done)',
+    title: 'Pursuit (iterate until done)',
     doctrine: 'D7',
-    when: 'The goal is open-ended — refine/fix/research UNTIL a condition holds, a draft→critique→revise loop, or multi-runtime cooperation that must converge (Opus researches → Codex fixes → verify → repeat). The body is a SEPARATE cohort sub-workflow you build and reference by id.',
+    when: 'The goal is open-ended — refine/fix/research UNTIL a condition holds, a draft→critique→revise loop, or multi-runtime cooperation that must reach an objective (Opus researches → Codex fixes → verify → repeat). The body is a SEPARATE cohort sub-workflow you build and reference by id.',
     nodes: [
-      { id: 'cohort', kind: 'converge', title: 'Converge until goal met', config: { kind: 'converge', bodyWorkflowId: '<cohort sub-workflow id: research → fix → verify>', continuation: { type: 'judge', targetPath: 'output', criteria: 'The objective is fully and verifiably met (e.g. zero failing tests).' }, maxIterations: 8, stallPolicy: { window: 2 }, isolation: 'auto', preserve: 'discard' } },
+      { id: 'cohort', kind: 'pursue', title: 'Pursue until objective met', config: { kind: 'pursue', bodyWorkflowId: '<cohort sub-workflow id: research → fix → verify>', doneWhen: { type: 'judge', targetPath: 'output', criteria: 'The objective is fully and verifiably met (e.g. zero failing tests).' }, maxIterations: 8, stopWhenStalled: { after: 2 }, isolation: 'auto', preserve: 'discard', assess: true, maxPivots: 2 } },
     ],
     edges: [],
   },

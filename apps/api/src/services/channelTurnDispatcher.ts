@@ -34,6 +34,8 @@ import type { ConversationSummaryService } from './conversationSummaryService.js
 import { AdapterStructuredCompleter } from './structuredCompleter.js';
 import type { ConversationParticipantService } from './conversationParticipants.js';
 import type { OutboundPolicyService } from './outboundPolicy.js';
+import type { ConversationService } from './conversationService.js';
+import type { ChatMemoryCaptureService } from './chatMemoryCapture.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from './agentWorkProgress.js';
@@ -51,6 +53,12 @@ export interface ChannelTurnDispatcherDeps {
   bus?: EventBus;
   /** Send the orchestrator's reply back to the origin channel. */
   deliver: ChannelTurnDeliver;
+  /**
+   * §3.2 — route an inbound message to a Subject on the Durable Entity spine that
+   * awaits this channel correlation (a reply that may be days late / out of order).
+   * Additive + best-effort: a no-op when no subject awaits, and never blocks the turn.
+   */
+  onInbound?: (args: { workspaceId: string; connectionId: string; chatId: string; from?: string; text?: string }) => void;
   /** Optional: show/clear the typing indicator while the turn runs. */
   setTyping?: (connectionId: string, chatId: string, on: boolean) => Promise<void>;
   /** Override the turn runner (tests). Defaults to ChatSessionExecutor.turn. */
@@ -73,6 +81,12 @@ export interface ChannelTurnDispatcherDeps {
   /** Multi-party threads (G1) — resolve the active responder (specialist warm handoff) + seed the primary. */
   participants?: ConversationParticipantService;
   /**
+   * BRAIN-BLUEPRINT-10X — channel turns form durable memory like web chat does
+   * (operator statements + the agent's own learnings, same formation pipeline).
+   * Absent → no capture (byte-identical to the old behavior).
+   */
+  memoryCapture?: ChatMemoryCaptureService;
+  /**
    * Outbound safety envelope (G7). When wired and the turn is App-bound, the
    * agent's final reply is checked against the App's outbound policy: a blocked
    * claim is withheld (a safe notice replaces it) and a require-approval match is
@@ -94,6 +108,14 @@ export interface ChannelTurnDispatcherDeps {
     body: string;
     reason: string;
   }) => Promise<boolean> | boolean;
+  /**
+   * Conversation State Machine (GAP B1/B3). When wired and the turn is App-bound,
+   * an inbound message is offered to the App's conversation script FIRST: if a
+   * script owns this contact, it advances the stage (deterministic where scripted,
+   * ZERO tokens) and the dispatcher does NOT run a general agent turn. Absent (or no
+   * script) → today's behavior, byte-identical.
+   */
+  conversation?: ConversationService;
   /**
    * Durable turn queue (Living Apps Phase 5 / G2). When wired, an inbound turn
    * is ENQUEUED (durable, at-least-once, resumable) instead of run in-process;
@@ -196,6 +218,10 @@ export class ChannelTurnDispatcher {
    * fire-and-forget exactly as before. Fire-and-forget safe — never throws.
    */
   async dispatch(input: ChannelTurnInput): Promise<{ replied: boolean; reason?: string }> {
+    // §3.2 — hand the inbound to any Subject awaiting this channel correlation (best-effort).
+    try {
+      this.deps.onInbound?.({ workspaceId: input.workspaceId, connectionId: input.connectionId, chatId: input.chatId, ...(input.from ? { from: input.from } : {}), ...(input.text ? { text: input.text } : {}) });
+    } catch { /* never let subject routing break a channel turn */ }
     this.#publishWorkStep(input, null, {
       phase: 'received',
       step: 'channel_message',
@@ -332,6 +358,29 @@ export class ChannelTurnDispatcher {
         });
         if (access.deny === 'decline') await this.#persistAndDeliver(input, UNKNOWN_SENDER_DECLINE);
         return { replied: access.deny === 'decline', reason: 'not_authorized' };
+      }
+      // Conversation State Machine (GAP B1/B3): if the App has a script that owns
+      // this contact, it advances the stage (deterministic where scripted — ZERO
+      // tokens) and we do NOT run a general agent turn. This is the primitive for
+      // "send → await their reply → branch → run a workflow → stop".
+      if (this.deps.conversation && input.appId) {
+        const advanced = await this.deps.conversation.handleInbound({
+          workspaceId: input.workspaceId,
+          appId: input.appId,
+          userId: input.userId,
+          ambientId: input.ambientId,
+          address: input.chatId,
+          text: input.text,
+        });
+        if (advanced.handled) {
+          this.#publishWorkStep(input, clientTurnId, {
+            phase: 'received',
+            step: 'script',
+            description: `Conversation script advanced → ${advanced.stage ?? '—'}`,
+            ...(advanced.action ? { detail: advanced.action } : {}),
+          });
+          return { replied: advanced.sent === true, reason: 'conversation_script' };
+        }
       }
       // Multi-party threads (G1): the inbound turn is answered by the active
       // responder — an active 'specialist' agent (warm handoff target) if present,
@@ -481,6 +530,25 @@ export class ChannelTurnDispatcher {
       await this.#persistAndDeliver(input, body);
       // Record the agent-initiated outbound against the App's rolling window (G7).
       if (input.appId) this.deps.outboundPolicy?.record(input.appId, 'agent');
+      // BRAIN-BLUEPRINT-10X — channel turns form memory exactly like web chat:
+      // operator statements + the agent's own learnings flow through the same
+      // formation pipeline. Fire-and-forget; capture must never delay a reply.
+      if (this.deps.memoryCapture) {
+        void this.deps.memoryCapture.captureTurn({
+          workspaceId: input.workspaceId,
+          conversationId: input.conversationId,
+          userId: input.userId,
+          agentId: responderAgentId,
+          userMessage: runtimeText,
+          assistantMessage: body,
+          finishReason,
+        }).catch((err: unknown) => {
+          this.deps.logger.warn('channel.turn.memory_capture_failed', {
+            conversationId: input.conversationId,
+            message: (err as Error).message,
+          });
+        });
+      }
       this.deps.logger.info('channel.turn.replied', {
         connectionId: input.connectionId,
         conversationId: input.conversationId,

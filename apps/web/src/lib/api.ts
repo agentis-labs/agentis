@@ -141,6 +141,16 @@ export async function apiText(path: string, init: RequestInit = {}): Promise<str
   return res.text();
 }
 
+/** Fetch a binary API response (e.g. an asset blob) with the normal auth flow. */
+export async function apiBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  const res = await rawFetch(path, init);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    throw body.error as ApiError;
+  }
+  return res.blob();
+}
+
 export async function streamSse(
   path: string,
   init: RequestInit = {},

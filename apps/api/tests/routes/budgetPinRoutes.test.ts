@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { buildBudgetRoutes } from '../../src/routes/budgets.js';
 import { buildArtifactRoutes } from '../../src/routes/artifacts.js';
+import { ArtifactService } from '../../src/services/artifactService.js';
 import { BudgetService } from '../../src/services/budget.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AuditTrailService } from '../../src/services/auditTrail.js';
@@ -25,7 +26,8 @@ function budgetApp() {
 }
 
 function artifactApp() {
-  return ctx.buildApp([{ path: '/v1/artifacts', app: buildArtifactRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus }) }]);
+  const artifacts = new ArtifactService(ctx.db, ctx.logger, ctx.bus);
+  return ctx.buildApp([{ path: '/v1/artifacts', app: buildArtifactRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, artifacts }) }]);
 }
 
 describe('/v1/budgets workspace daily ceiling', () => {

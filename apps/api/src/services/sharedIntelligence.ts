@@ -17,6 +17,12 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { EpisodicMemoryStore } from './episodicMemoryStore.js';
+import { SKILL_LIBRARY_PLANE } from './memoryStore.js';
+
+/** SQL LIKE pattern matching the Skill-library plane tag on an episode row. */
+const SKILL_LIBRARY_PLANE_LIKE = `%plane:${SKILL_LIBRARY_PLANE}%`;
+/** Atom kinds that must never be force-injected at dispatch (reached on demand). */
+const SKILL_LIBRARY_KINDS: KnowledgeAtomKind[] = ['skill', 'example'];
 import {
   type EmbeddingProvider,
   cosineSimilarity,
@@ -110,6 +116,12 @@ export interface BrainGraphOptions {
   scopeId?: string | null;
   includeWorkspace?: boolean;
   kinds?: KnowledgeAtomKind[];
+  /**
+   * Kinds to omit even when otherwise selected. The always-inject dispatch tier
+   * passes `['skill','example']` so Skill-library atoms are never force-injected
+   * — they are reached via search / materialization instead.
+   */
+  excludeKinds?: KnowledgeAtomKind[];
   minConfidence?: number;
   limit?: number;
   /**
@@ -1327,6 +1339,12 @@ export class SharedIntelligenceService {
     scope?: 'workspace' | 'scoped' | 'both';
     limit?: number;
     minConfidence?: number;
+    /** Restrict to these atom kinds. Passing an allowlist disables the default
+     * skill-library exclusion (the caller has opted in explicitly). */
+    kinds?: KnowledgeAtomKind[];
+    /** Kinds to omit. Defaults to `['skill','example']` when no `kinds` allowlist
+     * is given, so generic/auto-inject search never surfaces Skill-library atoms. */
+    excludeKinds?: KnowledgeAtomKind[];
     /** §C7 — when set, retrieval enforces team RLS (shared + own-scope only). */
     requesterScopeId?: string | null;
   }): Promise<BrainSearchResult[]> {
@@ -1334,12 +1352,17 @@ export class SharedIntelligenceService {
     const limit = Math.min(Math.max(args.limit ?? 5, 1), 25);
     const scopeId = args.scopeId ?? null;
     const graphScope: BrainGraphScope = args.scope === 'scoped' || (args.scope === 'both' && scopeId) ? 'scoped' : 'workspace';
+    // Skill-library atoms are never surfaced by generic search unless the caller
+    // opts in (via an explicit `kinds` allowlist or `excludeKinds`).
+    const excludeKinds = args.excludeKinds ?? (args.kinds ? [] : SKILL_LIBRARY_KINDS);
     const atoms = this.loadAtoms(args.workspaceId, {
       scope: graphScope,
       scopeId,
       includeWorkspace: args.scope === 'both' || graphScope === 'workspace',
       limit: MAX_GRAPH_LIMIT,
       minConfidence: args.minConfidence ?? 0,
+      ...(args.kinds ? { kinds: args.kinds } : {}),
+      excludeKinds,
       ...('requesterScopeId' in args ? { requesterScopeId: args.requesterScopeId } : {}),
     });
     if (atoms.length === 0) return [];
@@ -2214,9 +2237,11 @@ export class SharedIntelligenceService {
     const now = new Date().toISOString();
     let changes = 0;
     switch (kind) {
-      // §B4 — memory atoms are episodes now; both cases target the substrate.
+      // §B4 — memory atoms are episodes now; skill/example ride the substrate too.
       case 'episode':
-      case 'memory': {
+      case 'memory':
+      case 'skill':
+      case 'example': {
         const update: Record<string, unknown> = { updatedAt: now };
         if (patch.title !== undefined) update.title = patch.title;
         if (patch.content !== undefined) update.summary = patch.content;
@@ -2274,9 +2299,11 @@ export class SharedIntelligenceService {
     const now = new Date().toISOString();
     let changes = 0;
     switch (kind) {
-      // §B4 — memory atoms are episodes now; archive both via the substrate.
+      // §B4 — memory atoms are episodes now; skill/example ride the substrate too.
       case 'episode':
       case 'memory':
+      case 'skill':
+      case 'example':
         changes = this.db.update(schema.memoryEpisodes)
           .set({ archivedAt: now, status: 'archived', updatedAt: now })
           .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
@@ -2332,15 +2359,17 @@ export class SharedIntelligenceService {
           runId: row.runId,
         };
       }
-      case 'memory': {
-        // §B4 — memory atoms live in the episode substrate.
+      case 'memory':
+      case 'skill':
+      case 'example': {
+        // §B4 — memory atoms live in the episode substrate; skill/example too.
         const row = this.db.select().from(schema.memoryEpisodes)
           .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, node.atomId)))
           .get();
         if (!row) return null;
         return {
           content: row.summary,
-          source: sourceLabel(row.source, 'Scoped memory'),
+          source: sourceLabel(row.source, node.atomKind === 'skill' ? 'Skill' : node.atomKind === 'example' ? 'Example' : 'Scoped memory'),
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
         };
@@ -2474,8 +2503,8 @@ export class SharedIntelligenceService {
       return episodeToGraphNode(updated, 2);
     }
 
-    // §B4 — memory atoms are episodes; reinforce via the substrate.
-    if (kind === 'memory') {
+    // §B4 — memory atoms are episodes; skill/example ride the substrate too.
+    if (kind === 'memory' || kind === 'skill' || kind === 'example') {
       const updated = this.episodes.reinforce(workspaceId, id, { confidenceDelta: 0.06, trustDelta: 0.04 });
       if (!updated) return null;
       return episodeToGraphNode(updated, 2);
@@ -2500,10 +2529,12 @@ export class SharedIntelligenceService {
     const scope = options.scope ?? 'workspace';
     const includeWorkspace = options.includeWorkspace ?? scope !== 'scoped';
     const kindFilter = options.kinds && options.kinds.length > 0 ? new Set(options.kinds) : null;
+    const excludeKinds = options.excludeKinds && options.excludeKinds.length > 0 ? new Set(options.excludeKinds) : null;
+    const wants = (k: KnowledgeAtomKind): boolean => (!kindFilter || kindFilter.has(k)) && !excludeKinds?.has(k);
     const minConfidence = clamp01(options.minConfidence ?? 0);
     const out: AtomCandidate[] = [];
 
-    if (!kindFilter || kindFilter.has('episode')) {
+    if (wants('episode')) {
       const rows = this.db.select().from(schema.memoryEpisodes)
         .where(and(
           eq(schema.memoryEpisodes.workspaceId, workspaceId),
@@ -2511,6 +2542,10 @@ export class SharedIntelligenceService {
           // Hide unconsolidated episodic traces (staged run output + outcome
           // markers) from the graph — only formed/durable memory is shown.
           sql`${schema.memoryEpisodes.tags} NOT LIKE '%unconsolidated%'`,
+          // Skill-library atoms (skill/example) ride this table on a separate
+          // plane; keep them OUT of the generic episode surface (and thus the
+          // always-inject dispatch tier). They have dedicated branches below.
+          sql`${schema.memoryEpisodes.tags} NOT LIKE ${SKILL_LIBRARY_PLANE_LIKE}`,
           ...(scope === 'scoped' && scopeId
             ? [includeWorkspace ? or(eq(schema.memoryEpisodes.scopeId, scopeId), isNull(schema.memoryEpisodes.scopeId))! : eq(schema.memoryEpisodes.scopeId, scopeId)]
             : []),
@@ -2589,6 +2624,37 @@ export class SharedIntelligenceService {
       }
     }
 
+    // Skill-library plane: skill (a procedure) + example (its demonstrations).
+    // One read of the plane, split by the metadata.memoryKind discriminator, so
+    // these never surface via the generic `episode` branch (kept out of the
+    // always-inject tier) yet remain searchable + visible in the graph.
+    if (wants('skill') || wants('example')) {
+      const rows = this.db.select().from(schema.memoryEpisodes)
+        .where(and(
+          eq(schema.memoryEpisodes.workspaceId, workspaceId),
+          isNull(schema.memoryEpisodes.archivedAt),
+          sql`${schema.memoryEpisodes.tags} LIKE ${SKILL_LIBRARY_PLANE_LIKE}`,
+          ...(scope === 'scoped' && scopeId
+            ? [includeWorkspace ? or(eq(schema.memoryEpisodes.scopeId, scopeId), isNull(schema.memoryEpisodes.scopeId))! : eq(schema.memoryEpisodes.scopeId, scopeId)]
+            : []),
+          ...(options.requesterScopeId !== undefined
+            ? [typeof options.requesterScopeId === 'string'
+                ? or(eq(schema.memoryEpisodes.shared, true), eq(schema.memoryEpisodes.scopeId, options.requesterScopeId))!
+                : eq(schema.memoryEpisodes.shared, true)]
+            : []),
+        ))
+        .orderBy(desc(schema.memoryEpisodes.updatedAt))
+        .limit(perKind * 2)
+        .all();
+      for (const row of rows) {
+        const memoryKind = parseJsonRecord(row.metadata).memoryKind;
+        const atomKind: KnowledgeAtomKind = memoryKind === 'example' ? 'example' : 'skill';
+        if (!wants(atomKind)) continue;
+        const node = episodeRowToGraphNode(row, 1, atomKind);
+        if (node.confidence >= minConfidence) out.push({ id: row.id, kind: atomKind, text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node, embedding: row.embedding as number[] | null, embeddingModel: row.embeddingModel, embeddingDims: row.embeddingDims });
+      }
+    }
+
     return out;
   }
 
@@ -2602,13 +2668,16 @@ export class SharedIntelligenceService {
         const node = episodeRowToGraphNode(row, 1);
         return { id: row.id, kind, text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node };
       }
-      case 'memory': {
-        // §B4 — memory atoms live in the episode substrate.
+      case 'memory':
+      case 'skill':
+      case 'example': {
+        // §B4 — memory atoms live in the episode substrate; skill/example ride
+        // it too (on the skill-library plane).
         const row = this.db.select().from(schema.memoryEpisodes)
           .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.id, id)))
           .get();
         if (!row) return null;
-        const node = episodeRowToGraphNode(row, 1);
+        const node = episodeRowToGraphNode(row, 1, kind === 'memory' ? 'episode' : kind);
         return { id: row.id, kind, text: `${row.title}\n${row.summary}\n${row.details ?? ''}`, node };
       }
       case 'pattern': {
@@ -2733,12 +2802,12 @@ function episodeToGraphNode(row: ReturnType<EpisodicMemoryStore['write']>, reinf
   };
 }
 
-function episodeRowToGraphNode(row: typeof schema.memoryEpisodes.$inferSelect, reinforceCount: number): BrainGraphNode {
+function episodeRowToGraphNode(row: typeof schema.memoryEpisodes.$inferSelect, reinforceCount: number, atomKind: KnowledgeAtomKind = 'episode'): BrainGraphNode {
   const metadata = parseJsonRecord(row.metadata);
   return {
-    id: atomKey('episode', row.id),
+    id: atomKey(atomKind, row.id),
     atomId: row.id,
-    atomKind: 'episode',
+    atomKind,
     label: row.title,
     summary: row.summary,
     confidence: clamp01(Number(row.confidence)),

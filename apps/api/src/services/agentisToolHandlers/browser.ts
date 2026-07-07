@@ -11,6 +11,7 @@ import { AgentisError } from '@agentis/core';
 import type { BrowserRenderOptions } from '../browserPool.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
+import { shouldPersistScreenshot } from '../artifactRetentionPolicy.js';
 
 export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -19,7 +20,7 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.browser.screenshot',
         family: 'run',
         description:
-          'Open a real headless browser, render a URL (or inline HTML), and capture a PNG screenshot saved as an artifact. Returns { artifactId, ref, url }. Chat automatically renders the saved artifact; to deliver the image to Telegram/WhatsApp/Slack/Discord, pass `ref` (e.g. "artifact:<id>") to agentis.channel.send `attachments`.',
+          'Open a real headless browser, render a URL (or inline HTML), and capture a PNG screenshot. By default this is a transient visual check and is NOT saved to the asset library. Set `save: true` only when the user/task intentionally wants this image kept or delivered; saved captures return { artifactId, ref, url } for agentis.channel.send attachments.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -31,6 +32,8 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
               properties: { width: { type: 'number' }, height: { type: 'number' } },
             },
             title: { type: 'string', description: 'Title for the saved artifact.' },
+            save: { type: 'boolean', description: 'Persist this screenshot as a workspace asset. Default false unless the task artifact policy says to save screenshots.' },
+            persist: { type: 'boolean', description: 'Alias for save.' },
           },
         },
         mutating: true,
@@ -41,7 +44,9 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
         const opts = browserOpts(args);
         const png = await browser.screenshot(opts);
         const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
-        if (!deps.artifacts) return { saved: false, mimeType: 'image/png', dataUrl };
+        if (!deps.artifacts || !shouldPersistScreenshot(args, ctx.artifactPolicy)) {
+          return { saved: false, mimeType: 'image/png', dataUrl };
+        }
         const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : 'Screenshot';
         // When the agent is operating on an App surface, file the screenshot under
         // that App so it shows in the App's "Data & Assets" library.

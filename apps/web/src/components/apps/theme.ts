@@ -24,11 +24,13 @@ export interface ResolvedTheme {
   design: ResolvedDesign;
 }
 
-/** Per-theme defaults, including the design language a theme leads with (overridable). */
+/** Per-theme defaults. Every theme leads with the flagship `agentis` design
+ * system (INTERFACE-OVERHAUL-10X — one system, structural variants); a stored
+ * legacy `design` id still wins via resolveTheme's explicit-design override. */
 const PRESETS: Record<SurfaceTheme, Omit<ResolvedTheme, 'theme' | 'design'> & { design: DesignLanguage }> = {
-  operations: { density: 'compact', defaultAccent: 'teal', contentWidth: 1680, design: 'operations' },
-  analytics: { density: 'compact', defaultAccent: 'blue', contentWidth: 1520, design: 'aurora' },
-  product: { density: 'comfortable', defaultAccent: 'purple', contentWidth: 1120, design: 'soft' },
+  operations: { density: 'compact', defaultAccent: 'accent', contentWidth: 1680, design: 'agentis' },
+  analytics: { density: 'compact', defaultAccent: 'accent', contentWidth: 1520, design: 'agentis' },
+  product: { density: 'comfortable', defaultAccent: 'accent', contentWidth: 1120, design: 'agentis' },
   editorial: { density: 'comfortable', defaultAccent: 'accent', contentWidth: 860, design: 'editorial' },
 };
 
@@ -37,7 +39,7 @@ export const DEFAULT_THEME: ResolvedTheme = {
   density: 'compact',
   defaultAccent: 'accent',
   contentWidth: 1520,
-  design: resolveDesign('aurora'),
+  design: resolveDesign('agentis'),
 };
 
 /**
@@ -84,8 +86,9 @@ export function accentColor(name?: AccentName | null): string {
   return name ? ACCENT_COLOR[name] : ACCENT_COLOR.accent;
 }
 
-/** Series palette for multi-series charts — distinct, token-aligned hues. */
-export const CHART_PALETTE: AccentName[] = ['blue', 'teal', 'purple', 'orange', 'rose', 'lime', 'info', 'success'];
+/** Series palette for multi-series charts — the app accent leads, then distinct
+ * token-aligned hues (color belongs to DATA; the first series carries the brand). */
+export const CHART_PALETTE: AccentName[] = ['accent', 'teal', 'purple', 'orange', 'rose', 'lime', 'info', 'success'];
 
 export function seriesColor(index: number, override?: AccentName): string {
   if (override) return accentColor(override);

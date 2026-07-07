@@ -159,6 +159,12 @@ export interface ChatTurnContext {
   executionMode?: 'chat' | 'plan';
   /** Optional operation/run correlation id for direct tool turns. */
   runId?: string;
+  /** Optional turn-level retention policy for tool-created assets. */
+  artifactPolicy?: {
+    mode?: 'intentional' | 'all' | 'none';
+    saveScreenshots?: boolean;
+    saveGeneratedAssets?: boolean;
+  } | null;
   ambientId?: string | null;
   maxTurns?: number;
   /**
@@ -231,6 +237,10 @@ export interface AgentisToolCallResult {
   output?: unknown;
   errorCode?: string;
   errorMessage?: string;
+  /** Directive remediation from an AgentisError — what the agent should DO next. Surfaced over MCP (§F7). */
+  remediation?: string;
+  /** Structured error details from an AgentisError (offending field, candidates, …). Surfaced over MCP. */
+  details?: Record<string, unknown>;
   nextActions?: Array<{ toolId: string; rationale: string }>;
   costCents?: number;
   durationMs?: number;
@@ -276,6 +286,15 @@ export interface AgentisToolContext {
    * `appId` — so a resident channel agent persists to its App's datastore.
    */
   appId?: string | null;
+  /**
+   * Tool-created asset retention for this turn/run. When omitted, tools should
+   * treat screenshots and visual checks as transient unless explicitly saved.
+   */
+  artifactPolicy?: {
+    mode?: 'intentional' | 'all' | 'none';
+    saveScreenshots?: boolean;
+    saveGeneratedAssets?: boolean;
+  } | null;
   caller: 'chat' | 'workflow' | 'mcp' | 'system';
   /**
    * Cancellation signal propagated from the calling turn. A long, model-backed

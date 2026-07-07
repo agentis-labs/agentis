@@ -439,6 +439,9 @@ function presentRunDetail(
     ...(blockedNode?.blockedReason ? { blockedReason: blockedNode.blockedReason } : {}),
     startedAt: run.startedAt ?? run.createdAt,
     finishedAt: run.completedAt ?? undefined,
+    // SWIFT layer 3 — the run's world-verified outcome (checks + evidence +
+    // deficiencies), when the workflow carries a spec. Completion is not accomplishment.
+    ...((state as unknown as { verdict?: unknown }).verdict ? { verdict: (state as unknown as { verdict?: unknown }).verdict } : {}),
     selfHealIncident,
     durationMs: computeDurationMs(run.startedAt ?? run.createdAt, run.completedAt),
     triggeredBy: 'manual',
@@ -484,13 +487,19 @@ function presentSelfHealIncident(
   return latest(incidents);
 }
 
+// Per-run token usage reads the SAME sink as runAnalytics: the terminal
+// `node.completed` audit entries (`tokens_in/out`), written by every agent
+// execution path regardless of runtime. The `agent_sessions` table this used to
+// sum is never populated for non-agent_task runtimes (extension/CLI/deterministic
+// nodes), so a workflow like the Fashion Store Factory — mostly extension_task +
+// data_mutate nodes — always read 0 while its real usage sat in the audit trail.
 function loadRunTokenUsage(db: AgentisSqliteDb, workspaceId: string, runId: string): { tokensIn: number; tokensOut: number } {
   const row = db.select({
-    tokensIn: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensIn}), 0)`,
-    tokensOut: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensOut}), 0)`,
+    tokensIn: sql<number>`coalesce(sum(${schema.auditEntries.tokensIn}), 0)`,
+    tokensOut: sql<number>`coalesce(sum(${schema.auditEntries.tokensOut}), 0)`,
   })
-    .from(schema.agentSessions)
-    .where(and(eq(schema.agentSessions.workspaceId, workspaceId), eq(schema.agentSessions.runId, runId)))
+    .from(schema.auditEntries)
+    .where(and(eq(schema.auditEntries.workspaceId, workspaceId), eq(schema.auditEntries.runId, runId)))
     .get();
   return { tokensIn: Number(row?.tokensIn ?? 0), tokensOut: Number(row?.tokensOut ?? 0) };
 }
@@ -498,15 +507,15 @@ function loadRunTokenUsage(db: AgentisSqliteDb, workspaceId: string, runId: stri
 function loadBatchRunTokenUsage(db: AgentisSqliteDb, workspaceId: string, runIds: string[]): Map<string, { tokensIn: number; tokensOut: number }> {
   if (runIds.length === 0) return new Map();
   const rows = db.select({
-    runId: schema.agentSessions.runId,
-    tokensIn: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensIn}), 0)`,
-    tokensOut: sql<number>`coalesce(sum(${schema.agentSessions.totalTokensOut}), 0)`,
+    runId: schema.auditEntries.runId,
+    tokensIn: sql<number>`coalesce(sum(${schema.auditEntries.tokensIn}), 0)`,
+    tokensOut: sql<number>`coalesce(sum(${schema.auditEntries.tokensOut}), 0)`,
   })
-    .from(schema.agentSessions)
-    .where(and(eq(schema.agentSessions.workspaceId, workspaceId), inArray(schema.agentSessions.runId, runIds)))
-    .groupBy(schema.agentSessions.runId)
+    .from(schema.auditEntries)
+    .where(and(eq(schema.auditEntries.workspaceId, workspaceId), inArray(schema.auditEntries.runId, runIds)))
+    .groupBy(schema.auditEntries.runId)
     .all();
-  
+
   const map = new Map<string, { tokensIn: number; tokensOut: number }>();
   for (const row of rows) {
     if (row.runId) {

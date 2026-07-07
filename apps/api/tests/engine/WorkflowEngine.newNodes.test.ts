@@ -291,6 +291,36 @@ describe('WorkflowEngine - integration credentials', () => {
       name: 'Ada',
     });
   });
+
+  it('runIntegrationOperation invokes a connector standalone, resolving the vault credential by service (backs agentis.integration.call)', async () => {
+    // This is the agent-facing path: an agent inside a task calls a connector
+    // directly (e.g. vercel.create_deployment) WITHOUT adding a node — the
+    // engine still resolves the workspace-bound secret from the vault, so the
+    // agent never handles a token.
+    ctx.db.insert(schema.credentials).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Acme CRM',
+      credentialType: 'integration_acme_crm',
+      encryptedValue: ctx.vault.encrypt(JSON.stringify({ token: 'workspace-token' })),
+    }).run();
+
+    const result = await engine.runIntegrationOperation(
+      ctx.workspace.id,
+      'acme_crm',
+      'create_lead',
+      { name: 'Grace' },
+    );
+
+    expect(result).toMatchObject({ ok: true, operation: 'create_lead', token: 'workspace-token', name: 'Grace' });
+  });
+
+  it('runIntegrationOperation rejects an unsupported operation with a helpful error', async () => {
+    await expect(engine.runIntegrationOperation(ctx.workspace.id, 'acme_crm', 'not_a_real_op', {}))
+      .rejects.toThrow(/not supported by acme_crm/);
+  });
 });
 
 describe('WorkflowEngine — filter node', () => {

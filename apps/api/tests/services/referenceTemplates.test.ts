@@ -21,25 +21,47 @@ const leads = coll('leads', [{ key: 'name', type: 'string' }, { key: 'stage', ty
 const metrics = coll('metrics', [{ key: 'day', type: 'string' }, { key: 'visits', type: 'number' }, { key: 'signups', type: 'number' }]);
 const notes = coll('notes', [{ key: 'title', type: 'string' }, { key: 'body', type: 'string' }]);
 
+const contacts = coll('contacts', [{ key: 'name', type: 'string' }, { key: 'email', type: 'string' }, { key: 'company', type: 'string' }]);
+const releases = coll('releases', [{ key: 'title', type: 'string' }, { key: 'ship_date', type: 'date' }]);
+
 describe('classifyArchetype', () => {
   it('routes by data shape', () => {
-    expect(classifyArchetype([leads])).toBe('pipeline');   // has a status/stage field
+    expect(classifyArchetype([leads])).toBe('pipeline');    // has a status/stage field
     expect(classifyArchetype([metrics])).toBe('analytics'); // numeric fields
     expect(classifyArchetype([notes])).toBe('operations');  // plain records
+    expect(classifyArchetype([contacts])).toBe('crm');      // contact-ish strings
+    expect(classifyArchetype([releases])).toBe('roadmap');  // date + label
     expect(classifyArchetype([])).toBe('operations');
   });
 });
 
 describe('buildArchetypeSurface', () => {
-  it('pipeline → themed board + activity rail, declares insert', () => {
+  it('pipeline → drag kanban + stage flow + live ops rail, declares insert+update', () => {
     const built = buildArchetypeSurface([leads]);
     expect(built.archetype).toBe('pipeline');
     const json = JSON.stringify(built.view);
     expect(built.view).toMatchObject({ type: 'Stack', style: { theme: 'product' } });
-    expect(json).toContain('"type":"DataBoard"');
+    expect(json).toContain('"type":"Kanban"');
+    expect(json).toContain('"type":"PipelineFlow"');
+    expect(json).toContain('"type":"OrchestrationPanel"');
+    expect(json).toContain('"type":"RunMonitor"');
+    expect(json).toContain('"type":"AgentFeed"');
     expect(json).toContain('"type":"Hero"');
-    expect(json).toContain('"type":"ActivityStream"');
-    expect(built.actions).toEqual([{ name: 'create_leads', kind: 'data', target: 'leads.insert' }]);
+    expect(built.actions).toEqual([
+      { name: 'create_leads', kind: 'data', target: 'leads.insert' },
+      { name: 'update_leads', kind: 'data', target: 'leads.update' },
+    ]);
+  });
+
+  it('crm → master-detail records; roadmap → time lanes', () => {
+    const crm = buildArchetypeSurface([contacts]);
+    expect(crm.archetype).toBe('crm');
+    expect(JSON.stringify(crm.view)).toContain('"type":"RecordMaster"');
+    const road = buildArchetypeSurface([releases]);
+    expect(road.archetype).toBe('roadmap');
+    const json = JSON.stringify(road.view);
+    expect(json).toContain('"type":"Roadmap"');
+    expect(json).toContain('"startField":"ship_date"');
   });
 
   it('analytics → multi-series chart + records tabs', () => {
@@ -59,11 +81,12 @@ describe('buildArchetypeSurface', () => {
     expect(JSON.stringify(built.view)).toContain('"type":"Table"');
   });
 
-  it('empty → operator hero, no actions', () => {
+  it('empty → mission control (orchestration + runs + agent feed), no actions', () => {
     const built = buildArchetypeSurface([]);
     const json = JSON.stringify(built.view);
-    expect(json).toContain('"type":"ActivityStream"');
-    expect(json).toContain('"type":"ActivityStream"');
+    expect(json).toContain('"type":"OrchestrationPanel"');
+    expect(json).toContain('"type":"RunMonitor"');
+    expect(json).toContain('"type":"AgentFeed"');
     expect(built.actions).toEqual([]);
   });
 });

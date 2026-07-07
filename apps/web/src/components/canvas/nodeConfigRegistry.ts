@@ -21,6 +21,12 @@ export interface IntegrationManifestLite {
   };
   runtime?: string;
   builtin?: boolean;
+  /**
+   * Honest runtime state (CONNECTIONS-HONESTY): 'runnable' = hand-written or
+   * templated connector that works out of the box; 'needs_setup' = generic-HTTP
+   * fallback that throws at run time unless a raw URL is supplied.
+   */
+  readiness?: 'runnable' | 'needs_setup';
   /** Logo id (one of the bundled connector logos) or absolute URL. */
   icon?: string;
   docsUrl?: string;
@@ -48,7 +54,8 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   wait: { label: 'Wait', reason: 'Pauses the run safely until the configured delay has elapsed.' },
   loop: { label: 'Loop', reason: 'Iterates over an array through a reusable child workflow.' },
   parallel: { label: 'Parallel', reason: 'Runs downstream branches concurrently and defines how their results are joined.' },
-  converge: { label: 'Converge', reason: 'Re-runs a cohort sub-workflow until the goal is met, it stalls, or it hits budget.' },
+  pursue: { label: 'Pursue', reason: 'Pursues an objective: re-runs a cohort each pass, measures progress, reflects when stuck, and stops on done / stall / budget.' },
+  converge: { label: 'Converge', reason: 'Re-runs a cohort sub-workflow until the goal is met, it stalls, or it hits budget. (Legacy name for Pursue.)' },
   subflow: { label: 'Subflow', reason: 'Runs a reusable workflow as a single step.' },
   transform: { label: 'Transform', reason: 'Reshapes data deterministically without spending LLM tokens.' },
   filter: { label: 'Filter', reason: 'Stops data that does not satisfy a deterministic condition.' },
@@ -145,6 +152,8 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
     case 'http_request':
       if (!stringOf(c.method)) return missing('Choose an HTTP method.');
       return stringOf(c.url) ? ready() : missing('Enter the request URL.');
+    case 'mcp':
+      return stringOf(c.toolId) ? ready() : missing('Choose a tool from a mounted MCP server.');
     case 'extension_task':
       if (!stringOf(c.extensionId) && !stringOf(c.extensionSlug)) return missing('Choose an extension.');
       return stringOf(c.operationName) ? ready() : missing('Choose an extension operation.');
@@ -185,6 +194,21 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
       if (!stringOf(c.itemsExpression)) return missing('Enter the items expression.');
       if (!stringOf(c.bodyWorkflowId)) return missing('Choose the loop body workflow.');
       return stringOf(c.outputArrayKey) ? ready() : missing('Enter an output array key.');
+    case 'converge':
+      // The engine hard-fails a converge without a body workflow — surface it
+      // at edit time instead of at run time.
+      return stringOf(c.bodyWorkflowId) ? ready() : missing('Choose the converge body workflow.');
+    case 'pursue':
+      // Same hard requirement as converge — a Pursuit needs a cohort body.
+      return stringOf(c.bodyWorkflowId) ? ready() : missing('Choose the pursuit body workflow.');
+    case 'code':
+      if (!stringOf(c.language)) return missing('Choose the code language.');
+      return stringOf(c.code).trim() ? ready() : missing('Write the code body.');
+    case 'data_query':
+      return stringOf(c.collection) ? ready() : missing('Choose the collection to query.');
+    case 'data_mutate':
+      if (!stringOf(c.collection)) return missing('Choose the collection to write.');
+      return stringOf(c.operation) ? ready() : missing('Choose the mutation operation.');
     case 'browser':
       if (stringOf(c.operation) === 'serve_html') return ready();
       return stringOf(c.url) || stringOf(c.html) || stringOf(c.htmlPath)

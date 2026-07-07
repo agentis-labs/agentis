@@ -278,8 +278,14 @@ export interface MemoryEpisode {
   id: string;
   workspaceId: string;
   scopeId: string | null;
-  /** What kind of memory this is — narrows retrieval and UI grouping. */
-  kind: 'fact' | 'preference' | 'pattern' | 'rule' | 'lesson';
+  /**
+   * What kind of memory this is — narrows retrieval and UI grouping.
+   * `skill`/`example` are Skill-library atoms (a procedure and its demonstrations):
+   * they ride the episode substrate but on their own plane, and are deliberately
+   * kept OUT of the always-inject dispatch tier (discovered via search / skill
+   * materialization instead). See docs: Living Skills.
+   */
+  kind: 'fact' | 'preference' | 'pattern' | 'rule' | 'lesson' | 'skill' | 'example';
   source: 'seed' | 'promotion' | 'operator' | 'agent' | 'system';
   title: string;
   content: string;

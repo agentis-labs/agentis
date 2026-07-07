@@ -37,7 +37,6 @@ import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AppStore, AppPackager } from '@agentis/app';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import type { AbilityService } from './abilityService.js';
 import { PackagerService, type PackageScope } from './packager.js';
 import { scanArtifactBytes } from './registryScanner.js';
 
@@ -45,7 +44,6 @@ export interface WorkspacePackagerDeps {
   db: AgentisSqliteDb;
   bus?: EventBus;
   logger?: Logger;
-  abilities?: AbilityService;
   /** RSA keypair (PEM) for signing `sell` bundles. Without it, sell exports are unsigned. */
   signer?: { privateKeyPem: string; publicKeyPem: string };
 }
@@ -62,7 +60,6 @@ export interface InstallBundleResult {
   apps: number;
   workflows: number;
   extensions: number;
-  abilities: number;
   knowledgeSeeds: number;
   /** Credential slots the operator must fill in before bundled work can run. */
   requiredCredentials: Array<{ key: string; service: string; label: string }>;
@@ -81,7 +78,6 @@ export class WorkspacePackager {
       db: deps.db,
       ...(deps.bus ? { bus: deps.bus } : {}),
       ...(deps.logger ? { logger: deps.logger } : {}),
-      ...(deps.abilities ? { abilities: deps.abilities } : {}),
     });
   }
 
@@ -134,41 +130,6 @@ export class WorkspacePackager {
         manifest: objectRecord(e.manifest) as never,
       }));
 
-    const abilities = (this.deps.abilities?.list(workspaceId) ?? []).map((rec) => {
-      const pkg = this.deps.abilities!.export(rec.id);
-      return {
-        name: pkg.manifest.name,
-        slug: pkg.manifest.slug,
-        version: pkg.manifest.version,
-        domain_tag: pkg.manifest.domain_tag,
-        ...(pkg.manifest.icon_emoji ? { icon_emoji: pkg.manifest.icon_emoji } : {}),
-        ...(pkg.manifest.description ? { description: pkg.manifest.description } : {}),
-        compiled_prompt: pkg.manifest.compiled_prompt ?? '',
-        specs: pkg.manifest.specs ?? {},
-        rules_always: pkg.manifest.rules_always ?? [],
-        rules_never: pkg.manifest.rules_never ?? [],
-        tool_hints: pkg.manifest.tool_hints ?? [],
-        examples: pkg.examples.map((ex) => ({
-          input_text: ex.input_text,
-          output_text: ex.output_text,
-          input_media_url: ex.input_media_url ?? null,
-          media_description: ex.media_description ?? null,
-          quality_score: ex.quality_score,
-          source: ex.source,
-          embedding: dropEmbeddings ? null : (ex.embedding ?? null),
-        })),
-        knowledge: pkg.knowledge.map((k) => ({
-          title: k.title ?? null,
-          content: k.content,
-          context_prefix: k.context_prefix ?? null,
-          embedding: dropEmbeddings ? null : (k.embedding ?? null),
-          source_type: k.source_type,
-          source_url: k.source_url ?? null,
-          importance_score: k.importance_score,
-        })),
-      };
-    });
-
     const knowledgeSeeds = this.exportKnowledgeSeeds(workspaceId);
 
     // Credentials travel as SLOTS (requirements), never as encrypted values — even
@@ -187,7 +148,7 @@ export class WorkspacePackager {
       extensions,
       workflows,
       integrations: [],
-      abilities,
+      abilities: [],
       apps: appManifests,
       knowledgeSeeds,
       credentialSlots,
@@ -250,7 +211,6 @@ export class WorkspacePackager {
         apps: manifest.apps.length,
         workflows: manifest.workflows.length,
         extensions: manifest.extensions.length,
-        abilities: manifest.abilities.length,
         integrations: manifest.integrations.length,
         knowledgeSeeds: manifest.knowledgeSeeds.length,
         credentialSlots: manifest.credentialSlots.length,
@@ -291,7 +251,6 @@ export class WorkspacePackager {
       extensions: manifest.extensions,
       workflows: manifest.workflows.map((w) => ({ title: w.title, description: w.description ?? null, graph: w.graph, settings: w.settings })),
       integrations: manifest.integrations,
-      abilities: manifest.abilities,
       credentialSlots: manifest.credentialSlots,
       knowledgeSeeds: manifest.knowledgeSeeds,
       surfaces: [],
@@ -317,7 +276,6 @@ export class WorkspacePackager {
       apps: installedApps,
       workflows: manifest.workflows.length,
       extensions: manifest.extensions.length,
-      abilities: manifest.abilities.length,
       knowledgeSeeds: manifest.knowledgeSeeds.length,
       requiredCredentials: manifest.credentialSlots.map((slot) => ({ key: slot.key, service: slot.service, label: slot.label })),
       warnings: scan.findings.filter((f) => f.severity === 'warn').map((f) => f.detail),

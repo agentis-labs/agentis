@@ -4,7 +4,7 @@ import type {
   EvaluatorVerdict,
   RouteBranchArgs,
 } from './evaluatorRuntime.js';
-import type { StructuredCompleter } from './structuredCompleter.js';
+import type { CompletionUsage, StructuredCompleter } from './structuredCompleter.js';
 
 /**
  * The workflow engine only needs these two evaluator operations. Keeping the
@@ -32,6 +32,13 @@ export class StructuredEvaluatorRuntime implements EvaluationRuntime {
 
   get lastError(): string | null | undefined {
     return this.completer.lastError;
+  }
+
+  /** Token usage of the underlying completer's most recent call — lets the engine
+   * meter + attribute evaluator/router model spend (it delegates to whatever
+   * agent adapter or dedicated model backs this runtime). */
+  get lastUsage(): CompletionUsage | null | undefined {
+    return this.completer.lastUsage;
   }
 
   completeStructured<T extends Record<string, unknown>>(args: {

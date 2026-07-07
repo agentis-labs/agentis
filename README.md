@@ -155,6 +155,34 @@ Tracked in [DECISIONS.md](docs/DECISIONS.md):
 - AgentisHub: external skill + workflow registry product (separate codebase)
 - Optional managed control plane
 
+## Storage & generated assets
+
+Agentis keeps **all** runtime data out of the source tree so the repo stays clean
+and nothing personal is ever committed:
+
+- **Data root** — `AGENTIS_DATA_DIR` (default `./.agentis`, git-ignored). Holds the
+  SQLite DB, generated secrets, the per-agent managed homes, and backups.
+- **Asset store** — `AGENTIS_ASSETS_DIR` (default `{AGENTIS_DATA_DIR}/assets`). A
+  **content-addressed** blob store: every agent/app/workflow-generated file is
+  stored once by its SHA-256 (identical media dedups automatically) and registered
+  as an artifact so it shows up in the Assets library. Point this at an external
+  drive, OneDrive, or a NAS if you generate a lot of media — it never has to live
+  on the system disk, and it must never be inside the repo.
+
+Agents run with their working directory defaulting to a managed home under the data
+root — never the repo — so a stray relative write can't scatter files into your
+source tree. To persist a file they produced, agents call `agentis.assets.save`
+(dedup + register) instead of writing to disk.
+
+Migrating older, scattered media into the store (dry-run by default):
+
+```bash
+node scripts/import-assets-into-store.mjs            # dry run — reports dedup savings
+node scripts/import-assets-into-store.mjs --apply    # copy uniques in + register
+```
+
+See `.env.example` for the full set of storage/config variables.
+
 ## Security posture
 
 - OWASP A01: workspace isolation re-checked on every authenticated request.

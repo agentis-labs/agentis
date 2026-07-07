@@ -574,6 +574,9 @@ export interface PreflightWarning {
     | 'SINGLE_BRANCH_ROUTER'
     | 'NO_FAILURE_HANDLING'
     | 'MISSING_CONVERGENCE'
+    | 'AGENT_FOR_KNOWN_OPERATION'
+    | 'AGENT_FOR_PURE_RESHAPE'
+    | 'AGENT_ASKED_TO_RUN_SCRIPT'
     // ── Intent Contract (Organ 2, anti-green-washing) ──
     | 'AUTO_APPROVAL_BYPASS'
     | 'CAPABILITY_REMOVED';

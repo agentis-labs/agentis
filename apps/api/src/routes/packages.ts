@@ -14,7 +14,7 @@ import type { AgentisPackageContents, PackageContents, PackageManifest } from '@
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { AbilityService } from '../services/abilityService.js';
+import type { SkillService } from '../services/skillService.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -108,14 +108,14 @@ export function buildPackageRoutes(deps: {
   auth: AuthService;
   bus?: EventBus;
   logger?: Logger;
-  abilities?: AbilityService;
+  skills?: SkillService;
 }) {
   const app = new Hono();
   const packager = new PackagerService({
     db: deps.db,
     bus: deps.bus,
     logger: deps.logger,
-    abilities: deps.abilities,
+    skills: deps.skills,
   });
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -326,7 +326,6 @@ export function buildPackageRoutes(deps: {
       })),
       integrations: [],
       credentialSlots: [],
-      abilities: [],
       knowledgeSeeds: m.knowledgeSeeds,
       surfaces: [],
       collections: [],

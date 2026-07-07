@@ -1,0 +1,574 @@
+/**
+ * Archetype composite blocks (APP-INTERFACE-10X §2.4) — the interactive
+ * workhorses that make an App Interface fit any operation, registered on the
+ * open block seam:
+ *
+ *   Kanban       — a REAL board: drag a card across columns to write the
+ *                  groupBy field back through the declared `update` data action.
+ *   RecordMaster — CRM/ERP master-detail: searchable list + record page with
+ *                  field sections, related child collections, record actions.
+ *   Roadmap      — time lanes from date fields (roadmaps, releases, campaigns).
+ *   PipelineFlow — staged funnel with counts/values + stage conversion.
+ *
+ * All bind through the SAME datastore path as Table/List/Chart (useBoundRows →
+ * client.data.query, live on DATA_CHANGED); writes go through declared surface
+ * actions only — the blocks never invent a data path.
+ */
+import { useEffect, useMemo, useRef, useState } from 'react';
+import clsx from 'clsx';
+import { ChevronRight, Columns3, GanttChartSquare, Search, X } from 'lucide-react';
+import type { ActionRef, Tone, ViewNode } from '@agentis/core';
+import { registerBlock } from './registry';
+import { EmptyState, PanelShell, SkeletonRows, useActionInvoker, useBoundRows, useRuntime } from '../ViewRenderer';
+import { toneFillClass, toneFromStatus, toneSoftClass } from '../styleIntent';
+import { seriesColor } from '../theme';
+import { displayLabel } from '../../../lib/prettyRef';
+
+type Row = Record<string, unknown>;
+
+function rowId(row: Row): string {
+  return String(row.id ?? '');
+}
+
+function fieldText(row: Row, key: string | undefined, fallbacks: string[] = []): string {
+  for (const k of [key, ...fallbacks]) {
+    if (!k) continue;
+    const v = row[k];
+    if (v != null && v !== '') return String(v);
+  }
+  return '';
+}
+
+/**
+ * The card title for a record — the chosen field, unless it is empty or is
+ * itself an identifier (agents sometimes store a UUID as the name), in which
+ * case it collapses to a clean `#ref` on the row id. Never renders a raw UUID.
+ */
+function recordTitle(row: Row, key: string | undefined, fallbacks: string[], empty: string): string {
+  return displayLabel(fieldText(row, key, fallbacks), rowId(row), empty);
+}
+
+function humanize(key: string): string {
+  const spaced = key.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function formatValue(v: unknown): string {
+  if (v == null) return '—';
+  if (typeof v === 'number') return v.toLocaleString();
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
+  return String(v);
+}
+
+// ── Kanban ────────────────────────────────────────────────────
+
+const DRAG_MIME = 'application/agentis-kanban-card';
+
+function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
+  const { rows, loading } = useBoundRows(node.bind);
+  const invoke = useActionInvoker();
+  // Optimistic column overrides: recordId → column, cleared when fresh rows arrive.
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  const [openCard, setOpenCard] = useState<Row | null>(null);
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; setOverrides({}); }, [rows]);
+
+  if (loading) return <SkeletonRows />;
+
+  const columnOf = (row: Row): string => overrides[rowId(row)] ?? String(row[node.groupBy] ?? 'Unassigned');
+  const order: string[] = [...(node.columns ?? [])];
+  for (const row of rows) {
+    const key = columnOf(row);
+    if (!order.includes(key)) order.push(key);
+  }
+  if (order.length === 0) order.push('Unassigned');
+  const byColumn = new Map<string, Row[]>(order.map((k) => [k, []]));
+  for (const row of rows) byColumn.get(columnOf(row))?.push(row);
+
+  const draggable = Boolean(node.update);
+  const moveCard = async (id: string, to: string) => {
+    if (!node.update || !id) return;
+    const current = rowsRef.current.find((r) => rowId(r) === id);
+    if (!current || String(current[node.groupBy] ?? '') === to) return;
+    setOverrides((prev) => ({ ...prev, [id]: to }));
+    try {
+      await invoke(node.update.action, { ...(node.update.args ?? {}), id, patch: { [node.groupBy]: to } });
+    } catch {
+      setOverrides((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    }
+  };
+
+  return (
+    <div className="flex gap-3 overflow-x-auto pb-1.5">
+      {order.map((key, colIndex) => {
+        const cards = byColumn.get(key) ?? [];
+        const tone = toneFromStatus(key);
+        return (
+          <div
+            key={key}
+            className={clsx(
+              's-round flex w-[276px] shrink-0 flex-col bg-canvas/40 ring-1 transition-shadow',
+              dragOver === key ? 'ring-accent/60 shadow-[0_0_0_1px_var(--color-accent)]' : 'ring-line',
+            )}
+            onDragOver={(e) => { if (draggable) { e.preventDefault(); setDragOver(key); } }}
+            onDragLeave={() => setDragOver((cur) => (cur === key ? null : cur))}
+            onDrop={(e) => {
+              if (!draggable) return;
+              e.preventDefault();
+              setDragOver(null);
+              const id = e.dataTransfer.getData(DRAG_MIME);
+              if (id) void moveCard(id, key);
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+              <span className="inline-flex min-w-0 items-center gap-2">
+                <span className={clsx('h-2 w-2 shrink-0 rounded-full', toneFillClass(tone))} />
+                <span className="truncate text-[13px] font-semibold capitalize text-text-primary">{humanize(key)}</span>
+              </span>
+              <span className={clsx('rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums', toneSoftClass(tone))}>{cards.length}</span>
+            </div>
+            <div className="flex min-h-[48px] flex-1 flex-col gap-2 px-2 pb-2">
+              {cards.length === 0 ? (
+                <div className={clsx('rounded-btn border border-dashed px-2 py-4 text-center text-[11px] text-text-muted', dragOver === key ? 'border-accent/50 text-accent' : 'border-line/70')}>
+                  {draggable ? 'Drop here' : 'Empty'}
+                </div>
+              ) : cards.map((row) => {
+                const id = rowId(row);
+                const title = recordTitle(row, node.titleField, ['title', 'name', 'subject', 'label'], 'Untitled');
+                const subtitle = fieldText(row, node.subtitleField);
+                const badge = fieldText(row, node.badgeField);
+                const value = node.valueField != null ? row[node.valueField] : undefined;
+                return (
+                  <div
+                    key={id || title}
+                    role="button"
+                    tabIndex={0}
+                    draggable={draggable}
+                    onDragStart={(e) => { e.dataTransfer.setData(DRAG_MIME, id); e.dataTransfer.effectAllowed = 'move'; }}
+                    onClick={() => setOpenCard(row)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') setOpenCard(row); }}
+                    className={clsx(
+                      's-panel s-panel-hover px-3 py-2.5 text-[13px]',
+                      draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer',
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="min-w-0 break-words font-medium text-text-primary">{title}</span>
+                      {typeof value === 'number' ? <span className="shrink-0 text-[11px] font-semibold tabular-nums text-text-secondary">{value.toLocaleString()}</span> : null}
+                    </div>
+                    {subtitle ? <div className="mt-1 line-clamp-2 text-[12px] text-text-muted">{subtitle}</div> : null}
+                    {badge ? (
+                      <span className={clsx('mt-2 inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium', toneSoftClass(toneFromStatus(badge)))}>{badge}</span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+      {openCard ? (
+        <RecordDrawer
+          row={openCard}
+          title={recordTitle(openCard, node.titleField, ['title', 'name', 'subject', 'label'], 'Record')}
+          actions={node.cardActions}
+          onClose={() => setOpenCard(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Slide-over record detail shared by Kanban cards + RecordMaster on narrow screens. */
+function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: string; actions?: ActionRef[]; onClose: () => void }) {
+  const invoke = useActionInvoker();
+  const [busy, setBusy] = useState<string | null>(null);
+  const entries = Object.entries(row).filter(([k]) => k !== 'id');
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-overlay-soft" role="presentation" onClick={onClose}>
+      <div
+        className="flex h-full w-full max-w-md flex-col border-l border-line bg-surface shadow-floating"
+        role="dialog"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+          <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-text-primary">{title}</span>
+          <button type="button" onClick={onClose} aria-label="Close" className="flex h-7 w-7 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"><X size={15} /></button>
+        </div>
+        <div className="flex-1 overflow-auto px-4 py-3">
+          <dl className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2">
+            {entries.map(([k, v]) => (
+              <div key={k} className="min-w-0">
+                <dt className="s-label">{humanize(k)}</dt>
+                <dd className="mt-1 break-words text-[13.5px] text-text-primary">{formatValue(v)}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+        {actions && actions.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-3">
+            {actions.map((a) => (
+              <button
+                key={a.action}
+                type="button"
+                disabled={busy === a.action}
+                onClick={async () => {
+                  setBusy(a.action);
+                  try { await invoke(a.action, { ...(a.args ?? {}), id: rowId(row) }); } finally { setBusy(null); }
+                }}
+                className="inline-flex h-7 items-center rounded-btn border border-line px-2.5 text-[11.5px] font-medium text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+              >
+                {humanize(a.action)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ── RecordMaster (CRM / ERP master-detail) ────────────────────
+
+function RecordMasterView({ node }: { node: Extract<ViewNode, { type: 'RecordMaster' }> }) {
+  const { rows, loading } = useBoundRows(node.bind);
+  const [search, setSearch] = useState('');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    const keys = node.searchFields && node.searchFields.length > 0
+      ? node.searchFields
+      : Object.keys(rows[0] ?? {}).filter((k) => typeof (rows[0] ?? {})[k] === 'string');
+    return rows.filter((row) => keys.some((k) => String(row[k] ?? '').toLowerCase().includes(q)));
+  }, [rows, search, node.searchFields]);
+
+  const selected = useMemo(
+    () => filtered.find((r) => rowId(r) === selectedId) ?? filtered[0] ?? null,
+    [filtered, selectedId],
+  );
+
+  if (loading) return <SkeletonRows />;
+  if (rows.length === 0) {
+    return <EmptyState label="No records yet" hint="Rows the agent (or a form) adds to this collection appear here as a full record workspace." />;
+  }
+
+  return (
+    <div className="s-panel flex min-h-[380px] overflow-hidden p-0">
+      {/* Master list */}
+      <div className="flex w-[272px] shrink-0 flex-col border-r border-line/70">
+        <div className="border-b border-line p-2">
+          <div className="flex h-8 items-center gap-1.5 rounded-btn border border-line bg-canvas px-2 focus-within:border-accent/50">
+            <Search size={13} className="shrink-0 text-text-muted" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search…"
+              className="w-full bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+            />
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[11px] text-text-muted">No matches</div>
+          ) : filtered.map((row) => {
+            const id = rowId(row);
+            const active = selected != null && rowId(selected) === id;
+            const title = recordTitle(row, node.titleField, ['name', 'title', 'subject', 'label', 'email'], 'Untitled');
+            const subtitle = fieldText(row, node.subtitleField, ['email', 'company', 'phone']);
+            const status = node.statusField ? fieldText(row, node.statusField) : '';
+            return (
+              <button
+                key={id || title}
+                type="button"
+                onClick={() => setSelectedId(id)}
+                className={clsx(
+                  'flex w-full flex-col gap-0.5 border-b border-line/60 px-3 py-2.5 text-left transition-colors',
+                  active ? 'bg-accent-soft/60' : 'hover:bg-surface-2/70',
+                )}
+                aria-current={active ? 'true' : undefined}
+              >
+                <span className="flex items-center gap-2">
+                  <span className={clsx('min-w-0 flex-1 truncate text-[13.5px] font-medium', active ? 'text-text-primary' : 'text-text-secondary')}>{title}</span>
+                  {status ? <span className={clsx('shrink-0 rounded-full px-1.5 py-px text-[9.5px] font-medium', toneSoftClass(toneFromStatus(status)))}>{status}</span> : null}
+                </span>
+                {subtitle && subtitle !== title ? <span className="truncate text-[12px] text-text-muted">{subtitle}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+        <div className="border-t border-line/70 px-3.5 py-2 text-[11px] tabular-nums text-text-muted">{filtered.length} of {rows.length}</div>
+      </div>
+      {/* Record page */}
+      <div className="min-w-0 flex-1 overflow-auto">
+        {selected ? <RecordPage node={node} row={selected} /> : <EmptyState label="Select a record" />}
+      </div>
+    </div>
+  );
+}
+
+function RecordPage({ node, row }: { node: Extract<ViewNode, { type: 'RecordMaster' }>; row: Row }) {
+  const invoke = useActionInvoker();
+  const [busy, setBusy] = useState<string | null>(null);
+  const title = recordTitle(row, node.titleField, ['name', 'title', 'subject', 'label', 'email'], 'Record');
+  const status = node.statusField ? fieldText(row, node.statusField) : '';
+  const sections = node.sections && node.sections.length > 0
+    ? node.sections
+    : [{ title: 'Details', fields: Object.keys(row).filter((k) => k !== 'id') }];
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[13px] font-semibold text-accent">
+          {title.split(/\s+/).slice(0, 2).map((p) => p.charAt(0).toUpperCase()).join('') || '·'}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[17px] font-semibold tracking-[-0.01em] text-text-primary">{title}</div>
+          {status ? <span className={clsx('mt-0.5 inline-flex rounded-full px-1.5 py-px text-[10px] font-medium', toneSoftClass(toneFromStatus(status)))}>{status}</span> : null}
+        </div>
+        {(node.recordActions ?? []).map((a) => (
+          <button
+            key={a.action}
+            type="button"
+            disabled={busy === a.action}
+            onClick={async () => {
+              setBusy(a.action);
+              try { await invoke(a.action, { ...(a.args ?? {}), id: rowId(row) }); } finally { setBusy(null); }
+            }}
+            className="inline-flex h-7 shrink-0 items-center rounded-btn border border-line px-2.5 text-[11.5px] font-medium text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+          >
+            {humanize(a.action)}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-col gap-4 px-4 py-3.5">
+        {sections.map((section, i) => (
+          <section key={section.title ?? i}>
+            {section.title ? <h4 className="s-label mb-2.5">{section.title}</h4> : null}
+            <dl className="grid grid-cols-1 gap-x-6 gap-y-2.5 @lg:grid-cols-2">
+              {section.fields.map((key) => (
+                <div key={key} className="min-w-0">
+                  <dt className="s-label">{humanize(key)}</dt>
+                  <dd className="mt-1 break-words text-[13.5px] text-text-primary">{formatValue(row[key])}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        ))}
+        {(node.related ?? []).map((rel) => (
+          <RelatedList key={`${rel.collection}:${rel.foreignKey}`} rel={rel} parentId={rowId(row)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RelatedList({ rel, parentId }: { rel: { collection: string; foreignKey: string; title?: string; titleField?: string }; parentId: string }) {
+  const { client, dataRevision } = useRuntime();
+  const [rows, setRows] = useState<Row[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    client.data.query(rel.collection, { filter: { [rel.foreignKey]: parentId }, limit: 25 })
+      .then((r) => { if (!cancelled) setRows(r); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [client, rel.collection, rel.foreignKey, parentId, dataRevision]);
+
+  return (
+    <section>
+      <h4 className="s-label mb-2.5 flex items-center gap-2">
+        {rel.title ?? humanize(rel.collection)}
+        {rows ? <span className="rounded-full bg-surface-2 px-1.5 text-[9.5px] tabular-nums">{rows.length}</span> : null}
+      </h4>
+      {rows === null ? <SkeletonRows /> : rows.length === 0 ? (
+        <div className="rounded-btn border border-dashed border-line px-3 py-3 text-[11px] text-text-muted">No {humanize(rel.collection).toLowerCase()} linked yet</div>
+      ) : (
+        <ul className="overflow-hidden rounded-btn border border-line">
+          {rows.map((r, i) => (
+            <li key={rowId(r) || i} className={clsx('flex items-center gap-2 px-3 py-2 text-[12px] text-text-secondary', i > 0 && 'border-t border-line/60')}>
+              <ChevronRight size={12} className="shrink-0 text-text-muted" />
+              <span className="min-w-0 flex-1 truncate">{recordTitle(r, rel.titleField, ['title', 'name', 'subject', 'label'], '')}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ── Roadmap (time lanes) ──────────────────────────────────────
+
+const DAY_MS = 86_400_000;
+
+function RoadmapView({ node }: { node: Extract<ViewNode, { type: 'Roadmap' }> }) {
+  const { rows, loading } = useBoundRows(node.bind);
+  if (loading) return <SkeletonRows />;
+
+  const items = rows.flatMap((row) => {
+    const start = Date.parse(String(row[node.startField] ?? ''));
+    if (Number.isNaN(start)) return [];
+    const endRaw = node.endField ? Date.parse(String(row[node.endField] ?? '')) : Number.NaN;
+    const end = Number.isNaN(endRaw) ? start + 7 * DAY_MS : Math.max(endRaw, start + DAY_MS);
+    return [{
+      row,
+      label: fieldText(row, node.labelField, ['title', 'name']) || 'Item',
+      lane: node.laneField ? (fieldText(row, node.laneField) || 'General') : 'Timeline',
+      status: node.statusField ? fieldText(row, node.statusField) : '',
+      start, end,
+    }];
+  });
+
+  if (items.length === 0) {
+    return <EmptyState label="Nothing scheduled yet" hint={`Add rows with a "${node.startField}" date to draw the roadmap.`} />;
+  }
+
+  const min = Math.min(...items.map((i) => i.start));
+  const max = Math.max(...items.map((i) => i.end));
+  const pad = Math.max((max - min) * 0.04, DAY_MS);
+  const t0 = min - pad;
+  const t1 = max + pad;
+  const span = t1 - t0;
+  const pct = (t: number) => `${(((t - t0) / span) * 100).toFixed(2)}%`;
+  const widthPct = (a: number, b: number) => `${Math.max(((b - a) / span) * 100, 1.5).toFixed(2)}%`;
+
+  // Month tick marks across the window.
+  const ticks: Array<{ t: number; label: string }> = [];
+  const cursor = new Date(t0);
+  cursor.setUTCDate(1); cursor.setUTCHours(0, 0, 0, 0);
+  cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  while (cursor.getTime() < t1 && ticks.length < 24) {
+    ticks.push({ t: cursor.getTime(), label: cursor.toLocaleDateString(undefined, { month: 'short', ...(cursor.getUTCMonth() === 0 ? { year: 'numeric' } : {}) }) });
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+
+  const lanes = [...new Set(items.map((i) => i.lane))];
+  const now = Date.now();
+
+  return (
+    <PanelShell title={node.title ?? 'Roadmap'} icon={<GanttChartSquare size={14} />}>
+      <div className="overflow-x-auto">
+        <div className="min-w-[560px]">
+          {/* time header */}
+          <div className="relative ml-[132px] h-5 border-b border-line/70">
+            {ticks.map((tick) => (
+              <span key={tick.t} className="absolute top-0 -translate-x-1/2 text-[9.5px] uppercase tracking-wide text-text-muted" style={{ left: pct(tick.t) }}>{tick.label}</span>
+            ))}
+          </div>
+          <div className="relative">
+            {/* grid lines + today marker overlay the lane area only */}
+            <div className="pointer-events-none absolute inset-y-0 left-[132px] right-0">
+              {ticks.map((tick) => <span key={tick.t} className="absolute inset-y-0 w-px bg-line/50" style={{ left: pct(tick.t) }} />)}
+              {now > t0 && now < t1 ? <span className="absolute inset-y-0 w-px bg-accent/70" style={{ left: pct(now) }} title="Today" /> : null}
+            </div>
+            {lanes.map((lane, laneIndex) => {
+              const laneItems = items.filter((i) => i.lane === lane).sort((a, b) => a.start - b.start);
+              return (
+                <div key={lane} className={clsx('flex items-stretch', laneIndex > 0 && 'border-t border-line/50')}>
+                  <div className="w-[132px] shrink-0 py-2 pr-3">
+                    <span className="line-clamp-2 text-[12.5px] font-medium text-text-secondary">{humanize(lane)}</span>
+                  </div>
+                  <div className="relative min-h-[34px] flex-1 py-1.5">
+                    {laneItems.map((item, i) => {
+                      const tone: Tone = item.status ? toneFromStatus(item.status) : 'neutral';
+                      const color = tone === 'neutral' ? seriesColor(laneIndex) : undefined;
+                      return (
+                        <div
+                          key={`${rowId(item.row)}-${i}`}
+                          className={clsx('group relative mb-1 flex h-6 items-center overflow-hidden rounded-full px-2 last:mb-0', tone !== 'neutral' && toneSoftClass(tone))}
+                          style={{ marginLeft: pct(item.start), width: widthPct(item.start, item.end), ...(color ? { background: `color-mix(in srgb, ${color} 16%, transparent)` } : {}) }}
+                          title={`${item.label}${item.status ? ` · ${item.status}` : ''}`}
+                        >
+                          <span className={clsx('absolute inset-y-0 left-0 w-1 rounded-full', tone !== 'neutral' && toneFillClass(tone))} style={color ? { background: color } : undefined} />
+                          <span className="truncate pl-1.5 text-[11.5px] font-medium text-text-primary">{item.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </PanelShell>
+  );
+}
+
+// ── PipelineFlow (staged funnel with conversion) ──────────────
+
+function PipelineFlowView({ node }: { node: Extract<ViewNode, { type: 'PipelineFlow' }> }) {
+  const bind = node.bind ?? null;
+  const { rows, loading } = useBoundRows(bind ?? { collection: '__none', live: false });
+  const effectiveRows = bind ? rows : [];
+  if (bind && loading) return <SkeletonRows />;
+
+  const stageField = node.stageField ?? 'stage';
+  const declared = (node.stages ?? []).map((s) => ({ key: s.key, label: s.label ?? humanize(s.key), description: s.description }));
+  const order = [...declared];
+  for (const row of effectiveRows) {
+    const key = String(row[stageField] ?? '');
+    if (key && !order.some((s) => s.key === key)) order.push({ key, label: humanize(key), description: undefined });
+  }
+  if (order.length === 0) {
+    return <EmptyState label="No stages yet" hint="Declare stages or add rows with a stage field to draw the pipeline." />;
+  }
+
+  const stats = order.map((stage) => {
+    const inStage = effectiveRows.filter((r) => String(r[stageField] ?? '') === stage.key);
+    const value = node.valueField
+      ? inStage.reduce((sum, r) => sum + (typeof r[node.valueField!] === 'number' ? (r[node.valueField!] as number) : 0), 0)
+      : null;
+    return { ...stage, count: inStage.length, value };
+  });
+  const maxCount = Math.max(1, ...stats.map((s) => s.count));
+
+  return (
+    <PanelShell title={node.title ?? 'Pipeline'} icon={<Columns3 size={14} />}>
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {stats.map((stage, i) => {
+          const prev = i > 0 ? stats[i - 1] : null;
+          const conversion = prev && prev.count > 0 ? Math.round((stage.count / prev.count) * 100) : null;
+          const color = seriesColor(i);
+          return (
+            <div key={stage.key} className="flex min-w-[148px] flex-1 items-stretch gap-2">
+              {i > 0 ? (
+                <div className="flex shrink-0 flex-col items-center justify-center text-text-muted">
+                  <ChevronRight size={13} />
+                  {conversion !== null ? <span className="text-[9.5px] font-medium tabular-nums">{conversion}%</span> : null}
+                </div>
+              ) : null}
+              <div className="s-round flex min-w-0 flex-1 flex-col justify-between bg-canvas/40 p-3 ring-1 ring-line">
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
+                    <span className="s-label truncate">{stage.label}</span>
+                  </div>
+                  {stage.description ? <div className="mt-1 line-clamp-2 text-[11.5px] text-text-muted">{stage.description}</div> : null}
+                </div>
+                <div className="mt-2">
+                  <div className="text-[22px] font-semibold leading-none tabular-nums text-text-primary" style={{ fontSize: 'var(--s-kpi-size, 22px)' }}>{stage.count.toLocaleString()}</div>
+                  {stage.value !== null ? <div className="mt-1 text-[11.5px] tabular-nums text-text-muted">{stage.value.toLocaleString()}</div> : null}
+                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-2">
+                    <div className="h-full rounded-full" style={{ width: `${Math.round((stage.count / maxCount) * 100)}%`, background: color }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </PanelShell>
+  );
+}
+
+// ── registrations (open block seam) ───────────────────────────
+
+registerBlock('Kanban', (node) => (node.type === 'Kanban' ? <KanbanView node={node} /> : null));
+registerBlock('RecordMaster', (node) => (node.type === 'RecordMaster' ? <RecordMasterView node={node} /> : null));
+registerBlock('Roadmap', (node) => (node.type === 'Roadmap' ? <RoadmapView node={node} /> : null));
+registerBlock('PipelineFlow', (node) => (node.type === 'PipelineFlow' ? <PipelineFlowView node={node} /> : null));
+

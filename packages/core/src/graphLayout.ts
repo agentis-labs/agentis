@@ -32,8 +32,8 @@ export function computeLayeredLayout(
   edges: ReadonlyArray<{ source: string; target: string }>,
   opts: LayoutOptions = {},
 ): LayoutPositions {
-  const colGap = opts.colGap ?? 372;
-  const rowGap = opts.rowGap ?? 150;
+  const colGap = opts.colGap ?? 292;
+  const rowGap = opts.rowGap ?? 110;
   const originX = opts.originX ?? 0;
   const originY = opts.originY ?? 0;
 
@@ -94,7 +94,7 @@ export function computeLayeredLayout(
     arr.forEach((id, i) => indexInLayer.set(id, i));
   }
 
-  // Place: x by layer, y centered within the layer's column.
+  // Place: x by layer (left-to-right), y centered within the layer's column.
   const pos: LayoutPositions = new Map();
   for (const l of layers) {
     const arr = byLayer.get(l)!;

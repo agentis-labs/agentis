@@ -15,6 +15,7 @@ import type { ActiveTrigger } from '../engine/ActiveWorkflowRegistry.js';
 import { hashWorkflowGraph } from './graphHash.js';
 import { normalizeExtensionManifest } from './extensionRuntime.js';
 import { preflightWorkflow } from './workflowPreflight.js';
+import { deriveLoopStage, graphContentHash, readBuildLoop } from './workflowCompass.js';
 
 type TriggerType = TriggerNodeConfig['triggerType'];
 
@@ -53,6 +54,8 @@ export class WorkflowTriggerDeploymentService {
     workflowId: string;
     ambientId: string | null;
     userId: string;
+    /** SWIFT arming-gate override — explicit + audited, never silent. */
+    override?: { ack: string };
   }): Promise<WorkflowTriggerDeployment> {
     const workflow = this.#loadWorkflow(args.workspaceId, args.workflowId);
     const graph = workflow.graph as WorkflowGraph;
@@ -76,6 +79,35 @@ export class WorkflowTriggerDeploymentService {
     const effectiveType = effectiveTriggerType(authored.triggerType);
     if (effectiveType !== 'manual') {
       this.#assertRuntimeDependencies(args.workspaceId, effectiveType, runtimeConfig);
+      // ── SWIFT arming gate (§2-T1): an UNATTENDED trigger (cron / webhook /
+      // listener) only arms on a workflow whose CURRENT graph earned hardened
+      // (or already proved itself with a completed production run). Operational
+      // preflight above proves it CAN run; this gate proves it ACCOMPLISHES.
+      // Override is explicit + audited — never silent.
+      const stage = deriveLoopStage(readBuildLoop(workflow.settings), graphContentHash(graph));
+      if (stage !== 'hardened' && stage !== 'production') {
+        if (args.override?.ack?.trim()) {
+          this.db.insert(schema.auditEntries).values({
+            id: randomUUID(),
+            workspaceId: args.workspaceId,
+            runId: `trigger:${args.workflowId}`,
+            phaseId: null,
+            nodeId: null,
+            agentId: null,
+            action: 'trigger.armed_unhardened',
+            actorType: 'user',
+            actorId: args.userId,
+            inputSummary: `stage=${stage}`,
+            outputSummary: `override ack: ${args.override.ack.slice(0, 300)}`,
+            at: new Date().toISOString(),
+          }).run();
+        } else {
+          throw new AgentisError(
+            'WORKFLOW_GRAPH_INVALID',
+            `BLOCKED_LIFECYCLE_NOT_HARDENED: this workflow is at stage "${stage}" — an unattended ${effectiveType} trigger only arms once the workflow is HARDENED at the current graph (spec scoped → dry-run green → suite green → debug run ACCOMPLISHED → agentis.workflow.harden). Run agentis.workflow.loop_status for the exact next call, or pass override:{ack:"<reason>"} to arm anyway (audited).`,
+          );
+        }
+      }
     }
     const existingRows = this.#workflowTriggers(args.workspaceId, args.workflowId);
     const existing = (authored.triggerId

@@ -37,6 +37,44 @@ describe('GET /v1/approvals', () => {
     const res = await app().request('/v1/approvals?status=all', { headers: ctx.authHeaders });
     expect(res.status).toBe(200);
   });
+
+  it('includes redacted payload and context fields in list and detail responses', async () => {
+    const created = await approvals.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      runId: null,
+      taskId: null,
+      targetId: 'seed-node',
+      gatewayId: null,
+      source: 'checkpoint',
+      title: 'Approve Supabase seed',
+      summary: 'Approve Supabase seed for store identity and brand config.',
+      confidence: null,
+      payload: {
+        records: {
+          store_identity: { name: 'Nexseed', service_role_key: 'super-secret' },
+          brand_config: { primary: '#111111' },
+        },
+      },
+    });
+
+    const listRes = await app().request('/v1/approvals', { headers: ctx.authHeaders });
+    expect(listRes.status).toBe(200);
+    const listBody = (await listRes.json()) as { approvals: Array<{ id: string; payload?: any; targetId?: string | null; workflowName?: string | null; agentName?: string | null }> };
+    expect(listBody.approvals[0]?.id).toBe(created.id);
+    expect(listBody.approvals[0]?.targetId).toBe('seed-node');
+    expect(listBody.approvals[0]?.workflowName).toBeNull();
+    expect(listBody.approvals[0]?.agentName).toBeNull();
+    expect(listBody.approvals[0]?.payload.records.store_identity.service_role_key).toBe('[Redacted]');
+
+    const detailRes = await app().request(`/v1/approvals/${created.id}`, { headers: ctx.authHeaders });
+    expect(detailRes.status).toBe(200);
+    const detailBody = (await detailRes.json()) as { approval: { id: string; payload?: any } };
+    expect(detailBody.approval.id).toBe(created.id);
+    expect(detailBody.approval.payload.records.brand_config.primary).toBe('#111111');
+    expect(detailBody.approval.payload.records.store_identity.service_role_key).toBe('[Redacted]');
+  });
 });
 
 describe('POST /v1/approvals/:id/resolve', () => {

@@ -749,6 +749,22 @@ describe('App workflow control plane (E0)', () => {
     return id;
   }
 
+  function seedRun(workflowId: string, status: string, createdAt: string): string {
+    const id = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId,
+      userId: ctx.user.id,
+      status,
+      runState: {},
+      createdAt,
+      startedAt: status === 'RUNNING' ? createdAt : null,
+    }).run();
+    return id;
+  }
+
   it("lists an App's workflows with purpose, order, and trigger kind", async () => {
     const store = new AppStore(ctx.db);
     const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Lead Engine' }).id;
@@ -765,6 +781,25 @@ describe('App workflow control plane (E0)', () => {
     expect(discovery.triggerKind).toBe('cron');
     expect(discovery.purpose).toBe('Discovery description');
     expect(data.every((w) => w.enabled === true)).toBe(true);
+  });
+
+  it('does not report stale created or planning runs as active', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Run Badge App' }).id;
+    const wf = seedWorkflow(appId, 'Nightly Sync', 'manual');
+    seedRun(wf, 'CREATED', '2026-07-04T10:00:00.000Z');
+    seedRun(wf, 'PLANNING', '2026-07-04T10:01:00.000Z');
+
+    const quietRes = await app().request(`/v1/apps/${appId}/workflows`, { headers: ctx.authHeaders });
+    expect(quietRes.status).toBe(200);
+    const quiet = await quietRes.json() as { data: Array<{ id: string; activeRun: { id: string; status: string } | null; lastRun: { status: string } | null }> };
+    expect(quiet.data[0]?.activeRun).toBeNull();
+    expect(quiet.data[0]?.lastRun?.status).toBe('PLANNING');
+
+    const liveRunId = seedRun(wf, 'RUNNING', '2026-07-04T10:02:00.000Z');
+    const liveRes = await app().request(`/v1/apps/${appId}/workflows`, { headers: ctx.authHeaders });
+    const live = await liveRes.json() as { data: Array<{ activeRun: { id: string; status: string } | null }> };
+    expect(live.data[0]?.activeRun).toEqual(expect.objectContaining({ id: liveRunId, status: 'RUNNING' }));
   });
 
   it('updates a workflow binding (order + purpose) and reflects it in the ordered list', async () => {

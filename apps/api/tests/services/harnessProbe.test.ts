@@ -17,6 +17,12 @@ describe('runtime command resolution', () => {
         PATH: dir,
         Path: dir,
         PATHEXT: '.CMD;.EXE;.BAT;.COM',
+        // Sandbox the well-known-dir expansion (pathExpander derives npm/global
+        // bins from these): on a machine with a REAL claude installed under
+        // AppData, the expansion would otherwise out-resolve the temp shim.
+        USERPROFILE: dir,
+        APPDATA: join(dir, 'AppData', 'Roaming'),
+        LOCALAPPDATA: join(dir, 'AppData', 'Local'),
       } satisfies NodeJS.ProcessEnv;
 
       expect(resolveCommandPath('claude', dir, env)?.toLowerCase()).toBe(shim.toLowerCase());

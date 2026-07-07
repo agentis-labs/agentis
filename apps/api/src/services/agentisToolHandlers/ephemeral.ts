@@ -3,6 +3,7 @@ import { schemas, type WorkflowGraph } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { startEphemeralWorkflow } from '../ephemeralWorkflowService.js';
+import { compassForRun } from '../workflowCompass.js';
 
 const ephemeralRunArgsSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
@@ -19,7 +20,7 @@ export function registerEphemeralTools(registry: AgentisToolRegistry, deps: Tool
       family: 'run',
       mcpExposed: true,
       description:
-        'Run a transient workflow graph once WITHOUT saving it — the ideal way to TEST a draft while building. '
+        '[PAVED ROAD 3/5 — DEBUG a draft] Run a transient workflow graph once WITHOUT saving it — the ideal way to TEST a draft while building. '
         + 'Set debugRun:true to disable self-heal + fallback so you observe the RAW per-node failure. '
         + 'The graph is stored only as a run snapshot and can be promoted later if the operator wants to keep it.',
       inputSchema: {
@@ -37,7 +38,7 @@ export function registerEphemeralTools(registry: AgentisToolRegistry, deps: Tool
     },
     async (args, ctx) => {
       const body = ephemeralRunArgsSchema.parse(args);
-      return startEphemeralWorkflow(deps, {
+      const result = await startEphemeralWorkflow(deps, {
         workspaceId: ctx.workspaceId,
         ambientId: ctx.ambientId ?? null,
           conversationId: ctx.conversationId ?? null,
@@ -48,6 +49,16 @@ export function registerEphemeralTools(registry: AgentisToolRegistry, deps: Tool
         maxDurationMs: body.maxDurationMs,
         debugRun: body.debugRun,
       });
+      // PAVED-ROAD P1 — signpost: poll → diagnose-on-fail, real runId baked in.
+      return {
+        ...result,
+        compass: compassForRun({
+          runId: result.runId,
+          workflowId: result.syntheticWorkflowId ?? 'ephemeral',
+          status: 'started',
+          debugRun: body.debugRun === true,
+        }),
+      };
     },
   );
 }

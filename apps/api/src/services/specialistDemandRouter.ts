@@ -5,10 +5,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { SpecialistAgentService } from './specialistAgents.js';
-import type { SpecialistLoadoutService } from './specialistLoadoutService.js';
 import type { SpecialistMindService } from './specialistMindService.js';
 import type { SpecialistProfileService } from './specialistProfileService.js';
-import type { AbilityService } from './abilityService.js';
 import type { SpecialistRuntimeService, SpecialistRunRecord } from './specialistRuntimeService.js';
 
 export type SpecialistTopology = 'direct' | 'supervisor' | 'sequential' | 'swarm' | 'hierarchical' | 'shadow';
@@ -52,8 +50,6 @@ export interface SpecialistDemandRouterDeps {
   logger: Logger;
   specialists: SpecialistAgentService;
   profiles: SpecialistProfileService;
-  loadouts: SpecialistLoadoutService;
-  abilities: AbilityService;
   mind?: SpecialistMindService;
   runtime: SpecialistRuntimeService;
 }
@@ -161,15 +157,6 @@ export class SpecialistDemandRouter {
       if (role === 'orchestrator' || role === 'manager') continue;
       const def = this.deps.specialists.defForRole(workspaceId, role as AgentRole);
       const domainMatch = lexicalScore(task, [role, def.name, def.description, def.systemPrompt, ...def.capabilityTags]);
-      const loadout = this.deps.loadouts.resolveForRole(workspaceId, role);
-      const requiredAbilities = [...loadout.required]
-        .map((id) => this.deps.abilities.tryGet(id)?.name ?? id)
-        .slice(0, 8);
-      const loadoutTerms = [...loadout.byAbility.keys()].flatMap((id) => {
-        const ability = this.deps.abilities.tryGet(id);
-        return ability ? [ability.name, ability.description ?? '', ability.domainTag ?? '', ability.slug] : [id];
-      });
-      const abilityMatch = lexicalScore(task, loadoutTerms);
       const atoms = await this.deps.mind?.retrieve(workspaceId, role, task, 4).catch(() => []) ?? [];
       const mindRelevance = atoms.length === 0 ? 0 : Math.min(1, atoms.length / 4 + lexicalScore(task, atoms.map((a) => a.content)) * 0.5);
       const toolAffordanceMatch = toolScore(task, def.tools.map(String), modality);
@@ -177,12 +164,11 @@ export class SpecialistDemandRouter {
       const freshness = this.#freshness(workspaceId, role);
       const estimatedCostPenalty = topologyCostPenalty(task, def.defaultModel);
       const score = clamp(
-        0.25 * domainMatch +
-        0.20 * abilityMatch +
-        0.15 * mindRelevance +
-        0.15 * toolAffordanceMatch +
-        0.10 * historicalQuality +
-        0.05 * freshness -
+        0.35 * domainMatch +
+        0.20 * mindRelevance +
+        0.20 * toolAffordanceMatch +
+        0.12 * historicalQuality +
+        0.08 * freshness -
         0.05 * estimatedCostPenalty,
       );
       scored.push({
@@ -190,14 +176,14 @@ export class SpecialistDemandRouter {
         name: def.name,
         score,
         domainMatch,
-        abilityMatch,
+        abilityMatch: 0,
         mindRelevance,
         toolAffordanceMatch,
         historicalQuality,
         freshness,
         estimatedCostPenalty,
         mindAtoms: atoms.map((a) => a.content.slice(0, 180)),
-        requiredAbilities,
+        requiredAbilities: [],
         tools: def.tools.map(String),
       });
     }
@@ -247,7 +233,6 @@ export class SpecialistDemandRouter {
 function explainSelection(c: CandidateScore, topology: SpecialistTopology): string {
   const reasons = [
     c.domainMatch >= 0.35 ? 'domain language matched' : null,
-    c.abilityMatch >= 0.25 ? 'ability loadout matched' : null,
     c.mindRelevance > 0 ? 'specialist mind had relevant atoms' : null,
     c.toolAffordanceMatch >= 0.35 ? 'tool affordances fit the request' : null,
   ].filter(Boolean);

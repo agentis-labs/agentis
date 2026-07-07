@@ -51,6 +51,12 @@ const agentRequirementsSchema = z.object({
   nativeMcp: z.boolean().optional(),
 }).partial();
 
+const agentArtifactPolicySchema = z.object({
+  mode: z.enum(['intentional', 'all', 'none']).optional(),
+  saveScreenshots: z.boolean().optional(),
+  saveGeneratedAssets: z.boolean().optional(),
+}).partial();
+
 const agentTaskConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('agent_task'),
@@ -70,6 +76,7 @@ const agentTaskConfigSchema = z.object({
   useSession: z.boolean().optional(),
   maxToolSteps: z.number().int().min(1).max(12).optional(),
   memoryPolicy: z.enum(['form', 'episodic_only', 'none']).optional(),
+  artifactPolicy: agentArtifactPolicySchema.optional(),
 });
 
 const agentSessionConfigSchema = z.object({
@@ -84,6 +91,7 @@ const agentSessionConfigSchema = z.object({
   maxSteps: z.number().int().positive().optional(),
   capabilityTags: z.array(z.string()).default([]),
   requires: agentRequirementsSchema.optional(),
+  artifactPolicy: agentArtifactPolicySchema.optional(),
 });
 
 const extensionTaskConfigSchema = z.object({

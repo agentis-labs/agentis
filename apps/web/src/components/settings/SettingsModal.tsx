@@ -1,14 +1,16 @@
 /**
- * SettingsPage — 4 tabs: Profile / Workspace / Connections / Security.
+ * SettingsPage tabs: Profile / Workspace / Channels / MCP / Integrations /
+ * Governance / Security / Budget / Runtimes.
  *
- * Connections tab consolidates Gateways + Channels (replaces /gateways
- * and /settings/channels). Theme toggle lives here too (and in avatar menu).
+ * Channels = gateways + inbound messaging (WhatsApp/Slack/…) + channel
+ * identities. MCP = external MCP-server mounts (its own subpage — mounts are
+ * their own concern, distinct from messaging channels).
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale } from 'lucide-react';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale, Boxes } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -22,13 +24,15 @@ import { McpConnectionsPanel } from './McpConnectionsPanel';
 import { ChannelIdentitiesPanel } from './ChannelIdentitiesPanel';
 import { OrchestratorModelsPanel } from './OrchestratorModelsPanel';
 import { SelfHealingPanel } from './SelfHealingPanel';
+import { AutonomyPanel } from './AutonomyPanel';
 import { IntegrationsPanel } from './IntegrationsPanel';
 import { useAgentisStore, SettingsTab } from '../../store/agentisStore';
 
 const TABS: { value: SettingsTab; label: string; icon: React.ReactNode }[] = [
   { value: 'profile', label: 'Profile', icon: <User size={16} /> },
   { value: 'workspace', label: 'Workspace', icon: <Briefcase size={16} /> },
-  { value: 'connections', label: 'Connections', icon: <Plug size={16} /> },
+  { value: 'channels', label: 'Channels', icon: <MessageSquare size={16} /> },
+  { value: 'mcp', label: 'MCP', icon: <Boxes size={16} /> },
   { value: 'integrations', label: 'Integrations', icon: <LinkIcon size={16} /> },
   { value: 'governance', label: 'Governance', icon: <Scale size={16} /> },
   { value: 'security', label: 'Security', icon: <Shield size={16} /> },
@@ -99,15 +103,16 @@ export function SettingsModal() {
                 <div className="space-y-10">
                   <WorkspaceTab />
                   <SelfHealingPanel />
+                  <AutonomyPanel />
                 </div>
               )}
-              {settingsTab === 'connections' && (
+              {settingsTab === 'channels' && (
                 <div className="space-y-10">
                   <ConnectionsTab />
                   <ChannelIdentitiesPanel />
-                  <McpConnectionsPanel />
                 </div>
               )}
+              {settingsTab === 'mcp' && <McpConnectionsPanel />}
               {settingsTab === 'integrations' && <IntegrationsPanel />}
               {settingsTab === 'governance' && <GovernancePanel />}
               {settingsTab === 'security' && <SecurityTab />}
@@ -499,7 +504,7 @@ function ConnectionsTab() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Connections</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Gateways &amp; channels</h2>
         <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setAddOpen(true)}>Add connection</Button>
       </div>
       <AddConnectionDialog

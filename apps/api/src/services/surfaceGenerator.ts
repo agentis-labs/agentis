@@ -136,7 +136,7 @@ Example: "children/0/title" is the title of the first child; "children/2" is the
 RULES:
 - Emit ONLY the ops needed to satisfy the instruction. Do not rebuild the whole tree. If you'd touch most of it, that's a render, not a patch — still, prefer the fewest surgical ops.
 - Preserve everything the instruction doesn't mention. Keep the stable frame.
-- Any inserted ViewNode must be valid AG-UI grammar (Stack/Row/Grid/Card/Hero/KPIStrip/Table/Chart/DataBoard/Funnel/Timeline/Form/Button/Text/Heading/Metric/Badge/Callout/WorkflowControl/AgentRegion/…). Bind Table/Chart/Board only to collections that EXIST (listed below) and to real fields — never invent data. WorkflowControl(title?) needs no bind — it shows the App's own workflows with a run button.
+- Any inserted ViewNode must be valid AG-UI grammar (Stack/Row/Grid/Card/Hero/KPIStrip/Table/Chart/Kanban/RecordMaster/Roadmap/PipelineFlow/DataBoard/Funnel/Timeline/Form/Button/Text/Heading/Metric/Badge/Callout/OrchestrationPanel/RunMonitor/AgentFeed/ApprovalsInbox/AgentRegion/…). Bind Table/Chart/Kanban/RecordMaster/Roadmap only to collections that EXIST (listed below) and to real fields — never invent data. OrchestrationPanel/RunMonitor/AgentFeed/ApprovalsInbox need no bind — they read the App's own workflows/runs/approvals live.
 - To filter/sort a data panel, set its bind, e.g. { "op":"set", "path":"children/1/bind/query", "value":{ "amount": { "gt": 20000 } } } or set bind/sort / bind/limit.
 - To reorder, use remove + insert (or set the whole array). To restyle, set the node's "style" object (theme/tone/elevation/pad/accent enums only).
 - If the instruction is impossible against this tree, return { "ops": [] }.`;
@@ -168,24 +168,46 @@ CRAFT RULES (this is what separates a great surface from a dumb one):
 - NEVER emit one tall stack of identical cards. COMPOSE a layout: a Hero or Toolbar header; a Split
   (main content + an activity rail) or a Grid; Tabs/Accordion for progressive disclosure instead of one
   giant scroll.
-- Choose a THEME on the ROOT node's style: { "style": { "theme": "analytics"|"product"|"editorial", "density": "comfortable"|"compact" } }.
-  analytics = KPI dashboards; product = consumer-grade; editorial = content-forward.
-- Choose a DESIGN LANGUAGE on the ROOT node's style ("design") — it sets the whole LOOK (radii, elevation, gradients, type scale, palette). Pick the one that fits the app:
-  • "aurora"  — glass cards, ambient glow, gradient accents, big numbers. Best for analytics/exec dashboards (the "wow" look).
-  • "soft"    — rounded consumer cards, colorful tiles, friendly spacing. Best for product/CRM/pipeline apps.
-  • "editorial" — big type, generous whitespace, restrained color. Best for content/report/document apps.
-  • "console" — dense neon-on-black terminal, tight grid. Best for ops/SRE/monitoring.
-  • "operations" — the dense command center (the safe default).
-  Example: { "style": { "theme": "analytics", "design": "aurora" } }. When in doubt for a dashboard, use "aurora".
+- Choose a THEME on the ROOT node's style: { "style": { "theme": "analytics"|"product"|"editorial"|"operations", "density": "comfortable"|"compact" } }.
+  analytics = KPI dashboards; product = consumer-grade; editorial = content-forward; operations = dense command centers.
+- Every surface renders on the flagship Agentis design system — premium cards, a real type scale, auto-formatted
+  values, designed light AND dark. Optional ROOT knobs: "appearance": "light"|"dark" pins one (default follows the
+  platform); "accent" re-brands the accent hue; "design" picks a structural VARIANT when the domain demands it —
+  "aurora" (bigger numerals), "soft" (rounder, friendlier), "editorial" (big flat type), "console" (dense grid).
+  Default (no "design") is the flagship: set nothing unless you have a reason.
 - Visualize, don't narrate: use Chart (line/area/bar/pie/donut, multi-series via "series"), KPIStrip, Sparkline,
   ProgressBar, Timeline — not paragraphs of Text.
-- DASHBOARD-FIRST for an App overview: lead with the headline numbers (a KPIStrip), and — when the App owns
-  workflows — a WorkflowControl panel so the operator sees the App's pulse and can RUN its workflows; THEN the
-  supporting charts + a table. An App is an operational unit, not a form: the operator should grasp its state and
-  act on it without scrolling. Put data-entry Forms behind a Tab, never at the top.
+- MISSION-CONTROL-FIRST for an App overview (the App is an operational unit, not a form): lead with the headline
+  numbers (a KPIStrip or PipelineFlow), then — when the App owns workflows — an OrchestrationPanel (the operator
+  sees every workflow's rules and can run/pause/chain them) with the LIVE rail beside the working area: a Grid of
+  { the working composite (span 2) , a Stack of RunMonitor + AgentFeed (span 1) }. The operator should see what the
+  agents are DOING right now without scrolling. Put data-entry Forms behind a Tab, never at the top.
+- PICK THE WORKING COMPOSITE for the data, not a plain Table by default:
+  • Kanban — anything with a status/stage field the operator moves through states (deals, tickets, orders, content,
+    hiring). Drag writes the field back: give it "update": { "action": "<declared update action>" }.
+  • RecordMaster — people/things with many fields (CRM contacts, customers, inventory, employees, vendors — the
+    ERP shape). Master list + full record page + related child collections.
+  • Roadmap — anything with dates (plans, releases, campaigns, editorial calendars).
+  • PipelineFlow — the stage funnel summary (counts, values, conversion) — pairs above a Kanban.
+  • Chart/Table — metrics and logs.
+- The runtime wraps every surface in an App Shell (sidebar pages + topbar + ops drawer) — you author PAGE CONTENT,
+  never navigation. Root style may set "shell": "full"|"minimal"|"none" to override (default: full when the app has
+  multiple pages or workflows). Compose MULTIPLE surfaces for a real product (home = mission control; plus a
+  working page per job: board, records, roadmap, inbox) — each surface becomes a page in the shell's sidebar.
 - Shape hierarchy with bounded style intent on any node: "style": { "elevation":"flat"|"raised"|"inset"|"outline",
   "pad":"none"|"sm"|"md"|"lg"|"xl", "tone":"neutral"|"accent"|"success"|"warning"|"danger"|"info",
   "accent":"blue"|"teal"|"purple"|"orange"|..., "size":"sm"|"md"|"lg"|"xl", "span":1-12 }. (No raw CSS — these enums only.)
+
+THE OPERABILITY CONTRACT (hard-gated at persist — RENDERED ≠ OPERABLE):
+- EVERY action you declare must be reachable from a control. Workflow actions go on the Hero's "actions"
+  (the page-header action bar) or a Button; "<collection>.insert" behind a Form; "<collection>.update" powers
+  Kanban drag and the built-in record drawer; "<collection>.delete" as a Table rowAction.
+- A Button/Form that references an action you did NOT declare is dead — the gate strips it. Declare AND wire, always.
+- Rows drill into a record drawer automatically; the kit formats every value (URLs → links, SCREAMING_SNAKE
+  statuses → humanized tone pills, ISO dates → relative time, numbers → locale-grouped). NEVER hand-format values
+  or narrate them into Text nodes.
+- The gate auto-repairs what you miss (wires orphan workflow actions into the header, adds row deletes, inserts the
+  OrchestrationPanel when the app drives workflows) — but a surface that needs repair is a defect. Author it operable.
 
 NEVER (these produce broken UIs and are auto-stripped by the layout auditor — don't waste output on them):
 - NEVER use Image nodes as a header, and never put text-baked generated images at the top. Lead with a Hero (it looks great with NO image — a gradient) + a KPIStrip or Chart.
@@ -204,9 +226,19 @@ KEY NODES:
 - Container: Card(title?,children) | Section(title?,children)
 - Content: Heading|Text|Markdown(value) | Metric(label,value,delta?) | KPIStrip(items:[{label,value,delta?,tone?,spark?:number[]}]) | Badge(value,tone?) | Callout(value,title?) | ProgressBar(value,max?,label?) | Sparkline(points?:number[] | bind+y) | Avatar(name?,src?) | Divider | Image(src)
 - Data-bound: Table(bind,columns:[{key,label?}],rowActions?) | List(bind,item) | Chart(bind,chartType,x,y,series?:[{y,label?,color?}],area?,stacked?,curve?) | Timeline(bind?,items?,titleField?,detailField?,atField?)
+- Working composites (the archetype workhorses — prefer these over a bare Table when the shape fits):
+  Kanban(bind,groupBy,columns?:string[],titleField?,subtitleField?,badgeField?,valueField?,update?:{action},cardActions?) — drag-across-columns board; "update" must reference a declared data action targeting "<collection>.update" (drag writes groupBy back).
+  RecordMaster(bind,titleField?,subtitleField?,statusField?,searchFields?,sections?:[{title?,fields}],related?:[{collection,foreignKey,title?,titleField?}],recordActions?) — CRM/ERP master-detail record workspace.
+  Roadmap(bind,labelField,startField,endField?,laneField?,statusField?) — time lanes from date fields.
+  PipelineFlow(bind?,stageField?,valueField?,stages?:[{key,label?}]) — staged funnel with counts/values + conversion %.
 - Domain (use these to fit the app): ChatThread(title?,source?,bind?,roleField?,contentField?,messages?,channel?,send?,placeholder?) and Inbox(source?,bind?,titleField?,channelField?,messagesBind?,matchField?,send?) — conversations. SET source:"conversations" to bind to the App's REAL live channel threads (the resident inbox — a 24/7 sales/support desk; no bind needed, it reads the App's connected channels); use the default source:"collection" with a bind only to show conversation rows stored in a datastore collection; MediaGen(title?,generate?,bind?,srcField?) — image/media generation; Funnel(stages?:[{label,value}] | bind+labelField+valueField) — marketing/sales conversion; Calendar(events?:[{date,label}] | bind+dateField+labelField) — scheduling; Gauge(label?,value,max?,tone?) — a single metric.
 - Interactive: Form(fields:[{key,label?,type,required?,options?}],submit:{action},submitLabel?) | Button(label,action:{action,args?},variant?)
-- App control: WorkflowControl(title?) — the App's OWN workflows (each with purpose, trigger, last run) and a RUN button per row. App-scoped, no bind. Drop ONE into an App overview so the operator can see why each workflow exists, the order they run, and start them without leaving the App. This is the App's control plane — prefer it over describing workflows in Text.
+- Live operations (app-scoped, NO bind — they read the App's own workflows/runs/approvals over the realtime bus):
+  OrchestrationPanel(title?,controls?) — the App's control plane: every workflow with its rules (schedule cron, runs-after chains, concurrency, enable/pause), live status, a Run button per row + Run-pipeline. Drop ONE on the App's home. (WorkflowControl is its legacy alias.)
+  RunMonitor(title?,workflowIds?,limit?,controls?) — the App's runs LIVE: status pulse, node progress, elapsed, cancel/pause/resume, expandable per-run activity.
+  AgentFeed(title?,limit?) — watch the agent think: live reasoning/tool/node stream from the App's runs.
+  ApprovalsInbox(title?,limit?) — pending human gates with one-click approve/reject.
+  Compose home as: OrchestrationPanel + Grid[ working composite (span 2) | Stack[RunMonitor, AgentFeed] (span 1) ].
 - Escape hatch (LAST RESORT, only when the nodes above cannot express it): { "type":"CodeSurface", "code":<plain JS string>, "collections":[<names the code reads>] } — runs in a hardened, zero-egress sandbox with \`ui\` (component+chart kit: ui.card/row/grid/metric/badge/table/heading/text + ui.chart.bar/line/donut) and \`agentis\` (agentis.data.query, agentis.actions.invoke) and \`root\` (mount). Requires the app's custom-code policy. Prefer typed nodes.
 
 Bindable = a literal, or { "$row":"field" } (current row), or { "$state":"key" } (UI state).

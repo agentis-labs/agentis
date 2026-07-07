@@ -53,6 +53,7 @@ import {
 import clsx from 'clsx';
 import { api, workspace as workspaceStore } from '../../lib/api';
 import { openRunModal } from '../../lib/runModal';
+import { openApprovalModal } from '../../lib/approvalModal';
 import { useRealtime } from '../../lib/realtime';
 import { useRunActivity } from '../../lib/useRunActivity';
 import {
@@ -1702,7 +1703,7 @@ function LiveWorkspacePanel({
   const waitingCount = Math.max(approvals.length, waitingObservations.length);
   // Issues — open backlog (exclude done/cancelled), newest scheduled first.
   const backlogIssues = issues
-    .filter((issue) => issue.status !== 'done' && issue.status !== 'cancelled')
+    .filter((issue) => issue.status !== 'done' && issue.status !== 'cancelled' && !issue.labels?.includes('sentinel'))
     .sort((a, b) => issueScheduleRank(a) - issueScheduleRank(b));
   // History — tasks that already ran, newest first, so the operator can come
   // back and see what happened.
@@ -1729,14 +1730,6 @@ function LiveWorkspacePanel({
         maxWidth: containerSize.width - LIVE_WORKSPACE_MARGIN * 2,
         maxHeight: containerSize.height - LIVE_WORKSPACE_MARGIN * 2,
       };
-
-  async function resolveApproval(approval: WorkspaceApproval, decision: 'approve' | 'reject') {
-    await api(`/v1/approvals/${approval.id}/resolve`, {
-      method: 'POST',
-      body: JSON.stringify({ decision }),
-    }).catch(() => undefined);
-    onRefresh();
-  }
 
   function stopDrag(pointerId?: number) {
     const drag = dragRef.current;
@@ -1954,8 +1947,7 @@ function LiveWorkspacePanel({
                   <AttentionGroupRow
                     key={group.id}
                     group={group}
-                    onApprove={group.approval ? () => void resolveApproval(group.approval!, 'approve') : undefined}
-                    onReject={group.approval ? () => void resolveApproval(group.approval!, 'reject') : undefined}
+                    onReview={group.approval ? () => openApprovalModal({ approval: group.approval! }) : undefined}
                     onInspect={() => {
                       if (group.workflowId) onSelectWorkflow(group.workflowId);
                       else if (group.runId) openRunModal({ runId: group.runId, source: 'live-workspace-attention' });
@@ -1980,7 +1972,7 @@ function LiveWorkspacePanel({
             />
           </div>
         ) : (
-          <LiveWorkspaceTechnicalFeed events={techEvents} activity={activity} connected={streamConnected} wide={panelWide} />
+          <LiveWorkspaceTechnicalFeed events={techEvents} activity={activity} connected={streamConnected} wide={panelWide} workspaceTokens={fleet?.runs.totalTokens ?? null} />
         )}
       </div>
       {!panelFullscreen && (
@@ -2031,11 +2023,13 @@ function LiveWorkspaceTechnicalFeed({
   activity,
   connected,
   wide,
+  workspaceTokens,
 }: {
   events: ObservabilityEvent[];
   activity: RealtimeActivity[];
   connected: boolean;
   wide: boolean;
+  workspaceTokens: number | null;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = events.find((event) => event.id === selectedId) ?? events[0] ?? null;
@@ -2044,9 +2038,20 @@ function LiveWorkspaceTechnicalFeed({
     if (!selectedId || !events.some((event) => event.id === selectedId)) setSelectedId(events[0]?.id ?? null);
   }, [events, selectedId]);
 
+  // Workspace-wide token consumption — exact count for technical review. Refreshes
+  // with the workspace snapshot (driven by realtime events).
+  const tokenStrip = workspaceTokens != null ? (
+    <div className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-canvas/45 px-3 py-1.5">
+      <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse-dot" />
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted">Workspace tokens</span>
+      <span className="ml-auto font-mono text-[12px] font-semibold tabular-nums text-text-primary">{workspaceTokens.toLocaleString()}</span>
+    </div>
+  ) : null;
+
   if (events.length === 0) {
     return (
       <section className="rounded-card border border-line bg-canvas/35 px-3 py-3">
+        {tokenStrip}
         <div className="flex items-center gap-2 text-[12px] text-text-secondary">
           <span className={clsx('h-1.5 w-1.5 rounded-full', connected ? 'bg-accent animate-pulse-dot' : 'bg-text-muted')} />
           {connected ? 'Waiting for the first normalized runtime event.' : 'Reconnect to receive the technical event stream.'}
@@ -2057,7 +2062,9 @@ function LiveWorkspaceTechnicalFeed({
   }
 
   return (
-    <section className={clsx('gap-3', wide ? 'grid grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]' : 'space-y-3')}>
+    <div>
+      {tokenStrip}
+      <section className={clsx('gap-3', wide ? 'grid grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]' : 'space-y-3')}>
       <div className="min-w-0 overflow-hidden rounded-xl border border-line bg-canvas/35">
         <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
           <div>
@@ -2125,7 +2132,8 @@ function LiveWorkspaceTechnicalFeed({
           </>
         ) : null}
       </div>
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -2262,15 +2270,13 @@ function sessionStart(session: WorkSession | null): string | null {
 
 function AttentionGroupRow({
   group,
-  onApprove,
-  onReject,
+  onReview,
   onInspect,
   onRetry,
   onDetails,
 }: {
   group: CommandAttentionGroup;
-  onApprove?: () => void;
-  onReject?: () => void;
+  onReview?: () => void;
   onInspect: () => void;
   onRetry?: () => void;
   onDetails?: () => void;
@@ -2291,14 +2297,9 @@ function AttentionGroupRow({
           <div className="mt-0.5 truncate text-[11px] text-text-secondary">{group.summary}</div>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
-        {onApprove && (
-          <button type="button" onClick={onApprove} title="Approve" aria-label="Approve" className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-text-primary text-canvas hover:bg-white">
-            <CheckCircle2 size={12} />
-          </button>
-        )}
-        {onReject && (
-          <button type="button" onClick={onReject} title="Reject" aria-label="Reject" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
-            <X size={12} />
+        {onReview && (
+          <button type="button" onClick={onReview} title="Review & decide" aria-label="Review & decide" className="inline-flex h-5 items-center gap-1 rounded-md bg-text-primary px-1.5 text-[10px] font-semibold text-canvas hover:bg-white">
+            <ShieldCheck size={11} /> Review
           </button>
         )}
         <button type="button" onClick={onInspect} title="Inspect" aria-label="Inspect" className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-line bg-surface-2 text-text-muted hover:bg-surface-3 hover:text-text-primary">
@@ -2335,7 +2336,7 @@ function buildAttentionGroups(
       summary: approval.summary ?? approval.agentName ?? 'Operator decision required',
       count: 1,
       tone: 'warn',
-      runId: approval.runId,
+      runId: approval.runId ?? undefined,
       approval,
     });
   }
@@ -4529,4 +4530,3 @@ const PHASE_ORDER: Record<EntrancePhase, number> = {
   resources: 5,
   complete: 6,
 };
-

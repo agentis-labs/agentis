@@ -45,6 +45,16 @@ export interface PerWorkflowAnalytics {
   totalCostCents: number;
 }
 
+/** Token spend attributed to one agent (or the agentless System/evaluation bucket). */
+export interface PerAgentAnalytics {
+  /** The real agent id, or null for system/evaluation spend (dedicated judge model). */
+  agentId: string | null;
+  name: string;
+  tokensIn: number;
+  tokensOut: number;
+  totalTokens: number;
+}
+
 export interface RunAnalytics {
   runs: number;
   byStatus: Record<string, number>;
@@ -61,6 +71,8 @@ export interface RunAnalytics {
   nodeFailures: RunAnalyticsNodeFailure[];
   /** Per-workflow rollup — single entry for a workflow view, many for an app. */
   perWorkflow: PerWorkflowAnalytics[];
+  /** Token spend attributed per agent (+ a System bucket for agentless judge spend). */
+  perAgent: PerAgentAnalytics[];
 }
 
 /**
@@ -119,14 +131,17 @@ export function aggregateRunAnalytics(
     }
   }
 
-  // Tokens + cost from the audit sink, bucketed back to each run's workflow.
+  // Tokens + cost from the audit sink, bucketed back to each run's workflow AND
+  // to the agent that spent them (agent_id on the terminal node.completed entry).
   let costSum = 0;
   let totalTokensIn = 0;
   let totalTokensOut = 0;
+  const perAgentAcc = new Map<string | null, { tokensIn: number; tokensOut: number }>();
   const runIds = [...runWorkflow.keys()];
   if (runIds.length > 0) {
     const audit = db.select({
       runId: schema.auditEntries.runId,
+      agentId: schema.auditEntries.agentId,
       costCents: schema.auditEntries.costCents,
       tokensIn: schema.auditEntries.tokensIn,
       tokensOut: schema.auditEntries.tokensOut,
@@ -136,15 +151,46 @@ export function aggregateRunAnalytics(
       .all();
     for (const a of audit) {
       const cost = a.costCents ?? 0;
-      const tokens = (a.tokensIn ?? 0) + (a.tokensOut ?? 0);
+      const tIn = a.tokensIn ?? 0;
+      const tOut = a.tokensOut ?? 0;
+      const tokens = tIn + tOut;
       costSum += cost;
-      totalTokensIn += a.tokensIn ?? 0;
-      totalTokensOut += a.tokensOut ?? 0;
+      totalTokensIn += tIn;
+      totalTokensOut += tOut;
       const wfId = runWorkflow.get(a.runId);
       const bucket = wfId ? perWf.get(wfId) : undefined;
       if (bucket) { bucket.cost += cost; bucket.tokens += tokens; }
+      // Attribute token spend to its agent (null = System/evaluation bucket).
+      if (tokens > 0) {
+        const key = a.agentId ?? null;
+        const acc = perAgentAcc.get(key) ?? { tokensIn: 0, tokensOut: 0 };
+        acc.tokensIn += tIn;
+        acc.tokensOut += tOut;
+        perAgentAcc.set(key, acc);
+      }
     }
   }
+
+  // Resolve agent display names for the per-agent rollup in one query.
+  const agentIds = [...perAgentAcc.keys()].filter((k): k is string => k != null);
+  const agentName = new Map<string, string>();
+  if (agentIds.length > 0) {
+    for (const row of db.select({ id: schema.agents.id, name: schema.agents.name })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), inArray(schema.agents.id, agentIds)))
+      .all()) {
+      agentName.set(row.id, row.name);
+    }
+  }
+  const perAgent: PerAgentAnalytics[] = [...perAgentAcc.entries()]
+    .map(([agentId, v]) => ({
+      agentId,
+      name: agentId ? (agentName.get(agentId) ?? 'Unknown agent') : 'System · evaluation',
+      tokensIn: v.tokensIn,
+      tokensOut: v.tokensOut,
+      totalTokens: v.tokensIn + v.tokensOut,
+    }))
+    .sort((a, b) => b.totalTokens - a.totalTokens);
 
   const totalTokens = totalTokensIn + totalTokensOut;
   const terminal = [...perWf.values()].reduce((sum, b) => sum + b.terminal, 0);
@@ -178,6 +224,7 @@ export function aggregateRunAnalytics(
       .map(([nodeId, v]) => ({ nodeId, title: nodeTitle.get(nodeId) ?? nodeId, failures: v.count, sampleError: v.sample }))
       .sort((a, b) => b.failures - a.failures),
     perWorkflow,
+    perAgent,
   };
 }
 

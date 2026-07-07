@@ -37,6 +37,10 @@ export type ElementKind =
   | 'kpi_strip' | 'metric' | 'chart' | 'sparkline' | 'progress'
   // data
   | 'table' | 'board' | 'timeline' | 'form'
+  // archetype workhorses (APP-INTERFACE-10X)
+  | 'kanban' | 'record_master' | 'roadmap' | 'pipeline_flow'
+  // live operations plane
+  | 'orchestration' | 'run_monitor' | 'agent_feed' | 'approvals_inbox'
   // conversational & domain
   | 'chat_thread' | 'inbox' | 'media_gen' | 'funnel' | 'calendar' | 'gauge'
   // layout
@@ -87,10 +91,24 @@ export const SURFACE_GROUPS: Array<{ title: string; hint: string; items: Palette
     title: 'Data',
     hint: 'Bound to your collections',
     items: [
+      { kind: 'kanban', label: 'Kanban', hint: 'Drag cards across stages — writes back', icon: <ListChecks size={15} /> },
+      { kind: 'record_master', label: 'Records', hint: 'CRM/ERP master-detail workspace', icon: <Table2 size={15} /> },
+      { kind: 'roadmap', label: 'Roadmap', hint: 'Time lanes from date fields', icon: <Activity size={15} /> },
+      { kind: 'pipeline_flow', label: 'Pipeline', hint: 'Stage funnel + conversion', icon: <BarChart3 size={15} /> },
       { kind: 'table', label: 'Table', hint: 'Sortable record table', icon: <Table2 size={15} /> },
-      { kind: 'board', label: 'Board', hint: 'Kanban by a status field', icon: <ListChecks size={15} /> },
+      { kind: 'board', label: 'Board', hint: 'Read-only grouped cards', icon: <ListChecks size={15} /> },
       { kind: 'timeline', label: 'Timeline', hint: 'Chronological events', icon: <Activity size={15} /> },
       { kind: 'form', label: 'Form', hint: 'Create / submit records', icon: <ListChecks size={15} /> },
+    ],
+  },
+  {
+    title: 'Live operations',
+    hint: 'The app’s agentic heartbeat — no bind needed',
+    items: [
+      { kind: 'orchestration', label: 'Orchestration', hint: 'Workflows + rules: schedule, chains, run-all', icon: <Activity size={15} /> },
+      { kind: 'run_monitor', label: 'Run monitor', hint: 'Live runs: progress, controls, activity', icon: <Activity size={15} /> },
+      { kind: 'agent_feed', label: 'Agent feed', hint: 'Watch the agent think in real time', icon: <Sparkles size={15} /> },
+      { kind: 'approvals_inbox', label: 'Approvals', hint: 'Human gates — approve / reject', icon: <AlertTriangle size={15} /> },
     ],
   },
   {
@@ -243,6 +261,31 @@ export function buildBlock(kind: BlockKind, collections: CollectionInfo[]): Buil
       return { node: { type: 'Table', bind: { collection: name, live: true, limit: 25 }, columns } };
     case 'board':
       return { node: { type: 'DataBoard', bind: { collection: name, live: true, limit: 100 }, groupBy: statusField, titleField: firstString } };
+    case 'kanban': {
+      const update = `update_${name}`;
+      return {
+        node: { type: 'Kanban', bind: { collection: name, live: true, limit: 200 }, groupBy: statusField, titleField: firstString, update: { action: update }, ...(numberField ? { valueField: numberField } : {}) },
+        actions: [{ name: update, kind: 'data', target: `${name}.update` }],
+      };
+    }
+    case 'record_master':
+      return { node: { type: 'RecordMaster', bind: { collection: name, live: true, limit: 200 }, titleField: firstString, ...(statusField !== firstString ? { statusField } : {}) } };
+    case 'roadmap':
+      return {
+        node: dateField
+          ? { type: 'Roadmap', bind: { collection: name, live: true, limit: 200 }, labelField: firstString, startField: dateField }
+          : { type: 'Roadmap', bind: { collection: name, live: true, limit: 200 }, labelField: firstString, startField: 'date' },
+      };
+    case 'pipeline_flow':
+      return { node: { type: 'PipelineFlow', bind: { collection: name, live: true, limit: 500 }, stageField: statusField, ...(numberField ? { valueField: numberField } : {}) } };
+    case 'orchestration':
+      return { node: { type: 'OrchestrationPanel' } };
+    case 'run_monitor':
+      return { node: { type: 'RunMonitor' } };
+    case 'agent_feed':
+      return { node: { type: 'AgentFeed' } };
+    case 'approvals_inbox':
+      return { node: { type: 'ApprovalsInbox' } };
     case 'timeline':
       return { node: { type: 'Timeline', title: 'Timeline', bind: { collection: name, live: true, limit: 20 }, titleField: firstString } };
 

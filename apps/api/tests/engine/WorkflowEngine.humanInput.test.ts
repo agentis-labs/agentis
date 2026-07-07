@@ -24,12 +24,13 @@ let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });
 afterEach(() => ctx.close());
 
-interface SubmitInfo { approvalId: string; form: unknown }
+interface SubmitInfo { approvalId: string; form: unknown; blocked?: string }
 
 async function runHumanInput(opts: {
   outputKey?: string;
-  onWaiting: (info: SubmitInfo, approvals: ApprovalInboxService) => Promise<void>;
-}): Promise<{ status: string; output: Record<string, unknown> }> {
+  /** Return true to keep listening for further waiting events (re-park). */
+  onWaiting: (info: SubmitInfo, approvals: ApprovalInboxService) => Promise<boolean | void>;
+}): Promise<{ status: string; output: Record<string, unknown>; waitCount: number }> {
   const hi: Record<string, unknown> = {
     kind: 'human_input',
     prompt: 'Fill in the details',
@@ -75,12 +76,15 @@ async function runHumanInput(opts: {
   });
 
   // When the node pauses for input, run the submission.
+  let waitCount = 0;
   const offWaiting = ctx.bus.subscribe((m) => {
     if (m.room === `run:${runId}` && m.envelope.event === REALTIME_EVENTS.NODE_WAITING_FOR_INPUT) {
-      const payload = m.envelope.payload as { reason?: string; approvalId?: string; form?: unknown };
+      const payload = m.envelope.payload as { reason?: string; approvalId?: string; form?: unknown; blocked?: string };
       if (payload.reason === 'human_input' && payload.approvalId) {
-        offWaiting();
-        void opts.onWaiting({ approvalId: payload.approvalId, form: payload.form }, approvals);
+        waitCount += 1;
+        void Promise.resolve(
+          opts.onWaiting({ approvalId: payload.approvalId, form: payload.form, blocked: payload.blocked }, approvals),
+        ).then((keepListening) => { if (keepListening !== true) offWaiting(); });
       }
     }
   });
@@ -90,15 +94,21 @@ async function runHumanInput(opts: {
   const status = await terminal;
   const row = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
   const state = row.runState as { nodeStates: Record<string, { outputData?: Record<string, unknown> }> };
-  return { status: row.status ?? status, output: state.nodeStates.H?.outputData ?? {} };
+  return { status: row.status ?? status, output: state.nodeStates.H?.outputData ?? {}, waitCount };
 }
 
 describe('WorkflowEngine — human_input', () => {
   it('pauses, then completes with the submitted form values as output', async () => {
     let seenForm: unknown;
+    let payloadForm: unknown;
     const { status, output } = await runHumanInput({
       onWaiting: async ({ approvalId, form }, approvals) => {
         seenForm = form;
+        // The approval ROW carries the form spec on payload.humanInputForm — this
+        // is what feeds the operator UI (the approvals list, not just the live
+        // event), so a UI approve can submit real field `data`.
+        const row = ctx.db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.id, approvalId)).get();
+        payloadForm = (row?.payload as { humanInputForm?: unknown } | null)?.humanInputForm;
         await approvals.resolve({ workspaceId: ctx.workspace.id, approvalId, decision: 'approve', data: { subject: 'Launch', sendDate: '2026-07-01' } });
       },
     });
@@ -106,6 +116,8 @@ describe('WorkflowEngine — human_input', () => {
     expect(output).toMatchObject({ subject: 'Launch', sendDate: '2026-07-01' });
     // The pause event carried the form spec the UI needs to render.
     expect(seenForm).toMatchObject({ fields: expect.arrayContaining([expect.objectContaining({ key: 'subject' })]) });
+    // …and the persisted approval carries it too (the approvals-list UI path).
+    expect(payloadForm).toMatchObject({ targetId: 'H', fields: expect.arrayContaining([expect.objectContaining({ key: 'subject' })]) });
   });
 
   it('wraps the submission under outputKey when set', async () => {
@@ -126,5 +138,31 @@ describe('WorkflowEngine — human_input', () => {
       },
     });
     expect(status).toBe('FAILED');
+  });
+
+  it('an approve MISSING a required field re-parks (stays paused) instead of completing empty', async () => {
+    // Reproduces the seed-approval bug: an approve with no field values must not
+    // green-wash a `{}` output downstream — it re-opens a fresh pending approval
+    // naming the gap, then a real approve (with the field) completes it.
+    const blockedReasons: Array<string | undefined> = [];
+    let firstApprove = true;
+    const { status, output, waitCount } = await runHumanInput({
+      onWaiting: async ({ approvalId, blocked }, approvals) => {
+        blockedReasons.push(blocked);
+        if (firstApprove) {
+          firstApprove = false;
+          // Approve WITHOUT the required `subject` → must re-park.
+          await approvals.resolve({ workspaceId: ctx.workspace.id, approvalId, decision: 'approve', data: {} });
+          return true; // keep listening for the re-park's waiting event
+        }
+        // Second time around: a real decision completes the node.
+        await approvals.resolve({ workspaceId: ctx.workspace.id, approvalId, decision: 'approve', data: { subject: 'Launch' } });
+      },
+    });
+    expect(waitCount).toBe(2); // parked, re-parked, then completed
+    expect(blockedReasons[0]).toBeUndefined(); // first pause is a clean prompt
+    expect(blockedReasons[1]).toMatch(/Missing required field/i); // re-park names the gap
+    expect(status).toBe('COMPLETED');
+    expect(output).toMatchObject({ subject: 'Launch' });
   });
 });

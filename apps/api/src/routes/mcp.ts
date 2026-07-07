@@ -33,6 +33,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
+import { AGENTIS_MCP_SERVER_INSTRUCTIONS } from '../services/orchestratorPrompt.js';
 import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWorkflow.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
@@ -125,6 +126,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
       capabilities: MCP_CAPABILITIES,
       toolCount: tools.length,
       endpoint: '/v1/mcp/rpc',
+      instructions: AGENTIS_MCP_SERVER_INSTRUCTIONS,
     });
   });
 
@@ -145,6 +147,11 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
             protocolVersion: PROTOCOL_VERSION,
             serverInfo: { name: 'agentis', version: '1.0.0' },
             capabilities: MCP_CAPABILITIES,
+            // PAVED-ROAD P2 — deliver the doctrine at the door. MCP clients
+            // surface `instructions` to the model as system context, so an
+            // external harness gets the build loop + data-flow contract instead
+            // of a flat pile of ~70 undocumented tool names.
+            instructions: AGENTIS_MCP_SERVER_INSTRUCTIONS,
           }));
         case 'notifications/initialized':
           // Notification — no response body expected, but return 202-style ack.
@@ -165,6 +172,16 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
           return c.json(rpcError(id, -32601, `Method not found: ${body.method}`));
       }
     } catch (err) {
+      // §F7 — an AgentisError carries a code + directive remediation the platform
+      // wrote for exactly this failure. Return it as JSON-RPC error `data` instead
+      // of discarding everything but the message under a bare -32603.
+      if (err instanceof AgentisError) {
+        return c.json(rpcError(id, -32603, err.message, {
+          code: err.code,
+          ...(err.remediation ? { remediation: err.remediation } : {}),
+          ...(err.details ? { details: err.details } : {}),
+        }));
+      }
       const message = err instanceof Error ? err.message : 'internal error';
       return c.json(rpcError(id, -32603, message));
     }
@@ -275,9 +292,15 @@ async function callMcpTool(
       caller: 'mcp',
     };
     const res = await deps.toolRegistry.execute({ id: '', toolId: name, arguments: args }, ctx);
+    // §F7 — hand the agent the directive: code + message + remediation + details, not a bare enum.
     return res.ok
       ? textResult(JSON.stringify(res.output))
-      : textResult(`${res.errorCode}: ${res.errorMessage}`, true);
+      : textResult(JSON.stringify({
+          error: res.errorMessage,
+          code: res.errorCode,
+          ...(res.remediation ? { remediation: res.remediation } : {}),
+          ...(res.details ? { details: res.details } : {}),
+        }), true);
   }
 
   return textResult(`Unknown tool '${name}'`, true);
@@ -295,6 +318,6 @@ function rpcResult(id: string | number | null, result: unknown) {
   return { jsonrpc: '2.0', id, result };
 }
 
-function rpcError(id: string | number | null, code: number, message: string) {
-  return { jsonrpc: '2.0', id, error: { code, message } };
+function rpcError(id: string | number | null, code: number, message: string, data?: Record<string, unknown>) {
+  return { jsonrpc: '2.0', id, error: { code, message, ...(data ? { data } : {}) } };
 }

@@ -24,7 +24,8 @@ import { AGENT_AFFORDANCES, type AgentAffordance } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import { McpClient, type McpToolDescriptor } from './mcpClient.js';
-import { loadMcpServers, type McpServerConfig } from './mcpServerStore.js';
+import { loadMcpServers, resolveMcpServerHeaders, type McpServerConfig } from './mcpServerStore.js';
+import type { CredentialVault } from './credentialVault.js';
 
 export interface BridgedToolSpec {
   /** Namespaced tool id offered to the model: `mcp__<slug>__<tool>`. */
@@ -59,6 +60,8 @@ export interface ComputerUseServerConfig {
 export interface McpToolBridgeDeps {
   db: AgentisSqliteDb;
   logger: Logger;
+  /** Secrets plane: resolves a server's `credentialId` into headers at call time. */
+  vault?: CredentialVault;
   /** Default outbound network policy (mirrors the engine/MCP routes). */
   allowPrivateNetwork?: boolean;
   /** Built-in computer-use MCP server (Phase 3A). When set, mounted for every workspace. */
@@ -119,7 +122,7 @@ export class McpToolBridge {
     const server = this.#servers(workspaceId).find((s) => s.id === spec.serverId);
     if (!server) return { ok: false, error: `MCP server for '${toolId}' is no longer configured` };
     try {
-      const client = this.#client(server);
+      const client = this.#client(workspaceId, server);
       const res = await client.callTool(spec.toolName, args);
       return res.isError
         ? { ok: false, error: stringify(res.content) }
@@ -151,12 +154,20 @@ export class McpToolBridge {
   }
 
   async #serverTools(workspaceId: string, server: McpServerConfig, usedSlugs: Map<string, number>): Promise<BridgedToolSpec[]> {
-    const cacheKey = `${workspaceId}:${server.id}:${server.url}`;
+    // Allowlist rides the cache key so a PATCH takes effect immediately.
+    const cacheKey = `${workspaceId}:${server.id}:${server.url}:${(server.allowedTools ?? []).join(',')}`;
     const cached = this.#cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.specs;
 
-    const client = this.#client(server);
-    const tools = await client.listTools();
+    const client = this.#client(workspaceId, server);
+    const listed = await client.listTools();
+    // Least privilege: a non-empty allowlist makes ONLY those tools visible —
+    // to agents, to `mcp` nodes, and to REST — the rest of the server's
+    // surface simply does not exist for this workspace.
+    const allow = Array.isArray(server.allowedTools) && server.allowedTools.length > 0
+      ? new Set(server.allowedTools)
+      : null;
+    const tools = allow ? listed.filter((tool) => allow.has(tool.name)) : listed;
     const slug = this.#uniqueSlug(server, usedSlugs);
     const specs: BridgedToolSpec[] = tools.map((tool) => ({
       id: `${TOOL_ID_PREFIX}${slug}__${tool.name}`,
@@ -178,12 +189,20 @@ export class McpToolBridge {
     return seen === 0 ? base : `${base}${seen + 1}`;
   }
 
-  #client(server: McpServerConfig): McpClientLike {
-    const headers = server.headers ?? {};
+  #client(workspaceId: string, server: McpServerConfig): McpClientLike {
+    // Secrets plane: merge the vault credential into the headers at call time
+    // (JSON object → headers; bare token → Authorization: Bearer). The secret
+    // never rests in plaintext KV or travels through prompts/node configs.
+    const resolved = resolveMcpServerHeaders(this.deps.db, this.deps.vault, workspaceId, server);
+    if (resolved.credentialError) {
+      this.deps.logger.warn('mcp_bridge.credential_unresolved', {
+        workspaceId, server: server.name, error: resolved.credentialError,
+      });
+    }
     const opts = { allowPrivateNetwork: server.allowPrivateNetwork ?? this.deps.allowPrivateNetwork };
     return this.deps.clientFactory
-      ? this.deps.clientFactory(server.url, headers, opts)
-      : new McpClient(server.url, headers, opts);
+      ? this.deps.clientFactory(server.url, resolved.headers, opts)
+      : new McpClient(server.url, resolved.headers, opts);
   }
 }
 

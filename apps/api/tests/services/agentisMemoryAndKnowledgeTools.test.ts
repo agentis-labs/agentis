@@ -4,6 +4,7 @@ import { schema } from '@agentis/db/sqlite';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerInspectTools } from '../../src/services/agentisToolHandlers/inspect.js';
 import { registerRunTools } from '../../src/services/agentisToolHandlers/run.js';
+import { MemoryStore } from '../../src/services/memoryStore.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -27,6 +28,9 @@ function deps(): ToolHandlerDeps {
     approvals: { list: () => [] } as unknown as ToolHandlerDeps['approvals'],
     activity: {} as ToolHandlerDeps['activity'],
     replay: {} as ToolHandlerDeps['replay'],
+    // §B4 — the memory tools write/read/delete through the unified MemoryStore
+    // facade; the real store runs fine on the in-memory test db.
+    memory: new MemoryStore(ctx.db, ctx.logger),
     knowledgeBases: {
       listKnowledgeBases: () => [{ id: 'default_kb', name: 'Default KB' }],
       addDocument: async (args: any) => ({ id: 'doc_123', name: args.name, chunks: 1 }),

@@ -27,6 +27,33 @@ describe('auditWorkflowRobustness', () => {
     expect(codes(r)).toContain('MISSING_STATE');
   });
 
+  it('D9: flags an agent_task told to RUN a script (it has no shell → it fabricates)', () => {
+    const g = graphOf(
+      [
+        node('t', 'trigger'),
+        node('harvest', 'agent_task', { prompt: 'Run python scripts/fetch-instagram-public-profile.py for the handle and save 15 products to assets/.' }),
+        node('o', 'return_output'),
+      ],
+      [edge('t', 'harvest'), edge('harvest', 'o')],
+    );
+    const r = auditWorkflowRobustness(g, { triggerType: 'manual', archetype: 'pipeline' });
+    expect(codes(r)).toContain('AGENT_ASKED_TO_RUN_SCRIPT');
+    expect(r.warnings.find((w) => w.code === 'AGENT_ASKED_TO_RUN_SCRIPT')!.message).toMatch(/fabricate|code.*python/i);
+  });
+
+  it('D9: a genuine judgment agent_task (no script/command) is NOT flagged', () => {
+    const g = graphOf(
+      [
+        node('t', 'trigger'),
+        node('curate', 'agent_task', { prompt: 'Review the harvested posts and choose the 15 best products for a fashion storefront, writing a short rationale for each.' }),
+        node('o', 'return_output'),
+      ],
+      [edge('t', 'curate'), edge('curate', 'o')],
+    );
+    const r = auditWorkflowRobustness(g, { triggerType: 'manual', archetype: 'pipeline' });
+    expect(codes(r)).not.toContain('AGENT_ASKED_TO_RUN_SCRIPT');
+  });
+
   it('does NOT flag missing state when a workflow_store node is present', () => {
     const g = graphOf(
       [node('t', 'trigger', { triggerType: 'cron' }), node('s', 'workflow_store'), node('o', 'return_output')],

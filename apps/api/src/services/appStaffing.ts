@@ -27,7 +27,6 @@
 import type { AppStore } from '@agentis/app';
 import type { AppMemberRole } from '@agentis/core';
 import type { SpecialistAgentService } from './specialistAgents.js';
-import type { SpecialistLoadoutService } from './specialistLoadoutService.js';
 import type { Logger } from '../logger.js';
 
 /** A role in an App's cast — a specialist seat with baked-in operating competence. */
@@ -78,10 +77,6 @@ export interface StaffResult {
 export interface AppStaffingDeps {
   store: AppStore;
   specialists: SpecialistAgentService;
-  /** Optional — pins default abilities to a role's loadout when ability rows exist. */
-  loadouts?: SpecialistLoadoutService;
-  /** Optional — resolve an ability slug to its id for loadout pinning. */
-  resolveAbilityId?: (workspaceId: string, slug: string) => string | null;
   logger?: Logger;
 }
 
@@ -153,7 +148,6 @@ export class AppStaffingService {
         created = authored.created;
       }
 
-      this.#pinAbilities(input.workspaceId, role);
       this.deps.store.addMember(input.workspaceId, input.appId, agentId, memberRole);
       return { agentId, functionalRole: role.role, memberRole, created };
     } catch (err) {
@@ -166,23 +160,6 @@ export class AppStaffingService {
     }
   }
 
-  /** Best-effort: pin the role's default abilities when both the loadout service and the ability exist. */
-  #pinAbilities(workspaceId: string, role: CastRole): void {
-    const { loadouts, resolveAbilityId } = this.deps;
-    if (!loadouts || !resolveAbilityId || !role.abilities?.length) return;
-    for (const slug of role.abilities) {
-      const abilityId = resolveAbilityId(workspaceId, slug);
-      if (!abilityId) continue;
-      try {
-        // `required` = always composed for the role, like a pin (§3.2 — pinned
-        // abilities are identity, not slash-gated).
-        loadouts.setEntry(workspaceId, role.role, abilityId, { mode: 'required' });
-      } catch {
-        // A missing ability or loadout is not fatal — competence is carried by the
-        // specialist definition. Skip and move on.
-      }
-    }
-  }
 }
 
 // ── Cast derivation ─────────────────────────────────────────────

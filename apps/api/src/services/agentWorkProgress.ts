@@ -51,6 +51,54 @@ export function publishAgentWorkStep(bus: EventBus, input: AgentWorkStepInput): 
   }, correlationId);
 }
 
+/** A concrete thing an agent produced — the "creation" the operator wants to SEE. */
+export interface AgentCreationInput extends AgentWorkContext {
+  creationKind: 'record' | 'artifact' | 'file' | 'output' | 'surface' | 'collection';
+  /** Human label: a collection name, a filename, a surface name. */
+  title: string;
+  count?: number;
+  collection?: string;
+  /** Clickable reference: artifact:<id>, a path, or a url. */
+  ref?: string;
+}
+
+const CREATION_VERB: Record<AgentCreationInput['creationKind'], string> = {
+  record: 'Wrote', artifact: 'Saved', file: 'Created', output: 'Produced', surface: 'Rendered', collection: 'Defined',
+};
+
+/**
+ * Publish a CONCRETE creation an agent made (a record written, an artifact saved,
+ * a surface rendered) so the live feed shows "Wrote 12 records → leads" instead of
+ * generic tool text. Fires on the workspace room (chat/app agent feeds) and, when
+ * inside a run, the run room (canvas/node feed) so it is visible wherever the
+ * operator is watching. Carries a structured `creation` payload for rich rendering.
+ */
+export function publishAgentCreation(bus: EventBus, input: AgentCreationInput): void {
+  const description =
+    input.creationKind === 'record'
+      ? `Wrote ${input.count ?? 1} record${(input.count ?? 1) === 1 ? '' : 's'} → ${input.collection ?? input.title}`
+      : `${CREATION_VERB[input.creationKind]} ${input.title}`;
+  const payload = {
+    workspaceId: input.workspaceId,
+    ambientId: input.ambientId ?? undefined,
+    agentId: input.agentId,
+    agentName: input.agentName ?? undefined,
+    conversationId: input.conversationId,
+    clientTurnId: input.clientTurnId,
+    taskId: input.taskId,
+    workflowId: input.workflowId,
+    runId: input.runId,
+    nodeId: input.nodeId,
+    phase: 'creation',
+    step: 'creation',
+    description,
+    creation: { kind: input.creationKind, title: input.title, count: input.count, collection: input.collection, ref: input.ref },
+    at: new Date().toISOString(),
+  };
+  bus.publish(REALTIME_ROOMS.workspace(input.workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, payload, workCorrelationId(input));
+  if (input.runId) bus.publish(REALTIME_ROOMS.run(input.runId), REALTIME_EVENTS.AGENT_WORK_STEP, payload, workCorrelationId(input));
+}
+
 export function publishChatDeltaProgress(bus: EventBus, ctx: AgentWorkContext, delta: ChatDelta): void {
   if (delta.type === 'activity') {
     publishActivityProgress(bus, ctx, delta);

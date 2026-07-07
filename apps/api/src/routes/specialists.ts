@@ -17,8 +17,6 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { SpecialistAgentService } from '../services/specialistAgents.js';
 import type { AgentLibraryService } from '../services/agentLibrary.js';
-import type { SpecialistLoadoutService, LoadoutMode } from '../services/specialistLoadoutService.js';
-import type { AbilityService } from '../services/abilityService.js';
 import type { SpecialistProfileService } from '../services/specialistProfileService.js';
 import type { SpecialistMindService } from '../services/specialistMindService.js';
 import type { SpecialistDemandRouter } from '../services/specialistDemandRouter.js';
@@ -33,8 +31,6 @@ export interface SpecialistRoutesDeps {
   auth: AuthService;
   specialists: SpecialistAgentService;
   agentLibrary: AgentLibraryService;
-  loadouts: SpecialistLoadoutService;
-  abilities: AbilityService;
   profiles: SpecialistProfileService;
   mind: SpecialistMindService;
   router: SpecialistDemandRouter;
@@ -43,10 +39,9 @@ export interface SpecialistRoutesDeps {
   templates: SpecialistTemplateService;
 }
 
-/** Build the loadout-ability name/mode pairs for a role (used in cards). */
-function loadoutAbilityList(deps: SpecialistRoutesDeps, workspaceId: string, role: string): Array<{ name: string; mode: string }> {
-  const entries = deps.loadouts.listForRole(workspaceId, role).filter((e) => e.enabled);
-  return entries.map((e) => ({ name: deps.abilities.tryGet(e.abilityId)?.name ?? e.abilityId, mode: e.mode }));
+/** Ability loadouts were removed with the Abilities subsystem; cards show none. */
+function loadoutAbilityList(_deps: SpecialistRoutesDeps, _workspaceId: string, _role: string): Array<{ name: string; mode: string }> {
+  return [];
 }
 
 export interface SpecialistSummary {
@@ -162,11 +157,9 @@ export function buildSpecialistRoutes(deps: SpecialistRoutesDeps) {
     const role = c.req.param('role');
     const profile = deps.profiles.get(workspaceId, role) ?? deps.profiles.ensureFromDef(workspaceId, deps.specialists.defForRole(workspaceId, role));
     const mind = deps.mind.getMind(workspaceId, role);
-    const loadout = deps.loadouts.listForRole(workspaceId, role);
     const cases = deps.evals.ensureStarterCases(workspaceId, role);
     const warnings = [
       !mind || mind.sources.length === 0 ? 'Add at least one mind source before trusting this specialist broadly.' : null,
-      loadout.filter((entry) => entry.enabled).length === 0 ? 'No ability loadout configured.' : null,
       cases.length < 3 ? 'At least 3 eval cases are required before ready.' : null,
     ].filter(Boolean);
     return c.json({
@@ -176,7 +169,7 @@ export function buildSpecialistRoutes(deps: SpecialistRoutesDeps) {
         mindStatus: mind?.status ?? 'missing',
         sourceCount: mind?.sources.length ?? 0,
         atomCount: mind?.atoms.length ?? 0,
-        loadoutCount: loadout.filter((entry) => entry.enabled).length,
+        loadoutCount: 0,
         evalCaseCount: cases.length,
         ready: profile.status === 'ready' && (mind?.atoms.length ?? 0) > 0 && cases.length >= 3,
         warnings,
@@ -356,55 +349,6 @@ export function buildSpecialistRoutes(deps: SpecialistRoutesDeps) {
     return c.json({ run });
   });
 
-  // ── Ability loadouts (Phase 3) ──────────────────────────────
-  // A specialist's professional DNA: which abilities are required/preferred/
-  // optional/forbidden for a functional role.
-
-  app.get('/:role/abilities', async (c) => {
-    const { workspaceId } = getWorkspace(c);
-    const role = c.req.param('role');
-    const entries = deps.loadouts.listForRole(workspaceId, role);
-    const abilities = deps.abilities.list(workspaceId).map((a) => ({
-      id: a.id,
-      name: a.name,
-      slug: a.slug,
-      description: a.description ?? null,
-      domainTag: a.domainTag ?? null,
-      compileStatus: a.compileStatus,
-    }));
-    const byId = new Map(abilities.map((a) => [a.id, a]));
-    const loadout = entries.map((e) => ({ ...e, ability: byId.get(e.abilityId) ?? null }));
-    return c.json({ role, loadout, abilities });
-  });
-
-  app.put('/:role/abilities/:abilityId', async (c) => {
-    const { workspaceId } = getWorkspace(c);
-    const role = c.req.param('role');
-    const abilityId = c.req.param('abilityId');
-    if (!deps.abilities.tryGet(abilityId)) {
-      throw new AgentisError('RESOURCE_NOT_FOUND', `ability ${abilityId} not found`);
-    }
-    const body = await c.req.json().catch(() => ({}));
-    const parsed = loadoutSchema.safeParse(body);
-    if (!parsed.success) {
-      throw new AgentisError('VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'invalid loadout');
-    }
-    const entry = deps.loadouts.setEntry(workspaceId, role, abilityId, {
-      mode: parsed.data.mode as LoadoutMode | undefined,
-      priority: parsed.data.priority,
-      minRelevanceScore: parsed.data.minRelevanceScore ?? null,
-      conflictPolicy: parsed.data.conflictPolicy,
-      enabled: parsed.data.enabled,
-    });
-    return c.json({ entry });
-  });
-
-  app.delete('/:role/abilities/:abilityId', async (c) => {
-    const { workspaceId } = getWorkspace(c);
-    deps.loadouts.removeEntry(workspaceId, c.req.param('role'), c.req.param('abilityId'));
-    return c.json({ ok: true });
-  });
-
   return app;
 }
 
@@ -461,14 +405,6 @@ const evalCaseSchema = z.object({
 const evalRunSchema = z.object({
   output: z.string().max(100_000).optional(),
 }).strict();
-
-const loadoutSchema = z.object({
-  mode: z.enum(['required', 'preferred', 'optional', 'forbidden']).optional(),
-  priority: z.number().int().min(-100).max(100).optional(),
-  minRelevanceScore: z.number().min(0).max(1).nullable().optional(),
-  conflictPolicy: z.enum(['specialist_wins', 'ability_wins', 'newest_wins', 'evaluator_decides']).optional(),
-  enabled: z.boolean().optional(),
-});
 
 /** Union the library definitions with materialized agents into one summary list. */
 async function listSpecialists(deps: SpecialistRoutesDeps, workspaceId: string): Promise<SpecialistSummary[]> {

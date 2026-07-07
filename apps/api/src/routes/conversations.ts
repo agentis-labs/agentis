@@ -103,6 +103,8 @@ type ConversationRouteDeps = {
       promotedSessionMoments: number;
       workspaceMemoryIds: string[];
       sessionMomentId: string | null;
+      /** Learnings queued through the PRIMARY formation path (judge dedupes). */
+      signals: number;
     }>;
   };
 };
@@ -842,10 +844,31 @@ function streamConversationTurnReply(
       assistantMessage: finalText.trim() || null,
       finishReason,
     });
+    // BRAIN-BLUEPRINT-10X §visibility — the STORE half of the legible mind (the
+    // recall half is the executor's "Recalled N memories"). `signals` counts the
+    // learnings queued through the PRIMARY formation path (judge dedupes/rejects);
+    // the old condition ignored it, so exactly the turns that learned showed
+    // nothing — why the mind felt dead. The stream is still open here (`done` is
+    // written below), so the operator sees it in the turn itself.
     if (
       capture &&
-      (capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
+      (capture.signals > 0 || capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
     ) {
+      const stored = Math.max(capture.signals, capture.workspaceMemoryIds.length);
+      if (stored > 0) {
+        const storedAt = new Date().toISOString();
+        await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, createChatActivity({
+          clientTurnId: args.clientTurnId,
+          agentId: args.agentId,
+          phase: 'complete',
+          status: 'success',
+          label: `Storing ${stored} ${stored === 1 ? 'memory' : 'memories'}`,
+          detail: 'Learnings from this turn were queued into the Brain — the formation judge reconciles duplicates and rejects junk.',
+          suffix: 'memory-store',
+          startedAt: storedAt,
+          completedAt: storedAt,
+        }), streamedMetadata);
+      }
       publishAgentWorkStep(deps.bus, {
         workspaceId: ws.workspaceId,
         ambientId: ws.ambientId,

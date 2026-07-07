@@ -15,8 +15,9 @@ import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { HarnessMemoryIngestionService } from '../../src/services/harnessMemoryIngestion.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { AbilityService } from '../../src/services/abilityService.js';
-import { AbilityCreationService } from '../../src/services/abilityCreationService.js';
+import { MemoryStore } from '../../src/services/memoryStore.js';
+import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
+import { SkillService } from '../../src/services/skillService.js';
 import {
   discoverImportableAgents,
   previewAgentImport,
@@ -65,8 +66,10 @@ beforeEach(async () => {
   ctx = await createTestContext();
   store = new EpisodicMemoryStore(ctx.db, ctx.logger, new StubEmbeddingProvider());
   const ingestion = new HarnessMemoryIngestionService(store, ctx.logger);
-  const abilityService = new AbilityService(ctx.db, ctx.logger);
-  const abilityCreation = new AbilityCreationService({ db: ctx.db, logger: ctx.logger, abilities: abilityService });
+  const memory = new MemoryStore(ctx.db, ctx.logger);
+  memory.setEpisodicStore(store);
+  const brain = new SharedIntelligenceService(ctx.db, ctx.bus, store, ctx.logger);
+  const skills = new SkillService(ctx.db, memory, brain, ctx.logger);
   deps = {
     db: ctx.db,
     vault: ctx.vault,
@@ -74,8 +77,7 @@ beforeEach(async () => {
     logger: ctx.logger,
     bus: ctx.bus,
     ingestion,
-    abilityCreation,
-    abilities: abilityService,
+    skills,
   };
 
   home = mkdtempSync(path.join(os.tmpdir(), 'agentis-import-home-'));
@@ -209,7 +211,7 @@ describe('harness agent import (e2e)', () => {
     expect(imported).toHaveLength(1);
   });
 
-  it('transitions user skills into abilities pinned to the agent (P6)', async () => {
+  it('transitions user skills into agent-scoped Brain skill atoms', async () => {
     const preview = await withEnv(() => previewAgentImport(deps, ctx.workspace.id, 'claude_code:primary', {}));
     expect(preview.skills.some((s) => s.name === 'pdf-fill' && s.origin === 'user')).toBe(true);
 
@@ -222,12 +224,10 @@ describe('harness agent import (e2e)', () => {
     expect(result.totalAbilities).toBeGreaterThan(0);
     expect(outcome.abilities.created).toBeGreaterThan(0);
 
-    // The ability exists and is pinned to the imported agent.
-    const ability = ctx.db.select().from(schema.abilities).where(eq(schema.abilities.name, 'pdf-fill')).get();
-    expect(ability).toBeTruthy();
-    const pin = ctx.db.select().from(schema.agentAbilityPins)
-      .where(eq(schema.agentAbilityPins.agentId, outcome.agentId)).get();
-    expect(pin?.abilityId).toBe(ability!.id);
+    // The skill exists as an agent-scoped Brain skill atom (scoping replaces pinning).
+    const skill = deps.skills!.getByScopeAndSlug(ctx.workspace.id, outcome.agentId, 'pdf-fill');
+    expect(skill).toBeTruthy();
+    expect(skill!.body).toContain('pdftk');
   });
 
   it('agent deletion can promote its memory to the workspace (B11)', async () => {
@@ -329,7 +329,7 @@ describe('continuous transition updates (deferred item B)', () => {
     expect(update?.pendingMemory).toBeGreaterThan(0);
   });
 
-  it('detects and continuously syncs new harness skills into Agentis abilities', async () => {
+  it('detects and continuously syncs new harness skills into the Brain', async () => {
     await withEnv(() => importAgents(deps, { workspaceId: ctx.workspace.id, userId: ctx.user.id, specs: [{ externalId: 'claude_code:primary' }] }));
 
     const skillDir = path.join(home!, '.claude', 'skills', 'release-notes');
@@ -347,12 +347,10 @@ describe('continuous transition updates (deferred item B)', () => {
 
     const synced = await withEnv(() => syncImportedAgents(deps, ctx.workspace.id, {}));
     expect(synced.totalAbilities).toBe(1);
-    const ability = ctx.db.select().from(schema.abilities).where(eq(schema.abilities.name, 'release-notes')).get();
-    expect(ability).toBeTruthy();
-    const pin = ctx.db.select().from(schema.agentAbilityPins)
-      .where(eq(schema.agentAbilityPins.abilityId, ability!.id))
-      .get();
-    expect(pin?.agentId).toBe(synced.synced[0]!.agentId);
+    // The new skill landed as an agent-scoped Brain skill atom.
+    const skill = deps.skills!.getByScopeAndSlug(ctx.workspace.id, synced.synced[0]!.agentId, 'release-notes');
+    expect(skill).toBeTruthy();
+    expect(skill!.body).toContain('migration risks');
 
     const after = await withEnv(() => checkImportUpdates(deps, ctx.workspace.id, {}));
     expect(after.find((u) => u.externalId === 'claude_code:primary')).toBeUndefined();

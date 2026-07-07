@@ -17,8 +17,10 @@
  */
 
 import { effectiveSpecialistTools, TOOL_DESCRIPTIONS, type AgentRole, type AgentTool } from '@agentis/core';
+import { toolCallSignature, isRepeatedToolCall, LOOP_GUARD_THRESHOLD } from '../engine/pursuitControl.js';
 import type { AgentToolRuntime } from './agentToolRuntime.js';
 import type { Logger } from '../logger.js';
+import type { ArtifactRetentionPolicy } from './artifactRetentionPolicy.js';
 
 /** Minimal LLM surface — `EvaluatorRuntime` satisfies this. */
 export interface StructuredLlm {
@@ -54,6 +56,10 @@ export interface AgentToolLoopArgs {
   agentId?: string;
   /** The run's operator — actor context for `agentis.*` platform tools (E2). */
   userId?: string;
+  /** The concrete run this loop belongs to, used for artifact provenance. */
+  runId?: string;
+  /** Per-task asset retention policy propagated to mutating media tools. */
+  artifactPolicy?: ArtifactRetentionPolicy | null;
   /**
    * Explicit tool manifest to grant the agent. Defaults to the role's static
    * tools; pass the specialist's effective toolbox (incl. the universal default
@@ -126,6 +132,9 @@ export class AgentToolLoop {
     const extraIds = new Set(extraTools.map((t) => t.id));
     const steps: AgentToolLoopStep[] = [];
     const transcript: string[] = [];
+    // s6 loop guard (RFC §6/§10.3): executed (tool+args) signatures, so an agent
+    // that repeats the SAME call is nudged to change tack instead of burning steps.
+    const executedToolSignatures: string[] = [];
     let toolCalls = 0;
     // Accumulate token consumption across every model call so the engine can
     // attribute the node's real (or estimated) spend. Captured after each call.
@@ -179,6 +188,20 @@ export class AgentToolLoop {
       }
 
       const toolArgs = (decision.args && typeof decision.args === 'object') ? decision.args : {};
+
+      // s6 loop guard: the SAME tool+args has already executed enough times to be
+      // a loop — don't spend another call; feed a nudge back so the model changes
+      // its approach (or varies the args) rather than spinning to the step cap.
+      const sig = toolCallSignature(tool, toolArgs);
+      if (isRepeatedToolCall(executedToolSignatures, sig)) {
+        const note = `LOOP GUARD: '${tool}' was already called with identical arguments ${LOOP_GUARD_THRESHOLD}× and is not advancing. Change the arguments or take a different action.`;
+        steps.push({ thought, tool, args: toolArgs, error: note });
+        args.onStep?.({ index: i, phase: 'tool_result', tool, args: toolArgs, error: note });
+        transcript.push(`STEP ${i + 1}: ${tool}(${clip(JSON.stringify(toolArgs), 300)}) -> BLOCKED: ${note}`);
+        continue;
+      }
+
+      executedToolSignatures.push(sig);
       toolCalls += 1;
       args.onStep?.({ index: i, phase: 'tool_call', thought, tool, args: toolArgs });
       const res = isBridged
@@ -186,10 +209,14 @@ export class AgentToolLoop {
             userId: args.userId,
             agentId: args.agentId,
             workflowId: args.workflowId,
+            runId: args.runId,
+            artifactPolicy: args.artifactPolicy,
           })
         : await this.deps.runtime.execute(args.workspaceId, tool as AgentTool, toolArgs, args.role, {
             workflowId: args.workflowId,
             agentId: args.agentId,
+            runId: args.runId,
+            artifactPolicy: args.artifactPolicy,
             grantedTools: tools,
           });
       const observation = res.ok ? res.result : undefined;

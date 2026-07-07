@@ -204,8 +204,16 @@ export class AppSurfaceStore {
   render(workspaceId: string, appId: string, name: string, view: unknown): AppSurface {
     this.requireApp(workspaceId, appId);
     const parsed = viewNodeSchema.parse(view);
-    // Layout floor: auto-repair agent-authored trees before they ship.
-    const repaired = repairSurface(parsed, { collections: this.collectionNames(appId) }).view;
+    // Layout floor + operability gate: auto-repair agent-authored trees before
+    // they ship. The gate (RENDERED ≠ OPERABLE) runs against the surface's
+    // declared actions; when none are declared yet (render-then-declare flow),
+    // it defers to setActions, which re-audits with the real action set.
+    const existingRow = this.rowByName(appId, name);
+    const declared = (existingRow?.actionsJson ?? []) as SurfaceAction[];
+    const repaired = repairSurface(parsed, {
+      collections: this.collectionNames(appId),
+      ...(declared.length > 0 ? { actions: declared } : {}),
+    }).view;
     this.requireCustomCodeAllowed(workspaceId, appId, repaired);
     const existing = this.rowByName(appId, name);
     const now = new Date().toISOString();
@@ -230,7 +238,10 @@ export class AppSurfaceStore {
     let tree = structuredClone(current.view) as unknown;
     for (const op of ops) tree = applyPatchOp(tree, op);
     const parsed = viewNodeSchema.parse(tree);
-    const repaired = repairSurface(parsed, { collections: this.collectionNames(appId) }).view;
+    const repaired = repairSurface(parsed, {
+      collections: this.collectionNames(appId),
+      ...(current.actions.length > 0 ? { actions: current.actions } : {}),
+    }).view;
     this.requireCustomCodeAllowed(workspaceId, appId, repaired);
     const now = new Date().toISOString();
     this.db
@@ -299,7 +310,10 @@ export class AppSurfaceStore {
     return this.get(workspaceId, appId, name);
   }
 
-  /** ui_action_schema — declare the actions a surface may invoke. */
+  /** ui_action_schema — declare the actions a surface may invoke. Declaring
+   * actions re-runs the operability gate against the stored tree, so an action
+   * declared AFTER the render (the common agent flow) still gets wired into a
+   * control — a declared-but-unreachable workflow action cannot persist. */
   setActions(workspaceId: string, appId: string, name: string, actions: SurfaceAction[]): AppSurface {
     this.requireApp(workspaceId, appId);
     const parsed = actions.map((a) => surfaceActionSchema.parse(a));
@@ -312,6 +326,22 @@ export class AppSurfaceStore {
       .set({ actionsJson: parsed, updatedAt: new Date().toISOString() })
       .where(eq(schema.appSurfaces.id, existing.id))
       .run();
+
+    // Re-audit the stored tree with the now-authoritative action set.
+    const stored = existing.viewJson as ViewNode | null;
+    if (stored && parsed.length > 0) {
+      const { view: audited, fixes } = repairSurface(stored, { collections: this.collectionNames(appId), actions: parsed });
+      if (fixes.length > 0) {
+        this.db
+          .update(schema.appSurfaces)
+          .set({ viewJson: audited, revision: existing.revision + 1, updatedAt: new Date().toISOString() })
+          .where(eq(schema.appSurfaces.id, existing.id))
+          .run();
+        const surface = this.get(workspaceId, appId, name);
+        this.deps.emit?.({ appId, workspaceId, event: 'render', surfaceId: surface.id, revision: surface.revision, payload: { view: surface.view } });
+        return surface;
+      }
+    }
     return this.get(workspaceId, appId, name);
   }
 }

@@ -7,6 +7,7 @@ import type { EventBus } from '../event-bus.js';
 import type { CredentialVault } from './credentialVault.js';
 import { registerAdapter } from './agentCommission.js';
 import type { McpHarnessSessionService } from './mcpHarnessSession.js';
+import type { SkillMaterializer } from './skillMaterializer.js';
 import { cliCommandFromConfig, isCliHarnessAdapter, repairCliHarnessConfig } from './harnessConfigRepair.js';
 import { detectHarnesses, type HarnessDetectionResult, type V1HarnessAdapterType } from './harnessProbe.js';
 
@@ -20,6 +21,8 @@ export interface AgentRuntimeHydratorDeps {
   bus?: EventBus;
   /** Optional — mounts the Agentis MCP server on CLI harnesses (UNIVERSAL-HARNESS §5). */
   mcpHarness?: McpHarnessSessionService;
+  /** Optional — materializes each agent's Brain skills to `.claude/skills/` (Living Skills). */
+  skillMaterializer?: SkillMaterializer;
 }
 
 export async function hydrateAgentRuntimes(deps: AgentRuntimeHydratorDeps): Promise<void> {

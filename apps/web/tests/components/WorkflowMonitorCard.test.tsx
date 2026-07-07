@@ -6,6 +6,10 @@ const realtime = vi.hoisted(() => ({
   handler: null as null | ((env: { event: string; payload: unknown; emittedAt: string }) => void),
 }));
 const apiMock = vi.hoisted(() => vi.fn());
+const workspaceMock = vi.hoisted(() => ({
+  activeRuns: [] as Array<Record<string, unknown>>,
+  failedRuns: [] as Array<Record<string, unknown>>,
+}));
 
 vi.mock('../../src/lib/realtime', () => ({
   rtSubscribe: () => () => undefined,
@@ -22,8 +26,23 @@ vi.mock('../../src/lib/workspaceData', () => ({
   useWorkspaceData: () => ({
     workspaceId: 'workspace-1',
     approvals: [],
-    activeRuns: [],
-    failedRuns: [
+    activeRuns: workspaceMock.activeRuns,
+    failedRuns: workspaceMock.failedRuns,
+  }),
+  refreshWorkspaceSnapshot: vi.fn(async () => undefined),
+}));
+
+import { WorkflowMonitorCard } from '../../src/components/canvas/WorkflowMonitorCard';
+
+function emit(event: string, payload: Record<string, unknown>) {
+  act(() => realtime.handler?.({ event, payload, emittedAt: '2026-06-09T12:00:00.000Z' }));
+}
+
+describe('WorkflowMonitorCard', () => {
+  beforeEach(() => {
+    realtime.handler = null;
+    workspaceMock.activeRuns = [];
+    workspaceMock.failedRuns = [
       {
         id: 'run-self-heal',
         workflowId: 'workflow-self-heal',
@@ -41,20 +60,7 @@ vi.mock('../../src/lib/workspaceData', () => ({
           updatedAt: '2026-06-09T12:00:01.000Z',
         },
       },
-    ],
-  }),
-  refreshWorkspaceSnapshot: vi.fn(async () => undefined),
-}));
-
-import { WorkflowMonitorCard } from '../../src/components/canvas/WorkflowMonitorCard';
-
-function emit(event: string, payload: Record<string, unknown>) {
-  act(() => realtime.handler?.({ event, payload, emittedAt: '2026-06-09T12:00:00.000Z' }));
-}
-
-describe('WorkflowMonitorCard', () => {
-  beforeEach(() => {
-    realtime.handler = null;
+    ];
     apiMock.mockReset();
     apiMock.mockImplementation(async (path: string) => {
       if (path.includes('/preflight')) {
@@ -185,6 +191,50 @@ describe('WorkflowMonitorCard', () => {
     expect(screen.getByText(/Couldn't safely repair/)).toBeInTheDocument();
     expect(screen.getByText(/No workspace model available to ground a repair/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Report to team/ })).toBeInTheDocument();
+  });
+
+  it('does not keep showing an active repair incident after the run fails', async () => {
+    workspaceMock.failedRuns = [
+      {
+        id: 'run-stale-repair',
+        workflowId: 'workflow-stale-repair',
+        workflowName: 'Daily digest',
+        failedNode: 'Release validator',
+        failedNodeId: 'release-validator',
+        selfHealIncident: {
+          nodeId: 'release-validator',
+          nodeTitle: 'Release validator',
+          status: 'PLANNING',
+          mode: 'guarded',
+          attempt: 1,
+          maxAttempts: 2,
+          diagnosis: 'Orchestrator is repairing the workflow with the chat tool loop.',
+          startedAt: '2026-06-09T12:00:00.000Z',
+          updatedAt: '2026-06-09T12:00:01.000Z',
+        },
+      },
+    ];
+    const props = {
+      workflowId: 'workflow-stale-repair',
+      workflowTitle: 'Daily digest',
+      activeRunId: 'run-stale-repair',
+      activeRunStatus: 'running' as const,
+      nodeTitles: new Map<string, string>(),
+      revision: 'rev-1',
+      onFocusNode: vi.fn(),
+      onOpenRun: vi.fn(),
+      onRunStarted: vi.fn(),
+      onOpenHistory: vi.fn(),
+    };
+    const { rerender } = render(<WorkflowMonitorCard {...props} />);
+
+    emit(REALTIME_EVENTS.RUN_FAILED, { workflowId: 'workflow-stale-repair', runId: 'run-stale-repair' });
+    rerender(<WorkflowMonitorCard {...props} activeRunId={null} activeRunStatus={null} />);
+    await act(async () => undefined);
+
+    expect(screen.queryByTestId('self-heal-console')).not.toBeInTheDocument();
+    expect(screen.getByText('Latest run failed')).toBeInTheDocument();
+    expect(screen.getByText(/Failed at Release validator/)).toBeInTheDocument();
   });
 
   it('keeps the completed run visible instead of falling back to an older failure', async () => {

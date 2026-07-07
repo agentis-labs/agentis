@@ -41,11 +41,14 @@ export class OrchestratorEventBridge {
     const workspaceId = workspaceFromRoom(message.room) ?? workspaceFromPayload(message.envelope.payload);
     if (!workspaceId) return;
     const agent = findOrchestratorAgent(this.deps.db, workspaceId);
-    const payload = buildProactivePayload(event, message.envelope.payload, agent?.id ?? null, { db: this.deps.db, workspaceId });
-    this.deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_PROACTIVE_PUSH, payload);
-    if (agent) {
-      this.deps.bus.publish(REALTIME_ROOMS.conversation(agent.id), REALTIME_EVENTS.AGENT_PROACTIVE_PUSH, payload);
-    }
+    
+    // We intentionally stop pushing ProactiveCards to the chat stream 
+    // to keep chat for messages only.
+    // const payload = buildProactivePayload(event, message.envelope.payload, agent?.id ?? null, { db: this.deps.db, workspaceId });
+    // this.deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.AGENT_PROACTIVE_PUSH, payload);
+    // if (agent) {
+    //   this.deps.bus.publish(REALTIME_ROOMS.conversation(agent.id), REALTIME_EVENTS.AGENT_PROACTIVE_PUSH, payload);
+    // }
   }
 }
 

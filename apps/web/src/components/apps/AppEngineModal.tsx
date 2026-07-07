@@ -34,7 +34,6 @@ import {
 import type { AppRecord, AppSurface } from '@agentis/core';
 import type { AppUpdatePayload } from '../../lib/appsApi';
 import { api, apiErrorMessage } from '../../lib/api';
-import { openRunModal } from '../../lib/runModal';
 import { useToast } from '../shared/Toast';
 import { nestedDomainOptions } from '../shared/DomainToolbar';
 
@@ -58,6 +57,7 @@ interface AppAnalytics {
     totalTokens: number;
     totalCostCents: number;
   }>;
+  perAgent?: Array<{ agentId: string | null; name: string; tokensIn: number; tokensOut: number; totalTokens: number }>;
 }
 
 /** A field of a workflow's input contract — drives the on-demand Run inputs form. */
@@ -590,18 +590,16 @@ function AppAnalyticsPanel({
   const [runForm, setRunForm] = useState<{ workflowId: string; title: string; fields: RunInputField[] } | null>(null);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
 
-  // Fire the run + open the live, streaming run view (pain: "no option to run a
-  // workflow" + the blackbox) — the endpoint returns a runId immediately and
-  // openRunModal subscribes to its realtime room.
+  // Fire the run from the app engine. The run inspector remains available from
+  // explicit inspect actions instead of opening automatically.
   const submitRun = useCallback(
     async (workflowId: string, inputs: Record<string, unknown>) => {
       setLaunching(workflowId);
       try {
-        const res = await api<{ runId: string }>(`/v1/workflows/${workflowId}/run`, {
+        await api<{ runId: string }>(`/v1/workflows/${workflowId}/run`, {
           method: 'POST',
           body: JSON.stringify({ inputs }),
         });
-        openRunModal({ runId: res.runId, workflowId, source: 'app_engine' });
         setRunForm(null);
       } catch (err) {
         toast.error('Could not start run', apiErrorMessage(err));
@@ -780,6 +778,26 @@ function AppAnalyticsPanel({
           </div>
         )}
       </div>
+
+      {analytics.perAgent && analytics.perAgent.length > 0 && (
+        <div>
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-text-muted">Tokens by agent</div>
+          <div className="space-y-1.5">
+            {analytics.perAgent.map((row) => {
+              const share = analytics.totalTokens > 0 ? row.totalTokens / analytics.totalTokens : 0;
+              return (
+                <div key={row.agentId ?? 'system'} className="flex items-center gap-3">
+                  <span className={`min-w-0 flex-1 truncate text-[12px] ${row.agentId ? 'text-text-primary' : 'italic text-text-muted'}`} title={row.name}>{row.name}</span>
+                  <span className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-canvas">
+                    <span className="block h-full rounded-full bg-accent" style={{ width: `${Math.round(share * 100)}%` }} />
+                  </span>
+                  <span className="w-16 shrink-0 text-right font-mono text-[11.5px] tabular-nums text-text-secondary" title={`${row.tokensIn} in · ${row.tokensOut} out`}>{formatTokens(row.totalTokens)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -35,7 +35,9 @@ import {
   type WorkspaceSelfHealIncident,
 } from '../../lib/workspaceData';
 import { SelfHealConsole } from './SelfHealConsole';
+import { ApprovalPreviewCard, ApprovalReviewModal } from '../shared/ApprovalReviewModal';
 import { formatDuration, type WorkflowRunSummary } from '../workflows/runFormat';
+import { RunVerdictBanner } from '../workflows/RunVerdictBanner';
 
 type MonitorMode = 'minimized' | 'expanded';
 type MonitorStatus = 'idle' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed';
@@ -45,6 +47,8 @@ const DEFAULT_VISIBLE_EVENTS = 4;
 const DEFAULT_WIDTH = 372;
 const MIN_WIDTH = 300;
 const MAX_WIDTH = 560;
+const ACTIVE_SELF_HEAL_STATUSES = new Set(['DIAGNOSING', 'PLANNING', 'APPLYING', 'RETRYING']);
+const TERMINAL_SELF_HEAL_STATUSES = new Set(['APPLIED', 'BLOCKED', 'EXHAUSTED', 'ROLLED_BACK']);
 
 interface HealthIssue {
   code: string;
@@ -76,6 +80,7 @@ interface WorkflowAnalytics {
   avgTokensPerRun: number;
   byStatus: Record<string, number>;
   nodeFailures: Array<{ nodeId: string; title: string; failures: number; sampleError: string }>;
+  perAgent?: Array<{ agentId: string | null; name: string; tokensIn: number; tokensOut: number; totalTokens: number }>;
 }
 
 export function WorkflowMonitorCard({
@@ -110,6 +115,7 @@ export function WorkflowMonitorCard({
   const [terminalKind, setTerminalKind] = useState<'run' | 'build' | null>(null);
   const [showEarlier, setShowEarlier] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [selectedApproval, setSelectedApproval] = useState<WorkspaceApproval | null>(null);
   const [stopping, setStopping] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [health, setHealth] = useState<HealthReport | null>(null);
@@ -118,6 +124,9 @@ export function WorkflowMonitorCard({
   const [analytics, setAnalytics] = useState<WorkflowAnalytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  // Live token consumption for the tracked run — refreshed on every run event so
+  // operators watch spend accrue in real time (our core "no token slavery" promise).
+  const [runTokens, setRunTokens] = useState<{ input: number; output: number; total: number } | null>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const previousRunId = useRef<string | null>(activeRunId);
@@ -136,6 +145,15 @@ export function WorkflowMonitorCard({
     handle: HTMLElement;
   } | null>(null);
   const monitorRunId = activeRunId ?? trackedRunId;
+
+  const workflowApprovals = useMemo(
+    () => {
+      const runId = monitorRunId;
+      return runId ? approvals.filter((approval) => approval.runId === runId) : [];
+    },
+    [approvals, monitorRunId],
+  );
+  const topApproval = workflowApprovals[0] ?? null;
 
   const loadHealth = useCallback(async () => {
     setHealthChecking(true);
@@ -167,6 +185,17 @@ export function WorkflowMonitorCard({
     }
   }, [analytics, analyticsLoading, workflowId]);
 
+  // Live token usage for the tracked run — cheap read of the run detail's rolled-up
+  // tokenUsage. Called on run change and on every matched realtime event.
+  const loadRunTokens = useCallback(async (runId: string) => {
+    try {
+      const detail = await api<{ run?: { tokenUsage?: { input: number; output: number; total: number } } }>(`/v1/runs/${runId}`);
+      setRunTokens(detail.run?.tokenUsage ?? null);
+    } catch {
+      /* transient — keep the last known value */
+    }
+  }, []);
+
   useEffect(() => {
     if (!activeRunId) {
       if (previousRunId.current === null) return;
@@ -190,17 +219,21 @@ export function WorkflowMonitorCard({
   }, [activeRunId, activeRunStatus]);
 
   useEffect(() => {
-    const next = monitorStatusFromRun(activeRunStatus, activeRunId);
-    if (!activeRunId && status !== 'completed' && status !== 'failed') {
-      setStatus(next);
-      return;
+    let next = monitorStatusFromRun(activeRunStatus, activeRunId);
+    if (topApproval) {
+      if (next === 'running') next = 'waiting';
+    } else {
+      if (next === 'waiting' && activeRunId) next = 'running';
     }
-    if (activeRunStatus === 'paused') setStatus('paused');
-    else if (activeRunStatus === 'waiting') setStatus('waiting');
-    else if (activeRunStatus === 'pending' || activeRunStatus === 'running') {
-      setStatus((current) => current === 'completed' || current === 'failed' ? current : 'running');
-    }
-  }, [activeRunId, activeRunStatus, status]);
+
+    setStatus((current) => {
+      // If we are in a terminal state for the current run, don't revert to running/waiting
+      if ((current === 'completed' || current === 'failed') && activeRunId === previousRunId.current) {
+        return current;
+      }
+      return next;
+    });
+  }, [activeRunId, activeRunStatus, topApproval]);
 
   useEffect(() => {
     let cancelled = false;
@@ -240,7 +273,25 @@ export function WorkflowMonitorCard({
     upsertActivity(setFeed, activity);
     updateMonitorStatus(env, setStatus, setTerminalKind);
     if (activity.runId) setTrackedRunId(activity.runId);
+    // Refresh live token spend as the run progresses; on terminal events refresh
+    // the cumulative workflow analytics too.
+    const tokenRunId = activity.runId ?? monitorRunId;
+    if (tokenRunId) void loadRunTokens(tokenRunId);
+    if (env.event === REALTIME_EVENTS.RUN_COMPLETED || env.event === REALTIME_EVENTS.RUN_FAILED) {
+      void loadAnalytics(true);
+    }
   });
+
+  // Seed the live token counter for the tracked run + the cumulative workflow
+  // total, so the pill has numbers before any realtime event arrives.
+  useEffect(() => {
+    if (monitorRunId) void loadRunTokens(monitorRunId);
+    else setRunTokens(null);
+  }, [monitorRunId, loadRunTokens]);
+
+  useEffect(() => {
+    void loadAnalytics(false);
+  }, [loadAnalytics]);
 
   useEffect(() => {
     if (!activeRunId) return;
@@ -267,14 +318,7 @@ export function WorkflowMonitorCard({
     return () => { cancelled = true; };
   }, [activeRunId, nodeTitles, workflowId]);
 
-  const workflowApprovals = useMemo(
-    () => {
-      const runId = monitorRunId;
-      return runId ? approvals.filter((approval) => approval.runId === runId) : [];
-    },
-    [approvals, monitorRunId],
-  );
-  const topApproval = workflowApprovals[0] ?? null;
+
   const selfHealIncident = useMemo(
     () => {
       const runId = monitorRunId;
@@ -287,15 +331,21 @@ export function WorkflowMonitorCard({
     },
     [activeRuns, failedRuns, monitorRunId],
   );
+  const visibleSelfHealIncident = useMemo(() => {
+    if (!selfHealIncident) return null;
+    if (TERMINAL_SELF_HEAL_STATUSES.has(selfHealIncident.status)) return selfHealIncident;
+    if (ACTIVE_SELF_HEAL_STATUSES.has(selfHealIncident.status)) {
+      const runStillActive = status === 'running' || status === 'waiting' || status === 'paused';
+      return runStillActive && activeRunId && monitorRunId === activeRunId ? selfHealIncident : null;
+    }
+    return selfHealIncident;
+  }, [activeRunId, monitorRunId, selfHealIncident, status]);
   const currentFailedRun = useMemo(
     () => monitorRunId ? failedRuns.find((run) => run.id === monitorRunId) ?? null : null,
     [failedRuns, monitorRunId],
   );
 
-  useEffect(() => {
-    if (topApproval && status === 'running') setStatus('waiting');
-    if (!topApproval && status === 'waiting' && activeRunId) setStatus('running');
-  }, [activeRunId, status, topApproval]);
+  // Consolidated status updates in the first useEffect to prevent conflicting triggers.
 
   const displayFeed = (status === 'completed' || status === 'failed'
     ? feed.filter((item) => item.kind !== 'run')
@@ -318,19 +368,6 @@ export function WorkflowMonitorCard({
         : status === 'running'
           ? 'accent'
           : 'muted';
-
-  async function resolveApproval(approval: WorkspaceApproval, decision: 'approve' | 'reject') {
-    setResolving(true);
-    try {
-      await api(`/v1/approvals/${approval.id}/resolve`, {
-        method: 'POST',
-        body: JSON.stringify({ decision }),
-      });
-      await refreshWorkspaceSnapshot();
-    } finally {
-      setResolving(false);
-    }
-  }
 
   async function resolveSelfHeal(approvalId: string, decision: 'approve' | 'reject') {
     setResolving(true);
@@ -546,6 +583,11 @@ export function WorkflowMonitorCard({
   }
 
   const headerLabel = statusLabel(status, workflowTitle, terminalKind);
+  // Token pill — show the live run spend while a run is tracked, otherwise the
+  // cumulative workflow total. `live` drives the pulsing dot.
+  const runLive = status === 'running' || status === 'waiting' || status === 'paused';
+  const pillTokens = runTokens?.total ?? analytics?.totalTokens ?? null;
+  const pillIsLive = runLive && runTokens != null;
   const canPauseRun = (status === 'running' || status === 'waiting')
     && Boolean(activeRunId)
     && terminalKind !== 'build';
@@ -581,6 +623,21 @@ export function WorkflowMonitorCard({
             <div className="truncate text-[10px] leading-3 text-text-muted">{headerLabel}</div>
           )}
         </div>
+        {pillTokens != null && (
+          <span
+            className={clsx(
+              'inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
+              pillIsLive ? 'border-accent/30 bg-accent/10 text-accent' : 'border-white/10 bg-surface/60 text-text-secondary',
+            )}
+            title={pillIsLive
+              ? `${pillTokens.toLocaleString()} tokens this run (live)`
+              : `${pillTokens.toLocaleString()} tokens across recent runs`}
+          >
+            {pillIsLive && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
+            {formatTokens(pillTokens)}
+            <span className="text-[8px] font-normal uppercase tracking-wide opacity-70">tok</span>
+          </span>
+        )}
         {mode === 'expanded' && (
           <button
             type="button"
@@ -638,6 +695,10 @@ export function WorkflowMonitorCard({
 
       {mode === 'expanded' && (
         <div className="max-h-[min(440px,calc(100vh-190px))] overflow-y-auto px-3 py-2.5">
+          {/* SWIFT layer 3: the world-verified outcome â€” completion is not accomplishment. */}
+          {monitorRunId && (status === 'completed' || status === 'failed') && (
+            <RunVerdictBanner runId={monitorRunId} refreshKey={status} />
+          )}
           {(canResumeRun || canPauseRun || (monitorRunId && terminalKind !== 'build')) && (
             <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/10 bg-surface/55 p-2">
               <span className="min-w-0 flex-1 text-[10.5px] font-medium text-text-muted">Run controls</span>
@@ -693,37 +754,19 @@ export function WorkflowMonitorCard({
           </div>
 
           {tab === 'activity' && topApproval && (
-            <div className="mb-3 border-l border-warn/60 pl-3">
-              <div className="text-[12px] font-medium text-text-primary">
-                {topApproval.agentName ?? 'Approval requested'}
-              </div>
-              <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                {topApproval.summary ?? topApproval.workflowName ?? 'This run needs an operator decision.'}
-              </p>
-              <div className="mt-2 flex gap-3 text-[11px]">
-                <button
-                  type="button"
-                  disabled={resolving}
-                  onClick={() => void resolveApproval(topApproval, 'approve')}
-                  className="inline-flex items-center gap-1 font-medium text-accent hover:underline disabled:opacity-50"
-                >
-                  <Check size={11} /> Approve
-                </button>
-                <button
-                  type="button"
-                  disabled={resolving}
-                  onClick={() => void resolveApproval(topApproval, 'reject')}
-                  className="inline-flex items-center gap-1 font-medium text-danger hover:underline disabled:opacity-50"
-                >
-                  <X size={11} /> Reject
-                </button>
-              </div>
+            <div className="mb-3">
+              <ApprovalPreviewCard
+                approval={topApproval}
+                busy={resolving}
+                compact
+                onReview={setSelectedApproval}
+              />
             </div>
           )}
 
-          {tab === 'activity' && !topApproval && selfHealIncident && (
+          {tab === 'activity' && !topApproval && visibleSelfHealIncident && (
             <SelfHealConsole
-              incident={selfHealIncident}
+              incident={visibleSelfHealIncident}
               activity={feed}
               busy={resolving}
               onResolve={(approvalId, decision) => void resolveSelfHeal(approvalId, decision)}
@@ -732,7 +775,7 @@ export function WorkflowMonitorCard({
             />
           )}
 
-          {tab === 'activity' && !topApproval && !selfHealIncident && currentFailedRun && status === 'failed' && (
+          {tab === 'activity' && !topApproval && !visibleSelfHealIncident && currentFailedRun && status === 'failed' && (
             <div className="mb-3 border-l border-danger/70 pl-3">
               <div className="flex items-center gap-1.5 text-[12px] font-medium text-text-primary">
                 <AlertTriangle size={12} className="text-danger" />
@@ -838,6 +881,11 @@ export function WorkflowMonitorCard({
           <span className="h-2.5 w-2.5 border-b border-r border-current" />
         </button>
       )}
+      <ApprovalReviewModal
+        approval={selectedApproval}
+        open={Boolean(selectedApproval)}
+        onClose={() => setSelectedApproval(null)}
+      />
     </section>
   );
 }
@@ -858,9 +906,9 @@ function HealthStrip({
   const label = checking
     ? 'Checking health'
     : tone === 'healthy'
-      ? `Healthy · ${nodeCount} nodes`
+      ? `Healthy Â· ${nodeCount} nodes`
       : tone === 'blocked'
-        ? `Blocked · ${errorCount} issue${errorCount === 1 ? '' : 's'}`
+        ? `Blocked Â· ${errorCount} issue${errorCount === 1 ? '' : 's'}`
         : 'Needs run evidence';
   const Icon = checking ? RadioTower : tone === 'healthy' ? ShieldCheck : tone === 'blocked' ? AlertTriangle : CheckCircle2;
   return (
@@ -988,7 +1036,7 @@ function AnalyticsDetails({
       </div>
       <div className="grid grid-cols-3 gap-2">
         <Metric label="Runs" value={String(analytics.runs)} />
-        <Metric label="Success" value={analytics.successRate == null ? '–' : `${Math.round(analytics.successRate * 100)}%`} />
+        <Metric label="Success" value={analytics.successRate == null ? 'â€“' : `${Math.round(analytics.successRate * 100)}%`} />
         <Metric label="Avg duration" value={formatDuration(analytics.avgDurationMs)} />
       </div>
       <TokenSummary
@@ -998,6 +1046,25 @@ function AnalyticsDetails({
         perRun={analytics.avgTokensPerRun}
       />
       <CostSummary metered={analytics.metered} avgCostCents={analytics.avgCostCents} totalCostCents={analytics.totalCostCents} />
+      {analytics.perAgent && analytics.perAgent.length > 0 && (
+        <div className="border-t border-white/10 pt-2">
+          <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-text-muted">Tokens by agent</div>
+          <div className="space-y-1">
+            {analytics.perAgent.slice(0, 6).map((row) => {
+              const share = analytics.totalTokens > 0 ? row.totalTokens / analytics.totalTokens : 0;
+              return (
+                <div key={row.agentId ?? 'system'} className="flex items-center gap-2 text-[10.5px]">
+                  <span className={`min-w-0 flex-1 truncate ${row.agentId ? 'text-text-secondary' : 'italic text-text-muted'}`}>{row.name}</span>
+                  <span className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-surface-2">
+                    <span className="block h-full rounded-full bg-accent" style={{ width: `${Math.round(share * 100)}%` }} />
+                  </span>
+                  <span className="w-12 shrink-0 text-right font-mono text-text-muted">{formatTokens(row.totalTokens)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {Object.keys(analytics.byStatus).length > 0 && (
         <div className="border-t border-white/10 pt-2">
           <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-text-muted">Run outcomes</div>
@@ -1085,7 +1152,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * Token consumption — the headline analytics signal. One tile replaces the old
+ * Token consumption â€” the headline analytics signal. One tile replaces the old
  * confusing "Tokens" + "Avg tokens" pair: a big total, the in/out split, and the
  * per-run average folded in as a caption.
  */
@@ -1124,7 +1191,7 @@ function CostSummary({ metered, avgCostCents, totalCostCents }: { metered: boole
   if (!metered) {
     return (
       <div className="rounded-lg border border-white/10 bg-surface/40 px-3 py-2 text-[10.5px] text-text-muted">
-        Subscription runtime — cost not metered. Tokens above are the spend signal.
+        Subscription runtime â€” cost not metered. Tokens above are the spend signal.
       </div>
     );
   }
@@ -1136,7 +1203,7 @@ function CostSummary({ metered, avgCostCents, totalCostCents }: { metered: boole
   );
 }
 
-/** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
+/** Compact token count: 1234 â†’ "1.2k", 1_200_000 â†’ "1.2M". */
 function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0';
   if (value < 1_000) return String(Math.round(value));

@@ -92,6 +92,9 @@ describe('ClaudeCodeAdapter chat', () => {
       '--include-partial-messages',
       '--max-turns=4',
       '--dangerously-skip-permissions',
+      // Codex `--ignore-user-config` parity: never inherit the operator's personal
+      // `~/.claude` MCP servers (which can need auth and hang the turn).
+      '--strict-mcp-config',
     ], expect.any(Object));
     expect(deltas).toContainEqual(expect.objectContaining({
       type: 'tool_call',

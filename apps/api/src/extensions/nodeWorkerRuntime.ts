@@ -77,6 +77,8 @@ export async function runNodeWorkerExtension(args: {
   logger: Logger;
   /** When present, the operation runs with the Listener source contract. */
   listenerHooks?: ListenerHooks;
+  /** Run-scoped cancellation: aborting disposes the isolate (hard stop). */
+  signal?: AbortSignal;
 }): Promise<ExtensionExecutionOutcome> {
   const start = Date.now();
   const loaded = await loadIsolatedVm();
@@ -105,6 +107,11 @@ export async function runNodeWorkerExtension(args: {
 
   const { ivm } = loaded;
   const isolate = new ivm.Isolate({ memoryLimit: CONSTANTS.EXTENSION_ISOLATE_HEAP_MB });
+  // Run-scoped cancellation: disposing the isolate hard-stops the script
+  // mid-execution (the run() promise rejects immediately) — a cancelled run
+  // never waits for the extension timeout.
+  const onAbort = () => { try { isolate.dispose(); } catch { /* already disposed */ } };
+  args.signal?.addEventListener('abort', onAbort, { once: true });
   try {
     const context = await isolate.createContext();
     const jail = context.global;
@@ -327,7 +334,8 @@ return await (__entrypoint.length >= 2 ? __entrypoint(ctx.inputs, ctx) : __entry
       operationName: args.operationName,
     };
   } finally {
-    isolate.dispose();
+    args.signal?.removeEventListener('abort', onAbort);
+    try { isolate.dispose(); } catch { /* disposed by abort */ }
   }
 }
 

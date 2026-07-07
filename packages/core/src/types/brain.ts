@@ -129,7 +129,7 @@ export interface BrainResponse {
   gaps: BrainGap[];
 }
 
-export type KnowledgeAtomKind = 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern';
+export type KnowledgeAtomKind = 'kb_chunk' | 'knowledge_chunk' | 'episode' | 'memory' | 'pattern' | 'skill' | 'example';
 
 export type KnowledgeLinkRelation = 'supports' | 'contradicts' | 'refines' | 'derived_from' | 'co_observed' | 'owned_by';
 

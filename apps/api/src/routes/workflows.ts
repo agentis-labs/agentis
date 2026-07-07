@@ -34,6 +34,7 @@ import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.j
 import { buildTemplateContext, resolveTemplateDeep } from '../engine/templateResolver.js';
 import { WorkflowTriggerDeploymentService } from '../services/workflowTriggerDeployment.js';
 import { preflightWorkflow } from '../services/workflowPreflight.js';
+import { LOOP_STAGE_LABEL, compassForWorkflow, deriveLoopStage, detectProvenDivergence, graphContentHash, readBuildLoop } from '../services/workflowCompass.js';
 
 export function buildWorkflowRoutes(deps: {
   db: AgentisSqliteDb;
@@ -227,6 +228,38 @@ export function buildWorkflowRoutes(deps: {
     }));
   });
 
+  // PAVED-ROAD P5 — where this workflow stands on the build loop (authored →
+  // dry-run → debug-run → production), with staleness vs the CURRENT graph and
+  // the exact next step. Same substrate the agent tools read.
+  app.get('/:id/loop-status', (c) => {
+    const ws = getWorkspace(c);
+    const wf = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    const graph = wf.graph as WorkflowGraph;
+    const state = readBuildLoop(wf.settings);
+    const hash = graphContentHash(graph);
+    const stage = deriveLoopStage(state, hash);
+    return c.json({
+      workflowId: wf.id,
+      stage,
+      stageLabel: LOOP_STAGE_LABEL[stage],
+      graphHash: hash,
+      evidence: {
+        validatedAt: state.validatedAt ?? null,
+        dryRun: state.dryRun ? { ...state.dryRun, stale: state.dryRun.graphHash !== hash } : null,
+        suite: state.suite ? { ...state.suite, stale: state.suite.graphHash !== hash } : null,
+        debugRun: state.debugRun ? { ...state.debugRun, stale: state.debugRun.graphHash !== hash } : null,
+        hardened: state.hardened ? { ...state.hardened, stale: state.hardened.graphHash !== hash } : null,
+        productionRun: state.productionRun ? { ...state.productionRun, stale: state.productionRun.graphHash !== hash } : null,
+      },
+      // SWIFT-T: rolling production accomplishment (world-verified) — the health metric.
+      outcomeHealth: state.outcomeHealth ?? null,
+      // SWIFT proactive guard: non-null when the current graph was edited away from
+      // a PROVEN blueprint/hardened version → UNVERIFIED, re-verify before running.
+      divergence: detectProvenDivergence(state, hash, wf.id),
+      compass: compassForWorkflow({ workflowId: wf.id, graph, settings: wf.settings }),
+    });
+  });
+
   app.get('/:id/deployment', (c) => {
     const ws = getWorkspace(c);
     if (!triggerDeployments) {
@@ -240,11 +273,14 @@ export function buildWorkflowRoutes(deps: {
     if (!triggerDeployments) {
       throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Workflow trigger deployment is unavailable.');
     }
+    // SWIFT arming gate: an explicit override (audited) may arm an unhardened workflow.
+    const body = (await c.req.json().catch(() => ({}))) as { override?: { ack?: string } };
     const deployment = await triggerDeployments.activate({
       workspaceId: ws.workspaceId,
       workflowId: c.req.param('id'),
       ambientId: ws.ambientId ?? null,
       userId: ws.user.id,
+      ...(body.override?.ack?.trim() ? { override: { ack: String(body.override.ack) } } : {}),
     });
     return c.json({ deployment });
   });
@@ -301,7 +337,16 @@ export function buildWorkflowRoutes(deps: {
     } catch {
       /* best-effort mirror */
     }
-    return c.json({ ok: true });
+    // SWIFT "warn previously": if this save edited a PROVEN workflow away from its
+    // blueprint/hardened graph, tell the editor NOW — it is UNVERIFIED until it is
+    // re-proven, and a proven workflow only breaks when it changes. The save still
+    // succeeds (non-blocking); the warning steers to re-verify (or restore) next.
+    const divergence = detectProvenDivergence(
+      readBuildLoop(body.settings ?? (wf.settings as Record<string, unknown>)),
+      graphContentHash(nextGraph), // MUST match how buildLoop stamps hash (semantic, not the DB row hash)
+      id,
+    );
+    return c.json({ ok: true, ...(divergence ? { divergence } : {}) });
   });
 
   app.post('/:id/run', async (c) => {
@@ -399,7 +444,12 @@ export function buildWorkflowRoutes(deps: {
       graph,
     });
 
-    return c.json({ runId }, 202);
+    // SWIFT "warn previously": this HTTP run is always a production run (self-heal
+    // ON). If the graph diverges from its PROVEN blueprint/hardened version, the run
+    // is proceeding UNVERIFIED — surface that with the run id so the operator can
+    // re-verify (deliver) or restore rather than trust an unproven change silently.
+    const divergence = detectProvenDivergence(readBuildLoop(wf.settings), graphContentHash(graph), wf.id);
+    return c.json({ runId, ...(divergence ? { divergence } : {}) }, 202);
   });
 
   /**

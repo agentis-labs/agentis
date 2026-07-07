@@ -1,5 +1,5 @@
 /**
- * Canvas - run a saved workflow and verify inspection stays modal-first.
+ * Canvas - run a saved workflow and keep inspection operator-driven.
  */
 import { test, expect } from '../fixtures';
 import { trivialGraph } from '../api/_helpers';
@@ -21,7 +21,7 @@ async function seedWorkflow(request: import('@playwright/test').APIRequestContex
   return body.workflow.id as string;
 }
 
-test('Run button on the canvas starts a run and opens the run modal without leaving the canvas', async ({ page, request }) => {
+test('Run button on the canvas starts a run without auto-opening the run modal', async ({ page, request }) => {
   const auth = await uiAuth(page, request);
   const workflowId = await seedWorkflow(request, auth.h);
   await waitForShell(page);
@@ -29,7 +29,7 @@ test('Run button on the canvas starts a run and opens the run modal without leav
   await page.getByRole('button', { name: /^Run$/i }).click();
   await page.getByRole('dialog').getByRole('button', { name: /^Run$/i }).click();
   await expect(page).toHaveURL(new RegExp(`/workflows/${workflowId}(\\?tab=studio)?$`), { timeout: 10_000 });
-  await expect(page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i })).toHaveCount(0);
 });
 
 test('run modal renders the ledger tab from the canvas flow', async ({ page, request }) => {
@@ -39,6 +39,7 @@ test('run modal renders the ledger tab from the canvas flow', async ({ page, req
   await page.goto(`/workflows/${workflowId}`);
   await page.getByRole('button', { name: /^Run$/i }).click();
   await page.getByRole('dialog').getByRole('button', { name: /^Run$/i }).click();
+  await page.getByRole('button', { name: /^Inspect run$/i }).click();
   const modal = page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i });
   await expect(modal.getByRole('button', { name: /^ledger$/i })).toBeVisible({ timeout: 15_000 });
   await modal.getByRole('button', { name: /^ledger$/i }).click();
@@ -52,6 +53,7 @@ test('run modal shows a Nodes panel header', async ({ page, request }) => {
   await page.goto(`/workflows/${workflowId}`);
   await page.getByRole('button', { name: /^Run$/i }).click();
   await page.getByRole('dialog').getByRole('button', { name: /^Run$/i }).click();
+  await page.getByRole('button', { name: /^Inspect run$/i }).click();
   const modal = page.getByRole('dialog', { name: /Run [0-9a-f-]{36}/i });
   await expect(modal.getByRole('button', { name: /^nodes$/i })).toBeVisible({ timeout: 15_000 });
 });

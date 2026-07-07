@@ -12,6 +12,15 @@ out/
 .agentis/
 .claude/
 
+# Agent/app-generated media & runtime output — NEVER commit (personal/business
+# data, and it bloats the repo). Generated assets belong in the data root
+# ({AGENTIS_DATA_DIR}) or an external store dir, never in the source tree.
+brand-assets/
+**/brand-assets/
+apps/api/tmp/
+stores/
+**/generated-assets/
+
 # Smoke-test working dirs (generated DB + per-run secrets — never commit)
 .agentis-smoke/
 .agentis-cli-smoke/

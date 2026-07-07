@@ -118,6 +118,7 @@ const seeds: ManifestSeed[] = [
   manifest('sendgrid_marketing', 'SendGrid Marketing', 'Marketing', 'Manage marketing contacts and lists.', ['add_contact', 'create_list', 'send_marketing_email'], bearerCredential),
   manifest('youtube', 'YouTube', 'Marketing', 'Upload videos and read channel analytics.', ['upload_video', 'get_analytics', 'list_videos'], oauthCredential),
   // DevOps
+  manifest('vercel', 'Vercel', 'DevOps', 'Deploy generated sites to Vercel (inline files, no git/CLI needed) and read project/deployment status.', ['create_deployment', 'get_deployment', 'list_deployments', 'list_projects'], bearerCredential, 'https://vercel.com/docs/rest-api/reference/endpoints/deployments/create-a-new-deployment'),
   manifest('jenkins', 'Jenkins', 'DevOps', 'Trigger builds and read job status.', ['trigger_build', 'get_build_status', 'list_jobs'], { type: 'api_key', fields: ['baseUrl', 'username', 'apiToken'] }),
   manifest('circleci', 'CircleCI', 'DevOps', 'Trigger pipelines and read job status.', ['trigger_pipeline', 'get_pipeline', 'get_job_status'], bearerCredential),
   // Finance

@@ -35,6 +35,19 @@ interface Rule {
 
 const RULES: Rule[] = [
   {
+    // A DELIBERATE policy/approval gate throw (`BLOCKED_*`). Must be FIRST:
+    // these gates throw via a transform, so the generic expression rule below
+    // would misdiagnose the workflow working-as-intended as a broken expression.
+    match: /\bBLOCKED_[A-Z0-9_]{2,}\b/,
+    describe: (node, error) => ({
+      explanation: `“${title(node)}” is a policy/approval GATE and it deliberately blocked the run (${oneLine(error)}). This is the workflow working as intended — not a platform bug — and self-healing correctly leaves gates alone.`,
+      fixes: [
+        'Complete the approval this gate guards (fill the human-input form / resolve the pending approval with the required field values), then start a FRESH run — replaying from before the gate re-feeds the same unapproved data.',
+        'If the gate should not block in this case, edit its condition with agentis.build_workflow { workflowId, patchDraft } and dry-run before re-running.',
+      ],
+    }),
+  },
+  {
     // transform/filter expression problems (syntax, blocked token, bad reference)
     match: /expression (evaluation failed|rejected)|Unexpected token|is not defined/i,
     describe: (node, error) => ({

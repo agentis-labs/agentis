@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AdapterHealthStatus, AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext, AbilityRecord } from '@agentis/core';
+import type { AdapterHealthStatus, AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext } from '@agentis/core';
 import { REALTIME_EVENTS, CONSTANTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -24,11 +24,11 @@ import type { WorkspaceIntelligenceService } from './workspaceIntelligence.js';
 import type { KnowledgeBaseService } from './knowledgeBase.js';
 import type { BrainDiscourseService } from './brainDiscourseService.js';
 import type { SharedIntelligenceService } from './sharedIntelligence.js';
-import type { AbilityService } from './abilityService.js';
-import type { AbilityComposer, ComposerEntry, AbilityTier } from './abilityComposer.js';
 import type { EmbeddingProvider } from './embeddingProvider.js';
 import { embedText } from './embeddingProvider.js';
 import type { WorkspaceHarnessRuntimeResolver } from './workspaceHarnessRuntime.js';
+import type { CapabilityIndex } from './capabilityIndex.js';
+import type { CommandModelService } from './commandModel.js';
 
 export interface ChatSessionExecutorDeps {
   db?: AgentisSqliteDb;
@@ -65,17 +65,15 @@ export interface ChatSessionExecutorDeps {
   knowledgeBases?: KnowledgeBaseService;
   brainDiscourse?: BrainDiscourseService;
   awareness?: WorkspaceAwarenessService;
-  abilityService?: AbilityService;
   /**
-   * §M1/M2 (Living Apps) — abilities as identity. When set, an agent's PINNED
-   * abilities are composed into EVERY chat turn's system context (not only when
-   * a `/slash` command resolves one). The embedding provider + composer are
-   * optional: with them, the Ability Composer additionally auto-selects RELEVANT
-   * unpinned abilities by semantic score (§M1 step 2); without them, pinned-only
-   * composition still applies. Slash remains a manual override.
+   * Reach + comprehension (AUTONOMOUS-ORCHESTRATOR-COMMAND-MODEL). The capability
+   * index provides a constant-size CAPABILITY MANIFEST (know-of-everything without
+   * holding it); the command model provides the scoped COMMAND BRIEFING (what this
+   * agent manages, progress + deltas, App minds) so an orchestrator/manager has
+   * progressive comprehension instead of a cold, amnesiac turn.
    */
-  abilityEmbeddings?: (workspaceId: string) => EmbeddingProvider;
-  abilityComposer?: AbilityComposer;
+  capabilityIndex?: CapabilityIndex;
+  commandModel?: CommandModelService;
 }
 
 export interface ChannelTurnContext {
@@ -385,122 +383,6 @@ export class ChatSessionExecutor {
     return decision;
   }
 
-  /**
-   * §M1 (Living Apps) — compose an agent's abilities into the turn's system
-   * context, like its persona, on EVERY turn (no `/slash` required).
-   *
-   *   • Step 1 — the agent's PINNED, enabled, compiled abilities are always-on
-   *     identity. This is the highest-value un-gate: a pinned ability now shapes
-   *     behavior even when the user never types a slash command.
-   *   • Step 2 — the Ability Composer auto-selects RELEVANT unpinned abilities by
-   *     semantic score against the message (when an embedding provider is wired),
-   *     bounded by ABILITY_MAX_INJECTED. Degrades to pinned-only when no embedder
-   *     is available.
-   *
-   * Additive + non-throwing: any failure returns `null` and the turn proceeds
-   * with today's behavior. Returns a system-context block, not a user prompt.
-   */
-  static async #composeAbilityInjection(
-    workspaceId: string | undefined,
-    agentId: string | undefined,
-    userMessage: string,
-  ): Promise<string | null> {
-    const svc = this.#deps.abilityService;
-    if (!svc || !workspaceId || !agentId) return null;
-    try {
-      // Step 1 — pinned, enabled, ready abilities (always-on identity).
-      const pinnedIds = new Set(
-        svc.listPinsForAgent(agentId).filter((p) => p.enabled).map((p) => p.abilityId),
-      );
-      const pinnedRecords = [...pinnedIds]
-        .map((id) => svc.tryGet(id))
-        .filter((a): a is AbilityRecord => Boolean(a && a.compileStatus === 'ready'));
-
-      // Step 2 — Ability Composer: auto-select relevant UNPINNED abilities by
-      // semantic relevance (bundled local ONNX embeddings by default).
-      const semanticRecords: AbilityRecord[] = [];
-      const providerFn = this.#deps.abilityEmbeddings;
-      const query = userMessage.trim();
-      if (providerFn && query.length > 0) {
-        try {
-          const provider = providerFn(workspaceId);
-          const taskEmbedding = await embedText(provider, query.slice(0, 4000));
-          const scored = svc.scoreAbilitiesForTask(workspaceId, taskEmbedding);
-          for (const s of scored) {
-            if (pinnedIds.has(s.ability.id)) continue;
-            const threshold = s.ability.minRelevanceScore ?? CONSTANTS.ABILITY_MIN_RELEVANCE_SCORE;
-            if (s.score < threshold) continue;
-            semanticRecords.push(s.ability);
-          }
-        } catch (err) {
-          this.#deps.logger?.warn?.('chat.ability.semantic_failed', { agentId, err: (err as Error).message });
-        }
-      }
-
-      if (pinnedRecords.length === 0 && semanticRecords.length === 0) return null;
-
-      // Bound the total injected count (pins take precedence, then relevance).
-      const seen = new Set<string>();
-      const ordered: Array<{ ability: AbilityRecord; tier: AbilityTier; score: number }> = [];
-      for (const a of pinnedRecords) {
-        if (seen.has(a.id)) continue;
-        seen.add(a.id);
-        ordered.push({ ability: a, tier: 'pinned', score: 1 });
-      }
-      for (const a of semanticRecords) {
-        if (seen.has(a.id)) continue;
-        seen.add(a.id);
-        ordered.push({ ability: a, tier: 'semantic', score: 0.5 });
-      }
-
-      // Resolve precedence + rule conflicts deterministically when a composer is
-      // wired (same machinery as workflow dispatch); else keep pin-first order.
-      let final = ordered;
-      if (this.#deps.abilityComposer) {
-        const entries: ComposerEntry[] = ordered.map((e) => ({
-          id: e.ability.id,
-          name: e.ability.name,
-          contentHash: e.ability.contentHash ?? null,
-          depth: e.ability.depth,
-          tier: e.tier,
-          score: e.score,
-          rulesAlways: e.ability.rulesAlways ?? [],
-          rulesNever: e.ability.rulesNever ?? [],
-          toolHints: e.ability.toolHints ?? [],
-        }));
-        const composed = this.#deps.abilityComposer.compose(entries);
-        const rank = new Map(composed.ordered.map((e, i) => [e.id, i]));
-        final = [...ordered].sort(
-          (a, b) => (rank.get(a.ability.id) ?? 0) - (rank.get(b.ability.id) ?? 0),
-        );
-      }
-
-      final = final.slice(0, CONSTANTS.ABILITY_MAX_INJECTED);
-      if (final.length === 0) return null;
-
-      const blocks = final.map(({ ability }) => {
-        const body = (ability.compiledPrompt || ability.description || '').trim();
-        const rules: string[] = [];
-        for (const r of ability.rulesAlways ?? []) rules.push(`ALWAYS ${r}`);
-        for (const r of ability.rulesNever ?? []) rules.push(`NEVER ${r}`);
-        const ruleBlock = rules.length > 0 ? `\nRules:\n${rules.map((r) => `- ${r}`).join('\n')}` : '';
-        return `<ability name="${ability.name}">\n${body}${ruleBlock}\n</ability>`;
-      });
-
-      this.#deps.logger?.debug?.('chat.ability.composed', {
-        agentId,
-        pinned: pinnedRecords.length,
-        semantic: semanticRecords.length,
-        injected: final.length,
-      });
-
-      return `These are your abilities — specialized skills that are part of who you are. Apply them whenever relevant, unbidden:\n\n${blocks.join('\n\n')}\n`;
-    } catch (err) {
-      this.#deps.logger?.warn?.('chat.ability.compose_failed', { agentId, err: (err as Error).message });
-      return null;
-    }
-  }
-
   static async *turn(
     adapter: AgentAdapter,
     history: ChatMessage[],
@@ -520,32 +402,6 @@ export class ChatSessionExecutor {
     const tools = options.tools ?? (lightweightConversation ? [] : this.#buildCatalog({ ...ctx, viewport }));
     let effectiveUserMessage = expandedUserMessage;
     let brainSystemInjection: string | null = null;
-    let abilitySystemInjection: string | null = null;
-    // §M1 — composed pinned (+ relevant) abilities, injected on EVERY substantive
-    // turn as part of the agent's identity. Slash (below) stays a manual override
-    // that coexists with this. Skipped for trivial social chatter to keep it cheap.
-    let composedAbilityInjection: string | null = null;
-    if (!lightweightConversation) {
-      composedAbilityInjection = await this.#composeAbilityInjection(
-        ctx.workspaceId,
-        ctx.agentId,
-        userMessage,
-      );
-    }
-
-    if (userMessage.startsWith('/') && this.#deps.abilityService) {
-      const match = userMessage.match(/^\/(\w+)\s*(.*)$/);
-      if (match) {
-        const wId = ctx.workspaceId;
-        if (wId) {
-          const ability = this.#deps.abilityService.findBySlashCommand(wId as string, match[1] as string);
-          if (ability) {
-            abilitySystemInjection = `The operator triggered the /${match[1]} command. Apply the following ability rules:\n\n${ability.compiledPrompt || ability.description}\n\n`;
-            effectiveUserMessage = match[2] ? match[2] : `Execute the /${match[1]} command.`;
-          }
-        }
-      }
-    }
 
     const agentAdapter = adapter;
     this.#chatRoutingDecision(effectiveUserMessage, ctx.workspaceId, lightweightConversation, tools);
@@ -726,19 +582,32 @@ export class ChatSessionExecutor {
                 limit: 8,
                 surface: 'chat', // §C5 — chat leans working + semantic scales.
               });
-              return brain.block || null;
+              // Carry the atom count so the turn can SHOW the recall happening
+              // ("Recalled N memories") — an invisible mind reads as a dead one.
+              return { block: brain.block || null, atoms: brain.atomIds.length };
             } catch (err) {
               logger?.warn?.('chat.brain_context.failed', { agentId: ctx.agentId, err: (err as Error).message });
               return null;
             }
           }, CONTEXT_BUILDER_BUDGET_MS, null, () => logger?.warn?.('chat.brain_context.budget_exceeded', { agentId: ctx.agentId }))
-        : Promise.resolve<string | null>(null),
+        : Promise.resolve<{ block: string | null; atoms: number } | null>(null),
     ]);
 
     // §B3 — prefer the unified brain context; fall back to the legacy newest-8
     // slice only when SharedIntelligence is not wired.
-    if (brainContext) {
-      agentMemory = brainContext;
+    // BRAIN-BLUEPRINT-10X §visibility — surface the recall like a desktop harness
+    // does ("Recalled N memories"): the operator finally SEES the mind engage.
+    if (brainContext && brainContext.atoms > 0) {
+      yield this.#activity(
+        ctx,
+        'context',
+        `Recalled ${brainContext.atoms} ${brainContext.atoms === 1 ? 'memory' : 'memories'}`,
+        'Relevant Brain memories were injected into this turn\'s context.',
+        'memory-recall',
+      );
+    }
+    if (brainContext?.block) {
+      agentMemory = brainContext.block;
     } else if (!lightweightConversation && ctx.agentId && this.#deps.agentMemory) {
       try {
         agentMemory = this.#deps.agentMemory.contextSection(ctx.agentId, ctx.workspaceId);
@@ -834,7 +703,27 @@ export class ChatSessionExecutor {
         operatingManualBlock = composeOperatingManual({ role, workspaceManual: getWorkspaceManual(db, ctx.workspaceId) });
       }
     } catch { /* best-effort — never block a chat turn on the manual */ }
-    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), clampBlock(composedAbilityInjection, CONTEXT_BUDGET.abilityInjection), abilitySystemInjection, options.systemAddendum]
+    // COMMAND-MODEL — the resident comprehension + reach layer. A manager/orchestrator
+    // gets its SCOPED Command Briefing (what it manages + progress/deltas since last
+    // look + App minds + the use-your-mind doctrine); any other substantive turn gets
+    // the constant-size CAPABILITY MANIFEST so the agent knows what EXISTS and can
+    // reach it via capability.search/invoke. The briefing subsumes the manifest, so
+    // both are never injected at once. Best-effort — never blocks a turn.
+    let commandBriefingBlock: string | null = null;
+    let capabilityManifestBlock: string | null = null;
+    if (!lightweightConversation) {
+      try {
+        if (this.#deps.commandModel && ctx.agentId) {
+          commandBriefingBlock = this.#deps.commandModel.briefingBlock(ctx.workspaceId, ctx.agentId) || null;
+        }
+        if (!commandBriefingBlock && this.#deps.capabilityIndex) {
+          capabilityManifestBlock = this.#deps.capabilityIndex.manifestBlock(ctx.workspaceId) || null;
+        }
+      } catch (err) {
+        this.#deps.logger?.warn?.('chat.command_model.failed', { workspaceId: ctx.workspaceId, agentId: ctx.agentId, err: (err as Error).message });
+      }
+    }
+    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(commandBriefingBlock, 2600), clampBlock(capabilityManifestBlock, 900), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), options.systemAddendum]
       .map((value) => value?.trim())
       .filter((value): value is string => Boolean(value));
     const systemPrompt = systemAddendum.length > 0
@@ -1634,20 +1523,31 @@ function preflightUnhealthyTtlMs(): number {
 /**
  * Absolute defensive ceiling on tool rounds in a single turn. This is NOT the
  * governor — ChatProgressMonitor stops real loops far sooner. It exists only so a
- * pathological case the monitor somehow never catches can't spin forever. Set high
- * so it never clips legitimate long work; env-overridable.
+ * pathological case the monitor somehow never catches can't spin forever.
+ *
+ * It MUST be high enough to never clip legitimate long work: a marker-protocol CLI
+ * harness (Claude Code / Codex editing files) runs one tool per round, so a real
+ * coding task is hundreds of rounds. The old 150 guillotined those mid-task — the
+ * exact bug the ProgressMonitor was built to make impossible. Env-overridable via
+ * AGENTIS_CHAT_MAX_ROUNDS.
  */
 function absoluteMaxRounds(): number {
   const fromEnv = Number(process.env.AGENTIS_CHAT_MAX_ROUNDS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
-  return 150;
+  return 2000;
 }
 
-/** Default per-turn tool-call ceiling — a high count backstop, not a time limit. */
+/**
+ * Default per-turn tool-call ceiling — a high count backstop, not a time limit.
+ * A marker-protocol harness spends one tool call per round, so this must clear a
+ * real multi-step task (build a feature, refactor a repo). The old 80 cut agents
+ * off ~step 80 mid-task; the ProgressMonitor — not this number — stops true loops.
+ * Env-overridable via AGENTIS_CHAT_MAX_TOOL_CALLS.
+ */
 function defaultMaxToolCalls(): number {
   const fromEnv = Number(process.env.AGENTIS_CHAT_MAX_TOOL_CALLS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
-  return 80;
+  return 2000;
 }
 
 /**

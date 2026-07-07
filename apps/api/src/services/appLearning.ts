@@ -14,9 +14,10 @@
  *   3. GRADUATION — those lessons live in the SAME episodic plane the cross-session
  *      `MemoryReflectionService` already reflects over. When lessons of the same
  *      shape recur (its ≥2-distinct-sources + ≥3-for-skill thresholds), reflection
- *      derives a generalized rule and the EXISTING `SkillProposer` hook proposes an
- *      ability draft via `abilityCreationService.draft` — attributable to the agent
- *      scope, so future turns of that role inherit it (M1's pinned/auto-composition).
+ *      derives a generalized rule and fires the EXISTING `SkillProposer` hook —
+ *      since the 2026-07-04 Abilities deletion that hook feeds the Living Skills
+ *      path (Brain `skill` atoms), attributable to the agent scope, so future
+ *      turns of that role inherit it.
  *      We trigger a SCOPED reflection pass on each terminal outcome so graduation is
  *      prompt, rather than only on the periodic cron.
  *   4. VISIBILITY — `recentLearnings` returns the recent graded lessons + graduated
@@ -76,14 +77,6 @@ export interface RecordOutcomeResult {
   reflection?: { generalizations: number; skillsProposed: number } | null;
 }
 
-export interface LearnedAbility {
-  id: string;
-  name: string;
-  domainTag: string | null;
-  compileStatus: string;
-  createdAt: string;
-}
-
 export interface LearnedLesson {
   id: string;
   title: string;
@@ -96,7 +89,6 @@ export interface RecentLearnings {
   appId: string;
   ownerAgentId: string | null;
   lessons: LearnedLesson[];
-  abilities: LearnedAbility[];
 }
 
 export class AppLearningService {
@@ -199,6 +191,63 @@ export class AppLearningService {
   }
 
   /**
+   * Conversation-driven learning: a per-contact SCRIPT (GAP B1/B3) reached a
+   * terminal outcome — deposit a graded lesson to the App owner's memory plane,
+   * exactly like {@link recordOutcome} but sourced from a datastore-backed
+   * conversation contact (no `app_contacts` row required). This is what makes ANY
+   * relationship App's Brain (support, booking, sales, collections…) fill with
+   * real "what worked / what didn't" over time. Non-throwing.
+   */
+  async recordConversationOutcome(input: {
+    workspaceId: string;
+    appId: string;
+    address: string;
+    outcome: AppOutcome;
+    /** A short, scrubbed note on what happened (e.g. the last exchange). */
+    summary?: string | null;
+  }): Promise<RecordOutcomeResult> {
+    const result: RecordOutcomeResult = { recorded: false, lessonDeposited: false, reflection: null };
+    if (!OUTCOME_VALUES.has(input.outcome)) return result;
+    try {
+      const ownerAgentId = this.#ownerAgentId(input.appId);
+      const verb = input.outcome === 'won' ? 'WON' : input.outcome === 'lost' ? 'LOST' : 'ABANDONED';
+      const title = `Conversation ${verb}: ${input.address}`;
+      const content =
+        `A per-contact conversation ended ${verb} for this App.\nContact: ${input.address}.`
+        + (input.summary ? `\nWhat happened: ${input.summary}` : '');
+      result.recorded = true;
+      await this.deps.shared.addAtom({
+        workspaceId: input.workspaceId,
+        scopeId: ownerAgentId,
+        agentId: ownerAgentId,
+        content,
+        title,
+        confidence: 0.62,
+        source: 'system_write',
+        managed: true,
+        tags: [LESSON_TAG, `app:${input.appId}`, `outcome:${input.outcome}`, 'pacer:procedural', ...(ownerAgentId ? [`role:${ownerAgentId}`] : [])],
+        metadata: { m2: true, appId: input.appId, outcome: input.outcome, contactRef: input.address },
+      });
+      result.lessonDeposited = true;
+      // GRADUATION — same recurrence-gated nudge as recordOutcome.
+      if (this.deps.reflection && ownerAgentId) {
+        const scopedLessons = this.#scopedLessonCount(input.workspaceId, ownerAgentId);
+        if (scopedLessons >= GRADUATION_THRESHOLD && scopedLessons % GRADUATION_THRESHOLD === 0) {
+          try {
+            const r = await this.deps.reflection.run({ workspaceId: input.workspaceId, scopeId: ownerAgentId, trigger: 'episode_threshold' });
+            result.reflection = { generalizations: r.generalizations, skillsProposed: r.skillsProposed };
+          } catch (err) {
+            this.deps.logger.warn('app.learning.reflection_failed', { appId: input.appId, err: (err as Error).message });
+          }
+        }
+      }
+    } catch (err) {
+      this.deps.logger.warn('app.learning.conversation_outcome_failed', { appId: input.appId, err: (err as Error).message });
+    }
+    return result;
+  }
+
+  /**
    * Mark contacts abandoned when they have gone untouched past a threshold and
    * carry no terminal outcome yet. Each becomes a recorded 'abandoned' outcome
    * (→ a graded lesson). Returns how many were swept. Non-throwing.
@@ -233,7 +282,7 @@ export class AppLearningService {
    * whose origin/lessons trace back to this App's owner role. Never throws.
    */
   recentLearnings(workspaceId: string, appId: string, limit = 20): RecentLearnings {
-    const out: RecentLearnings = { appId, ownerAgentId: null, lessons: [], abilities: [] };
+    const out: RecentLearnings = { appId, ownerAgentId: null, lessons: [] };
     try {
       const ownerAgentId = this.#ownerAgentId(appId);
       out.ownerAgentId = ownerAgentId;
@@ -267,31 +316,6 @@ export class AppLearningService {
         };
       });
 
-      // Graduated abilities: drafted in this agent's scope. We match by author scope
-      // (the SkillProposer fires for the owner-agent scope), surfacing the newest.
-      if (ownerAgentId) {
-        const abilityRows = this.deps.db
-          .select({
-            id: schema.abilities.id,
-            name: schema.abilities.name,
-            domainTag: schema.abilities.domainTag,
-            compileStatus: schema.abilities.compileStatus,
-            origin: schema.abilities.origin,
-            createdAt: schema.abilities.createdAt,
-          })
-          .from(schema.abilities)
-          .where(eq(schema.abilities.workspaceId, workspaceId))
-          .orderBy(desc(schema.abilities.createdAt))
-          .limit(50)
-          .all();
-        out.abilities = abilityRows
-          .filter((r) => {
-            const origin = (r.origin ?? {}) as Record<string, unknown>;
-            return origin.scopeId === ownerAgentId || origin.appId === appId;
-          })
-          .slice(0, limit)
-          .map((r) => ({ id: r.id, name: r.name, domainTag: r.domainTag, compileStatus: r.compileStatus, createdAt: r.createdAt }));
-      }
     } catch (err) {
       this.deps.logger.warn('app.learning.recent_failed', { appId, err: (err as Error).message });
     }

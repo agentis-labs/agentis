@@ -4,6 +4,7 @@ import type { WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 import { WorkflowTriggerDeploymentService } from '../../src/services/workflowTriggerDeployment.js';
+import { graphContentHash } from '../../src/services/workflowCompass.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -37,7 +38,11 @@ function seedWorkflow(graph: WorkflowGraph): string {
     userId: ctx.user.id,
     title: 'Automation',
     graph,
-    settings: {},
+    // These fences target the deployment MECHANICS (runtime linking, webhook
+    // secrets, listener health) — seed the workflow HARDENED at this graph so
+    // the SWIFT arming gate passes. The gate itself is fenced in
+    // swiftLifecycle.test.ts.
+    settings: { buildLoop: { hardened: { at: new Date().toISOString(), graphHash: graphContentHash(graph), specHash: 'test' } } },
   }).run();
   return id;
 }

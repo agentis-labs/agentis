@@ -88,4 +88,58 @@ describe('AgentToolRuntime', () => {
     expect(git.ok).toBe(false);
   });
 
+  it('keeps browser screenshots transient by default and only persists intentional assets with App provenance', async () => {
+    const persisted: Array<Record<string, unknown>> = [];
+    const browser = { screenshot: async () => Buffer.from('png-bytes') };
+    const artifacts = {
+      persist: (input: Record<string, unknown>) => {
+        persisted.push(input);
+        return {
+          id: `artifact-${persisted.length}`,
+          name: input.name,
+          title: input.title,
+          type: input.type,
+          ref: `artifact:artifact-${persisted.length}`,
+          url: `/v1/artifacts/artifact-${persisted.length}`,
+        };
+      },
+    };
+    const runtime = new AgentToolRuntime({
+      volume,
+      browser: browser as never,
+      artifacts: artifacts as never,
+      resolveAppIdForWorkflow: (_ws, workflowId) => (workflowId === 'wf-app' ? 'app-1' : undefined),
+    });
+
+    const inspection = await runtime.execute(WS, 'browser_screenshot', { html: '<main>Preview</main>' }, undefined, {
+      workflowId: 'wf-app',
+      runId: 'run-1',
+      agentId: 'agent-1',
+    });
+
+    expect(inspection.ok).toBe(true);
+    expect(inspection.result).toMatchObject({ saved: false, mimeType: 'image/png' });
+    expect(persisted).toHaveLength(0);
+
+    const saved = await runtime.execute(WS, 'browser_screenshot', { html: '<main>Deliverable</main>', title: 'Login mockup', save: true }, undefined, {
+      workflowId: 'wf-app',
+      runId: 'run-1',
+      agentId: 'agent-1',
+    });
+
+    expect(saved.ok).toBe(true);
+    expect(saved.result).toMatchObject({ saved: true, artifactId: 'artifact-1', ref: 'artifact:artifact-1' });
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      workspaceId: WS,
+      type: 'image',
+      title: 'Login mockup',
+      workflowId: 'wf-app',
+      runId: 'run-1',
+      agentId: 'agent-1',
+      appId: 'app-1',
+      savedBy: 'browser_screenshot',
+    });
+  });
+
 });

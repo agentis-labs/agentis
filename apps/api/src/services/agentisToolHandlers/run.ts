@@ -8,12 +8,13 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type WorkflowRunState } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type WorkflowRunState } from '@agentis/core';
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import { collectFailedNodeIds, failedNodeCount } from '../runStateFailures.js';
 import { analyzeRunFailure } from '../runFailureAnalysis.js';
 import { recordWorkflowLesson, recallWorkflowLessons } from '../workflowPlaybook.js';
+import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop, type CompassStep } from '../workflowCompass.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -24,9 +25,10 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         family: 'run',
         mcpExposed: true,
         description:
-          'Start a workflow run with optional inputs. Set debugRun:true for a TEST run that '
+          '[PAVED ROAD 3–4/5 — DEBUG-RUN / RUN] Start a workflow run with optional inputs. Set debugRun:true for a TEST run that '
           + 'disables self-healing and fallback recovery so you observe the RAW per-node failure '
-          + '(use while debugging a build; use a normal run in production).',
+          + '(step 3 — do this once after a green dry_run; use a normal run in production, step 4). '
+          + 'The result includes compass.next (agentis.run.await to block until it settles — event-driven, zero-token; diagnose on failure).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -89,7 +91,28 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           debugRun: args.debugRun === true,
           graph,
         });
-        return { runId: handle.runId, workflowId: handle.workflowId, status: 'started' };
+        // SWIFT "warn previously": a PRODUCTION run (not a debug run — that IS the
+        // verification) of a graph that diverges from its PROVEN blueprint/hardened
+        // version is proceeding UNVERIFIED. Warn the agent at the run, before a
+        // failure it would then have to self-heal.
+        const divergence =
+          args.debugRun === true
+            ? null
+            : detectProvenDivergence(readBuildLoop(wf.settings), graphContentHash(graph), wf.id);
+        // PAVED-ROAD P1 — every result is a signpost: hand the agent the exact
+        // next call (poll → diagnose-on-fail) instead of a terminal "started".
+        return {
+          runId: handle.runId,
+          workflowId: handle.workflowId,
+          status: 'started',
+          ...(divergence ? { divergence } : {}),
+          compass: compassForRun({
+            runId: handle.runId,
+            workflowId: handle.workflowId,
+            status: 'started',
+            debugRun: args.debugRun === true,
+          }),
+        };
       },
     },
     {
@@ -119,12 +142,53 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         id: 'agentis.run.status',
         family: 'run',
         mcpExposed: true,
-        description: 'Quick status check on a run (lighter than agentis.run.inspect).',
+        description: '[PAVED ROAD 5/5 — OBSERVE] One-off status snapshot of a run (lighter than agentis.run.inspect). To WAIT for a run to finish, use agentis.run.await (event-driven, zero-token) instead of polling this in a sleep loop. On FAILED the compass points to agentis.run.diagnose.',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: false,
       },
       handler: async (args, ctx) => {
         return runStatus(deps, ctx.workspaceId, String(args.runId));
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.run.await',
+        family: 'run',
+        mcpExposed: true,
+        description:
+          '[EFFICIENT WAIT] BLOCK until a run settles — COMPLETED / FAILED / CANCELLED, or PAUSED/WAITING (e.g. on an approval) — '
+          + 'or until an optional specific node completes, then return its full status in ONE call. Use this INSTEAD of sleeping '
+          + '(Start-Sleep / setTimeout) and polling agentis.run.status in a loop: it is event-driven and wakes you the instant the '
+          + 'run finishes, so you spend ZERO tokens while waiting (no re-reading state, no guessing sleep durations). Returns '
+          + 'immediately if the run is already settled. Bounded by timeoutMs; on timeout it returns the current status with '
+          + 'timedOut:true — just call it again to keep waiting.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            runId: { type: 'string' },
+            nodeId: { type: 'string', description: 'Optional: wake as soon as THIS node completes/fails, instead of waiting for the whole run.' },
+            timeoutMs: { type: 'number', description: 'Max block in ms (default 300000 = 5m, max 900000 = 15m). On timeout, returns timedOut:true; await again if still running.' },
+          },
+          required: ['runId'],
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        const runId = String(args.runId);
+        const nodeId = typeof args.nodeId === 'string' && args.nodeId.trim() ? args.nodeId.trim() : undefined;
+        const timeoutMs = clampNumber(args.timeoutMs, 300_000, 1_000, 900_000);
+        const result = await waitForRunSettle(deps, ctx.workspaceId, runId, { ...(nodeId ? { nodeId } : {}), timeoutMs });
+        if (result.resolved === 'not_found') return { found: false, runId, awaited: 'not_found' };
+        const snapshot = runStatus(deps, ctx.workspaceId, runId);
+        return {
+          ...snapshot,
+          awaited: result.resolved,
+          ...(nodeId ? { nodeId } : {}),
+          ...(result.nodeEvent ? { nodeEvent: result.nodeEvent } : {}),
+          ...(result.resolved === 'timeout'
+            ? { timedOut: true, note: 'Still running after the timeout — call agentis.run.await again to keep waiting (no tokens spent while blocked).' }
+            : {}),
+        };
       },
     },
     {
@@ -184,7 +248,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         id: 'agentis.run.diagnose',
         family: 'inspect',
         mcpExposed: true,
-        description: 'Diagnose a failed or stalled run using state and recent ledger events.',
+        description: '[PAVED ROAD 5/5 — OBSERVE] Diagnose a failed or stalled run: grounded root cause from real state + ledger, concrete fixes, and nextCalls (machine-actionable follow-ups with real ids). Always diagnose BEFORE patching.',
         inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
         mutating: false,
       },
@@ -216,6 +280,32 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           }
         }
 
+        // PAVED-ROAD P1 — machine-actionable next calls with REAL ids, so the
+        // agent's next step is a tool call, not an interpretation of prose.
+        const wfId = 'workflowId' in status ? (status as { workflowId?: string | null }).workflowId : null;
+        const nextCalls: CompassStep[] = [
+          ...(analysis?.failedNodeId
+            ? [{
+                tool: 'agentis.run.replay',
+                args: { sourceRunId: runId, mode: 'replay-with-edited-node', targetNodeId: analysis.failedNodeId, nodeConfigPatch: {} },
+                why: 'Fix the failed node config and re-run FROM that node — no need to repeat the healthy upstream work.',
+              }]
+            : []),
+          ...(wfId
+            ? [
+                {
+                  tool: 'agentis.build_workflow',
+                  args: { workflowId: wfId, description: 'apply the diagnosed fix', patchDraft: { updateNodes: [] } },
+                  why: 'Patch the workflow itself (scoped patchDraft) when the cause is in the graph, then dry-run before re-running.',
+                },
+                {
+                  tool: 'agentis.workflow.dry_run',
+                  args: { workflowId: wfId },
+                  why: 'Zero-cost re-proof of the whole data flow after any patch.',
+                },
+              ]
+            : []),
+        ];
         return {
           ...status,
           failureEvents: failures,
@@ -232,6 +322,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
                 'Check the assigned agent or extension configuration.',
                 'Patch timeout or routing settings before retrying if the cause is configuration-related.',
               ],
+          ...(nextCalls.length > 0 ? { nextCalls } : {}),
           learned,
         };
       },
@@ -266,6 +357,22 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           nodeConfigPatch: args.nodeConfigPatch as Record<string, unknown> | undefined,
           userId: ctx.userId,
         });
+        // PERSIST THE CHILD RUN ROW BEFORE STARTING. `engine.startRun` only
+        // UPDATES an existing row — every other caller (workflow.run, the
+        // issues replay route) inserts first. Without this insert the replay
+        // ran as a GHOST: run.status/run.inspect returned found:false, run
+        // history never listed it, and every state persist updated zero rows.
+        deps.db.insert(schema.workflowRuns).values({
+          id: prepared.runId,
+          workspaceId: prepared.workspaceId,
+          ambientId: prepared.ambientId,
+          workflowId: prepared.workflowId,
+          userId: prepared.userId,
+          status: 'CREATED',
+          runState: prepared.initialState,
+          triggerId: null,
+          parentRunId: String(args.sourceRunId),
+        }).run();
         const handle = await deps.engine.startRun({
           workspaceId: prepared.workspaceId,
           ambientId: prepared.ambientId,
@@ -276,14 +383,24 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           initialState: prepared.initialState,
           graph: prepared.graph,
         });
-        return { runId: handle.runId, parentRunId: String(args.sourceRunId), status: 'started' };
+        return {
+          runId: handle.runId,
+          parentRunId: String(args.sourceRunId),
+          status: 'started',
+          compass: compassForRun({ runId: handle.runId, workflowId: prepared.workflowId, status: 'started' }),
+        };
       },
     },
     {
       definition: {
         id: 'agentis.memory.write',
         family: 'run',
-        description: 'Store a memory entry directly in the WORKSPACE-wide persistent memory (ungated: no formation judge or PII scrub). For App-scoped, gated learnings prefer agentis.data.promote_memory instead. Write only durable, reusable lessons — never transient work product.',
+        description:
+          'Store a memory entry in the WORKSPACE-wide persistent memory. Write only DURABLE, REUSABLE lessons — a rule, '
+          + 'a root cause, a standing preference — never transient work product, run ids, or status notes (those are '
+          + 'rejected). Give it a SPECIFIC, searchable title (that is how it is found later — cite memories by TITLE, '
+          + 'never by id). Writing the same title again UPDATES the existing memory instead of duplicating it. For '
+          + 'App-scoped, gated learnings prefer agentis.data.promote_memory instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -328,6 +445,31 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
 
         // §B4 — write typed memory through the unified MemoryStore facade.
         if (!deps.memory) throw new Error('workspace memory service not available');
+
+        // QUALITY GATE (deterministic): the Brain is for durable lessons, not a
+        // scratch log. Reject junk with an instructive error so the agent's
+        // retry is a better memory, not a duplicate of a bad one.
+        const junk = memoryWriteRejection(title, content);
+        if (junk) throw new AgentisError('VALIDATION_FAILED', junk);
+
+        // DEDUP BY TITLE: memories are found by TITLE, so a same-titled write is
+        // an update (freshness), never a second row the operator must diff.
+        const normalized = normalizeMemoryTitle(title);
+        const existing = deps.memory
+          .list({ workspaceId: ctx.workspaceId, scopeId: scopeId || null, limit: 200 })
+          .find((episode) => normalizeMemoryTitle(episode.title) === normalized);
+        if (existing) {
+          deps.memory.update(ctx.workspaceId, scopeId || null, existing.id, { content, importance: importanceVal, ...(parsedTags.length ? { tags: parsedTags } : {}) });
+          return {
+            id: existing.id,
+            title: existing.title,
+            kind: existing.kind,
+            status: 'updated',
+            deduplicated: true,
+            message: `Updated the existing memory "${existing.title}" (same title). Cite it by its TITLE.`,
+          };
+        }
+
         const id = deps.memory.write({
           workspaceId: ctx.workspaceId,
           scopeId: scopeId || null,
@@ -340,7 +482,15 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           tags: parsedTags,
         });
 
-        return { id, title, kind, importance: importanceVal, tags: parsedTags, status: 'created' };
+        return {
+          id,
+          title,
+          kind,
+          importance: importanceVal,
+          tags: parsedTags,
+          status: 'created',
+          message: `Saved memory "${title}". Cite it by its TITLE (searchable in the Brain), never by the raw id.`,
+        };
       },
     },
     {
@@ -456,6 +606,35 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
   ]);
 }
 
+/** Case/whitespace-insensitive title key for memory dedup. */
+function normalizeMemoryTitle(title: string): string {
+  return title.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Deterministic Brain write-policy: reject entries that cannot possibly be a
+ * durable, findable lesson. Returns the instructive rejection message, or null
+ * when the write is acceptable. (The Brain is recalled by TITLE + semantics —
+ * a one-word title or an id-dump is unfindable noise.)
+ */
+function memoryWriteRejection(title: string, content: string): string | null {
+  const t = title.trim();
+  const c = content.trim();
+  if (t.length < 8 || t.split(/\s+/).length < 2) {
+    return 'Memory rejected: the title must be a specific, searchable phrase (≥ 2 words) — it is how this memory is found later. Example: "Replay runs need a persisted parent row" not "replay bug".';
+  }
+  if (c.length < 30) {
+    return 'Memory rejected: the content is too thin to be a durable lesson. State WHEN it applies and WHAT to do (≥ 30 chars).';
+  }
+  // An entry that is mostly ids is transient work product, not a lesson.
+  const uuids = c.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) ?? [];
+  const withoutIds = c.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '').trim();
+  if (uuids.length > 0 && withoutIds.length < 40) {
+    return 'Memory rejected: this is mostly run/entity ids — transient work product, not a durable lesson. Record the LESSON (when → do), not the ids; ids live in run history already.';
+  }
+  return null;
+}
+
 function parseInputs(value: unknown): Record<string, unknown> {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
@@ -472,6 +651,73 @@ function parseInputs(value: unknown): Record<string, unknown> {
     }
   }
   return { input: value };
+}
+
+const RUN_SETTLE_EVENTS: ReadonlySet<string> = new Set([
+  REALTIME_EVENTS.RUN_COMPLETED,
+  REALTIME_EVENTS.RUN_FAILED,
+  REALTIME_EVENTS.RUN_CANCELLED,
+  REALTIME_EVENTS.RUN_PAUSED,
+]);
+/** Statuses at which awaiting stops: terminal, or parked WAITING/PAUSED (e.g. an approval). */
+const SETTLED_RUN_STATUSES: ReadonlySet<string> = new Set([
+  'COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'COMPLETED_WITH_ERRORS', 'FAILED', 'CANCELLED', 'WAITING', 'PAUSED',
+]);
+
+interface RunSettleResult {
+  resolved: 'settled' | 'node' | 'timeout' | 'not_found';
+  status?: string;
+  nodeEvent?: 'completed' | 'failed';
+}
+
+/**
+ * Event-driven wait (backs agentis.run.await): resolve when the run settles — or the
+ * given node finishes — or on timeout, WITHOUT polling. Subscribes to the bus FIRST,
+ * then reads the current state, so an event that fires between the read and the
+ * subscribe is never missed. The agent spends no tokens while this blocks.
+ */
+export function waitForRunSettle(
+  deps: Pick<ToolHandlerDeps, 'db' | 'bus'>,
+  workspaceId: string,
+  runId: string,
+  opts: { nodeId?: string; timeoutMs: number },
+): Promise<RunSettleResult> {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let unsub: () => void = () => {};
+    const finish = (r: RunSettleResult): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      unsub();
+      resolve(r);
+    };
+    unsub = deps.bus.subscribe((msg) => {
+      const ev = msg.envelope.event as string;
+      const p = (msg.envelope.payload ?? {}) as { runId?: string; nodeId?: string; status?: string };
+      if (p.runId !== runId) return;
+      if (opts.nodeId) {
+        if (ev === REALTIME_EVENTS.NODE_COMPLETED && p.nodeId === opts.nodeId) return finish({ resolved: 'node', nodeEvent: 'completed' });
+        if (ev === REALTIME_EVENTS.NODE_FAILED && p.nodeId === opts.nodeId) return finish({ resolved: 'node', nodeEvent: 'failed' });
+      }
+      if (RUN_SETTLE_EVENTS.has(ev)) return finish({ resolved: 'settled', ...(p.status ? { status: p.status } : {}) });
+    });
+    timer = setTimeout(() => finish({ resolved: 'timeout' }), opts.timeoutMs);
+    // Subscribed — now resolve from the CURRENT state if it already settled.
+    const row = deps.db
+      .select({ status: schema.workflowRuns.status, runState: schema.workflowRuns.runState })
+      .from(schema.workflowRuns)
+      .where(and(eq(schema.workflowRuns.id, runId), eq(schema.workflowRuns.workspaceId, workspaceId)))
+      .get();
+    if (!row) return finish({ resolved: 'not_found' });
+    if (opts.nodeId) {
+      const st = row.runState as WorkflowRunState;
+      if (st.completedNodeIds?.includes(opts.nodeId)) return finish({ resolved: 'node', nodeEvent: 'completed' });
+      if (collectFailedNodeIds(st).includes(opts.nodeId)) return finish({ resolved: 'node', nodeEvent: 'failed' });
+    }
+    if (SETTLED_RUN_STATUSES.has(row.status)) return finish({ resolved: 'settled', status: row.status });
+  });
 }
 
 function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
@@ -492,6 +738,23 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
   const failedNodeIds = collectFailedNodeIds(state);
   const activeNodeId = Object.keys(state.activeExecutions ?? {})[0] ?? state.readyQueue?.[0]?.nodeId ?? null;
   const activeNode = activeNodeId ? graph?.nodes.find((node) => node.id === activeNodeId) : null;
+  // Distinguish EXECUTING (an active execution with a start time) from QUEUED
+  // (still in readyQueue): an agent node legitimately executes for minutes, and
+  // conflating the two is how an observer misreads a healthy run as a stalled
+  // dispatcher and cancels it.
+  const activeExec = activeNodeId ? (state.activeExecutions ?? {})[activeNodeId] : undefined;
+  const startedMs = activeExec?.startedAt ? Date.parse(activeExec.startedAt) : NaN;
+  // Was this a debug run? The engine stamps `settings.buildLoop.debugRun` with
+  // the runId at the terminal transition, so the compass can distinguish
+  // "debug passed → run production" from "production completed".
+  const wasDebugRun = workflow ? readBuildLoop(workflow.settings).debugRun?.runId === run.id : false;
+  // SWIFT layer 3 — the ANSWER, hoisted so it HEADLINES the result. A weak agent
+  // reads the top of the payload and stops; if that top says COMPLETED, it
+  // declares victory over an empty world. So a terminal run leads with
+  // `accomplished` + `outcome`, not just the mechanical status.
+  const verdict = (state as unknown as { verdict?: { outcome: 'accomplished' | 'partial' | 'hollow' | 'failed_checks'; checks?: unknown[]; deficiencies?: Array<{ claim: string; detail: string }> } }).verdict;
+  const isTerminal = ['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'COMPLETED_WITH_ERRORS', 'FAILED', 'CANCELLED'].includes(run.status);
+  const accomplished = verdict ? verdict.outcome === 'accomplished' : undefined;
   return {
     found: true,
     runId: run.id,
@@ -499,8 +762,28 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     workflowTitle: workflow?.title ?? run.ephemeralTitle ?? null,
     isEphemeral: run.isEphemeral,
     status: run.status,
+    // The honest headline. `accomplished:false` on a COMPLETED run is the whole
+    // point of SWIFT — do NOT report success to the operator on that basis.
+    ...(verdict ? { accomplished, outcome: verdict.outcome } : {}),
+    ...(isTerminal && verdict && !accomplished
+      ? { headline: `NOT ACCOMPLISHED (${verdict.outcome}) — the run finished but the world-check failed. Do not report success. ${(verdict.deficiencies ?? []).slice(0, 3).map((d) => d.detail || d.claim).join(' | ')}`.slice(0, 400) }
+      : isTerminal && accomplished ? { headline: 'ACCOMPLISHED — verified against the world.' }
+        : isTerminal && !verdict ? { headline: `${run.status} — but UNVERIFIED (no acceptance spec ran). Completion is not proof; scope it (agentis.workflow.scope) to verify the outcome.` }
+          : {}),
     progress: Math.min(1, (completed + failed) / total),
-    currentNode: activeNode ? { id: activeNode.id, title: activeNode.title, type: activeNode.type } : null,
+    currentNode: activeNode
+      ? {
+          id: activeNode.id,
+          title: activeNode.title,
+          type: activeNode.type,
+          // executing = dispatched with a live execution; queued = still in
+          // readyQueue awaiting a dispatch slot. Agent/subflow/swarm nodes
+          // legitimately EXECUTE for minutes — judge by inFlightMs, not vibes.
+          phase: activeExec ? ('executing' as const) : ('queued' as const),
+          ...(activeExec?.startedAt ? { startedAt: activeExec.startedAt } : {}),
+          ...(Number.isFinite(startedMs) ? { inFlightMs: Math.max(0, Date.now() - startedMs) } : {}),
+        }
+      : null,
     completedNodeCount: completed,
     failedNodeCount: failed,
     failedNodes: failedNodeIds.map((nodeId) => ({
@@ -511,6 +794,20 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     createdAt: run.createdAt,
     startedAt: run.startedAt,
     completedAt: run.completedAt,
+    // The full verdict object (checks + evidence + deficiencies) for an agent
+    // that wants the detail behind the headline.
+    ...(verdict ? { verdict } : {}),
+    ...(run.workflowId
+      ? {
+          compass: compassForRun({
+            runId: run.id,
+            workflowId: run.workflowId,
+            status: run.status,
+            debugRun: wasDebugRun,
+            ...(verdict ? { verdict: verdict.outcome } : {}),
+          }),
+        }
+      : {}),
   };
 }
 

@@ -14,7 +14,9 @@ describe('modelRoutingPolicy', () => {
     });
 
     expect(decision.taskClass).toBe('simple_text');
-    expect(decision.selectedModel).toBe('claude-sonnet-4-6');
+    // Reconciled to the policy's current balanced-tier Claude id (source
+    // upgraded claude-sonnet-4-6 → claude-sonnet-5; the test had gone stale).
+    expect(decision.selectedModel).toBe('claude-sonnet-5');
     expect(decision.modelTier).toBe('balanced');
     expect(decision.explicitPin).toBe(false);
     expect(decision.alternatives.some((alt) => alt.model === 'claude-opus-4-8')).toBe(true);

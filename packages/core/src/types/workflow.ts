@@ -251,6 +251,7 @@ export type WorkflowNodeConfig = (
   | GuardrailsNodeConfig
   | LoopNodeConfig
   | ConvergeNodeConfig
+  | PursueNodeConfig
   | ParallelNodeConfig
   | ReturnOutputNodeConfig
   | ArtifactSaveNodeConfig
@@ -343,6 +344,19 @@ export interface AgentRetryPolicy {
   maxSelfHealAttempts?: number;
 }
 
+export interface AgentArtifactPolicy {
+  /**
+   * `intentional` keeps screenshots/transient captures ephemeral unless a tool
+   * call explicitly asks to save them. `all` preserves legacy capture-everything
+   * behavior. `none` blocks incidental tool-created assets for the task.
+   */
+  mode?: 'intentional' | 'all' | 'none';
+  /** Persist browser screenshots/captures even when the tool call omits `save`. */
+  saveScreenshots?: boolean;
+  /** Persist generated outputs that are clearly deliverables for this task. */
+  saveGeneratedAssets?: boolean;
+}
+
 export interface AgentTaskNodeConfig {
   kind: 'agent_task';
   agentId?: string;
@@ -384,6 +398,12 @@ export interface AgentTaskNodeConfig {
    */
   memoryPolicy?: 'form' | 'episodic_only' | 'none';
   /**
+   * Asset retention policy for tools called by this task. Defaults to
+   * `intentional`: screenshots and other inspection captures stay transient
+   * unless the task/tool explicitly asks to save them.
+   */
+  artifactPolicy?: AgentArtifactPolicy;
+  /**
    * Run this task as a persistent AgentSession (SMARTER-AGENTS-10X §VI) instead
    * of a one-shot dispatch: working memory, suspend/wake yield points, and
    * context compaction. Requires a configured session adapter. `agent_session`
@@ -414,6 +434,11 @@ export interface AgentSessionNodeConfig {
   capabilityTags: string[];
   /** Required runtime affordances used for capability-aware routing. */
   requires?: AgentRequirements;
+  /**
+   * Asset retention policy for tools called by this session. Defaults to
+   * intentional-only persistence for screenshots and inspection captures.
+   */
+  artifactPolicy?: AgentArtifactPolicy;
 }
 
 /**
@@ -916,6 +941,17 @@ export type ConvergeContinuation =
       type: 'signal';
       /** Blackboard channel the done-signal is read from. Default 'converge'. */
       channel?: string;
+    }
+  | {
+      /**
+       * OBJECTIVE (COGNITIVE-LOOPING-RFC P1). The done-check IS the workflow's
+       * scoped Objective — its `WorkflowSpec` acceptance checks, run against the
+       * WORLD (http/data/file/expr/judge) by the SWIFT verdict engine. The Pursuit
+       * is done when the verdict is `accomplished`; progress = the fraction of
+       * acceptance checks passing, so distance-to-goal is real, not guessed.
+       * No hand-written predicate — the objective and its verification are one.
+       */
+      type: 'objective';
     };
 
 export interface ConvergeNodeConfig {
@@ -942,6 +978,61 @@ export interface ConvergeNodeConfig {
   isolation?: 'auto' | 'shared' | 'worktree' | 'tempdir';
   /** What to do with the isolated worktree when the loop settles. Default 'discard'. */
   preserve?: 'discard' | 'branch' | 'pr';
+  /**
+   * ASSESS (COGNITIVE-LOOPING-RFC §3.2/§6). Measure distance-to-goal (progress
+   * 0..1) each iteration and record the trajectory, so a stall can be detected
+   * as a progress *plateau/regression* — not only an identical-output repeat.
+   * Cheap when `continuation` is a `judge` (reuses its 0..10 score). Default
+   * false for `converge` (behavioural parity); a `pursue` node defaults it true.
+   */
+  assess?: boolean;
+  /**
+   * REFLECT (RFC §8). Max reflective pivots before settling `stalled`. On a
+   * detected stall the loop feeds a verbal self-critique (the judge's own
+   * critique, or a synthesized hint) into the NEXT iteration and tries again,
+   * instead of stopping. `0` = stop-on-stall (converge parity). A `pursue` node
+   * defaults 2.
+   */
+  maxPivots?: number;
+}
+
+// ────────────────────────────────────────────────────────────
+// Pursuit — the cognitive-loop primitive (COGNITIVE-LOOPING-RFC).
+// A forward-reading rename of `converge`: "pursue an Objective until done".
+// It is normalized to a ConvergeNodeConfig at dispatch (see
+// pursueConfigToConverge in WorkflowEngine), so the engine loop, worktree,
+// realtime events, durable resume, and knowledge promotion are all SHARED — no
+// fork. Existing stored `converge` graphs keep working unchanged and keep their
+// content hash (hash-safe, RFC §10.1); new work authors `pursue`.
+// ────────────────────────────────────────────────────────────
+export interface PursueNodeConfig {
+  kind: 'pursue';
+  /** The cohort sub-graph, invoked once per iteration via SubflowExecutor. */
+  bodyWorkflowId: string;
+  /** How the Pursuit knows it is finished. (Forward-reading rename of `continuation`.) */
+  doneWhen: ConvergeContinuation;
+  /** Hard ceiling on iterations (safety net). Default 8. */
+  maxIterations?: number;
+  /** Circuit breaker — abort the Pursuit when any limit is crossed. */
+  budget?: { usd?: number; ms?: number; tokens?: number };
+  /** Early-stop when iterations stop advancing. (Rename of `stallPolicy`.) */
+  stopWhenStalled?: {
+    /** Consecutive no-change iterations that trip a stall. Default 2. */
+    after?: number;
+    on?: 'no_progress' | 'oscillation';
+  };
+  /** Blackboard namespace carried across iterations. Defaults to the node id. */
+  stateKey?: string;
+  /** How iteration N sees N-1's output. (Rename of `carryStrategy`.) Default 'keep'. */
+  carry?: 'keep' | 'latest' | 'delta';
+  /** Filesystem isolation for the cohort. Default 'auto'. */
+  isolation?: 'auto' | 'shared' | 'worktree' | 'tempdir';
+  /** What to do with the isolated worktree when the Pursuit settles. Default 'discard'. */
+  preserve?: 'discard' | 'branch' | 'pr';
+  /** ASSESS — measure distance-to-goal each iteration. Default true for a Pursuit. */
+  assess?: boolean;
+  /** REFLECT — max reflective pivots before settling `stalled`. Default 2. */
+  maxPivots?: number;
 }
 
 // ────────────────────────────────────────────────────────────

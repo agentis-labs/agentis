@@ -168,14 +168,16 @@ describe('AdapterStructuredCompleter default timeout', () => {
     return { completer: new AdapterStructuredCompleter(adapter), seen: () => invocation?.timeoutMs };
   }
 
-  it('gives a CLI harness 60s for synthesis (cold re-spawn needs the headroom)', async () => {
+  it('gives a CLI harness 120s for synthesis (cold re-spawn needs the headroom)', async () => {
     const { completer, seen } = captureTimeout(() => ({
       interactiveChat: true,
       toolCalling: true,
       toolForwarding: 'marker_protocol' as const,
     }));
     await completer.completeStructured({ system: 'Return JSON.', user: 'Build a graph.' });
-    expect(seen()).toBe(60_000);
+    // Reconciled to HARNESS_STRUCTURED_COMPLETION_TIMEOUT_MS (120s) — the
+    // committed source raised the harness headroom; the test had gone stale.
+    expect(seen()).toBe(120_000);
   });
 
   it('keeps the tight 30s default for a streaming (non-harness) adapter', async () => {

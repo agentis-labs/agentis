@@ -39,7 +39,7 @@ export function LiveStrip() {
             {approvals.length} pending {approvals.length === 1 ? 'approval' : 'approvals'}
           </Link>
         )}
-        <button onClick={() => setSettingsOpen(true, 'connections')} className="flex items-center gap-1 hover:text-text-primary">
+        <button onClick={() => setSettingsOpen(true, 'channels')} className="flex items-center gap-1 hover:text-text-primary">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-text-muted/40" />
           Connections 0/0
         </button>
@@ -67,7 +67,7 @@ export function LiveStrip() {
           {snap.approvals.pending} pending {snap.approvals.pending === 1 ? 'approval' : 'approvals'}
         </Link>
       )}
-      <button onClick={() => setSettingsOpen(true, 'connections')} className="flex items-center gap-1 hover:text-text-primary">
+      <button onClick={() => setSettingsOpen(true, 'channels')} className="flex items-center gap-1 hover:text-text-primary">
         <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', gwDot)} />
         Connections {snap.gateways.connected}/{snap.gateways.total}
       </button>

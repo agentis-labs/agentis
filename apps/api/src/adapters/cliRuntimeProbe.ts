@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { AdapterHealthStatus } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 
 export interface CliRuntimeProbeResult {
   health: AdapterHealthStatus;
@@ -23,13 +23,16 @@ export async function probeCliRuntime(input: {
   timeout.unref?.();
   try {
     const env = withExpandedPath({ ...process.env, ...(input.env ?? {}) });
-    const target = resolveSpawnTarget(input.binary, input.args ?? ['--version'], input.cwd ?? process.cwd(), env);
+    // A version/health probe doesn't need the agent's real workdir — just a dir
+    // that EXISTS, so a vanished cwd can't make a present binary throw ENOENT.
+    const cwd = resolveSpawnCwd(input.cwd);
+    const target = resolveSpawnTarget(input.binary, input.args ?? ['--version'], cwd ?? process.cwd(), env);
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       let stdout = '';
       let stderr = '';
       let settled = false;
       const child = spawn(target.command, target.args, {
-        cwd: input.cwd,
+        cwd,
         env,
         windowsHide: true,
         signal: controller.signal,

@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { ChatMessage } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -22,6 +22,9 @@ import type { Logger } from '../logger.js';
 
 export type SessionStatus = 'idle' | 'active' | 'suspended' | 'waiting' | 'completed' | 'failed';
 export type MemoryBlock = 'persona' | 'task' | 'plan' | 'observations';
+
+/** Fixed nodeId sentinel for an agent's cross-run resident session (runId NULL). §3.1 */
+export const RESIDENT_NODE_ID = '__resident__';
 export type SuspendReason = 'delegate' | 'await_event' | 'checkpoint' | 'sleep_until' | 'long_tool';
 
 export interface AgentSession {
@@ -153,6 +156,43 @@ export class AgentSessionService {
       .get();
     if (existing) return this.#hydrate(existing);
     return this.create(args);
+  }
+
+  /**
+   * The agent's cross-run RESIDENT session (Agent-Native Platform Plan §3.1).
+   *
+   * Every other session dies with its run — an `AgentSession` is keyed
+   * `(runId, nodeId)`. A *persistent* agent needs a session that OUTLIVES any run:
+   * keyed by `agentId` alone, with `runId` NULL (the column already allows it) and
+   * a fixed `nodeId` sentinel. This is the working-memory home a scheduled wake
+   * reuses tick after tick — so a resident agent continues where it left off
+   * (`planBlock`/`observationsBlock`) instead of waking amnesiac every time.
+   */
+  getOrCreateResident(args: { workspaceId: string; agentId: string; personaBlock?: string }): AgentSession {
+    const existing = this.db
+      .select()
+      .from(schema.agentSessions)
+      .where(and(
+        eq(schema.agentSessions.agentId, args.agentId),
+        isNull(schema.agentSessions.runId),
+        eq(schema.agentSessions.nodeId, RESIDENT_NODE_ID),
+      ))
+      .get();
+    if (existing) return this.#hydrate(existing);
+    return this.create({ workspaceId: args.workspaceId, agentId: args.agentId, nodeId: RESIDENT_NODE_ID, personaBlock: args.personaBlock });
+  }
+
+  /** Read a resident agent's carried working state (plan + observations blocks). */
+  residentState(workspaceId: string, agentId: string): { plan: string; observations: string } {
+    const s = this.getOrCreateResident({ workspaceId, agentId });
+    return { plan: s.planBlock ?? '', observations: s.observationsBlock ?? '' };
+  }
+
+  /** Persist a resident agent's working state across wakes (what it's doing / where it left off). */
+  rememberResident(workspaceId: string, agentId: string, patch: { plan?: string; observations?: string }): void {
+    const s = this.getOrCreateResident({ workspaceId, agentId });
+    if (patch.plan !== undefined) this.updateMemoryBlock(s.id, 'plan', patch.plan);
+    if (patch.observations !== undefined) this.updateMemoryBlock(s.id, 'observations', patch.observations);
   }
 
   get(sessionId: string): AgentSession | null {
@@ -358,8 +398,12 @@ export class AgentSessionService {
    * followed by every in-context episodic message. This is what makes the agent
    * "a DB record between steps" — the live conversation is reconstructed, never
    * held in memory.
+   *
+   * `opts.inContext` lets a caller that already fetched `contextMessages()` this
+   * turn (e.g. for a compaction check) pass it through instead of paying for a
+   * second identical query.
    */
-  reconstructContext(session: AgentSession, opts: { runContext?: string } = {}): ChatMessage[] {
+  reconstructContext(session: AgentSession, opts: { runContext?: string; inContext?: SessionMessage[] } = {}): ChatMessage[] {
     const blocks: string[] = [];
     if (session.personaBlock) blocks.push(session.personaBlock);
     const memory: string[] = [];
@@ -372,7 +416,7 @@ export class AgentSessionService {
     const messages: ChatMessage[] = [];
     if (blocks.length > 0) messages.push({ role: 'system', content: blocks.join('\n\n') });
 
-    for (const m of this.contextMessages(session.id)) {
+    for (const m of opts.inContext ?? this.contextMessages(session.id)) {
       const msg: ChatMessage = { role: m.role, content: m.content };
       if (m.toolCalls) msg.toolCalls = m.toolCalls;
       if (m.toolCallId) msg.toolCallId = m.toolCallId;

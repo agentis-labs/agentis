@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, ChevronRight, ExternalLink, MessageCircle, Settings, Wrench, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, ChevronDown, ChevronRight, ExternalLink, MessageCircle, Settings, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
@@ -16,6 +16,7 @@ import {
   type ObservabilityEvent,
 } from '../../lib/observability';
 import { SelectedAgentModelControl } from '../agents/SelectedAgentModelControl';
+import { ApprovalPreviewCard, ApprovalReviewModal } from '../shared/ApprovalReviewModal';
 import type { CanvasNode } from './homeCanvasTypes';
 
 export function CanvasNodeDetailPanel({
@@ -33,20 +34,13 @@ export function CanvasNodeDetailPanel({
   onOpenChat: (node: CanvasNode) => void;
   onRefresh: () => void;
 }) {
+  const [selectedApproval, setSelectedApproval] = useState<CanvasNode['approval'] | null>(null);
+
   if (!node) return null;
   const hasRoute = Boolean(node.route);
   const canChat = Boolean(node.agent);
   const state = node.operationalState ?? (node.warn ? 'attention' : node.active ? 'active' : 'idle');
   const nodeEvents = observabilityEvents.filter((event) => eventMatchesNode(event, node)).slice(0, 8);
-
-  async function resolveApproval(decision: 'approve' | 'reject') {
-    if (!node?.approval?.id) return;
-    await api(`/v1/approvals/${node.approval.id}/resolve`, {
-      method: 'POST',
-      body: JSON.stringify({ decision }),
-    }).catch(() => undefined);
-    onRefresh();
-  }
 
   return (
     <div data-canvas-control className="pointer-events-none absolute inset-y-0 right-0 z-50 flex w-full max-w-[380px] items-stretch p-3">
@@ -115,35 +109,14 @@ export function CanvasNodeDetailPanel({
           )}
 
           {node.kind === 'approval' && (
-            <section className={node.approval?.source === 'self_heal'
-              ? 'mt-4 rounded-card border border-accent/25 bg-accent/[0.08] px-3 py-3'
-              : 'mt-4 rounded-card border border-warn/25 bg-warn-soft px-3 py-3'}
-            >
-              <div className="flex gap-2 text-[12px] text-text-secondary">
-                {node.approval?.source === 'self_heal' ? (
-                  <Wrench size={14} className="mt-0.5 shrink-0 text-accent" />
-                ) : (
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" />
-                )}
-                <span className="whitespace-pre-line">{node.approval?.summary ?? 'This run is waiting for an operator decision.'}</span>
-              </div>
-              <div className="mt-3 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => void resolveApproval('approve')}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-text-primary px-2.5 text-[12px] font-medium text-canvas hover:bg-white active:scale-[0.98]"
-                >
-                  <Check size={13} />
-                  {node.approval?.source === 'self_heal' ? 'Approve fix' : 'Approve'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void resolveApproval('reject')}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-                >
-                  Reject
-                </button>
-              </div>
+            <section className="mt-4">
+              {node.approval ? (
+                <ApprovalPreviewCard approval={node.approval} onReview={setSelectedApproval} />
+              ) : (
+                <div className="rounded-card border border-warn/25 bg-warn-soft px-3 py-3 text-[12px] text-text-secondary">
+                  This run is waiting for an operator decision.
+                </div>
+              )}
             </section>
           )}
 
@@ -199,6 +172,12 @@ export function CanvasNodeDetailPanel({
           )}
         </footer>
       </aside>
+      <ApprovalReviewModal
+        approval={selectedApproval ?? null}
+        open={Boolean(selectedApproval)}
+        onClose={() => setSelectedApproval(null)}
+        onResolved={() => onRefresh()}
+      />
     </div>
   );
 }

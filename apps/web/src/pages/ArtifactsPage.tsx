@@ -20,6 +20,7 @@ import {
 import clsx from 'clsx';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api } from '../lib/api';
+import { useAssetUrl } from '../lib/useAssetUrl';
 import { useRealtime } from '../lib/realtime';
 import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact, ArtifactOrigin, ArtifactType } from '../components/ArtifactPanel/types';
@@ -303,7 +304,8 @@ function ArtifactCard({
   onDelete: (id: string) => void;
 }) {
   const Icon = TYPE_ICONS[a.type] ?? Frame;
-  const preview = a.thumbnailUrl ?? (a.type === 'image' ? a.content : null);
+  const asset = useAssetUrl(a.type === 'image' ? a : null, { thumbnail: true });
+  const preview = a.thumbnailUrl ?? (a.type === 'image' ? asset.url : null);
   return (
     <div className="group flex flex-col overflow-hidden rounded-lg border border-line bg-surface transition hover:border-accent/40 hover:shadow-lg">
       <button

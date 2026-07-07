@@ -63,21 +63,23 @@ export function suggestWorkflowPhases(graph: Pick<WorkflowGraph, 'nodes' | 'edge
 
 /**
  * Lay out ordered phases as LEFT-TO-RIGHT lanes (phase 1, then phase 2 to its
- * right, …) — the natural reading direction of a workflow. Within a lane,
- * dependencies determine local columns and siblings stack vertically.
+ * right, …) — the natural reading direction of a workflow and the shape of the
+ * reference builder. Within a lane, dependencies determine local columns and
+ * siblings stack vertically. Cards are compact with generous gutters so the
+ * orthogonal edges have room to route cleanly between them.
  */
 export function computePhaseAwareLayout(
   graph: Pick<WorkflowGraph, 'nodes' | 'edges' | 'phases'>,
   options: PhaseLayoutOptions = {},
 ): PhaseLayoutResult {
-  const nodeWidth = options.nodeWidth ?? 300;
-  const nodeHeight = options.nodeHeight ?? 90;
+  const nodeWidth = options.nodeWidth ?? 220;
+  const nodeHeight = options.nodeHeight ?? 54;
   const nodeGapX = options.nodeGapX ?? 72;
-  const nodeGapY = options.nodeGapY ?? 32;
-  const laneGap = options.laneGap ?? 40;
-  const lanePaddingX = options.lanePaddingX ?? 28;
+  const nodeGapY = options.nodeGapY ?? 56;
+  const laneGap = options.laneGap ?? 56;
+  const lanePaddingX = options.lanePaddingX ?? 32;
   const lanePaddingTop = options.lanePaddingTop ?? 56;
-  const lanePaddingBottom = options.lanePaddingBottom ?? 24;
+  const lanePaddingBottom = options.lanePaddingBottom ?? 28;
   const originX = options.originX ?? 0;
   const originY = options.originY ?? 0;
 

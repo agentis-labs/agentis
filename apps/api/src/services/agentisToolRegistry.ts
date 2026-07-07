@@ -188,12 +188,18 @@ export class AgentisToolRegistry {
       const code = zodMessage ? 'VALIDATION_FAILED' : err instanceof AgentisError ? err.code : 'INTERNAL_TOOL_ERROR';
       const message = zodMessage ?? (err instanceof Error ? err.message : 'unknown error');
       this.#logger.warn('tool.execute_failed', { toolId: req.toolId, code, message, caller: ctx.caller });
+      // Propagate the directive remediation + structured details the thrower wrote,
+      // so the MCP boundary (routes/mcp.ts) can hand the agent a fix, not a bare code (§F7).
+      const remediation = err instanceof AgentisError ? err.remediation : undefined;
+      const details = err instanceof AgentisError ? err.details : undefined;
       return {
         id: callId,
         toolId: req.toolId,
         ok: false,
         errorCode: code,
         errorMessage: message,
+        ...(remediation ? { remediation } : {}),
+        ...(details ? { details } : {}),
         durationMs: Date.now() - startedAt,
       };
     }

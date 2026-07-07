@@ -10,7 +10,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, PanelRightClose, PanelRightOpen, Plus, Minus } from 'lucide-react';
 import clsx from 'clsx';
-import { api } from '../../lib/api';
+import { api, apiBlob } from '../../lib/api';
+import { useAssetUrl } from '../../lib/useAssetUrl';
 import { useToast } from '../shared/Toast';
 import { useChatPanelStore } from '../chat/ChatPanelStore';
 import { safeResourceUrl } from '../workflows/OutputViewers';
@@ -219,11 +220,11 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
           className="h-full w-full border-0"
         />
       );
-    case 'image': {
-      const safeSrc = safeResourceUrl(artifact.content, ['data:image/']);
-      if (!safeSrc) return <div className="p-6 text-sm text-danger">Blocked unsafe image URL.</div>;
-      return <ZoomableImage src={safeSrc} alt={artifact.title} />;
-    }
+    case 'image':
+    case 'pdf':
+    case 'audio':
+    case 'video':
+      return <MediaRenderer artifact={artifact} kind={artifact.type} />;
     case 'code':
       return (
         <pre className="m-0 h-full overflow-auto bg-canvas p-4 font-mono text-[12px] leading-relaxed text-text">
@@ -232,31 +233,6 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
       );
     case 'data':
       return <DataView content={artifact.content} />;
-    case 'pdf': {
-      const safeSrc = safeResourceUrl(artifact.content, ['data:application/pdf']);
-      if (!safeSrc) return <DownloadFallback artifact={artifact} note="Preview unavailable for this PDF source." />;
-      return <iframe title={artifact.title} src={safeSrc} className="h-full w-full border-0" />;
-    }
-    case 'audio': {
-      const safeSrc = safeResourceUrl(artifact.content, ['data:audio/']);
-      if (!safeSrc) return <DownloadFallback artifact={artifact} note="Blocked unsafe audio source." />;
-      return (
-        <div className="flex h-full items-center justify-center p-6">
-          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-          <audio src={safeSrc} controls className="w-full max-w-xl" />
-        </div>
-      );
-    }
-    case 'video': {
-      const safeSrc = safeResourceUrl(artifact.content, ['data:video/']);
-      if (!safeSrc) return <DownloadFallback artifact={artifact} note="Blocked unsafe video source." />;
-      return (
-        <div className="flex h-full items-center justify-center p-4">
-          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-          <video src={safeSrc} controls className="max-h-full max-w-full" />
-        </div>
-      );
-    }
     case 'spreadsheet':
       // Inline CSV/TSV text renders as a table; binary sheets (xlsx) download.
       if (artifact.content.startsWith('data:')) {
@@ -272,6 +248,51 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
           <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
             {artifact.content}
           </pre>
+        </div>
+      );
+  }
+}
+
+const DATA_URL_PREFIX: Record<'image' | 'pdf' | 'audio' | 'video', string[]> = {
+  image: ['data:image/'],
+  pdf: ['data:application/pdf'],
+  audio: ['data:audio/'],
+  video: ['data:video/'],
+};
+
+/**
+ * Render binary media from either an inline `data:` URL (legacy) or a
+ * content-addressed `asset://` reference (fetched as an authed object URL).
+ */
+function MediaRenderer({ artifact, kind }: { artifact: Artifact; kind: 'image' | 'pdf' | 'audio' | 'video' }) {
+  const isData = (artifact.content ?? '').startsWith('data:');
+  // Fetch only for non-inline (asset://) content; inline data: is used directly.
+  const { url, loading, error } = useAssetUrl(isData ? null : artifact);
+  const src = isData ? safeResourceUrl(artifact.content, DATA_URL_PREFIX[kind]) : url;
+
+  if (!isData && loading) {
+    return <div className="flex h-full items-center justify-center p-6 text-sm text-text-muted">Loading…</div>;
+  }
+  if (!src || (!isData && error)) {
+    return <DownloadFallback artifact={artifact} note="Preview unavailable for this source." />;
+  }
+  switch (kind) {
+    case 'image':
+      return <ZoomableImage src={src} alt={artifact.title} />;
+    case 'pdf':
+      return <iframe title={artifact.title} src={src} className="h-full w-full border-0" />;
+    case 'audio':
+      return (
+        <div className="flex h-full items-center justify-center p-6">
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <audio src={src} controls className="w-full max-w-xl" />
+        </div>
+      );
+    case 'video':
+      return (
+        <div className="flex h-full items-center justify-center p-4">
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <video src={src} controls className="max-h-full max-w-full" />
         </div>
       );
   }
@@ -516,6 +537,23 @@ function downloadName(artifact: Artifact, mime?: string): string {
 
 /** Download an artifact as a real file (data URLs are decoded to a Blob first). */
 function downloadArtifactFile(artifact: Artifact) {
+  // Content-addressed blobs live on the asset store behind an authed endpoint —
+  // fetch the bytes (with the auth header) then save.
+  if ((artifact.content ?? '').startsWith('asset://')) {
+    void apiBlob(`/v1/artifacts/${artifact.id}/content?download=1`)
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = downloadName(artifact);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      })
+      .catch(() => undefined);
+    return;
+  }
   const file = artifactToFile(artifact);
   const a = document.createElement('a');
   if (file) {

@@ -41,6 +41,23 @@ export function recordWorkflowLesson(
     `DO: ${fix}`,
     ...(lesson.patternId ? [`PATTERN: ${lesson.patternId}`] : []),
   ].join('\n');
+  // DEDUP BY TITLE (centralized so every caller benefits): re-learning the same
+  // failure mode UPDATES the existing lesson instead of piling rows the
+  // operator can only tell apart by uuid.
+  const normalizedTitle = failureMode.slice(0, 120).toLowerCase().replace(/\s+/g, ' ').trim();
+  try {
+    const existing = memory
+      .list({ workspaceId, scopeId: null, kind: 'lesson', limit: 200 })
+      .find((episode) =>
+        episode.tags.includes(WORKFLOW_PLAYBOOK_TAG)
+        && episode.title.toLowerCase().replace(/\s+/g, ' ').trim() === normalizedTitle);
+    if (existing) {
+      memory.update(workspaceId, null, existing.id, { content });
+      return existing.id;
+    }
+  } catch {
+    /* dedup is best-effort — fall through to a fresh write */
+  }
   return memory.write({
     workspaceId,
     scopeId: null,
@@ -53,6 +70,45 @@ export function recordWorkflowLesson(
     trust: 0.7,
     provenance: { source: 'workflow_playbook', agentId: agentId ?? null },
   });
+}
+
+/**
+ * Does this failure teach a durable DESIGN lesson (a guard / precondition /
+ * validation / contract / business-rule rejection that dead-ended the run), as
+ * opposed to a transient infra failure (self-heal's territory, not a lesson)?
+ * The "fail-forward, don't dead-end" law (COGNITIVE-LOOPING / WORKFLOW-DESIGN):
+ * a run that hard-stops at a guard should have been built as a corrective loop.
+ */
+export function isInstructiveFailure(error: string | undefined | null): boolean {
+  if (!error) return false;
+  const e = error.toLowerCase();
+  // Transient / runtime-class — NOT a design lesson.
+  if (/\b(timeout|timed out|econnrefused|enotfound|enoent|socket hang|rate.?limit|429|credits?|quota|out of memory|oom|network error|fetch failed|aborted|econnreset|etimedout)\b/.test(e)) {
+    return false;
+  }
+  // Instructive: an explicit guard block, precondition, validation, or contract gap.
+  return /\b(block(ed)?|must (be|have|first|not)|before |require[ds]?|precondition|unresolved|missing|expected|invalid|validation|not allowed|forbidden|sufficiency|contract|placeholder|out of scope|dead[- ]?end)\b/.test(e)
+    || /(^|[^A-Z])[A-Z][A-Z0-9]{3,}(_[A-Z0-9]+)+\s*:/.test(error); // a CODE: message (BLOCKED_UNRESOLVED_BIO_LINK: …)
+}
+
+/**
+ * Distill a node failure into a workspace playbook lesson (failureMode → fix).
+ * Deterministic + non-throwing: the error text usually states the requirement,
+ * so the fix reads it back and prescribes the fail-forward correction. Covers
+ * both a fixable precondition (loop back) and a genuine out-of-scope input
+ * (filter/route earlier) — never wrong advice.
+ */
+export function distillFailureLesson(args: { workflowTitle?: string | null; nodeTitle: string; error: string }): WorkflowLesson {
+  const error = args.error.trim().replace(/\s+/g, ' ');
+  const where = args.workflowTitle ? `In "${args.workflowTitle}", ` : '';
+  const failureMode = `${where}the step "${args.nodeTitle}" hard-stopped the run: ${error}`.slice(0, 280);
+  const fix = (
+    'This step DEAD-ENDED the run instead of failing forward. Either (a) if the block is a fixable precondition, '
+    + 'wire a corrective loop — a `pursue` (or a correction edge back to the producing step) that re-runs it with THIS '
+    + 'feedback until the precondition holds; or (b) if it is a genuinely out-of-scope input, filter/route it earlier so '
+    + `the run never reaches a hard stop here. Requirement stated by the guard: ${error}`
+  ).slice(0, 500);
+  return { failureMode, fix };
 }
 
 export interface RecalledLesson {

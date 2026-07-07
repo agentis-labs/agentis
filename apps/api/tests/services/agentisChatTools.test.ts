@@ -196,49 +196,10 @@ describe('agent-facing capability authoring tools', () => {
     }));
   });
 
-  it('creates and queues a reusable ability from intent', async () => {
-    const registry = new AgentisToolRegistry({ logger: ctx.logger });
-    const draftCalls: unknown[] = [];
-    const toolDeps = deps();
-    toolDeps.abilityCreation = {
-      draft: async (input: unknown) => {
-        draftCalls.push(input);
-        return {
-          ability: {
-            id: 'ability_1',
-            name: 'Social Post Monitor',
-            slug: 'social-post-monitor',
-            compileStatus: 'queued',
-          },
-          synthesized: true,
-          notes: [],
-        };
-      },
-    } as ToolHandlerDeps['abilityCreation'];
-    registerCapabilityTools(registry, toolDeps);
-
-    const result = await registry.execute({
-      toolId: 'agentis.ability.create',
-      arguments: {
-        intent: 'Monitor public social posts for topics and extract matching links.',
-        name: 'Social Post Monitor',
-        domainTag: 'monitoring',
-      },
-    }, toolContext());
-
-    expect(result.ok).toBe(true);
-    expect(draftCalls).toEqual([expect.objectContaining({
-      workspaceId: ctx.workspace.id,
-      authorId: ctx.user.id,
-      from: 'intent',
-      name: 'Social Post Monitor',
-      domainTag: 'monitoring',
-    })]);
-    expect(result.output).toEqual(expect.objectContaining({
-      abilityId: 'ability_1',
-      compileStatus: 'queued',
-    }));
-  });
+  // NOTE: the "reusable ability from intent" test was removed 2026-07-05 — the
+  // Abilities subsystem (agentis.ability.create + ToolHandlerDeps.abilityCreation)
+  // was deleted wholesale on 2026-07-04 in favor of Living Skills in the Brain
+  // (SKILL.md materializer + brain skill/example atoms), which has its own tests.
 
   it('creates a listener extension and returns its real executable ID', async () => {
     const registry = new AgentisToolRegistry({ logger: ctx.logger });

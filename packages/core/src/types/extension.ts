@@ -112,6 +112,7 @@ export interface ExtensionExecutionFailure {
     | 'EXTENSION_OPERATION_NOT_FOUND'
     | 'EXTENSION_ENTRYPOINT_MISSING'
     | 'EXTENSION_INTERNAL'
+    | 'EXTENSION_ABORTED'
     | 'VALIDATION_FAILED';
   message: string;
   durationMs: number;

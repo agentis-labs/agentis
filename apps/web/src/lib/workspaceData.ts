@@ -53,10 +53,18 @@ export interface WorkspaceApproval {
   id: string;
   title?: string;
   source?: string;
-  agentName?: string;
-  workflowName?: string;
+  agentName?: string | null;
+  workflowName?: string | null;
+  workflowId?: string | null;
+  nodeTitle?: string | null;
+  nodeType?: string | null;
   summary?: string;
-  runId?: string;
+  runId?: string | null;
+  taskId?: string | null;
+  targetId?: string | null;
+  status?: string;
+  confidence?: number | null;
+  resolvedAt?: string | null;
   createdAt: string;
   payload?: Record<string, unknown> | null;
 }
@@ -83,6 +91,13 @@ export interface WorkspaceFailedRun {
   finishedAt?: string;
   failureReason?: string | null;
   selfHealIncident?: WorkspaceSelfHealIncident | null;
+}
+
+export interface WorkspaceCompletedRun {
+  id: string;
+  workflowId?: string;
+  workflowName?: string;
+  finishedAt?: string;
 }
 
 export interface WorkspaceSelfHealIncident {
@@ -175,6 +190,7 @@ export interface WorkspaceSnapshot {
   approvals: WorkspaceApproval[];
   activeRuns: WorkspaceActiveRun[];
   failedRuns: WorkspaceFailedRun[];
+  completedRuns: WorkspaceCompletedRun[];
   artifacts: WorkspaceArtifact[];
   issues: WorkspaceIssue[];
   fleet: WorkspaceFleetOverview | null;
@@ -195,6 +211,7 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   approvals: [],
   activeRuns: [],
   failedRuns: [],
+  completedRuns: [],
   artifacts: [],
   issues: [],
   fleet: null,
@@ -267,6 +284,7 @@ function normalizeArtifact(raw: WorkspaceArtifact): WorkspaceArtifact {
 function deriveNotifications(
   approvals: WorkspaceApproval[],
   failedRuns: WorkspaceFailedRun[],
+  completedRuns: WorkspaceCompletedRun[],
   agents: WorkspaceAgent[],
 ): WorkspaceNotification[] {
   const setup: WorkspaceNotification[] = [];
@@ -293,9 +311,9 @@ function deriveNotifications(
       title: selfHeal ? 'Self-healing needs approval' : 'Approval needed',
       context: approval.summary || `${approval.workflowName ?? 'workflow'} - ${approval.agentName ?? 'agent'}`,
       timestamp: approval.createdAt,
-      runId: approval.runId,
-      workflowName: approval.workflowName,
-      agentName: approval.agentName,
+      runId: approval.runId ?? undefined,
+      workflowName: approval.workflowName ?? undefined,
+      agentName: approval.agentName ?? undefined,
       approvalId: approval.id,
     });
   }
@@ -331,6 +349,18 @@ function deriveNotifications(
       runId: run.id,
       workflowId: run.workflowId,
       failedNodeId: run.failedNodeId,
+      workflowName: run.workflowName,
+    });
+  }
+  for (const run of completedRuns) {
+    rest.push({
+      id: `completed-${run.id}`,
+      type: 'completion',
+      title: 'Workflow succeeded',
+      context: run.workflowName ?? 'Workflow',
+      timestamp: run.finishedAt ?? new Date().toISOString(),
+      runId: run.id,
+      workflowId: run.workflowId,
       workflowName: run.workflowName,
     });
   }
@@ -377,13 +407,14 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
   setSnapshot({ ...base, workspaceId, loading: firstLoadForWorkspace });
 
   inflight = (async () => {
-    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, artifactsRes, fleetRes, activityRes, issuesRes] =
+    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, completedRunsRes, artifactsRes, fleetRes, activityRes, issuesRes] =
       await Promise.allSettled([
         api<{ user: WorkspaceUser }>('/v1/auth/me'),
         api<{ agents: WorkspaceAgent[] }>('/v1/agents'),
         api<{ approvals: WorkspaceApproval[] }>('/v1/approvals?status=pending'),
         api<{ runs: WorkspaceActiveRun[] }>('/v1/runs?status=active&limit=5'),
         api<{ runs: WorkspaceFailedRun[] }>('/v1/runs?status=failed&limit=5'),
+        api<{ runs: WorkspaceCompletedRun[] }>('/v1/runs?status=completed&limit=5'),
         api<{ artifacts: WorkspaceArtifact[] }>('/v1/artifacts?limit=6'),
         api<WorkspaceFleetOverview>('/v1/dashboard/fleet-overview'),
         api<{ events: WorkspaceActivityRow[] }>('/v1/activity?limit=1'),
@@ -396,6 +427,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
     const approvals = fulfilled(approvalsRes, { approvals: previous.approvals }).approvals ?? [];
     const activeRuns = fulfilled(activeRunsRes, { runs: previous.activeRuns }).runs ?? [];
     const failedRuns = fulfilled(failedRunsRes, { runs: previous.failedRuns }).runs ?? [];
+    const completedRuns = fulfilled(completedRunsRes, { runs: previous.completedRuns }).runs ?? [];
     const artifacts = (fulfilled(artifactsRes, { artifacts: previous.artifacts }).artifacts ?? []).map(normalizeArtifact);
     const fleet = fleetRes.status === 'fulfilled' ? fleetRes.value : previous.fleet;
     const latestActivity = (fulfilled(activityRes, { events: previous.latestActivity ? [previous.latestActivity] : [] }).events ?? [])[0] ?? null;
@@ -409,11 +441,12 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
       approvals,
       activeRuns,
       failedRuns,
+      completedRuns,
       artifacts,
       issues,
       fleet,
       latestActivity,
-      notifications: deriveNotifications(approvals, failedRuns, agents),
+      notifications: deriveNotifications(approvals, failedRuns, completedRuns, agents),
       counts: deriveCounts(agents, activeRuns),
       updatedAt: Date.now(),
     });

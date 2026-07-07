@@ -18,12 +18,9 @@ import {
   type WorkflowPhase,
 } from '@agentis/core';
 import {
-  Handle,
   MarkerType,
-  Position,
   useNodesState,
   useEdgesState,
-  useStore,
   type Node,
   type Edge,
   type Connection,
@@ -57,6 +54,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage, workspace as workspaceStore } from '../lib/api';
+import { useAgentisStore } from '../store/agentisStore';
 import { nestedDomainOptions } from '../components/shared/DomainToolbar';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
 import { REALTIME_ACTIVITY_EVENTS, describeRealtimeActivity, type RealtimeActivityTone } from '../lib/realtimeActivity';
@@ -92,7 +90,12 @@ import { CanvasBuildComposer } from '../components/canvas/CanvasBuildComposer';
 import { nodeKindMeta, nodeKindColor } from '../components/canvas/nodeKindMeta';
 import { autoLayout } from '../components/canvas/autoLayout';
 import { AgentFocusOverlayManager } from '../components/canvas/AgentFocusOverlayManager';
-import { Typewriter } from '../components/shared/Typewriter';
+import {
+  AgentisNode,
+  type CanvasAgentMatch,
+  type LiveExtra,
+  type LiveStatus,
+} from '../components/canvas/AgentisNode';
 import { Button } from '../components/shared/Button';
 import { SegmentedControl } from '../components/shared/SegmentedControl';
 import { useToast } from '../components/shared/Toast';
@@ -180,14 +183,6 @@ const ACTIVE_RUN_SUMMARY_STATUSES = new Set(['running', 'waiting', 'paused', 'pe
 
 function isActiveRunSummary(run: Pick<WorkflowRunSummary, 'status'>): boolean {
   return ACTIVE_RUN_SUMMARY_STATUSES.has(run.status);
-}
-
-interface CanvasAgentMatch {
-  id: string;
-  name: string;
-  satisfied: boolean;
-  provided?: string[];
-  missing: string[];
 }
 
 type PhaseNodeData = {
@@ -308,8 +303,14 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       setWf(d.workflow);
       setTitleDraft(d.workflow.title);
       lastSavedFingerprintRef.current = graphFingerprint(d.workflow.graph, d.workflow.title);
+      // Let id-only surfaces resolve this workflow's real name.
+      useAgentisStore.getState().registerResourceName('workflow', d.workflow.id, d.workflow.title);
     });
-    void api<{ extensions: ExtensionRow[] }>('/v1/extensions').then((d) => setExtensions(d.extensions));
+    void api<{ extensions: ExtensionRow[] }>('/v1/extensions').then((d) => {
+      setExtensions(d.extensions);
+      const { registerResourceName } = useAgentisStore.getState();
+      for (const ext of d.extensions) registerResourceName('extension', ext.id, ext.name);
+    });
     void api<{ agents: AgentCapabilityRow[] }>('/v1/agents')
       .then((d) => setAgents(d.agents ?? []))
       .catch(() => setAgents([]));
@@ -372,6 +373,26 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     return () => { cancelled = true; };
   }, [id]);
 
+  // ROBUST continuous resolution — the workspace's LIVE active-run list (kept fresh
+  // by the workspace room on EVERY RUN_* lifecycle event) is the source of truth,
+  // so a run of THIS workflow started by ANY path (the App, the orchestrator,
+  // deliver, a schedule — not only a RUN_CREATED event that happens to reach the
+  // canvas with a matching workflowId) resolves the run room and paints node/phase
+  // status live. The mount fetch only catches runs active at open; RUN_CREATED only
+  // catches events it directly hears — this covers the rest (the "black canvas
+  // during an App/orchestrator run" gap). Never CLEARS here: RUN_END owns clearing,
+  // so a transient snapshot gap can't drop a live subscription mid-run.
+  useEffect(() => {
+    if (!id) return;
+    const mine = activeRuns.find(
+      (r) => r.workflowId === id && ACTIVE_RUN_SUMMARY_STATUSES.has((r.status ?? '').toLowerCase()),
+    );
+    if (mine) {
+      setActiveRunId((prev) => (prev === mine.id ? prev : mine.id));
+      setActiveRunFallbackStatus(mine.status as WorkflowRunSummary['status']);
+    }
+  }, [activeRuns, id]);
+
   const runStartEvents = useMemo(
     () => [REALTIME_EVENTS.RUN_CREATED, REALTIME_EVENTS.RUN_RUNNING],
     [],
@@ -390,14 +411,10 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   useRealtime(runEndEvents, (env: RealtimeEnvelope) => {
     const payload = (env.payload ?? {}) as { runId?: string };
     if (!activeRunId || payload.runId !== activeRunId) return;
-    // Run finished — close the live drawer. Failures open the run modal; the
-    // result otherwise stays available via the run modal / history.
+    // Run finished; results stay available via explicit inspect actions.
     setActiveRunId(null);
     setActiveRunFallbackStatus(null);
     setRunControlOpen(false);
-    if (env.event === REALTIME_EVENTS.RUN_FAILED) {
-      openRunModal({ runId: payload.runId, workflowId: id, source: 'workflow-failure' });
-    }
   });
 
   // Cmd+K / Ctrl+K opens the command palette. Bound at the page level so it
@@ -561,8 +578,18 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
             : n,
         ),
       );
+      // Light up the edges feeding the running node so the flow is visible in
+      // motion — the connection lights up and its dashes march toward the step.
+      const active = status === 'running';
+      setFlowEdges((prev) =>
+        prev.map((e) => {
+          if (e.target !== nodeId) return e;
+          const nextClass = active ? 'agentis-edge-active' : undefined;
+          return e.className === nextClass ? e : { ...e, className: nextClass };
+        }),
+      );
     },
-    [setFlowNodes],
+    [setFlowNodes, setFlowEdges],
   );
   const clearLiveNodeStatus = useCallback(() => {
     // Fade after a short delay so users see the final state before it clears.
@@ -575,8 +602,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           return { ...n, data: rest };
         }),
       );
+      setFlowEdges((prev) => prev.map((e) => (e.className ? { ...e, className: undefined } : e)));
     }, 3500);
-  }, [setFlowNodes]);
+  }, [setFlowNodes, setFlowEdges]);
   useRealtime(liveStatusEvents, (env: RealtimeEnvelope) => {
     const payload = (env.payload ?? {}) as {
       runId?: string;
@@ -587,12 +615,6 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     if (!activeRunId || payload.runId !== activeRunId) return;
     if (env.event === REALTIME_EVENTS.RUN_COMPLETED || env.event === REALTIME_EVENTS.RUN_FAILED) {
       clearLiveNodeStatus();
-      if (env.event === REALTIME_EVENTS.RUN_FAILED) {
-        // On failure, take the operator straight to Inspect (run detail) — the
-        // failed node, error, and self-heal incident — instead of leaving them on
-        // the bare canvas to hunt for what broke.
-        openRunModal({ runId: payload.runId ?? activeRunId, workflowId: wf?.id, source: 'run-failed' });
-      }
       return;
     }
     if (!payload.nodeId) return;
@@ -804,6 +826,11 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           kind: (n.config as { kind?: string }).kind ?? n.type,
           type: n.type,
           operationName: (n.config as { operationName?: string }).operationName,
+          // Provider identity for the card subtitle (reference-builder parity):
+          // an mcp node names its server·tool, an integration its service·op.
+          toolId: (n.config as { toolId?: string }).toolId,
+          integrationId: (n.config as { integrationId?: string }).integrationId,
+          operationId: (n.config as { operationId?: string }).operationId,
           ...readinessNodeData(n.config, integrations, credentialTypes),
           ...agentCapabilityNodeData(n.config, agents),
         },
@@ -979,8 +1006,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         : prev,
     );
     queueSave();
-    // Fit after the new positions have painted.
-    window.setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.18, duration: 400 }), 60);
+    // Fit after the new positions have painted — same legibility floor as the
+    // entry framing so Tidy never lands on an unreadable whole-graph view.
+    window.setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.1, duration: 400, maxZoom: 1, minZoom: 0.55 }), 60);
   }, [queueSave, setFlowNodes]);
 
   // Phase rail navigation: focus a phase (dim others) and frame just its nodes
@@ -1022,7 +1050,11 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     const inst = flowInstanceRef.current;
     if (!inst) return;
     if (inst.getNodes().length === 0) return;
-    inst.fitView({ padding: 0.14, duration: animate ? 460 : 0, maxZoom: 1 });
+    // Readable-first framing: never open below the legibility floor. A big
+    // workflow opens on its first phases at a zoom where cards can be read,
+    // and the operator pans/uses the phase rail for the rest — instead of
+    // framing everything as illegible confetti.
+    inst.fitView({ padding: 0.1, duration: animate ? 460 : 0, maxZoom: 1, minZoom: 0.55 });
   }, []);
 
   // Run the entry framing once per workflow — but only after the canvas is
@@ -1092,7 +1124,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     wfRef.current = nextWorkflow;
     setWf(nextWorkflow);
     queueSave();
-    window.setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.12, duration: 320 }), 60);
+    window.setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.1, duration: 320, maxZoom: 1, minZoom: 0.55 }), 60);
   }, [queueSave, setFlowNodes]);
 
   const createPhaseFromSelection = useCallback((selectionIds?: string[]) => {
@@ -1406,8 +1438,6 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       setRunControlOpen(false);
       setTab('canvas');
       toast.success('Run started');
-      openRunModal({ runId: res.runId, workflowId: wf.id, source: 'workflow-run' });
-      // Keep the operator on the canvas while the run inspector opens as a modal.
     } catch (e) {
       toast.error('Failed to start run', apiErrorMessage(e));
     } finally {
@@ -1834,7 +1864,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
             // Directional arrowheads so the flow reads left-to-right at a glance,
             // like the reference builder. Color tracks the edge stroke token.
             defaultEdgeOptions={{
-              markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: 'var(--color-line-strong)' },
+              markerEnd: { type: MarkerType.ArrowClosed, width: 13, height: 13, color: 'var(--color-line-strong)' },
             }}
             dropEffect="copy"
             onDropCanvas={(e, pos) => {
@@ -3442,17 +3472,6 @@ function VariablesDialog({
   );
 }
 
-type LiveStatus = 'running' | 'completed' | 'failed' | 'retry' | 'waiting';
-type LiveExtra = {
-  progress?: { completed?: number; total?: number };
-  runtimeActivity?: {
-    kind: string;
-    title: string;
-    detail: string;
-    tone: RealtimeActivityTone;
-  };
-};
-
 function readinessNodeData(
   config: unknown,
   integrations: readonly IntegrationManifestLite[],
@@ -3494,361 +3513,6 @@ function agentCapabilityNodeData(
       missing: match.missing,
     })),
   };
-}
-
-function AgentisNode({
-  data,
-  selected,
-}: {
-  data: {
-    label: string;
-    kind: string;
-    type: string;
-    operationName?: string;
-    toolPreview?: string;
-    liveStatus?: LiveStatus;
-    liveExtra?: LiveExtra;
-    pendingConfig?: boolean;
-    readinessMessage?: string;
-    requiredCapabilities?: string[];
-    agentMatches?: CanvasAgentMatch[];
-    runtimeLabel?: string;
-    lastRunAt?: string;
-    lastDurationMs?: number;
-    phaseDimmed?: boolean;
-  };
-  selected?: boolean;
-}) {
-  const meta = nodeKindMeta(data.kind);
-  const glyph = meta.glyph;
-  // Each node carries its category color on the icon tile — the canvas reads as
-  // a set of legible, color-coded cards (like the reference builder) rather than
-  // monochrome boxes that only make sense once you squint at the label.
-  const accentColor = nodeKindColor(data.kind);
-  const isTrigger = data.kind === 'trigger';
-  const status = data.liveStatus;
-  const progress = data.liveExtra?.progress;
-  const title = stripPhasePrefix(data.label);
-  const subtitle =
-    data.kind === 'extension_task' && data.operationName ? data.operationName : meta.label;
-  const isAgentNode = data.kind === 'agent_task' || data.kind === 'agent_session';
-  const missingAgentMatches = (data.agentMatches ?? []).filter((match) => !match.satisfied);
-  const showPersistentAgentWarnings = missingAgentMatches.length > 0;
-  const runtimeActivity = data.liveExtra?.runtimeActivity;
-  const [, setClockTick] = useState(0);
-  useEffect(() => {
-    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const bestRuntimeMatch = (data.agentMatches ?? []).find((match) => match.satisfied) ?? data.agentMatches?.[0];
-  const runtimeMatchLabel = bestRuntimeMatch
-    ? bestRuntimeMatch.satisfied
-      ? `Ready: ${bestRuntimeMatch.name}`
-      : `Missing: ${bestRuntimeMatch.missing.join(', ')}`
-    : data.runtimeLabel;
-  const showRuntimeStrip = isAgentNode && Boolean(runtimeMatchLabel || data.requiredCapabilities?.length || runtimeActivity);
-
-  // Semantic zoom: the clean header card is the default reading unit at any
-  // scale; dense detail (tool preview, capability/agent chips, the full setup
-  // message) only appears once the user has zoomed in past 1:1 so the canvas
-  // stays uncluttered when framing the whole flow.
-  const zoom = useStore((s) => s.transform[2]);
-  const showDetail = zoom > 1.05;
-  // Keep node cards compact. Phase readability comes from the rail and lane
-  // labels; node text should not counter-scale into oversized labels.
-  const showSubtitle = true;
-
-  // Calm state styling — a thin colored border + soft glow, never a twitching
-  // animated border. Motion is reserved for the small status pip so an idle
-  // canvas stays still.
-  const stateRing =
-    status === 'running'
-      ? 'border-accent/70 shadow-glow'
-      : status === 'completed'
-        ? 'border-success/55'
-        : status === 'failed'
-          ? 'border-danger/70'
-          : status === 'waiting'
-            ? 'border-warn/70'
-            : status === 'retry'
-              ? 'border-warn/60 border-dashed'
-              : data.pendingConfig
-                ? 'border-warn/55'
-                : 'border-line hover:border-line-strong';
-
-  const handleClass =
-    '!h-2.5 !w-2.5 !rounded-full !border-2 !border-line-strong !bg-surface transition-colors';
-
-  return (
-    <div
-      className={clsx(
-        'agentis-workflow-node group relative w-[300px] rounded-node border bg-surface-2 shadow-card transition-[border-color,box-shadow,opacity]',
-        stateRing,
-        isAgentNode && 'bg-[linear-gradient(180deg,rgba(22,28,38,0.98)_0%,rgba(18,22,30,0.98)_100%)] shadow-[inset_0_1px_0_rgba(125,211,252,0.08),0_12px_24px_rgba(0,0,0,0.28)]',
-        data.phaseDimmed && 'opacity-30',
-        selected && 'ring-2 ring-accent/40',
-      )}
-    >
-      {isAgentNode && (
-        <div
-          className="pointer-events-none absolute inset-x-0 top-0 h-9 rounded-t-node"
-          style={{ background: 'linear-gradient(180deg, rgba(56,189,248,0.12) 0%, rgba(56,189,248,0) 100%)' }}
-          aria-hidden
-        />
-      )}
-      {!isTrigger && <Handle type="target" position={Position.Left} className={handleClass} />}
-      <Handle type="source" position={Position.Right} className={handleClass} />
-      {/* Error / catch branch — quiet until hovered so it doesn't add noise. */}
-      {!isTrigger && (
-        <Handle
-          type="source"
-          position={Position.Bottom}
-          id="error"
-          style={{ left: 'auto', right: 16 }}
-          className="!h-2 !w-2 !rounded-full !border-2 !border-danger/50 !bg-surface opacity-40 transition-opacity group-hover:opacity-100"
-        />
-      )}
-
-      {/* Header — icon + title + status. The single, default reading unit. The
-          icon is monochrome (matching the node palette); phase color lives in the
-          band behind the card, not on the node. */}
-      <div className="flex items-center gap-3 px-4 py-3.5">
-        <span
-          className={clsx(
-            'flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl text-[20px] leading-none',
-            isAgentNode && 'border border-sky-400/25 bg-sky-400/10 text-sky-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
-          )}
-          style={
-            isAgentNode
-              ? undefined
-              : { backgroundColor: `${accentColor}1f`, color: accentColor, boxShadow: `inset 0 0 0 1px ${accentColor}33` }
-          }
-          aria-hidden
-        >
-          {glyph}
-        </span>
-        <div className="min-w-0 flex-1 leading-tight">
-          <div
-            className="font-medium text-text-primary"
-            style={{
-              fontSize: 16.5,
-              lineHeight: 1.2,
-              display: '-webkit-box',
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: 'vertical',
-              overflow: 'hidden',
-            }}
-          >
-            {title}
-          </div>
-          {showSubtitle && (
-            <div
-              className={clsx(
-                'truncate text-[13px]',
-                isAgentNode
-                  ? 'font-medium uppercase tracking-[0.08em] text-sky-300/90'
-                  : data.kind === 'extension_task' && data.operationName
-                  ? 'font-mono text-text-secondary'
-                  : 'text-text-muted',
-              )}
-            >
-              {subtitle}
-            </div>
-          )}
-          {data.lastRunAt && !status && (
-            <div className="mt-0.5 text-[10px] text-text-muted">
-              Ran {relativeRunTime(data.lastRunAt)}{data.lastDurationMs != null ? ` · ${formatNodeDuration(data.lastDurationMs)}` : ''}
-            </div>
-          )}
-        </div>
-        <StatusPip status={status} pending={data.pendingConfig} />
-      </div>
-
-      {showRuntimeStrip && (
-        <div className="border-t border-sky-400/10 bg-canvas/45 px-3 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="rounded border border-sky-400/20 bg-sky-400/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-sky-200">
-              HAL
-            </span>
-            {runtimeMatchLabel && (
-              <span
-                className={clsx(
-                  'min-w-0 truncate text-[10px] font-medium',
-                  bestRuntimeMatch && !bestRuntimeMatch.satisfied ? 'text-warn' : 'text-text-secondary',
-                )}
-                title={runtimeMatchLabel}
-              >
-                {runtimeMatchLabel}
-              </span>
-            )}
-          </div>
-          {data.requiredCapabilities && data.requiredCapabilities.length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {data.requiredCapabilities.map((label) => (
-                <span key={label} className={halPowerChipClass(label)}>
-                  {label}
-                </span>
-              ))}
-            </div>
-          )}
-          {runtimeActivity && (
-            <div
-              className={clsx(
-                'mt-1.5 rounded border px-1.5 py-1 text-[9.5px] leading-snug',
-                runtimeActivityToneClass(runtimeActivity.tone),
-              )}
-              title={`${runtimeActivity.title}: ${runtimeActivity.detail}`}
-            >
-              <span className="font-medium">{runtimeActivity.title}</span>
-              <span className="text-text-muted"> - {runtimeActivity.detail}</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Pending-setup hint — compact at mid, full message when zoomed in. */}
-      {data.pendingConfig && !status && (
-        <div
-          className="flex items-center gap-1.5 border-t border-warn/20 bg-warn/5 px-3 py-1.5 text-[10.5px] font-medium text-warn"
-          title={data.readinessMessage}
-        >
-          <AlertCircle size={12} className="shrink-0" />
-          <span className="truncate">{showDetail ? (data.readinessMessage ?? 'Finish setup') : 'Needs setup'}</span>
-        </div>
-      )}
-
-      {/* Live progress — a thin determinate bar while a loop/agent runs. */}
-      {showPersistentAgentWarnings && (
-        <div className="border-t border-danger/15 bg-danger/5 px-3 py-2">
-          <div className="mb-1 flex flex-wrap gap-1">
-            {(data.requiredCapabilities ?? []).map((label) => (
-              <span key={label} className="rounded bg-surface/80 px-1.5 py-0.5 text-[9px] text-text-secondary">
-                {label}
-              </span>
-            ))}
-          </div>
-          <div className="space-y-1">
-            {missingAgentMatches.slice(0, 3).map((match) => (
-              <div
-                key={match.id}
-                className="flex items-center justify-between gap-2 rounded border border-danger/20 bg-danger/8 px-1.5 py-1 text-[9px] text-danger"
-                title={`Missing ${match.missing.join(', ')}`}
-              >
-                <span className="truncate">{match.name}</span>
-                <span className="shrink-0 font-medium">missing</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {progress &&
-        typeof progress.total === 'number' &&
-        typeof progress.completed === 'number' &&
-        progress.total > 0 && (
-          <div className="px-3 pb-2.5">
-            <div className="mb-1 text-[9.5px] text-text-muted">
-              {progress.completed} / {progress.total}
-            </div>
-            <div className="h-1 w-full overflow-hidden rounded-full bg-line">
-              <div
-                className="h-full rounded-full bg-accent transition-all duration-300"
-                style={{ width: `${Math.min(100, (progress.completed / progress.total) * 100)}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-      {/* Detail — only when zoomed in. Keeps the default card clean. */}
-      {showDetail && data.toolPreview && (
-        <div className="border-t border-line px-3 py-2">
-          <Typewriter text={data.toolPreview} className="text-[10px] text-text-muted" />
-        </div>
-      )}
-      {showDetail && data.requiredCapabilities && data.requiredCapabilities.length > 0 && !showPersistentAgentWarnings && (
-        <div className="space-y-1.5 border-t border-line px-3 py-2">
-          <div className="flex flex-wrap gap-1">
-            {data.requiredCapabilities.map((label) => (
-              <span key={label} className="rounded bg-surface px-1.5 py-0.5 text-[9px] text-text-secondary">
-                {label}
-              </span>
-            ))}
-          </div>
-          <div className="space-y-0.5">
-            {(data.agentMatches ?? []).slice(0, 3).map((match) => (
-              <div
-                key={match.id}
-                className={clsx(
-                  'flex items-center justify-between gap-1 rounded px-1.5 py-0.5 text-[9px]',
-                  match.satisfied ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger',
-                )}
-                title={match.satisfied ? 'Satisfies requirements' : `Missing ${match.missing.join(', ')}`}
-              >
-                <span className="truncate">{match.name}</span>
-                <span className="shrink-0">{match.satisfied ? 'ready' : 'missing'}</span>
-              </div>
-            ))}
-            {(data.agentMatches?.length ?? 0) === 0 && (
-              <div className="text-[9px] text-warn">No connected agent advertises capabilities</div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-function relativeRunTime(value: string): string {
-  const elapsed = Math.max(0, Date.now() - Date.parse(value));
-  if (!Number.isFinite(elapsed) || elapsed < 60_000) return 'just now';
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m ago`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h ago`;
-  return `${Math.floor(elapsed / 86_400_000)}d ago`;
-}
-
-function formatNodeDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
-
-/** Small status indicator in the node header — the only animated element. */
-function StatusPip({
-  status,
-  pending,
-}: {
-  status?: LiveStatus;
-  pending?: boolean;
-}) {
-  if (status === 'running')
-    return <LoaderCircle size={14} className="shrink-0 animate-spin text-accent" aria-label="running" />;
-  if (status === 'completed')
-    return <CheckCircle2 size={14} className="shrink-0 text-success" aria-label="completed" />;
-  if (status === 'failed')
-    return <AlertCircle size={14} className="shrink-0 text-danger" aria-label="failed" />;
-  if (status === 'waiting')
-    return <Pause size={13} className="shrink-0 text-warn" aria-label="waiting" />;
-  if (status === 'retry')
-    return <RefreshCw size={13} className="shrink-0 text-warn" aria-label="retrying" />;
-  if (pending)
-    return <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-warn" aria-label="needs setup" />;
-  return null;
-}
-
-function halPowerChipClass(label: string): string {
-  const nativePower = /native browser|computer use/i.test(label);
-  return clsx(
-    'rounded px-1.5 py-0.5 text-[9px] font-medium',
-    nativePower
-      ? 'border border-sky-300/25 bg-sky-300/10 text-sky-100'
-      : 'bg-surface/80 text-text-secondary',
-  );
-}
-
-function runtimeActivityToneClass(tone: RealtimeActivityTone): string {
-  if (tone === 'success') return 'border-success/25 bg-success-soft text-success';
-  if (tone === 'warn') return 'border-warn/35 bg-warn/10 text-warn';
-  if (tone === 'danger') return 'border-danger/30 bg-danger-soft text-danger';
-  if (tone === 'accent') return 'border-sky-400/20 bg-sky-400/10 text-sky-100';
-  return 'border-line bg-surface/70 text-text-secondary';
 }
 
 function KnowledgeCanvasCallout({ onOpen }: { onOpen: () => void }) {

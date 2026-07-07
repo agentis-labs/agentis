@@ -99,6 +99,7 @@ function selfHealChatAdapter(args: {
   nodes: WorkflowGraph['nodes'];
   edges: WorkflowGraph['edges'];
   seenTools: string[][];
+  seenMessages?: Array<{ system: string; user: string }>;
 }): AgentAdapter {
   return {
     adapterType: 'codex',
@@ -112,6 +113,7 @@ function selfHealChatAdapter(args: {
     chat: async function* (messages, tools) {
       args.seenTools.push(tools.map((tool) => tool.name));
       const system = String(messages[0]?.content ?? '');
+      args.seenMessages?.push({ system, user: String(messages[messages.length - 1]?.content ?? '') });
       if (system.includes('intent-preservation judge')) {
         yield { type: 'text', delta: '{"preservesIntent":true,"grounded":true,"reason":"same output meaning"}' };
         yield { type: 'done', finishReason: 'stop' };
@@ -480,6 +482,51 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
     expect(seenTools.every((tools) => !tools.includes('agentis.workflow.patch'))).toBe(true);
     const state = run.runState as { selfHealIncidents?: Record<string, { status?: string }> };
     expect(state.selfHealIncidents?.A?.status).toBe('APPLIED');
+  });
+
+  it('BYPASS grants the repair agent FULL AUTONOMY — the world-fixing contract reaches it, not the "return a graph" straitjacket', async () => {
+    setSelfHealConfig(ctx.db, ctx.workspace.id, { mode: 'bypass' });
+    const orchestratorId = seedOrchestrator();
+    const failingAgentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: failingAgentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Digest writer', adapterType: 'claude_code', capabilityTags: [], config: {}, status: 'online', role: 'worker',
+    }).run();
+    const initialGraph = graphWithKeys(['location', 'budget']);
+    const baseGraph = {
+      ...initialGraph,
+      nodes: initialGraph.nodes.map((node) => node.id === 'A'
+        ? { ...node, config: { ...node.config, agentId: failingAgentId, useRoleTools: false, useSession: false } }
+        : node),
+    };
+    const patchedNodes = baseGraph.nodes.map((node) => node.id === 'A'
+      ? { ...node, type: 'return_output' as const, config: { kind: 'return_output' as const, renderAs: 'json' as const } }
+      : node);
+    const seenTools: string[][] = [];
+    const seenMessages: Array<{ system: string; user: string }> = [];
+    const adapter = selfHealChatAdapter({ nodes: patchedNodes, edges: baseGraph.edges, seenTools, seenMessages });
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(orchestratorId, adapter);
+    const engine = buildEngine(new WorkflowSelfHealService(ctx.logger), {
+      adapters,
+      evaluatorRuntime: null,
+      resolveAgentRuntime: (_workspaceId, agentId) =>
+        agentId === orchestratorId ? adapter : agentId === failingAgentId ? failingTaskAdapter() : undefined,
+    });
+
+    const runId = await runTo(engine, baseGraph, completedOrFailed);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+
+    // The repair turn is the one whose brief names the FAILING NODE.
+    const repair = seenMessages.find((m) => m.user.includes('FAILING NODE'));
+    expect(repair, 'the repair agent received a self-heal turn').toBeTruthy();
+    // Full-autonomy grant (system addendum) — NOT the old graph-only mode line.
+    expect(repair!.system).toContain('FULL AUTONOMY');
+    // The brief tells it to fix the WORLD (root power) and offers the env-fix resume.
+    expect(repair!.user).toMatch(/FULL CONTROL/);
+    expect(repair!.user).toMatch(/outside the graph/i);
+    expect(repair!.user).toMatch(/resume/i);
   });
 
   it('adapts (typed-empty defaults + visible deviation) when self-heal cannot ground a repair — no blind re-run loop, no crash', async () => {

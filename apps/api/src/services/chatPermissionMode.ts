@@ -17,8 +17,10 @@ export const PLAN_MODE_SYSTEM_ADDENDUM = [
   'The operator explicitly asked you to plan. You are the selected agent for this conversation; answer in your own role and expertise.',
   'Do not mutate workspace state in this turn. You may inspect existing state with read-only tools, but do not build, save, run, delete, patch, or otherwise change resources.',
   'Produce an intelligent, concrete plan for the requested outcome. Avoid generic placeholders. Use domain-specific phases, dependencies, risks, open questions, and verification criteria.',
-  'When useful, wrap the final plan in <proposed_plan>...</proposed_plan>. Keep it readable markdown; the UI will render it as a lightweight canvas.',
-  'If the user asks for workflow design, describe the actual workflow architecture: trigger, data sources, specialist/agent steps, integrations, guardrails, outputs, and verification.',
+  'When useful, wrap the readable implementation plan in <proposed_plan>...</proposed_plan>. Keep it readable markdown.',
+  'For workflow, extension, app, or system design requests, also include a separate preview-only <architecture_canvas>...</architecture_canvas> block containing compact JSON: {"kind":"workflow|extension|app|system","nodes":[{"id":"trigger","title":"...","role":"trigger|agent|integration|validator|output|...","kind":"optional subtype","summary":"optional"}],"edges":[{"source":"trigger","target":"next","label":"optional"}],"groups":[{"id":"phase-1","title":"optional lane"}]}.',
+  'The architecture_canvas is a visual preview only. Do not create or save the real workflow/app/extension in Plan mode.',
+  'If the user asks for workflow design, the architecture canvas must describe the actual workflow architecture: trigger, data sources, specialist/agent steps, integrations, guardrails, outputs, and verification.',
 ].join('\n');
 
 /**

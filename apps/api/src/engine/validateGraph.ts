@@ -57,6 +57,7 @@ export const SUPPORTED_NODE_KINDS = new Set([
   'guardrails',
   'loop',
   'converge',
+  'pursue',
   'parallel',
   'return_output',
   'artifact_save',
@@ -415,6 +416,23 @@ export function validateWorkflowGraph(
         }
         if (node.config.maxIterations !== undefined && node.config.maxIterations <= 0) {
           fail(`Node ${node.id} (converge) maxIterations must be > 0`);
+        }
+        break;
+      }
+      case 'pursue': {
+        if (!node.config.bodyWorkflowId) {
+          fail(`Node ${node.id} (pursue) missing bodyWorkflowId`);
+        }
+        const done = node.config.doneWhen;
+        if (!done || typeof done !== 'object') {
+          fail(`Node ${node.id} (pursue) missing doneWhen policy`);
+        } else if (done.type === 'deterministic' && !done.expr?.trim()) {
+          fail(`Node ${node.id} (pursue) deterministic doneWhen missing expr`);
+        } else if (done.type === 'judge' && (!done.targetPath?.trim() || !done.criteria?.trim())) {
+          fail(`Node ${node.id} (pursue) judge doneWhen requires targetPath + criteria`);
+        }
+        if (node.config.maxIterations !== undefined && node.config.maxIterations <= 0) {
+          fail(`Node ${node.id} (pursue) maxIterations must be > 0`);
         }
         break;
       }

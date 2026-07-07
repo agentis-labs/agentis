@@ -13,6 +13,7 @@ import { ChatPanelHeaderButton } from './components/chat/ChatPanelHeaderButton';
 import { NotificationPanel } from './components/shared/NotificationPanel';
 import { AvatarMenu } from './components/shared/AvatarMenu';
 import { RunModalProvider } from './components/runs/RunModalProvider';
+import { ApprovalModalProvider } from './components/shared/ApprovalModalProvider';
 import { ConfirmProvider } from './components/shared/ConfirmDialog';
 import { ToastProvider } from './components/shared/Toast';
 import { openRunModal } from './lib/runModal';
@@ -48,7 +49,8 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ defa
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
-const AbilityDetailPage = lazy(() => import('./pages/AbilityDetailPage').then((m) => ({ default: m.AbilityDetailPage })));
+const IssuesPage = lazy(() => import('./pages/IssuesPage').then((m) => ({ default: m.IssuesPage })));
+const MissionControlPage = lazy(() => import('./pages/MissionControlPage').then((m) => ({ default: m.MissionControlPage })));
 
 interface Workspace {
   id: string;
@@ -219,6 +221,7 @@ export function App() {
     <ToastProvider>
       <ConfirmProvider>
         <RunModalProvider>
+          <ApprovalModalProvider>
           <Shell
           workspaceName={ws?.name ?? '…'}
           workspaceImage={ws?.imageUrl ?? null}
@@ -236,6 +239,7 @@ export function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/home" replace />} />
               <Route path="/home" element={<HomePage />} />
+              <Route path="/mission" element={<MissionControlPage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agents/:id" element={<AgentDetailPage />} />
 
@@ -253,10 +257,13 @@ export function App() {
               {/* Legacy alias — chat/share links still point at /artifacts. */}
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/abilities" element={<Navigate to="/agents" replace />} />
-              <Route path="/abilities/:id" element={<AbilityDetailPage />} />
+              <Route path="/abilities/:id" element={<Navigate to="/brain" replace />} />
               <Route path="/packages" element={<PackagesPage />} />
-              <Route path="/issues" element={<Navigate to="/home" replace />} />
+              <Route path="/issues" element={<IssuesPage />} />
               <Route path="/history" element={<HistoryPage />} />
+              {/* Approvals no longer have a page — they open in a global review modal
+                  (ApprovalModalProvider). Legacy links redirect home. */}
+              <Route path="/approvals" element={<Navigate to="/home" replace />} />
               <Route path="/runs/:id" element={<RunRouteBridge />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/chat/agent/:agentId" element={<ChatPage />} />
@@ -267,7 +274,6 @@ export function App() {
               <Route path="/fleet" element={<Navigate to="/home" replace />} />
               <Route path="/runs" element={<Navigate to="/history?tab=runs" replace />} />
               <Route path="/activity" element={<Navigate to="/history?tab=activity" replace />} />
-              <Route path="/approvals" element={<Navigate to="/home" replace />} />
               <Route path="/spaces" element={<Navigate to="/home" replace />} />
               <Route path="/spaces/:id" element={<Navigate to="/home" replace />} />
               <Route path="/gateways" element={<Navigate to="/home" replace />} />
@@ -280,6 +286,7 @@ export function App() {
           <CommandPalette />
           <SettingsModal />
           </Shell>
+          </ApprovalModalProvider>
         </RunModalProvider>
       </ConfirmProvider>
     </ToastProvider>
@@ -452,7 +459,7 @@ function WorkspaceSwitcher({
   workspaceImage: string | null;
   workspaceId: string | null;
 }) {
-  const nav = useNavigate();
+  const { setSettingsOpen } = useAgentisStore();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Workspace[]>([]);
   const [creating, setCreating] = useState(false);
@@ -589,7 +596,7 @@ function WorkspaceSwitcher({
             )}
             <button
               type="button"
-              onClick={() => { setOpen(false); nav('/settings?tab=workspace'); }}
+              onClick={() => { setOpen(false); setSettingsOpen(true, 'workspace'); }}
               className="block w-full border-t border-line px-3 py-2 text-left text-[11px] text-text-muted hover:bg-surface-2 hover:text-text-primary"
             >
               Manage workspace settings →

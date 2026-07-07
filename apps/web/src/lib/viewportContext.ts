@@ -4,6 +4,7 @@ import type { AgentisSurface, ViewportContext } from '@agentis/core';
 import { emitRealtime } from './realtime';
 import { useAgentisStore } from '../store/agentisStore';
 import { useRunModalSnapshot } from './runModal';
+import { shortRef } from './prettyRef';
 
 export function useViewportAwareness(): { context: ViewportContext; label: string } {
   const location = useLocation();
@@ -54,7 +55,15 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
     return () => window.clearTimeout(timer);
   }, [context]);
 
-  return { context, label: formatViewportLabel(context) };
+  // Resolve the resource's real name from the registry so the label reads
+  // "App · My Sales Dashboard" instead of "App · Workflow #efe2961f".
+  const resolvedName = useAgentisStore((s) =>
+    context.resourceId && context.resourceKind
+      ? s.resourceNames[`${context.resourceKind}:${context.resourceId}`]
+      : undefined,
+  );
+
+  return { context, label: formatViewportLabel(context, resolvedName) };
 }
 
 export function deriveSurface(pathname: string, search = ''): Pick<ViewportContext, 'surface' | 'resourceId' | 'resourceKind' | 'title'> {
@@ -91,9 +100,12 @@ export function deriveSurface(pathname: string, search = ''): Pick<ViewportConte
   return { surface: 'unknown' as AgentisSurface, title: root };
 }
 
-function formatViewportLabel(context: ViewportContext): string {
+function formatViewportLabel(context: ViewportContext, resolvedName?: string): string {
   const base = context.title ?? context.surface;
-  const id = context.resourceId ? ` ${context.resourceId.slice(0, 8)}` : '';
-  const run = context.activeRunId ? ` · ${context.activeRunId.slice(0, 8)} running` : '';
-  return `${base}${id}${run}`;
+  // Prefer the resolved human name; only fall back to a short reference.
+  const ref = resolvedName?.trim()
+    ? ` · ${resolvedName.trim()}`
+    : context.resourceId ? ` ${shortRef(context.resourceId)}` : '';
+  const run = context.activeRunId ? ` · ${shortRef(context.activeRunId)} running` : '';
+  return `${base}${ref}${run}`;
 }

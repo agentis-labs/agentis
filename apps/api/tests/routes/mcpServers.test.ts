@@ -55,4 +55,62 @@ describe('/v1/mcp-servers', () => {
     const res = await app().request('/v1/mcp-servers/nope/call', { method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ tool: 'x' }) });
     expect(res.status).toBe(404);
   });
+
+  it('serves the pre-defined mount catalog (Supabase et al. with url + auth shape)', async () => {
+    const res = await app().request('/v1/mcp-servers/catalog', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const { catalog } = (await res.json()) as { catalog: Array<{ id: string; url: string; authType: string; connectorService?: string }> };
+    const supabase = catalog.find((e) => e.id === 'supabase');
+    expect(supabase).toBeTruthy();
+    expect(supabase!.url).toMatch(/^https:\/\//);
+    expect(supabase!.connectorService).toBe('supabase');
+    expect(['none', 'oauth', 'token', 'header']).toContain(supabase!.authType);
+  });
+
+  it('verify returns ok:false with the real error for an unreachable mount (never a false success)', async () => {
+    const a = app();
+    const create = await a.request('/v1/mcp-servers', {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'dead', url: 'https://mcp.unreachable.invalid/rpc', allowPrivateNetwork: true }),
+    });
+    const id = ((await create.json()) as { server: { id: string } }).server.id;
+    const verify = await a.request(`/v1/mcp-servers/${id}/verify`, { method: 'POST', headers: ctx.authHeaders });
+    expect(verify.status).toBe(200); // reachable-but-failing is a UI state, not an HTTP error
+    const body = (await verify.json()) as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBeTruthy();
+  });
+
+  it('mounts with credentialId + allowedTools, PATCHes governance, and enforces the allowlist on REST calls', async () => {
+    const a = app();
+    const create = await a.request('/v1/mcp-servers', {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'supabase', url: 'https://mcp.supabase.test', credentialId: 'cred-1', allowedTools: ['insert_row', 'insert_row', ''] }),
+    });
+    expect(create.status).toBe(201);
+    const created = (await create.json()) as { server: { id: string; credentialId?: string; allowedTools?: string[] } };
+    expect(created.server.credentialId).toBe('cred-1');
+    expect(created.server.allowedTools).toEqual(['insert_row']); // deduped, blanks dropped
+    const id = created.server.id;
+
+    // A call to a tool OFF the allowlist is refused before any network I/O.
+    const blocked = await a.request(`/v1/mcp-servers/${id}/call`, {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ tool: 'delete_table' }),
+    });
+    expect(blocked.status).toBe(422);
+    expect(JSON.stringify(await blocked.json())).toMatch(/allowlist/);
+
+    // PATCH: clear the allowlist and the credential.
+    const patch = await a.request(`/v1/mcp-servers/${id}`, {
+      method: 'PATCH', headers: ctx.authHeaders,
+      body: JSON.stringify({ allowedTools: null, credentialId: null }),
+    });
+    expect(patch.status).toBe(200);
+    const patched = (await patch.json()) as { server: { credentialId?: string; allowedTools?: string[] } };
+    expect(patched.server.allowedTools).toBeUndefined(); // cleared = all tools
+    expect(patched.server.credentialId).toBeUndefined();
+
+    const patch404 = await a.request('/v1/mcp-servers/nope', { method: 'PATCH', headers: ctx.authHeaders, body: JSON.stringify({}) });
+    expect(patch404.status).toBe(404);
+  });
 });

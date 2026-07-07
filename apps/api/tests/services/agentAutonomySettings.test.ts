@@ -27,8 +27,12 @@ describe('agentOperatingManual (W2)', () => {
     expect(orch).toContain(ROLE_TIER_MANUAL.orchestrator);
     const worker = composeOperatingManual({ role: 'worker' });
     expect(worker).toContain(ROLE_TIER_MANUAL.worker);
-    // Unknown role → no role tier, still the base manual.
-    expect(composeOperatingManual({ role: 'wizard' })).toBe(DEFAULT_CAPABILITIES_MANUAL);
+    // Unknown role → no role tier; the base manual (+ the always-on routing
+    // intelligence block the composer appends) and nothing role-specific.
+    const unknown = composeOperatingManual({ role: 'wizard' });
+    expect(unknown.startsWith(DEFAULT_CAPABILITIES_MANUAL)).toBe(true);
+    expect(unknown).toContain('Runtime Routing Intelligence');
+    expect(unknown).not.toContain('### Your role');
   });
 
   it('a workspace override replaces the capabilities base (persona stays separate)', () => {

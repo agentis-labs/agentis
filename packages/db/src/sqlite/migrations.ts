@@ -2438,4 +2438,110 @@ ALTER TABLE audit_entries ADD COLUMN tokens_in INTEGER;
 ALTER TABLE audit_entries ADD COLUMN tokens_out INTEGER;
 `,
   },
+  {
+    version: 106,
+    name: 'drop_abilities',
+    sql: `
+-- The Abilities subsystem was removed and superseded by Living Skills (skill/example
+-- Brain atoms on the skill-library plane; procedures materialize as real SKILL.md
+-- files). Drop its tables. Children first so foreign keys never block the parent.
+DROP TABLE IF EXISTS specialist_ability_loadouts;
+DROP TABLE IF EXISTS agent_ability_pins;
+DROP TABLE IF EXISTS ability_activations;
+DROP TABLE IF EXISTS ability_eval_runs;
+DROP TABLE IF EXISTS ability_knowledge;
+DROP TABLE IF EXISTS ability_examples;
+DROP TABLE IF EXISTS abilities;
+`,
+  },
+  {
+    version: 107,
+    name: 'connection_agent_grants',
+    sql: `
+-- Per-agent scoped authority over a connection (Agent-Native Platform Plan §3.3).
+-- Generalizes the grounding_agent_grants ACL to any connection an agent uses to act.
+CREATE TABLE IF NOT EXISTS connection_agent_grants (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  connection_kind TEXT NOT NULL,
+  connection_id   TEXT NOT NULL,
+  agent_id        TEXT NOT NULL,
+  scope           TEXT NOT NULL DEFAULT 'send',
+  status          TEXT NOT NULL DEFAULT 'active',
+  note            TEXT,
+  granted_by      TEXT,
+  expires_at      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS connection_agent_grants_uq
+  ON connection_agent_grants(workspace_id, connection_id, agent_id);
+`,
+  },
+  {
+    version: 108,
+    name: 'durable_entity_spine',
+    sql: `
+-- The Durable Entity spine (Agent-Native Platform Plan §3.0) — keyed single-writer
+-- durable record + inbox + wake clock, one dispatcher. Unifies Agent + Subject.
+CREATE TABLE IF NOT EXISTS durable_entities (
+  id                        TEXT PRIMARY KEY,
+  workspace_id              TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  kind                      TEXT NOT NULL,
+  key                       TEXT NOT NULL,
+  app_id                    TEXT,
+  status                    TEXT NOT NULL DEFAULT 'active',
+  state_json                TEXT NOT NULL DEFAULT '{}',
+  next_wake_at              TEXT,
+  awaiting_correlation_json TEXT,
+  lease_owner               TEXT,
+  lease_expires_at          TEXT,
+  created_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS durable_entities_key_uq ON durable_entities(workspace_id, kind, key);
+CREATE INDEX IF NOT EXISTS durable_entities_due_idx ON durable_entities(status, next_wake_at);
+
+CREATE TABLE IF NOT EXISTS entity_inbox (
+  id           TEXT PRIMARY KEY,
+  entity_id    TEXT NOT NULL REFERENCES durable_entities(id) ON DELETE CASCADE,
+  event_type   TEXT NOT NULL,
+  payload_json TEXT,
+  received_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  consumed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS entity_inbox_scan_idx ON entity_inbox(entity_id, consumed_at);
+`,
+  },
+  {
+    version: 109,
+    name: 'experiment_substrate',
+    sql: `
+-- Experiment substrate (Agent-Native Platform Plan §3.5) — variant assignment + outcome.
+CREATE TABLE IF NOT EXISTS experiments (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id        TEXT,
+  key           TEXT NOT NULL,
+  variants_json TEXT NOT NULL DEFAULT '[]',
+  status        TEXT NOT NULL DEFAULT 'running',
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS experiments_key_uq ON experiments(workspace_id, key);
+
+CREATE TABLE IF NOT EXISTS experiment_assignments (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+  subject_key   TEXT NOT NULL,
+  variant       TEXT NOT NULL,
+  outcome       TEXT,
+  assigned_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  outcome_at    TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS experiment_assignments_uq ON experiment_assignments(experiment_id, subject_key);
+CREATE INDEX IF NOT EXISTS experiment_assignments_variant_idx ON experiment_assignments(experiment_id, variant);
+`,
+  },
 ];

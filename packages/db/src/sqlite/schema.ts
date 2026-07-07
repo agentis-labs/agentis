@@ -1805,209 +1805,6 @@ export const promotedPatterns = sqliteTable('promoted_patterns', {
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
 });
 
-// ────────────────────────────────────────────────────────────
-// Abilities — compiled behavioral specialization units (docs/brain/ABILITIES.md).
-// Workspace-scoped pool; semantic relevance + optional pinning decide injection.
-// ────────────────────────────────────────────────────────────
-
-export const abilities = sqliteTable('abilities', {
-  id: text('id').primaryKey(),
-  /** NULL = global / hub-installed ability not yet attached to a workspace. */
-  workspaceId: text('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
-  name: text('name').notNull(),
-  slug: text('slug').notNull(),
-  description: text('description'),
-  /** Free-form tag (ui_engineering | legal | sales | ...). */
-  domainTag: text('domain_tag'),
-  iconEmoji: text('icon_emoji').default('⚡'),
-  authorId: text('author_id').references(() => users.id, { onDelete: 'set null' }),
-  /** Layer 1 — synthesized specialist persona. */
-  compiledPrompt: text('compiled_prompt'),
-  /** Layer 2 — structured domain specs. */
-  specs: text('specs', { mode: 'json' }).notNull().default(sql`'{}'`),
-  /** Layer 3 — ALWAYS rules. */
-  rulesAlways: text('rules_always', { mode: 'json' }).notNull().default(sql`'[]'`),
-  /** Layer 3 — NEVER rules. */
-  rulesNever: text('rules_never', { mode: 'json' }).notNull().default(sql`'[]'`),
-  /** Layer 4 — tool selection hints. */
-  toolHints: text('tool_hints', { mode: 'json' }).notNull().default(sql`'[]'`),
-
-  // -- V2 Features --
-  /** compiled | static */
-  mode: text('mode').notNull().default('compiled'),
-  slashCommand: text('slash_command'),
-  /** model | tool */
-  commandDispatch: text('command_dispatch'),
-  commandToolName: text('command_tool_name'),
-  envKeys: text('env_keys', { mode: 'json' }).notNull().default(sql`'[]'`),
-  envSecretIds: text('env_secret_ids', { mode: 'json' }).notNull().default(sql`'[]'`),
-  gate: text('gate', { mode: 'json' }),
-  minRelevanceScore: real('min_relevance_score'),
-  preferredModel: text('preferred_model'),
-
-  /** Compile-time vector representing the ability's domain — used at dispatch scoring. */
-  domainEmbedding: text('domain_embedding', { mode: 'json' }),
-  exampleCount: integer('example_count').notNull().default(0),
-  knowledgeCount: integer('knowledge_count').notNull().default(0),
-  /** pending | compiling | ready | failed | dirty. */
-  compileStatus: text('compile_status').notNull().default('pending'),
-  /** Last reported compile pipeline phase (embedding_examples, contextualizing_knowledge, synthesizing_persona, indexing_brain). */
-  compileStage: text('compile_stage'),
-  /** Set by user clicking Cancel; the worker bails between stages. */
-  compileCancelRequested: integer('compile_cancel_requested', { mode: 'boolean' }).notNull().default(false),
-  lastCompiledAt: text('last_compiled_at'),
-  compileError: text('compile_error'),
-  isPublic: integer('is_public', { mode: 'boolean' }).notNull().default(false),
-  hubSlug: text('hub_slug'),
-  hubVersion: text('hub_version').notNull().default('1.0.0'),
-  installCount: integer('install_count').notNull().default(0),
-  /** NULL = inherit workspace default. */
-  tokenBudget: integer('token_budget'),
-  version: text('version').notNull().default('1.0.0'),
-  /** Linked workspace KB document (Brain integration). */
-  kbDocumentId: text('kb_document_id'),
-
-  // -- ABILITIES-10X (LoRA-for-agents) --
-  /** Earned specialization rung: d0_instinct | d1_knowledge | d2_tuned | d3_method | d4_conductor. */
-  depth: text('depth').notNull().default('d0_instinct'),
-  /** private | workspace | unlisted | hub. */
-  visibility: text('visibility').notNull().default('workspace'),
-  /** SHA-256 of the compiled behavioral payload — drives the Ability Cache + prefix-cache ordering. */
-  contentHash: text('content_hash'),
-  /** Provenance: which creation on-ramp produced this ability (intent | examples | material | run | fork | manual). */
-  origin: text('origin_json', { mode: 'json' }),
-  /** D3 — execution policy (tool plan / verify-retry / sub-graph). */
-  executionPolicy: text('execution_policy_json', { mode: 'json' }),
-  /** D4 — routing policy (model/tool/path selection per task signal). */
-  routingPolicy: text('routing_policy_json', { mode: 'json' }),
-
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-}, (table) => ({
-  slashCommandUnique: uniqueIndex('abilities_slash_command_unique').on(table.workspaceId, table.slashCommand),
-}));
-
-/**
- * ABILITIES-10X — ability-scoped self-eval evidence. Every promotion to a deeper
- * depth must point at a passing run. Evals measure against a metric; they do not
- * prove correctness (the UI says so).
- */
-export const abilityEvalRuns = sqliteTable('ability_eval_runs', {
-  id: text('id').primaryKey(),
-  abilityId: text('ability_id').notNull().references(() => abilities.id, { onDelete: 'cascade' }),
-  workspaceId: text('workspace_id'),
-  /** self_eval | regression | candidate_vs_base. */
-  kind: text('kind').notNull().default('self_eval'),
-  /** 0–1 aggregate. */
-  score: real('score').notNull().default(0),
-  passed: integer('passed', { mode: 'boolean' }).notNull().default(false),
-  caseCount: integer('case_count').notNull().default(0),
-  failures: text('failures_json', { mode: 'json' }).notNull().default(sql`'[]'`),
-  summary: text('summary'),
-  model: text('model'),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-});
-
-/**
- * ABILITIES-10X — the activation ledger (the free flywheel). One row per dispatch
- * that fired ≥1 ability, captured as a byproduct of serving. Feeds auto-improve
- * and Hub quality signals. Consent defaults to workspace_private.
- */
-export const abilityActivations = sqliteTable('ability_activations', {
-  id: text('id').primaryKey(),
-  workspaceId: text('workspace_id'),
-  runId: text('run_id'),
-  agentId: text('agent_id'),
-  model: text('model'),
-  abilityIds: text('ability_ids_json', { mode: 'json' }).notNull().default(sql`'[]'`),
-  conflictsResolved: text('conflicts_resolved_json', { mode: 'json' }).notNull().default(sql`'[]'`),
-  outcome: text('outcome'),
-  qualityScore: real('quality_score'),
-  consentScope: text('consent_scope').notNull().default('workspace_private'),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-});
-
-export const abilityExamples = sqliteTable('ability_examples', {
-  id: text('id').primaryKey(),
-  abilityId: text('ability_id')
-    .notNull()
-    .references(() => abilities.id, { onDelete: 'cascade' }),
-  inputText: text('input_text').notNull(),
-  outputText: text('output_text').notNull(),
-  inputMediaUrl: text('input_media_url'),
-  mediaDescription: text('media_description'),
-  qualityScore: real('quality_score').notNull().default(0.8),
-  /** user_curated | synthetic | promoted_from_run | imported. */
-  source: text('source').notNull().default('user_curated'),
-  embedding: text('embedding', { mode: 'json' }),
-  originRunId: text('origin_run_id'),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-});
-
-export const abilityKnowledge = sqliteTable('ability_knowledge', {
-  id: text('id').primaryKey(),
-  abilityId: text('ability_id')
-    .notNull()
-    .references(() => abilities.id, { onDelete: 'cascade' }),
-  /** Optional link to source kb_chunk this knowledge was derived from. */
-  kbChunkId: text('kb_chunk_id'),
-  title: text('title'),
-  content: text('content').notNull(),
-  /** Anthropic Contextual Retrieval prefix — embedded alongside content. */
-  contextPrefix: text('context_prefix'),
-  embedding: text('embedding', { mode: 'json' }),
-  /** document | image | audio | url | manual. */
-  sourceType: text('source_type').notNull().default('document'),
-  sourceUrl: text('source_url'),
-  importanceScore: real('importance_score').notNull().default(0.5),
-  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-});
-
-export const agentAbilityPins = sqliteTable(
-  'agent_ability_pins',
-  {
-    agentId: text('agent_id')
-      .notNull()
-      .references(() => agents.id, { onDelete: 'cascade' }),
-    abilityId: text('ability_id')
-      .notNull()
-      .references(() => abilities.id, { onDelete: 'cascade' }),
-    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
-    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-  },
-  (table) => ({
-    pk: primaryKey({ columns: [table.agentId, table.abilityId] }),
-  }),
-);
-
-/**
- * Phase 3 (SPECIALISTS-10X) — ability loadouts: a versioned relation binding a
- * specialist functional role to an ability with a mode. Keyed by role string so
- * it governs every materialized agent of that role, complementing per-agent
- * `agent_ability_pins`.
- */
-export const specialistAbilityLoadouts = sqliteTable(
-  'specialist_ability_loadouts',
-  {
-    id: text('id').primaryKey(),
-    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
-    role: text('role').notNull(),
-    abilityId: text('ability_id').notNull().references(() => abilities.id, { onDelete: 'cascade' }),
-    /** required | preferred | optional | forbidden */
-    mode: text('mode').notNull().default('preferred'),
-    priority: integer('priority').notNull().default(0),
-    minRelevanceScore: real('min_relevance_score'),
-    /** specialist_wins | ability_wins | newest_wins | evaluator_decides */
-    conflictPolicy: text('conflict_policy').notNull().default('specialist_wins'),
-    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
-    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
-    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-  },
-  (table) => ({
-    unique: uniqueIndex('idx_specialist_loadout_unique').on(table.workspaceId, table.role, table.abilityId),
-  }),
-);
-
 /**
  * Phase 1 (SPECIALISTS-10X) — the durable expert definition for a functional
  * role: identity, runtime contract, generated card, status, version. One per
@@ -2631,6 +2428,130 @@ export const groundingAgentGrants = sqliteTable('grounding_agent_grants', {
   expiresAt: text('expires_at'),
   ...baseTimestamps(),
 }, (table) => ({ unique: uniqueIndex('grounding_agent_grants_agent_uq').on(table.workspaceId, table.agentId) }));
+
+/**
+ * Per-agent scoped authority over a connection (Agent-Native Platform Plan §3.3).
+ *
+ * Generalizes the `grounding_agent_grants` ACL shape from web-search sources to
+ * ANY connection an agent may use to act on the world — a channel connection, a
+ * stored credential, an MCP mount. A connection with NO grant rows is *ungoverned*
+ * (open, back-compat); once any grant exists for it, only granted agents (plus the
+ * connection's own owner) may use it at the granted scope. `status='requested'` is
+ * the capability-negotiation on-ramp: an agent asks, an operator approves.
+ */
+export const connectionAgentGrants = sqliteTable('connection_agent_grants', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** channel | credential | mcp — the resource family this grant governs. */
+  connectionKind: text('connection_kind').notNull(),
+  /** id of the governed resource (channel_connections.id / credential id / mcp server id). Polymorphic — no hard FK. */
+  connectionId: text('connection_id').notNull(),
+  agentId: text('agent_id').notNull(),
+  /** read | send | manage — least-privilege scope ceiling (manage ⊃ send ⊃ read). */
+  scope: text('scope').notNull().default('send'),
+  /** active | requested | revoked — `requested` is the negotiation on-ramp awaiting operator approval. */
+  status: text('status').notNull().default('active'),
+  /** Free-text reason captured on request/grant, surfaced to the operator. */
+  note: text('note'),
+  /** userId (operator) or agentId that issued/approved the grant. */
+  grantedBy: text('granted_by'),
+  expiresAt: text('expires_at'),
+  ...baseTimestamps(),
+}, (table) => ({ unique: uniqueIndex('connection_agent_grants_uq').on(table.workspaceId, table.connectionId, table.agentId) }));
+
+/**
+ * The Durable Entity spine (Agent-Native Platform Plan §3.0) — the ONE unification.
+ *
+ * A keyed, restart-durable, single-writer-per-key record with a typed inbox and a
+ * wake clock, driven by one dispatcher. This is the shape Restate Virtual Objects /
+ * Cloudflare Durable Objects / Temporal entity workflows all converge on, and what
+ * `ConversationContactState` + `WorkflowRunState.waitingInputs` + `app_contacts`
+ * already are, three-quarters-built and split. A persistent Agent and a per-subject
+ * Subject are the SAME primitive at different `kind`. A run stays the transient
+ * per-wake execution an entity spawns — related by FK, never merged (R1's rule).
+ */
+export const durableEntities = sqliteTable('durable_entities', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** agent | subject | <domain kind> — which projection of the spine this row is. */
+  kind: text('kind').notNull(),
+  /** Stable identity within (workspace, kind) — an agentId, a lead handle, a ticket id. */
+  key: text('key').notNull(),
+  appId: text('app_id'),
+  /** active | done — a terminal entity stops being woken. */
+  status: text('status').notNull().default('active'),
+  /** Small, agent-editable working-memory blocks (Letta-style) — NOT an ever-growing log. */
+  stateJson: text('state_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+  /** Timer wake — the entity is due when nextWakeAt <= now. */
+  nextWakeAt: text('next_wake_at'),
+  /** Correlation token handed to the outside world; an inbound reply matches on it. */
+  awaitingCorrelationJson: text('awaiting_correlation_json', { mode: 'json' }),
+  /** Single-writer lease (SQLite is single-writer for the FILE, not per-entity — this is mandatory). */
+  leaseOwner: text('lease_owner'),
+  leaseExpiresAt: text('lease_expires_at'),
+  ...baseTimestamps(),
+}, (table) => ({
+  unique: uniqueIndex('durable_entities_key_uq').on(table.workspaceId, table.kind, table.key),
+  due: index('durable_entities_due_idx').on(table.status, table.nextWakeAt),
+}));
+
+/** The per-entity durable inbox — external events queue here and are drained under the entity's lease. */
+export const entityInbox = sqliteTable('entity_inbox', {
+  id: text('id').primaryKey(),
+  entityId: text('entity_id')
+    .notNull()
+    .references(() => durableEntities.id, { onDelete: 'cascade' }),
+  eventType: text('event_type').notNull(),
+  payloadJson: text('payload_json', { mode: 'json' }),
+  receivedAt: text('received_at').notNull().default(isoNow() as unknown as string),
+  consumedAt: text('consumed_at'),
+}, (table) => ({ scan: index('entity_inbox_scan_idx').on(table.entityId, table.consumedAt) }));
+
+/**
+ * Experiment substrate (Agent-Native Platform Plan §3.5) — the one genuinely-absent
+ * primitive. A general variant/metric layer: assign each subject to a variant, record
+ * its outcome, aggregate success rate PER variant. Domain-neutral — any decision point
+ * (which message, which model, which prompt) is an experiment; not message-specific.
+ */
+export const experiments = sqliteTable('experiments', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id'),
+  /** Stable experiment key within the workspace (e.g. "first_message"). */
+  key: text('key').notNull(),
+  /** The arms, e.g. ["A","B","C"]. */
+  variantsJson: text('variants_json', { mode: 'json' }).notNull().default(sql`'[]'`),
+  /** running | stopped. */
+  status: text('status').notNull().default('running'),
+  ...baseTimestamps(),
+}, (table) => ({ unique: uniqueIndex('experiments_key_uq').on(table.workspaceId, table.key) }));
+
+/** One row per subject assigned to a variant; its outcome is recorded later (sticky arm). */
+export const experimentAssignments = sqliteTable('experiment_assignments', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  experimentId: text('experiment_id')
+    .notNull()
+    .references(() => experiments.id, { onDelete: 'cascade' }),
+  /** Stable subject identity (a lead handle, a contact id…). */
+  subjectKey: text('subject_key').notNull(),
+  variant: text('variant').notNull(),
+  /** null until a terminal outcome is recorded (e.g. won | lost). */
+  outcome: text('outcome'),
+  assignedAt: text('assigned_at').notNull().default(isoNow() as unknown as string),
+  outcomeAt: text('outcome_at'),
+}, (table) => ({
+  unique: uniqueIndex('experiment_assignments_uq').on(table.experimentId, table.subjectKey),
+  byVariant: index('experiment_assignments_variant_idx').on(table.experimentId, table.variant),
+}));
 
 export const groundingBehaviorInfluences = sqliteTable('grounding_behavior_influences', {
   id: text('id').primaryKey(),

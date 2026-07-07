@@ -1474,7 +1474,11 @@ export function ThreadView({
                 </button>
               </li>
             )}
-            {messages.map((message) => (
+            {messages.filter((msg) => {
+              const cardTitle = msg.metadata?.card?.title;
+              if (cardTitle === 'Run failed' || cardTitle === 'Approval needed') return false;
+              return true;
+            }).map((message) => (
               <MessageBubble
                 key={message.id}
                 msg={message}
@@ -1669,7 +1673,7 @@ function MessageBubble({
               onCancel={() => onConfirmAction(msg.metadata!.confirmation!, false)}
             />
           )}
-          {parsedAgentPlan && <ChatPlanCanvas planText={parsedAgentPlan.planText} />}
+          {parsedAgentPlan && <ChatPlanCanvas planText={parsedAgentPlan.planText} architecture={parsedAgentPlan.architecture} />}
           {msg.metadata?.card && <ProactiveCard data={msg.metadata.card} />}
           {msg.metadata?.runId && (
             <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/60 px-2 py-1.5 text-[11px] text-text-secondary">

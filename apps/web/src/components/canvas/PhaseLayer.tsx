@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useStore, ViewportPortal } from '@xyflow/react';
+import { CheckCircle2 } from 'lucide-react';
 import clsx from 'clsx';
 
 /**
@@ -61,17 +62,21 @@ export function stripPhasePrefix(name: string): string {
   return name.replace(/^Phase\s+\d+\s*[^A-Za-z0-9]*\s*/i, '').trim() || name;
 }
 
-const NODE_WIDTH = 300;
-const BASE_NODE_HEIGHT = 86;
-const AGENT_NODE_HEIGHT = 124;
-const HEADER_HEIGHT = 104;
-const PAD_X = 20;
-const PAD_TOP = 20;
-const PAD_BOTTOM = 40;
+// Geometry of the compact icon-first card (AgentisNode) + the band chrome.
+// Must track the layout constants in @agentis/core computePhaseAwareLayout so
+// bands hug their nodes without clipping the header or the activity pill.
+const NODE_WIDTH = 220;
+const BASE_NODE_HEIGHT = 54;
+const HEADER_HEIGHT = 44;
+const PAD_X = 32;
+const PAD_TOP = 12;
+const PAD_BOTTOM = 28;
 
 export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
   const zoom = useStore((state) => state.transform[2]);
-  const counterScale = zoom < 1 ? 1 / Math.max(zoom, 0.24) : 1;
+  // Keep the header legible when zoomed out, but never let it balloon into a
+  // banner that dwarfs the cards (cap the counter-scale).
+  const counterScale = zoom < 1 ? Math.min(1.6, 1 / Math.max(zoom, 0.24)) : 1;
 
   const lanes = useMemo(() => {
     if (phases.length === 0) return [];
@@ -113,11 +118,13 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
               transform: `translate(${x}px, ${y}px)`,
               width,
               height,
-              // Minimal grouping: a smooth top-to-bottom tint (no border).
-              // The bottom is almost transparent but still visible.
+              // Each phase carries its identity color as a soft top-to-bottom
+              // tint (denser when focused), so the lanes read as distinct,
+              // color-coded stages at a glance.
               background: active
-                ? `linear-gradient(180deg, ${phase.color}28 0%, ${phase.color}05 100%)`
-                : `linear-gradient(180deg, ${phase.color}18 0%, ${phase.color}03 100%)`,
+                ? `linear-gradient(180deg, ${phase.color}2b 0%, ${phase.color}06 100%)`
+                : `linear-gradient(180deg, ${phase.color}1c 0%, ${phase.color}05 100%)`,
+              boxShadow: `inset 0 0 0 1px ${phase.color}${active ? '30' : '1a'}`,
               pointerEvents: 'none',
               zIndex: -1,
             }}
@@ -129,8 +136,8 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
         const active = focusedPhaseId === phase.id;
         const laneScreenWidth = width * zoom;
         const compact = laneScreenWidth < 180;
-        const headerWidth = Math.max(72, Math.min(compact ? 164 : 260, Math.round(laneScreenWidth - 6)));
-        const headerY = y + Math.max(4, Math.min(10, 8 / counterScale));
+        const headerWidth = Math.max(96, Math.min(compact ? 180 : 300, Math.round(laneScreenWidth - 6)));
+        const headerY = y + 12;
         return (
           <div
             key={`${phase.id}-header`}
@@ -138,26 +145,34 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
             data-testid="phase-header"
             className={clsx('pointer-events-none absolute', dimmed && 'opacity-20')}
             style={{
-              transform: `translate(${x + 14}px, ${headerY}px)`,
+              transform: `translate(${x + 18}px, ${headerY}px)`,
               zIndex: 6,
             }}
           >
+            {/* Phase label — colored dot + number, then the bright name. */}
             <div
               className="inline-flex items-center gap-1.5"
               style={{
                 transform: counterScale !== 1 ? `scale(${counterScale})` : undefined,
                 transformOrigin: 'top left',
                 maxWidth: headerWidth,
-                textShadow: active ? '0 1px 4px rgba(0,0,0,0.9)' : '0 1px 3px rgba(0,0,0,0.76)',
+                textShadow: active ? '0 1px 4px rgba(0,0,0,0.9)' : '0 1px 3px rgba(0,0,0,0.72)',
               }}
             >
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: phase.color }} aria-hidden />
-              <span className="shrink-0 font-semibold tabular-nums" style={{ color: phase.color, fontSize: compact ? 11 : 12 }}>
+              <span
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ backgroundColor: phase.color }}
+                aria-hidden
+              />
+              <span
+                className="shrink-0 font-semibold tabular-nums"
+                style={{ color: phase.color, fontSize: compact ? 11 : 12.5 }}
+              >
                 {index + 1}
               </span>
               <span
                 className="min-w-0 flex-1 truncate font-semibold text-text-primary"
-                style={{ fontSize: compact ? 11.5 : 12.5 }}
+                style={{ fontSize: compact ? 11.5 : 13 }}
                 title={stripPhasePrefix(phase.name)}
               >
                 {stripPhasePrefix(phase.name)}
@@ -186,6 +201,17 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
                 >
                   Error
                 </span>
+              ) : status === 'completed' ? (
+                // Finished phase — the checkmark the operator was missing. Matches
+                // AgentisNode's completed styling (CheckCircle2 + text-success).
+                <span
+                  className="inline-flex shrink-0 items-center gap-0.5 font-medium text-success"
+                  style={{ fontSize: compact ? 9 : 10 }}
+                  title="Phase completed"
+                >
+                  <CheckCircle2 size={compact ? 10 : 11} aria-hidden />
+                  {compact ? null : 'Done'}
+                </span>
               ) : null}
             </div>
           </div>
@@ -200,12 +226,7 @@ function estimatedNodeWidth(node: PhaseNode): number {
 }
 
 function estimatedNodeHeight(node: PhaseNode): number {
+  // The compact card has a fixed footprint — live detail floats outside it.
   if (typeof node.height === 'number' && node.height > 0) return node.height;
-  const isAgentNode = node.data?.kind === 'agent_task' || node.data?.kind === 'agent_session';
-  let height = isAgentNode ? AGENT_NODE_HEIGHT : BASE_NODE_HEIGHT;
-  if (node.data?.pendingConfig) height += 28;
-  if (Array.isArray(node.data?.agentMatches) && node.data.agentMatches.some((match) => !match.satisfied)) height += 52;
-  if (node.data?.liveExtra?.progress && typeof node.data.liveExtra.progress.total === 'number') height += 24;
-  if (node.data?.toolPreview) height += 30;
-  return height;
+  return BASE_NODE_HEIGHT;
 }

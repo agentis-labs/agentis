@@ -26,6 +26,7 @@ import { listAgentInstructionFiles, resolveWritableInstructionFile, writeInstruc
 import type { HarnessMemoryIngestionService } from '../services/harnessMemoryIngestion.js';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import type { McpHarnessSessionService } from '../services/mcpHarnessSession.js';
+import type { SkillMaterializer } from '../services/skillMaterializer.js';
 import { detectRuntimeState, listRuntimeModels, modelConfiguredOnAgent } from '../services/runtimeModels.js';
 import { RuntimeProfileService } from '../services/runtimeProfileService.js';
 import { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
@@ -44,18 +45,10 @@ export interface AgentRoutesDeps {
   /** Optional: distils a connected harness's own memory into the agent's Brain. */
   harnessMemoryIngestion?: HarnessMemoryIngestionService;
   mcpHarness?: McpHarnessSessionService;
+  /** Optional: materializes an agent's Brain skills to `.claude/skills/` (Living Skills). */
+  skillMaterializer?: SkillMaterializer;
   /** Optional: lets agent deletion decide the fate of the agent's memory (B11). */
   episodes?: EpisodicMemoryStore;
-}
-
-interface AgentAbilitySummary {
-  id: string;
-  name: string;
-  slug: string;
-  domainTag: string | null;
-  iconEmoji: string | null;
-  compileStatus: string;
-  pinnedAt: string;
 }
 
 export function buildAgentRoutes(deps: AgentRoutesDeps) {
@@ -129,28 +122,6 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         ownedWorkflowsByAgent.set(workflow.ownerAgentId, (ownedWorkflowsByAgent.get(workflow.ownerAgentId) ?? 0) + 1);
       }
     }
-    const abilityRows = agentIds.length > 0
-      ? deps.db
-        .select({
-          agentId: schema.agentAbilityPins.agentId,
-          enabled: schema.agentAbilityPins.enabled,
-          pinnedAt: schema.agentAbilityPins.createdAt,
-          id: schema.abilities.id,
-          name: schema.abilities.name,
-          slug: schema.abilities.slug,
-          domainTag: schema.abilities.domainTag,
-          iconEmoji: schema.abilities.iconEmoji,
-          compileStatus: schema.abilities.compileStatus,
-        })
-        .from(schema.agentAbilityPins)
-        .innerJoin(schema.abilities, eq(schema.agentAbilityPins.abilityId, schema.abilities.id))
-        .where(and(
-          inArray(schema.agentAbilityPins.agentId, agentIds),
-          eq(schema.abilities.workspaceId, ws.workspaceId),
-        ))
-        .all()
-      : [];
-    const abilitiesByAgent = groupAgentAbilities(abilityRows);
     const runsById = new Map(runs.map((run) => [run.id, run]));
     const statsByAgent = new Map(rows.map((agent) => [agent.id, createAgentNodeStats()]));
     const taskAgentById = new Map(tasks.map((task) => [task.id, task.executorRef]));
@@ -213,7 +184,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
           domainName: isSubdomain ? parentDomain?.name ?? null : space?.name ?? agent.spaceTag ?? null,
           subdomainId: isSubdomain ? agent.spaceId ?? null : null,
           subdomainName: isSubdomain ? space?.name ?? null : null,
-          abilities: abilitiesByAgent.get(agent.id) ?? [],
+          abilities: [],
           canvasAngle: canvasAngleFromPosition(agent.canvasPosition),
           runsToday: stats.runsToday,
           spendTodayCents: stats.spendTodayCents,
@@ -621,29 +592,6 @@ function parseQuality(raw: unknown): number | undefined {
   return Math.max(0, Math.min(1, n));
 }
 
-function groupAgentAbilities(
-  rows: Array<AgentAbilitySummary & { agentId: string; enabled: boolean | number | null }>,
-): Map<string, AgentAbilitySummary[]> {
-  const byAgent = new Map<string, AgentAbilitySummary[]>();
-  for (const row of rows) {
-    if (!row.enabled) continue;
-    const list = byAgent.get(row.agentId) ?? [];
-    list.push({
-      id: row.id,
-      name: row.name,
-      slug: row.slug,
-      domainTag: row.domainTag,
-      iconEmoji: row.iconEmoji,
-      compileStatus: row.compileStatus,
-      pinnedAt: row.pinnedAt,
-    });
-    byAgent.set(row.agentId, list);
-  }
-  for (const list of byAgent.values()) {
-    list.sort((a, b) => a.name.localeCompare(b.name));
-  }
-  return byAgent;
-}
 
 const LIVE_AGENT_STATUSES = new Set(['online', 'busy', 'active', 'running']);
 const HEARTBEAT_STALE_MS = CONSTANTS.AGENT_HEARTBEAT_INTERVAL_MS * 4;

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { and, eq, ne } from 'drizzle-orm';
 import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -19,6 +20,8 @@ import { joinUrl, testHarnessConfig, type V1HarnessAdapterType } from './harness
 import type { McpHarnessServer, McpHarnessSessionService } from './mcpHarnessSession.js';
 import { repairCliHarnessConfig } from './harnessConfigRepair.js';
 import { RuntimeSessionStore } from './runtimeSessionStore.js';
+import { harnessAgentHomeDir } from './harnessAgentHome.js';
+import type { SkillMaterializer } from './skillMaterializer.js';
 
 export interface RegisterAdapterOptions {
   skipConfigRepair?: boolean;
@@ -37,6 +40,13 @@ export interface AgentCommissionDeps {
    * invocation, no marker re-spawn). (UNIVERSAL-HARNESS §5.)
    */
   mcpHarness?: McpHarnessSessionService;
+  /**
+   * Optional — when wired, an agent's Brain `skill` atoms are materialized to
+   * `.claude/skills/` in its harness cwd so Claude Code loads them natively
+   * (Living Skills). Without an explicit project cwd, the managed per-agent
+   * home is used as the cwd.
+   */
+  skillMaterializer?: SkillMaterializer;
 }
 
 export interface CommissionAgentInput {
@@ -260,7 +270,7 @@ export async function registerAdapter(
       workspaceId,
       sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
+      cwd: managedAgentCwd(agentId, config),
       model: stringOf(config.model) ?? undefined,
       maxTurns: nativeTurnCap(),
       modelReasoningEffort: reasoningEffortOf(config.modelReasoningEffort),
@@ -288,7 +298,7 @@ export async function registerAdapter(
       workspaceId,
       sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
+      cwd: managedAgentCwd(agentId, config),
       model: stringOf(config.model) ?? undefined,
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
@@ -306,7 +316,7 @@ export async function registerAdapter(
       workspaceId,
       sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
+      cwd: managedAgentCwd(agentId, config),
       model: stringOf(config.model) ?? undefined,
       chatTransport: hermesChatTransportOf(config.chatTransport),
       maxTurns: nativeTurnCap(),
@@ -333,7 +343,7 @@ export async function registerAdapter(
       workspaceId,
       sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: stringOf(config.cwd) ?? undefined,
+      cwd: managedAgentCwd(agentId, config),
       model: stringOf(config.model) ?? undefined,
       yolo: booleanOf(config.yolo),
       extraArgs: stringArrayOf(config.extraArgs),
@@ -346,12 +356,18 @@ export async function registerAdapter(
     return;
   }
   if (!options.skipCliAvailabilityCheck) await ensureCliHarnessAvailable(adapterType, config);
+  // Living Skills: materialize the agent's Brain skill atoms to `.claude/skills/`
+  // so Claude Code loads them natively. Resolves the cwd (managed home when no
+  // explicit project cwd is set); best-effort, never blocks registration.
+  const resolvedCwd = deps.skillMaterializer
+    ? deps.skillMaterializer.materializeForAgent(workspaceId, agentId, stringOf(config.cwd) ?? null).cwd
+    : managedAgentCwd(agentId, config);
   const adapter = new ClaudeCodeAdapter({
     agentId,
     workspaceId,
     sessionStore: new RuntimeSessionStore(deps.db),
     binaryPath: cliCommandFromConfig(config) ?? undefined,
-    cwd: stringOf(config.cwd) ?? undefined,
+    cwd: resolvedCwd,
     model: stringOf(config.model) ?? undefined,
     maxTurns: nativeTurnCap(),
     allowedTools: stringArrayOf(config.allowedTools),
@@ -364,6 +380,18 @@ export async function registerAdapter(
   });
   await adapter.connect();
   deps.adapters.register(agentId, adapter);
+}
+
+/**
+ * Working directory for a CLI harness agent. An explicit project cwd wins;
+ * otherwise the agent runs in its Agentis-managed home under AGENTIS_DATA_DIR —
+ * NEVER `process.cwd()` (the repo), which is how agents used to scatter
+ * generated media into the source tree (e.g. `apps/api/brand-assets/`).
+ */
+function managedAgentCwd(agentId: string, config: Record<string, unknown>): string {
+  const cwd = stringOf(config.cwd) || harnessAgentHomeDir(agentId);
+  try { mkdirSync(cwd, { recursive: true }); } catch { /* best-effort */ }
+  return cwd;
 }
 
 async function ensureCliHarnessAvailable(adapterType: Extract<V1HarnessAdapterType, 'claude_code' | 'codex' | 'cursor' | 'hermes_agent' | 'antigravity'>, config: Record<string, unknown>) {

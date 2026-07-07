@@ -95,6 +95,67 @@ function linearAddCommentBody(params: Record<string, unknown>): Record<string, u
   };
 }
 
+/**
+ * Vercel non-git deployment (POST /v13/deployments). The generated site enters
+ * as either the API's native `files: [{ file, data, encoding? }]` array OR the
+ * friendlier map form `files: { "index.html": "<html>…", "style.css": "…" }` —
+ * the latter is what an agent naturally produces. `name` (project name) is
+ * required; `projectSettings.framework` defaults to `null` (static, no build)
+ * which the first deployment of a project must carry; `target` defaults to
+ * `production` so a fresh deploy is live, not a preview. This is the real deploy
+ * path the Vercel *MCP* lacks — its `deploy_to_vercel` tool is advisory (assumes
+ * a local project dir + CLI), so uploading generated files needs the REST API.
+ */
+function vercelDeploymentBody(params: Record<string, unknown>): Record<string, unknown> {
+  const name = stringValue(params.name ?? params.project ?? params.projectName);
+  if (!name) throw new AgentisError('VALIDATION_FAILED', 'vercel.create_deployment requires `name` (the project name)');
+  const files = normalizeVercelFiles(params.files);
+  if (files.length === 0) {
+    throw new AgentisError('VALIDATION_FAILED', 'vercel.create_deployment requires `files` — either an array of { file, data } or an object map of path → contents');
+  }
+  const projectSettings = params.projectSettings && typeof params.projectSettings === 'object'
+    ? params.projectSettings
+    : { framework: (params.framework as string | null | undefined) ?? null };
+  const body: Record<string, unknown> = {
+    name,
+    files,
+    projectSettings,
+    target: stringValue(params.target) ?? 'production',
+  };
+  for (const key of ['alias', 'meta', 'regions', 'env', 'buildEnv', 'functions', 'routes', 'deploymentId'] as const) {
+    if (params[key] !== undefined) body[key] = params[key];
+  }
+  return body;
+}
+
+type VercelFileEntry = { file: string; data: string; encoding?: string } | { file: string; sha: string; size?: number };
+
+function normalizeVercelFiles(input: unknown): VercelFileEntry[] {
+  if (Array.isArray(input)) {
+    const out: VercelFileEntry[] = [];
+    for (const entry of input) {
+      if (!entry || typeof entry !== 'object') continue;
+      const rec = entry as Record<string, unknown>;
+      const file = stringValue(rec.file ?? rec.path ?? rec.name)?.replace(/^\/+/u, '');
+      if (!file) continue;
+      // A previously uploaded file referenced by SHA passes through untouched.
+      if (rec.sha !== undefined) { out.push({ file, sha: String(rec.sha), ...(rec.size !== undefined ? { size: Number(rec.size) } : {}) }); continue; }
+      if (rec.data === undefined) continue;
+      const encoding = stringValue(rec.encoding);
+      out.push({ file, data: String(rec.data), ...(encoding ? { encoding } : {}) });
+    }
+    return out;
+  }
+  // Friendly map form: { "index.html": "<html>…", "assets/app.js": "…" }.
+  if (input && typeof input === 'object') {
+    return Object.entries(input as Record<string, unknown>).map(([path, data]) => ({
+      file: path.replace(/^\/+/u, ''),
+      data: typeof data === 'string' ? data : JSON.stringify(data),
+    }));
+  }
+  return [];
+}
+
 function pickDefined(params: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of keys) {
@@ -197,6 +258,16 @@ export const SERVICE_TEMPLATES: Record<string, ServiceTemplate> = {
       send_sms: { method: 'POST', url: 'https://api.twilio.com/2010-04-01/Accounts/{accountSid}/Messages.json', bodyEncoding: 'form' },
       send_whatsapp: { method: 'POST', url: 'https://api.twilio.com/2010-04-01/Accounts/{accountSid}/Messages.json', bodyEncoding: 'form' },
       make_call: { method: 'POST', url: 'https://api.twilio.com/2010-04-01/Accounts/{accountSid}/Calls.json', bodyEncoding: 'form' },
+    },
+  },
+  vercel: {
+    auth: { scheme: 'bearer', tokenField: 'token' },
+    operations: {
+      // The one the Vercel MCP can't do: upload generated files and get a live URL.
+      create_deployment: { method: 'POST', url: 'https://api.vercel.com/v13/deployments', query: ['teamId', 'slug', 'forceNew', 'skipAutoDetectionConfirmation'], body: vercelDeploymentBody },
+      get_deployment: { method: 'GET', url: 'https://api.vercel.com/v13/deployments/{idOrUrl}', query: ['teamId', 'slug'] },
+      list_deployments: { method: 'GET', url: 'https://api.vercel.com/v6/deployments', query: ['projectId', 'teamId', 'slug', 'limit', 'target', 'since', 'until', 'state'] },
+      list_projects: { method: 'GET', url: 'https://api.vercel.com/v9/projects', query: ['teamId', 'slug', 'limit', 'search'] },
     },
   },
   supabase: {

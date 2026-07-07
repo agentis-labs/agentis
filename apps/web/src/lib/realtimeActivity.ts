@@ -36,6 +36,8 @@ export interface RealtimeActivity {
   tool?: string;
   approvalId?: string;
   progress?: { completed: number; total: number };
+  /** A concrete thing the agent produced (record/artifact/surface…) — the "creation" feed. */
+  creation?: { kind: string; title?: string; count?: number; collection?: string; ref?: string };
   raw: Record<string, unknown>;
 }
 
@@ -338,6 +340,26 @@ export function describeRealtimeActivity(
     case REALTIME_EVENTS.AGENT_WORK_STEP: {
       const phase = stringField(payload, ['phase']);
       const text = stringField(payload, ['detail', 'description', 'text', 'summary', 'step', 'message']) ?? 'Working';
+      // A concrete creation (record/artifact/surface…) renders as a distinct, richer
+      // item so the operator SEES what the agent made — not a generic "Working" line.
+      const creationRaw = isRecord(payload.creation) ? payload.creation : null;
+      if (creationRaw) {
+        const ref = stringField(creationRaw, ['ref']);
+        return {
+          ...base,
+          kind: 'tool',
+          tone: 'success',
+          title: stringField(creationRaw, ['title']) ?? agentName ?? 'Created',
+          detail: text,
+          creation: {
+            kind: stringField(creationRaw, ['kind']) ?? 'output',
+            title: stringField(creationRaw, ['title']),
+            count: numberField(creationRaw, ['count']),
+            collection: stringField(creationRaw, ['collection']),
+            ...(ref ? { ref } : {}),
+          },
+        };
+      }
       return {
         ...base,
         kind: 'agent',

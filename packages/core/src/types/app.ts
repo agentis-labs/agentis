@@ -177,6 +177,23 @@ export const appWorkflowBindingSchema = z.object({
   purpose: z.string().max(400).optional(),
   enabled: z.boolean().optional(),
   dependsOn: z.array(z.string()).default([]),
+  /**
+   * App-level recurring schedule (APP-INTERFACE-10X §2.3) — a standard 5-field
+   * cron expression the AppOrchestrator fires through the SAME run queue as every
+   * other start (never a forked execution path). Graph-authored triggers stay
+   * authoritative where present; this is the App's own layer for "run this at…".
+   */
+  schedule: z
+    .object({
+      cron: z.string().min(9).max(120),
+      enabled: z.boolean().default(true),
+    })
+    .nullable()
+    .optional(),
+  /** `exclusive` = skip an orchestrated start while a run of this workflow is still active. */
+  concurrency: z.enum(['parallel', 'exclusive']).optional(),
+  /** When dependents fire: after upstream success only (default) or on any settle. */
+  chainOn: z.enum(['success', 'always']).optional(),
 });
 export type AppWorkflowBinding = z.infer<typeof appWorkflowBindingSchema>;
 
@@ -197,4 +214,14 @@ export interface AppWorkflowSummary {
   triggerKind: string | null;
   /** Most recent run, if any. */
   lastRun: { id: string; status: string; at: string } | null;
+  /** A run currently executing (running/waiting), if any — the live pulse. */
+  activeRun: { id: string; status: string; startedAt: string } | null;
+  /** App-level schedule rule (binding.schedule). */
+  schedule: { cron: string; enabled: boolean } | null;
+  /** Next App-level scheduled fire, when computable. */
+  nextRunAt: string | null;
+  /** Orchestrated-start concurrency policy. */
+  concurrency: 'parallel' | 'exclusive';
+  /** When dependents of this workflow fire. */
+  chainOn: 'success' | 'always';
 }

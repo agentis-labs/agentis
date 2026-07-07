@@ -34,7 +34,7 @@ const NATIVE_BOUNDARY: InformationBoundary = {
   policySource: 'owner_rule',
 };
 
-const SCOPES = ['agents', 'workflows', 'runs', 'abilities'] as const;
+const SCOPES = ['agents', 'workflows', 'runs'] as const;
 type NativeScope = (typeof SCOPES)[number];
 
 export class AgentisNativeSource implements KnowledgeSource {
@@ -177,32 +177,6 @@ export class AgentisNativeSource implements KnowledgeSource {
       if (objects.length > 0) yield { objects, deletions: [], cursor: maxSeen || cursor };
     }
 
-    if (include('abilities') && !excluded.has('abilities')) {
-      const rows = this.db.select().from(schema.abilities)
-        .where(cursor
-          ? and(eq(schema.abilities.workspaceId, ctx.workspaceId), gt(schema.abilities.updatedAt, cursor))
-          : eq(schema.abilities.workspaceId, ctx.workspaceId))
-        .all();
-      const objects: CanonicalSourceObject[] = rows.map((ab) => {
-        track(ab.updatedAt);
-        return {
-          externalId: `ability:${ab.id}`,
-          objectType: 'ability',
-          title: ab.name,
-          nativeUrl: `/abilities/${ab.id}`,
-          observedAt: new Date().toISOString(),
-          createdAt: ab.createdAt,
-          modifiedAt: ab.updatedAt,
-          content: [
-            `Ability "${ab.name}".`,
-            ab.description ? `Behavior: ${ab.description}` : '',
-          ].filter(Boolean).join('\n'),
-          attributes: { depth: (ab as { depth?: string }).depth },
-          boundary: NATIVE_BOUNDARY,
-        };
-      });
-      if (objects.length > 0) yield { objects, deletions: [], cursor: maxSeen || cursor };
-    }
 
     // Terminal empty batch commits the final cursor even when nothing changed.
     yield { objects: [], deletions: [], cursor: maxSeen || cursor, done: true };

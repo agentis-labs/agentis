@@ -16,8 +16,6 @@ import { SharedIntelligenceService } from '../../src/services/sharedIntelligence
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { MemoryReflectionService } from '../../src/services/memoryReflectionService.js';
 import { AppLearningService } from '../../src/services/appLearning.js';
-import { AbilityService } from '../../src/services/abilityService.js';
-import { AbilityCreationService } from '../../src/services/abilityCreationService.js';
 import { AppContactService } from '../../src/services/appContacts.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -100,58 +98,6 @@ describe('AppLearningService.recordOutcome — outcome → graded lesson', () =>
     const lesson = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.scopeId, agentId)).all()
       .find((r) => (r.tags as string[]).includes('m2_lesson'));
     expect(lesson?.summary).toContain('same-day call');
-  });
-});
-
-describe('AppLearningService — graduation (recurrence → ability draft)', () => {
-  it('graduates a recurring winning pattern into an ability draft via the existing hooks', async () => {
-    const { appId, agentId, contactId } = seedAppWithContact('won');
-
-    // Wire the real graduation flywheel: reflection → SkillProposer → ability draft.
-    const abilityService = new AbilityService(ctx.db, ctx.logger);
-    const abilityCreation = new AbilityCreationService({ db: ctx.db, logger: ctx.logger, abilities: abilityService });
-    const reflection = new MemoryReflectionService(ctx.db, brain, ctx.logger);
-    // Scripted completer → a grounded PROCEDURAL rule the deduction pass returns.
-    reflection.setCompleter({
-      async completeStructured<T>(): Promise<T | null> {
-        return {
-          statement: 'Always follow up promptly on whatsapp relationships that reach the won stage to keep momentum.',
-          title: 'Follow up promptly on won whatsapp deals',
-          confidence: 0.85,
-        } as unknown as T;
-      },
-    });
-    const drafts: Promise<unknown>[] = [];
-    reflection.setSkillProposer((args) => {
-      drafts.push(abilityCreation.draft({ workspaceId: args.workspaceId, from: 'intent', intent: args.intent, name: args.title, originMetadata: args.scopeId ? { scopeId: args.scopeId } : undefined }));
-    });
-
-    const learning = new AppLearningService({ db: ctx.db, shared: brain, logger: ctx.logger, reflection });
-
-    // Three recurring 'won' lessons across distinct contacts → ≥3 distinct sources,
-    // which is the skill-proposal threshold in MemoryReflectionService.
-    const contacts = new AppContactService(ctx.db);
-    await learning.recordOutcome({ workspaceId: ctx.workspace.id, appId, contactId, outcome: 'won' });
-    for (let i = 0; i < 2; i++) {
-      const cid = contacts.touch({ workspaceId: ctx.workspace.id, appId, channelKind: 'whatsapp', handle: `h${i}` });
-      contacts.update(ctx.workspace.id, cid, { stage: 'won', goal: 'reserve the unit' });
-      await learning.recordOutcome({ workspaceId: ctx.workspace.id, appId, contactId: cid, outcome: 'won' });
-    }
-
-    // Let the fire-and-forget draft(s) settle.
-    await Promise.allSettled(drafts);
-
-    // An ability draft was proposed, attributable to the owner-agent scope.
-    const abilities = ctx.db.select().from(schema.abilities).where(eq(schema.abilities.workspaceId, ctx.workspace.id)).all();
-    expect(abilities.length).toBeGreaterThanOrEqual(1);
-    const graduated = abilities.find((a) => ((a.origin ?? {}) as Record<string, unknown>).scopeId === agentId);
-    expect(graduated).toBeTruthy();
-
-    // Visibility surfaces both the lessons and the graduated ability.
-    const learnings = learning.recentLearnings(ctx.workspace.id, appId);
-    expect(learnings.ownerAgentId).toBe(agentId);
-    expect(learnings.lessons.length).toBeGreaterThanOrEqual(1);
-    expect(learnings.abilities.length).toBeGreaterThanOrEqual(1);
   });
 });
 

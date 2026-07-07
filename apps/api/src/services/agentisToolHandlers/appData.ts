@@ -17,11 +17,13 @@ import {
   collectionSchemaSchema,
   createAppSchema,
   dataQuerySchema,
+  repairSurface,
   surfaceActionSchema,
   uiPatchOpSchema,
   uiPerformRegionSchema,
   viewNodeSchema,
   type AgentisToolContext,
+  type AppSurface,
 } from '@agentis/core';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
@@ -29,6 +31,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { buildAppStores, type AppStores } from '@agentis/app';
+import { publishAgentCreation } from '../agentWorkProgress.js';
 import { generateSurfaceView, generateSurfacePatch } from '../surfaceGenerator.js';
 import { resolveSynthesisCompleter } from './build.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';
@@ -94,6 +97,25 @@ const filterProp = {
     description: 'Field → match. A bare value means equality; an operator uses { "op": "eq|ne|gt|gte|lt|lte|contains|in", "value": ... }. Example: { "status": "open", "score": { "op": "gte", "value": 8 } }.',
   },
 } as const;
+
+/** Surface a concrete datastore creation on the live feed (best-effort). */
+function emitCreation(
+  deps: ToolHandlerDeps,
+  ctx: AgentisToolContext,
+  creation: { creationKind: 'record' | 'collection'; title: string; collection?: string; count?: number },
+): void {
+  try {
+    publishAgentCreation(deps.bus, {
+      workspaceId: ctx.workspaceId,
+      ...(ctx.runId ? { runId: ctx.runId } : {}),
+      ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
+      ...(ctx.conversationId ? { conversationId: ctx.conversationId } : {}),
+      ...creation,
+    });
+  } catch {
+    /* telemetry must never fail a write */
+  }
+}
 
 export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   const stores: AppStores = buildAppStores({ db: deps.db, bus: deps.bus });
@@ -169,14 +191,59 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.app.list',
         family: 'app',
-        description: 'List the Agentic Apps in this workspace (id, name, slug, status). Use to find an App to operate on.',
-        inputSchema: { type: 'object', properties: {} },
+        description: 'List the Agentic Apps in this workspace (id, name, slug, status). Archived apps are hidden unless includeArchived is true. Use to find an App to operate on.',
+        inputSchema: { type: 'object', properties: { includeArchived: { type: 'boolean', description: 'Include archived apps (default false).' } } },
         mutating: false,
         autoExecute: true,
       },
-      handler: (_args, ctx) => ({
-        apps: store.list(ctx.workspaceId, {}).map((app) => ({ appId: app.id, name: app.name, slug: app.slug, status: app.status })),
+      handler: (args, ctx) => ({
+        apps: store.list(ctx.workspaceId, {})
+          .filter((app) => (args.includeArchived === true ? true : app.status !== 'archived'))
+          .map((app) => ({ appId: app.id, name: app.name, slug: app.slug, status: app.status })),
       }),
+    },
+    {
+      definition: {
+        id: 'agentis.app.archive',
+        family: 'app',
+        description: 'Archive an App (soft, reversible): it is hidden from the default app list and its triggers should be paused, but nothing is destroyed and it can be restored. Use this to retire a duplicate or superseded App instead of deleting it. Pass restore:true to un-archive.',
+        inputSchema: { type: 'object', properties: { ...appIdProp, restore: { type: 'boolean', description: 'Un-archive instead of archive.' } } },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const updated = store.update(ctx.workspaceId, appId, { status: args.restore === true ? 'draft' : 'archived' });
+        return { appId: updated.id, name: updated.name, status: updated.status, archived: updated.status === 'archived' };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.app.delete',
+        family: 'app',
+        description: 'PERMANENTLY delete an App and its collections/records/surfaces (adopted workflows survive as bare, un-owned). Destructive and irreversible. Called WITHOUT confirm:true it returns a preview of exactly what will be removed and what survives — review it, then call again with confirm:true. Prefer agentis.app.archive unless the App must truly be erased.',
+        inputSchema: { type: 'object', properties: { ...appIdProp, confirm: { type: 'boolean', description: 'Must be true to actually delete. Omit/false to get a preview first.' } } },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const app = store.get(ctx.workspaceId, appId);
+        const workflowIds = store.listWorkflowIds(ctx.workspaceId, appId);
+        if (args.confirm !== true) {
+          return {
+            deleted: false,
+            preview: true,
+            app: { appId: app.id, name: app.name, status: app.status },
+            willRemove: 'this App, its collections/records and surfaces',
+            willSurviveAsBare: { workflows: workflowIds },
+            next: `Call agentis.app.delete again with { appId: "${appId}", confirm: true } to proceed, or agentis.app.archive to retire it reversibly instead.`,
+          };
+        }
+        store.delete(ctx.workspaceId, appId);
+        return { deleted: true, appId, name: app.name, workflowsNowBare: workflowIds };
+      },
     },
     {
       definition: {
@@ -279,7 +346,11 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         mutating: true,
         autoExecute: true,
       },
-      handler: (args, ctx) => data.defineCollection(ctx.workspaceId, resolveAppId(args, ctx), { name: str(args.name, 'name'), schema: collectionSchemaSchema.parse(args.schema) }),
+      handler: (args, ctx) => {
+        const info = data.defineCollection(ctx.workspaceId, resolveAppId(args, ctx), { name: str(args.name, 'name'), schema: collectionSchemaSchema.parse(args.schema) });
+        emitCreation(deps, ctx, { creationKind: 'collection', title: info.name });
+        return info;
+      },
     },
     {
       definition: {
@@ -290,7 +361,12 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         mutating: true,
         autoExecute: true,
       },
-      handler: (args, ctx) => data.insert(ctx.workspaceId, resolveAppId(args, ctx), str(args.collection, 'collection'), obj(args.record, 'record'), ctx.agentId),
+      handler: (args, ctx) => {
+        const collection = str(args.collection, 'collection');
+        const rec = data.insert(ctx.workspaceId, resolveAppId(args, ctx), collection, obj(args.record, 'record'), ctx.agentId);
+        emitCreation(deps, ctx, { creationKind: 'record', title: collection, collection, count: 1 });
+        return rec;
+      },
     },
     {
       definition: {
@@ -312,7 +388,12 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         mutating: true,
         autoExecute: true,
       },
-      handler: (args, ctx) => data.upsert(ctx.workspaceId, resolveAppId(args, ctx), str(args.collection, 'collection'), obj(args.match, 'match'), obj(args.record, 'record'), ctx.agentId),
+      handler: (args, ctx) => {
+        const collection = str(args.collection, 'collection');
+        const rec = data.upsert(ctx.workspaceId, resolveAppId(args, ctx), collection, obj(args.match, 'match'), obj(args.record, 'record'), ctx.agentId);
+        emitCreation(deps, ctx, { creationKind: 'record', title: collection, collection, count: 1 });
+        return rec;
+      },
     },
     {
       definition: {
@@ -512,6 +593,70 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const actions = z.array(surfaceActionSchema).parse(args.actions);
         surfaces.setActions(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), actions);
         return { ok: true, actions: actions.length };
+      },
+    },
+    {
+      // INTERFACE-OVERHAUL-10X: the gate's findings BEFORE persisting — the UI
+      // equivalent of a workflow dry-run. Author → lint → render.
+      definition: {
+        id: 'agentis.ui.lint',
+        family: 'app',
+        description:
+          'Lint a surface against the layout floor + operability gate (RENDERED ≠ OPERABLE) WITHOUT persisting. ' +
+          'Pass view (and optionally actions) to check a PROPOSED tree before ui.render, or just surface to audit the stored one. ' +
+          'Returns operable (true = no repairs needed) plus the exact fixes the gate would apply at persist ' +
+          '(orphan workflow actions wired into the header, buttons on undeclared actions stripped, dead binds removed, legacy kinds migrated). ' +
+          'A surface that needs repairs is a defect — fix the tree and lint again. Flow: author → lint → render.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            surface: { type: 'string', description: 'Surface name (its stored tree/actions are used when view/actions are omitted). Defaults to "home".' },
+            view: { type: 'object', description: 'Proposed ViewNode tree to lint (omit to lint the stored surface).' },
+            actions: { type: 'array', description: 'Proposed SurfaceAction[] to lint against (omit to use the stored declarations).' },
+          },
+        },
+        mutating: false,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const surfaceName = typeof args.surface === 'string' && args.surface.trim() ? args.surface.trim() : 'home';
+        let stored: AppSurface | null = null;
+        try { stored = surfaces.get(ctx.workspaceId, appId, surfaceName); } catch { stored = null; }
+
+        // A proposed tree that fails the schema is the first-class lint finding.
+        if (args.view !== undefined) {
+          const parsed = viewNodeSchema.safeParse(args.view);
+          if (!parsed.success) {
+            return {
+              operable: false,
+              schemaErrors: parsed.error.issues.slice(0, 12).map((i) => `${i.path.join('/') || '(root)'}: ${i.message}`),
+              fixes: [],
+              hint: 'The view does not parse as a ViewNode tree — fix the schema errors before anything else.',
+            };
+          }
+        }
+        const view = args.view !== undefined ? viewNodeSchema.parse(args.view) : stored?.view ?? null;
+        if (!view) {
+          throw new AgentisError('VALIDATION_FAILED', `nothing to lint: surface "${surfaceName}" has no stored view — pass a proposed view or render first`);
+        }
+        const actions = Array.isArray(args.actions) ? z.array(surfaceActionSchema).parse(args.actions) : stored?.actions ?? [];
+        const collectionNames = data.listCollections(ctx.workspaceId, appId).map((c) => c.name);
+        const { fixes } = repairSurface(view, {
+          collections: collectionNames,
+          ...(actions.length > 0 ? { actions } : {}),
+        });
+        return {
+          operable: fixes.length === 0,
+          fixes,
+          actionsConsidered: actions.length,
+          collections: collectionNames,
+          hint: fixes.length === 0
+            ? 'Passes the gate — render it.'
+            : 'These repairs WILL be auto-applied at persist; a cleaner surface fixes them at the source and lints again.',
+        };
       },
     },
     {

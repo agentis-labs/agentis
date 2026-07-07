@@ -83,3 +83,100 @@ describe('repairSurface — auto-fixes the garbage', () => {
     expect(JSON.stringify(once.view)).toContain('"Hero"');
   });
 });
+
+describe('operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X)', () => {
+  const workflowAction = { name: 'run_factory', kind: 'workflow' as const, target: 'wf-1' };
+
+  it('wires a declared-but-unreachable workflow action into the page header (the DB-proven Fashion Store case)', () => {
+    // The real production failure: run_factory declared, ZERO interactive elements authored.
+    const { view, fixes } = repairSurface(
+      {
+        type: 'Stack',
+        children: [
+          { type: 'Hero', title: 'Fashion Store Factory' },
+          { type: 'Table', bind: { collection: 'factory_leads', live: true }, columns: [{ key: 'lead' }] },
+        ],
+      },
+      { collections: ['factory_leads'], actions: [workflowAction] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).toContain('"run_factory"'); // reachable from a control now
+    expect(json).toContain('"Hero"');
+    expect(fixes.some((f) => f.includes('wired 1 workflow action'))).toBe(true);
+  });
+
+  it('adds an action bar when there is no Hero to carry the workflow action', () => {
+    const { view } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Table', bind: { collection: 'c', live: true }, columns: [{ key: 'x' }] }] },
+      { collections: ['c'], actions: [workflowAction] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).toContain('"Toolbar"');
+    expect(json).toContain('"run_factory"');
+  });
+
+  it('inserts the OrchestrationPanel when the app drives workflows and none is present', () => {
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Hero', title: 'App' }] },
+      { actions: [workflowAction] },
+    );
+    expect(JSON.stringify(view)).toContain('"OrchestrationPanel"');
+    expect(fixes).toContain('added the orchestration panel (app drives workflows)');
+  });
+
+  it('strips a button bound to an undeclared action (would 404 on click)', () => {
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Button', label: 'Ghost', action: { action: 'not_declared' } }, { type: 'Heading', value: 'Keep' }] },
+      { actions: [workflowAction] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).not.toContain('not_declared');
+    expect(json).toContain('Keep');
+    expect(fixes.some((f) => f.includes('undeclared action'))).toBe(true);
+  });
+
+  it('keeps navigate/setState buttons (client built-ins need no declaration)', () => {
+    const { view } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Button', label: 'Go', action: { action: 'navigate', args: { surface: 'board' } } }] },
+      { actions: [workflowAction] },
+    );
+    expect(JSON.stringify(view)).toContain('"navigate"');
+  });
+
+  it('wires a declared delete action as a row action on the matching table', () => {
+    const del = { name: 'delete_lead', kind: 'data' as const, target: 'leads.delete' };
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Table', bind: { collection: 'leads', live: true }, columns: [{ key: 'name' }] }] },
+      { collections: ['leads'], actions: [del] },
+    );
+    const table = JSON.stringify(view);
+    expect(table).toContain('"delete_lead"');
+    expect(table).toContain('"$row":"id"');
+    expect(fixes.some((f) => f.includes('row delete'))).toBe(true);
+  });
+
+  it('migrates legacy kinds (AgentConsole → ActivityStream) in place', () => {
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'AgentConsole', title: 'Ops' } as unknown as ViewNode] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).toContain('"ActivityStream"');
+    expect(json).not.toContain('AgentConsole');
+    expect(fixes.some((f) => f.includes('migrated legacy'))).toBe(true);
+  });
+
+  it('is idempotent: a gated surface passes through the gate unchanged', () => {
+    const first = repairSurface(
+      {
+        type: 'Stack',
+        children: [
+          { type: 'Hero', title: 'App' },
+          { type: 'Table', bind: { collection: 'leads', live: true }, columns: [{ key: 'name' }] },
+        ],
+      },
+      { collections: ['leads'], actions: [workflowAction, { name: 'delete_lead', kind: 'data', target: 'leads.delete' }] },
+    );
+    const second = repairSurface(first.view, { collections: ['leads'], actions: [workflowAction, { name: 'delete_lead', kind: 'data', target: 'leads.delete' }] });
+    expect(JSON.stringify(second.view)).toBe(JSON.stringify(first.view));
+  });
+});

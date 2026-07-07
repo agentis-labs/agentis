@@ -24,7 +24,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { Logger } from '../logger.js';
-import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { linkAbortSignal } from './abort.js';
 
 /** An MCP server descriptor in ACP's `session/new` shape (HTTP transport). */
@@ -142,9 +142,12 @@ export class AcpClient {
   /** Spawn the harness in ACP mode and begin reading its JSON-RPC stream. */
   start(): void {
     const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}) });
-    const target = resolveSpawnTarget(this.opts.command, this.opts.args ?? [], this.opts.cwd ?? process.cwd(), env);
+    // Self-heal a vanished workdir so a present binary can't throw the misleading
+    // `spawn <binary> ENOENT` (Windows reports a missing cwd against the command).
+    const cwd = resolveSpawnCwd(this.opts.cwd, { create: true });
+    const target = resolveSpawnTarget(this.opts.command, this.opts.args ?? [], cwd ?? process.cwd(), env);
     this.#child = spawn(target.command, target.args, {
-      cwd: this.opts.cwd,
+      cwd,
       env,
       windowsHide: true,
       signal: this.#controller.signal,

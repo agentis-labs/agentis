@@ -26,13 +26,21 @@ import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPre
 import { REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { tokens } from '../../lib/api';
+import { displayLabel } from '../../lib/prettyRef';
 import { appsApi, type AppConversation, type AppConversationMessage } from '../../lib/appsApi';
 import { pathsEqual, pathKey } from './viewTree';
 import { CHART_PALETTE, ThemeProvider, accentColor, resolveTheme, useTheme, type ResolvedTheme } from './theme';
 import { containerClasses, textClasses, toneFillClass, toneFromStatus, toneSoftClass } from './styleIntent';
+import { StatusPill, classifyValue, formatDisplay, isWordyMetric, numeralScale } from './format';
 import { DataChart, Sparkline as SparkSvg, type ChartSeries } from './charts';
 import { CODE_SURFACE_KIT, CODE_SURFACE_TOKENS } from './codeSurfaceKit';
 import { registerBlock, getBlock, type BlockContext, type ResolveScope } from './blocks/registry';
+// Side-effect registrations on the open block seam. These modules import shared
+// helpers back from this file (cycle-safe: they dereference them only at render
+// time) and register the live-ops + archetype composite kinds. WorkflowControl
+// is owned by opsBlocks now (aliased to the OrchestrationPanel).
+import './blocks/opsBlocks';
+import './blocks/archetypeBlocks';
 
 interface RuntimeCtx {
   appId: string;
@@ -46,7 +54,8 @@ interface RuntimeCtx {
 
 const Ctx = createContext<RuntimeCtx | null>(null);
 
-const useRuntime = () => {
+/** Runtime context accessor — exported for block modules (ops/archetype blocks). */
+export const useRuntime = () => {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('ViewRenderer used outside an AppRuntime');
   return ctx;
@@ -157,36 +166,102 @@ function useResolvedScope(row?: Record<string, unknown>): ResolveScope {
   return useMemo(() => ({ row, state: uiState }), [row, uiState]);
 }
 
-function useBoundRows(bind: DataBind): { rows: Record<string, unknown>[]; loading: boolean } {
-  const { client, dataRevision, uiState } = useRuntime();
-  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const key = JSON.stringify({ collection: bind.collection, query: bind.query, sort: bind.sort, limit: bind.limit, state: uiState });
+// ── Shared bind store — the deduped data plane (INTERFACE-OVERHAUL-10X §2.4) ──
+// One store per app client: identical binds (collection + RESOLVED filter +
+// sort + limit) share one subscription and ONE fetch per data revision. A
+// uiState change that does not alter a bind's resolved filter refetches
+// nothing (the old hook keyed on the WHOLE uiState — every keystroke refetched
+// every bound view), and revision refetches keep the previous rows on screen
+// (live update without skeleton flicker).
 
-  useEffect(() => {
-    let cancelled = false;
-    const filter = resolveDeep(bind.query ?? {}, { state: uiState }) as Record<string, unknown>;
-    setLoading(true);
-    client.data
-      .query(bind.collection, { filter, sort: bind.sort, limit: bind.limit ?? 50 })
-      .then((nextRows) => {
-        if (!cancelled) setRows(nextRows);
-      })
-      .catch(() => {
-        if (!cancelled) setRows([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [bind.collection, bind.limit, bind.sort, client, dataRevision, key, uiState]);
-
-  return { rows, loading };
+interface BindEntry {
+  rows: Record<string, unknown>[];
+  hasLoaded: boolean;
+  fetchedRevision: number;
+  fetchingRevision: number;
+  subs: Set<() => void>;
+  gc: ReturnType<typeof setTimeout> | null;
 }
 
-function useActionInvoker() {
+class BindStore {
+  private entries = new Map<string, BindEntry>();
+  constructor(private readonly client: AgentisAppClient) {}
+
+  private entry(key: string): BindEntry {
+    let e = this.entries.get(key);
+    if (!e) {
+      e = { rows: [], hasLoaded: false, fetchedRevision: -1, fetchingRevision: -1, subs: new Set(), gc: null };
+      this.entries.set(key, e);
+    }
+    if (e.gc) { clearTimeout(e.gc); e.gc = null; }
+    return e;
+  }
+
+  peek(key: string): BindEntry | undefined {
+    return this.entries.get(key);
+  }
+
+  subscribe(key: string, notify: () => void): () => void {
+    const e = this.entry(key);
+    e.subs.add(notify);
+    return () => {
+      e.subs.delete(notify);
+      // Keep the entry warm briefly (page/tab switches re-hit the cache), then GC.
+      if (e.subs.size === 0) {
+        e.gc = setTimeout(() => { if (e.subs.size === 0) this.entries.delete(key); }, 30_000);
+      }
+    };
+  }
+
+  /** Fetch once per (key, revision) no matter how many blocks share the bind. */
+  fetch(key: string, spec: { collection: string; filter: Record<string, unknown>; sort?: DataBind['sort']; limit?: number }, revision: number): void {
+    const e = this.entry(key);
+    if (revision <= e.fetchedRevision || revision <= e.fetchingRevision) return;
+    e.fetchingRevision = revision;
+    this.client.data
+      .query(spec.collection, { filter: spec.filter, sort: spec.sort, limit: spec.limit ?? 50 })
+      .then((rows) => { e.rows = rows; })
+      .catch(() => { if (!e.hasLoaded) e.rows = []; })
+      .finally(() => {
+        e.fetchedRevision = Math.max(e.fetchedRevision, revision);
+        e.hasLoaded = true;
+        for (const notify of e.subs) notify();
+      });
+  }
+}
+
+const BIND_STORES = new WeakMap<AgentisAppClient, BindStore>();
+function bindStoreFor(client: AgentisAppClient): BindStore {
+  let store = BIND_STORES.get(client);
+  if (!store) {
+    store = new BindStore(client);
+    BIND_STORES.set(client, store);
+  }
+  return store;
+}
+
+export function useBoundRows(bind: DataBind): { rows: Record<string, unknown>[]; loading: boolean } {
+  const { client, dataRevision, uiState } = useRuntime();
+  // The RESOLVED filter is the identity: `$state` refs participate only through
+  // their current value, so unrelated uiState changes produce the same key.
+  const filter = resolveDeep(bind.query ?? {}, { state: uiState }) as Record<string, unknown>;
+  const key = JSON.stringify({ c: bind.collection, f: filter, s: bind.sort, l: bind.limit });
+  const store = bindStoreFor(client);
+  const [, force] = useState(0);
+
+  useEffect(() => {
+    const unsub = store.subscribe(key, () => force((n) => n + 1));
+    store.fetch(key, { collection: bind.collection, filter, sort: bind.sort, limit: bind.limit }, dataRevision);
+    return unsub;
+    // `key` carries collection/filter/sort/limit identity; `filter` is the same render's resolution.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, key, dataRevision]);
+
+  const entry = store.peek(key);
+  return { rows: entry?.rows ?? [], loading: !entry?.hasLoaded };
+}
+
+export function useActionInvoker() {
   const { client, surfaceActions } = useRuntime();
   return useCallback(
     async (action: string, args: Record<string, unknown>) => {
@@ -216,7 +291,15 @@ function useActionInvoker() {
         return;
       }
 
-      await client.actions.invoke(action, args);
+      const result = await client.actions.invoke(action, args);
+      // Run feedback loop: a workflow action that started a run announces it, so
+      // the shell can surface a live "run started" chip → ops drawer deep link.
+      if (isRecord(result) && typeof (result as { runId?: unknown }).runId === 'string') {
+        window.dispatchEvent(new CustomEvent('agentis:run-started', {
+          detail: { runId: (result as { runId: string }).runId, action },
+        }));
+      }
+      return result;
     },
     [client, surfaceActions],
   );
@@ -250,12 +333,29 @@ export function ViewRenderer({
 
   let content = renderContent();
   if (isRoot) {
+    // The root carries the design system scope: `.s-surface` re-points the token
+    // palette (appearance-aware — platform theme or per-app pin), the design vars
+    // add structure, and an optional root accent re-brands the app's accent hue.
+    const appearance = node.style?.appearance && node.style.appearance !== 'auto' ? node.style.appearance : undefined;
+    const rootAccent = node.style?.accent && node.style.accent !== 'accent' ? accentColor(node.style.accent) : undefined;
     content = (
       <ThemeProvider value={effective}>
         <div
-          className="@container mx-auto w-full"
+          className="s-surface @container mx-auto w-full"
           data-design={effective.design.id}
-          style={{ maxWidth: effective.contentWidth, ...effective.design.vars }}
+          {...(appearance ? { 'data-appearance': appearance } : {})}
+          style={{
+            maxWidth: effective.contentWidth,
+            ...effective.design.vars,
+            ...(rootAccent
+              ? {
+                  '--color-accent': rootAccent,
+                  '--color-accent-hover': rootAccent,
+                  '--color-accent-soft': `color-mix(in srgb, ${rootAccent} 12%, transparent)`,
+                  '--color-accent-muted': `color-mix(in srgb, ${rootAccent} 30%, transparent)`,
+                } as React.CSSProperties
+              : {}),
+          }}
         >
           {content}
         </div>
@@ -395,17 +495,17 @@ function InlineTextEditor({
   );
 }
 
-function PanelShell({ title, icon, children, action }: { title?: string; icon: ReactNode; children: ReactNode; action?: ReactNode }) {
+export function PanelShell({ title, icon, children, action }: { title?: string; icon: ReactNode; children: ReactNode; action?: ReactNode }) {
   return (
     <div className="s-panel overflow-hidden">
       {(title || action) ? (
-        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-          <span className="text-accent">{icon}</span>
-          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text-primary">{title}</span>
+        <div className="flex items-center gap-2.5 border-b border-line/70 px-5 py-3.5">
+          <span className="text-text-muted">{icon}</span>
+          <span className="s-title min-w-0 flex-1 truncate">{title}</span>
           {action}
         </div>
       ) : null}
-      <div className="p-3">{children}</div>
+      <div style={{ padding: 'calc(var(--s-pad, 20px) - 4px) var(--s-pad, 20px) var(--s-pad, 20px)' }}>{children}</div>
     </div>
   );
 }
@@ -466,13 +566,13 @@ function StatusBoardBlock({ node, scope }: { node: Extract<ViewNode, { type: 'St
             : /wait|warn|review|pending/i.test(status) ? 'text-warn bg-warn-soft'
               : 'text-accent bg-accent-soft';
           return (
-            <div key={`${item.label}-${index}`} className="flex items-center gap-3 rounded-btn border border-line bg-canvas px-3 py-2">
-              <span className={`h-2.5 w-2.5 rounded-full ${tone.split(' ')[1]}`} />
+            <div key={`${item.label}-${index}`} className="s-round flex items-center gap-3.5 border border-line/70 bg-canvas/50 px-4 py-3">
+              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${tone.split(' ')[1]}`} />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[12px] font-medium text-text-primary">{item.label}</div>
-                {item.detail != null ? <div className="truncate text-[11px] text-text-muted">{String(resolveBindable(item.detail, scope) ?? '')}</div> : null}
+                <div className="truncate text-[13.5px] font-medium text-text-primary">{item.label}</div>
+                {item.detail != null ? <div className="mt-0.5 truncate text-[12px] text-text-muted">{String(resolveBindable(item.detail, scope) ?? '')}</div> : null}
               </div>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${tone}`}>{status}</span>
+              <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${tone}`}>{status}</span>
             </div>
           );
         })}
@@ -742,18 +842,20 @@ function ActionButton({
   args,
   scope,
   variant,
+  size,
 }: {
   label: string;
   action: string;
   args?: Record<string, unknown>;
   scope?: Record<string, unknown>;
   variant?: 'primary' | 'secondary' | 'danger';
+  size?: 'sm' | 'md';
 }) {
   const resolvedScope = useResolvedScope(scope);
   const invoke = useActionInvoker();
   const editing = useContext(EditCtx);
   const [busy, setBusy] = useState(false);
-  const cls = variant === 'danger' ? 'bg-danger text-white' : variant === 'secondary' ? 'border border-line bg-surface text-text-primary' : 'bg-accent text-on-accent';
+  const cls = variant === 'danger' ? 's-btn-danger' : variant === 'secondary' ? 's-btn-secondary' : 's-btn-primary';
   return (
     <button
       type="button"
@@ -767,9 +869,10 @@ function ActionButton({
           setBusy(false);
         }
       }}
-      className={`inline-flex w-fit items-center rounded-btn px-3 py-1.5 text-[12px] font-medium disabled:opacity-50 ${cls}`}
+      className={clsx('s-btn w-fit', cls, size === 'sm' && 's-btn-sm')}
     >
-      {busy ? '...' : label}
+      {busy ? <Loader2 size={size === 'sm' ? 11 : 13} className="animate-spin" /> : null}
+      {label}
     </button>
   );
 }
@@ -798,11 +901,14 @@ const TABLE_PAGE_SIZE = 10;
 
 function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   const { rows, loading } = useBoundRows(node.bind);
+  const editing = useContext(EditCtx);
   // Client-side over the bound rows: click a header to sort (asc → desc → off),
   // a filter box, and pagination — all kick in only for sizeable tables.
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
+  // Row drill-in: every row opens the RecordDrawer (detail + edit + actions).
+  const [openRow, setOpenRow] = useState<Record<string, unknown> | null>(null);
   const sorted = useMemo(() => {
     if (!sort) return rows;
     const sign = sort.dir === 'asc' ? 1 : -1;
@@ -816,6 +922,12 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   const toggleSort = (key: string) => setSort((s) => (s?.key === key ? (s.dir === 'asc' ? { key, dir: 'desc' } : null) : { key, dir: 'asc' }));
   if (loading) return <SkeletonRows />;
   const identityCol = node.columns.find((c) => isNameKey(c.key))?.key ?? node.columns[0]?.key;
+  // Numeric columns right-align (header + cells) — classified from a sample of rows.
+  const numericCols = new Set(
+    node.columns
+      .filter((c) => !c.format && c.key !== identityCol && rows.slice(0, 6).some((r) => classifyValue(r[c.key], c.key) === 'number'))
+      .map((c) => c.key),
+  );
   const filterable = rows.length > 8;
   const pageCount = Math.max(1, Math.ceil(filtered.length / TABLE_PAGE_SIZE));
   const current = Math.min(page, pageCount - 1);
@@ -825,24 +937,29 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   return (
     <div className="s-panel overflow-hidden">
       {filterable ? (
-        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-          <Search size={13} className="shrink-0 text-text-muted" />
+        <div className="flex items-center gap-2 border-b border-line/70 px-4 py-2.5">
+          <Search size={14} className="shrink-0 text-text-muted" />
           <input
             value={query}
             onChange={(e) => { setQuery(e.target.value); setPage(0); }}
             placeholder="Filter…"
-            className="w-full bg-transparent text-[12px] text-text-primary placeholder:text-text-muted focus:outline-none"
+            className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-muted focus:outline-none"
             aria-label="Filter rows"
           />
           {query ? <span className="shrink-0 text-[11px] text-text-muted">{filtered.length} of {rows.length}</span> : null}
         </div>
       ) : null}
-      <table className="w-full text-left text-[12px]">
-        <thead className="bg-canvas/60 text-text-muted">
+      <table className="w-full text-left text-[13px]">
+        <thead className="bg-surface-2/50 text-text-muted">
           <tr>
             {node.columns.map((col) => (
-              <th key={col.key} className="px-3.5 py-2.5 text-[10px] font-semibold uppercase tracking-wide">
-                <button type="button" onClick={() => toggleSort(col.key)} className="inline-flex items-center gap-1 uppercase tracking-wide transition-colors hover:text-text-secondary" aria-label={`Sort by ${col.label ?? col.key}`}>
+              <th key={col.key} className={clsx('px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.07em]', numericCols.has(col.key) && 'text-right')}>
+                <button
+                  type="button"
+                  onClick={() => toggleSort(col.key)}
+                  className={clsx('inline-flex items-center gap-1 uppercase tracking-wide transition-colors hover:text-text-secondary', numericCols.has(col.key) && 'justify-end')}
+                  aria-label={`Sort by ${col.label ?? col.key}`}
+                >
                   {col.label ?? col.key}
                   {sort?.key === col.key ? (sort.dir === 'asc' ? <ChevronUp size={11} /> : <ChevronDown size={11} />) : null}
                 </button>
@@ -855,31 +972,36 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
           {visible.length === 0 ? (
             <tr><td colSpan={colCount}><EmptyState label={query ? 'No matches' : 'No records yet'} hint={query ? 'Try a different filter.' : 'Rows the agent or a form adds will appear here.'} /></td></tr>
           ) : visible.map((row, i) => (
-            <tr key={(row.id as string) ?? i} className="border-t border-line transition-colors odd:bg-surface/30 hover:bg-surface-2/60">
+            <tr
+              key={(row.id as string) ?? i}
+              className={clsx('border-t border-line transition-colors odd:bg-surface-2/25 hover:bg-surface-2/60', !editing && 'cursor-pointer')}
+              onClick={(e) => {
+                if (editing) return; // builder canvas: selection only
+                if ((e.target as HTMLElement).closest('a,button,input,select,textarea')) return;
+                setOpenRow(row);
+              }}
+            >
               {node.columns.map((col) => {
                 const isId = col.key === identityCol;
-                const asStatus = col.format === 'badge' || (!col.format && isStatusKey(col.key));
                 const raw = row[col.key];
+                const asStatus = raw != null && raw !== '' && (col.format === 'badge' || (!col.format && (isStatusKey(col.key) || classifyValue(raw, col.key) === 'status')));
                 return (
-                  <td key={col.key} className={clsx('px-3.5 py-2.5', isId ? 'text-text-primary' : 'text-text-secondary')}>
-                    {asStatus && raw != null && raw !== '' ? (
-                      <span className={clsx('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium', toneSoftClass(toneFromStatus(String(raw))))}>
-                        <span className={clsx('h-1.5 w-1.5 rounded-full', toneFillClass(toneFromStatus(String(raw))))} />
-                        {String(raw)}
-                      </span>
+                  <td key={col.key} className={clsx('px-4 py-3', numericCols.has(col.key) && 'text-right', isId ? 'text-text-primary' : 'text-text-secondary')}>
+                    {asStatus ? (
+                      <StatusPill value={String(raw)} />
                     ) : isId ? (
-                      <span className="inline-flex items-center gap-2 font-medium">
+                      <span className="inline-flex max-w-full items-center gap-2 font-medium">
                         <AvatarChip name={String(raw ?? '')} />
-                        <span className="truncate">{formatCell(raw, col.format)}</span>
+                        <span className="min-w-0 truncate">{formatCell(raw, col.format, col.key)}</span>
                       </span>
-                    ) : formatCell(raw, col.format)}
+                    ) : formatCell(raw, col.format, col.key)}
                   </td>
                 );
               })}
               {node.rowActions?.length ? (
                 <td className="px-3 py-2.5">
-                  <div className="flex justify-end gap-1">
-                    {node.rowActions.map((a, j) => <ActionButton key={j} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={row} variant="secondary" />)}
+                  <div className="flex justify-end gap-1.5">
+                    {node.rowActions.map((a, j) => <ActionButton key={j} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={row} variant="secondary" size="sm" />)}
                   </div>
                 </td>
               ) : null}
@@ -897,6 +1019,135 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
           </div>
         </div>
       ) : null}
+      {openRow ? (
+        <RecordDrawer
+          collection={node.bind.collection}
+          row={openRow}
+          identityKey={identityCol}
+          rowActions={node.rowActions}
+          onClose={() => setOpenRow(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * RecordDrawer — the default row drill-in (INTERFACE-OVERHAUL-10X §P4): every
+ * table row opens a detail panel with all fields through the kit formatter,
+ * inline editing when the surface declares an `<collection>.update` data
+ * action, and the row's declared actions. No more dead rows.
+ */
+function RecordDrawer({ collection, row, identityKey, rowActions, onClose }: {
+  collection: string;
+  row: Record<string, unknown>;
+  identityKey?: string;
+  rowActions?: ActionRef[];
+  onClose: () => void;
+}) {
+  const { surfaceActions } = useRuntime();
+  const invoke = useActionInvoker();
+  const updateAction = surfaceActions.find((a) => a.kind === 'data' && a.target === `${collection}.update`);
+  const [patch, setPatch] = useState<Record<string, unknown>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const title = String(row[identityKey ?? 'id'] ?? 'Record');
+  const entries = Object.entries(row).filter(([k]) => k !== 'id');
+  const dirty = Object.keys(patch).length;
+
+  async function save() {
+    if (!updateAction || dirty === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke(updateAction.name, { id: row.id, patch });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the record.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const editableKind = (v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v == null;
+
+  return (
+    <div className="fixed inset-0 z-[90] flex justify-end bg-overlay-soft" role="presentation" onClick={onClose}>
+      <div
+        className="flex h-full w-full max-w-[420px] flex-col border-l border-line bg-canvas"
+        style={{ boxShadow: 'var(--app-modal-shadow, var(--shadow-modal))' }}
+        role="dialog"
+        aria-label={`Record ${title}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-line bg-surface px-4 py-3.5">
+          <AvatarChip name={title} />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[14.5px] font-semibold text-text-primary">{title}</div>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-text-muted">
+              <span className="capitalize">{collection.replace(/[_-]+/g, ' ')}</span>
+              {row.id != null ? <code className="rounded bg-surface-2 px-1 py-px font-mono text-[10px]">{String(row.id).slice(0, 8)}</code> : null}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="s-icon-btn" aria-label="Close record">
+            <X size={14} />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {entries.map(([key, value]) => {
+            const current = key in patch ? patch[key] : value;
+            const editable = Boolean(updateAction) && editableKind(value) && classifyValue(value, key) !== 'url';
+            return (
+              <div key={key} className="min-w-0">
+                <div className="s-label mb-1">{prettifyAction(key)}</div>
+                {editable && typeof value === 'boolean' ? (
+                  <label className="inline-flex cursor-pointer items-center gap-2 text-[13px] text-text-secondary">
+                    <input type="checkbox" checked={Boolean(current)} onChange={(e) => setPatch((p) => ({ ...p, [key]: e.target.checked }))} className="h-4 w-4 accent-[var(--color-accent)]" />
+                    {current ? 'Yes' : 'No'}
+                  </label>
+                ) : editable ? (
+                  String(value ?? '').length > 64 ? (
+                    <textarea
+                      rows={3}
+                      className="s-input"
+                      value={String(current ?? '')}
+                      onChange={(e) => setPatch((p) => ({ ...p, [key]: e.target.value }))}
+                    />
+                  ) : (
+                    <input
+                      type={typeof value === 'number' ? 'number' : 'text'}
+                      className="s-input"
+                      value={String(current ?? '')}
+                      onChange={(e) => setPatch((p) => ({ ...p, [key]: typeof value === 'number' ? Number(e.target.value) : e.target.value }))}
+                    />
+                  )
+                ) : (
+                  <div className="break-words text-[13px] text-text-primary">{formatDisplay(value, { key })}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <footer className="flex items-center gap-2 border-t border-line bg-surface px-4 py-3">
+          {error ? <span className="min-w-0 flex-1 truncate text-[12px] text-danger">{error}</span> : <span className="min-w-0 flex-1" />}
+          {rowActions?.map((a, i) => (
+            <ActionButton key={i} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={row} variant="secondary" size="sm" />
+          ))}
+          {updateAction ? (
+            <button type="button" disabled={busy || dirty === 0} onClick={() => void save()} className="s-btn s-btn-primary">
+              {busy ? <Loader2 size={13} className="animate-spin" /> : null}
+              {dirty > 0 ? `Save ${dirty} change${dirty > 1 ? 's' : ''}` : 'Saved'}
+            </button>
+          ) : null}
+        </footer>
+      </div>
     </div>
   );
 }
@@ -908,12 +1159,12 @@ function AvatarChip({ name }: { name: string }) {
 }
 
 /** A designed empty state — intentional, not an error. Used by tables/boards/lists. */
-function EmptyState({ label, hint }: { label: string; hint?: string }) {
+export function EmptyState({ label, hint }: { label: string; hint?: string }) {
   return (
-    <div className="flex flex-col items-center gap-1.5 px-4 py-8 text-center">
-      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-text-muted"><Sparkles size={16} /></span>
-      <div className="text-[12px] font-medium text-text-secondary">{label}</div>
-      {hint ? <div className="max-w-xs text-[11px] text-text-muted">{hint}</div> : null}
+    <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
+      <span className="flex h-10 w-10 items-center justify-center rounded-full bg-surface-2 text-text-muted"><Sparkles size={17} /></span>
+      <div className="text-[13.5px] font-medium text-text-secondary">{label}</div>
+      {hint ? <div className="max-w-xs text-[12px] leading-relaxed text-text-muted">{hint}</div> : null}
     </div>
   );
 }
@@ -949,8 +1200,8 @@ function BoundChart({ node }: { node: Extract<ViewNode, { type: 'Chart' }> }) {
   );
 }
 
-/** Shared field styling — consistent height, hover + accent focus ring, tokenized. */
-const FORM_INPUT = 'w-full rounded-btn border border-line bg-canvas px-2.5 py-2 text-[12px] text-text-primary placeholder:text-text-muted transition-colors hover:border-line-strong focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-soft';
+/** Shared field styling — the kit input (styles.css .s-input). */
+const FORM_INPUT = 's-input';
 
 function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
   const resolvedScope = useResolvedScope();
@@ -999,7 +1250,7 @@ function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
           </label>
         );
       })}
-      <button type="submit" disabled={busy} className="mt-1 inline-flex w-fit items-center gap-1.5 rounded-btn bg-accent px-3.5 py-2 text-[12px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-50">{busy ? <Loader2 size={13} className="animate-spin" /> : null}{busy ? 'Saving…' : node.submitLabel ?? 'Submit'}</button>
+      <button type="submit" disabled={busy} className="s-btn s-btn-primary mt-1 w-fit">{busy ? <Loader2 size={13} className="animate-spin" /> : null}{busy ? 'Saving…' : node.submitLabel ?? 'Submit'}</button>
     </form>
   );
 }
@@ -1078,11 +1329,11 @@ function ActivityStreamView({ node }: { node: Extract<ViewNode, { type: 'Activit
   const items = useActivityFeed(node.limit ?? 12);
   return (
     <div className="s-panel overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-        <Activity size={14} className="text-accent" />
-        <span className="text-[12px] font-semibold text-text-primary">{node.title ?? 'Live activity'}</span>
-        <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-text-muted">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" /> live
+      <div className="flex items-center gap-2.5 border-b border-line/70 px-5 py-3.5">
+        <Activity size={14} className="text-text-muted" />
+        <span className="s-title">{node.title ?? 'Live activity'}</span>
+        <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] font-medium text-success">
+          <span className="s-pulse h-1.5 w-1.5 rounded-full bg-success" /> live
         </span>
       </div>
       {items.length === 0 ? (
@@ -1090,7 +1341,7 @@ function ActivityStreamView({ node }: { node: Extract<ViewNode, { type: 'Activit
       ) : (
         <ul className="max-h-72 divide-y divide-line overflow-auto">
           {items.map((item) => (
-            <li key={item.id} className="flex items-start gap-2 px-3 py-2 text-[12px]">
+            <li key={item.id} className="flex items-start gap-2.5 px-5 py-2.5 text-[13px]">
               <span className={`mt-0.5 shrink-0 ${activityToneClass(item.tone)}`}>{item.icon}</span>
               <span className="min-w-0 flex-1 break-words text-text-secondary">{item.label}</span>
               <span className="shrink-0 text-[10px] text-text-muted">{activityTime(item.at)}</span>
@@ -1121,8 +1372,8 @@ function BoundBoard({ node }: { node: Extract<ViewNode, { type: 'DataBoard' }> }
         const groupRows = byGroup.get(key) ?? [];
         const tone = toneFromStatus(key);
         return (
-          <div key={key} className="s-round flex w-60 shrink-0 flex-col bg-canvas/40 ring-1 ring-line">
-            <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+          <div key={key} className="s-round flex w-64 shrink-0 flex-col bg-canvas/40 ring-1 ring-line">
+            <div className="flex items-center justify-between gap-2 px-3.5 py-3">
               <span className="inline-flex min-w-0 items-center gap-2">
                 <span className={clsx('h-2 w-2 shrink-0 rounded-full', toneFillClass(tone))} />
                 <span className="truncate text-[12px] font-semibold capitalize text-text-primary">{key}</span>
@@ -1133,8 +1384,8 @@ function BoundBoard({ node }: { node: Extract<ViewNode, { type: 'DataBoard' }> }
               {groupRows.length === 0 ? (
                 <div className="rounded-btn border border-dashed border-line/70 px-2 py-3 text-center text-[11px] text-text-muted">Empty</div>
               ) : groupRows.map((row, i) => (
-                <div key={(row.id as string) ?? i} className="s-panel cursor-default px-2.5 py-2 text-[12px] text-text-secondary transition-transform hover:-translate-y-0.5">
-                  <div className="font-medium text-text-primary">{String(row[node.titleField ?? 'title'] ?? row.name ?? row.id ?? 'Untitled')}</div>
+                <div key={(row.id as string) ?? i} className="s-panel s-panel-hover cursor-default px-3 py-2.5 text-[13px] text-text-secondary">
+                  <div className="font-medium text-text-primary">{displayLabel(String(row[node.titleField ?? 'title'] ?? row.name ?? ''), row.id != null ? String(row.id) : undefined, 'Untitled')}</div>
                 </div>
               ))}
             </div>
@@ -1155,18 +1406,30 @@ function prettifyAction(name: string): string {
 function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' }>; scope: ResolveScope }) {
   const { density } = useTheme();
   const value = resolveDisplay(node.value, scope);
+  // Overflow defense: a WORD value ("ACCOMPLISHED", "world verified") never renders
+  // as a 32px numeral — it becomes a humanized tone pill. Numerals auto-fit their
+  // type step to the value length so they can't wrap mid-word or clip.
+  const wordy = !value.unbound && isWordyMetric(value.text);
+  const deltaRaw = node.delta != null ? String(resolveBindable(node.delta, scope) ?? '') : '';
+  const deltaTone = deltaRaw.startsWith('-') ? 'text-danger bg-danger-soft' : deltaRaw.startsWith('+') ? 'text-success bg-success-soft' : 'text-text-secondary bg-surface-2';
   return (
     <div className={containerClasses(node.style, density, { defaultElevation: 'inset', defaultPad: 'sm' })}>
-      <div className="text-[10px] uppercase tracking-wide text-text-muted">{node.label}</div>
-      <div className="mt-0.5 flex items-baseline gap-2">
+      <div className="s-label">{node.label}</div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
         {value.unbound ? (
           <UnboundMarker path={value.unbound} />
+        ) : wordy ? (
+          <StatusPill value={value.text} className="!px-3 !py-1 !text-[13px] font-semibold" />
         ) : (
-          <span className={clsx('text-[19px] font-semibold leading-none text-text-primary', textClasses({ tone: node.style?.tone }))}>
+          <span
+            className={clsx('s-num min-w-0', textClasses({ tone: node.style?.tone }))}
+            style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(value.text || '—')})` }}
+            title={value.text.length > 12 ? value.text : undefined}
+          >
             {value.text || '—'}
           </span>
         )}
-        {node.delta != null ? <span className="text-[11px] text-text-secondary">{String(resolveBindable(node.delta, scope) ?? '')}</span> : null}
+        {deltaRaw ? <span className={clsx('rounded-full px-2 py-0.5 text-[11.5px] font-medium tabular-nums', deltaTone)}>{deltaRaw}</span> : null}
       </div>
     </div>
   );
@@ -1175,8 +1438,8 @@ function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' 
 function CalloutView({ node }: { node: Extract<ViewNode, { type: 'Callout' }> }) {
   const tone = node.style?.tone ?? 'info';
   return (
-    <div className={clsx('flex items-start gap-2 rounded-card px-3 py-2.5 text-[12px]', toneSoftClass(tone))}>
-      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+    <div className={clsx('s-round flex items-start gap-3 px-4 py-3.5 text-[13px] leading-relaxed', toneSoftClass(tone))}>
+      <AlertTriangle size={15} className="mt-0.5 shrink-0" />
       <div className="min-w-0">
         {node.title ? <div className="font-semibold">{node.title}</div> : null}
         <div className="leading-relaxed">{node.value}</div>
@@ -1314,7 +1577,7 @@ function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStr
   const { design } = useTheme();
   // Auto-fit so wide screens pack more KPIs per row (denser dashboards).
   return (
-    <div className="grid" style={{ gap: 'var(--s-gap, 12px)', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+    <div className="grid" style={{ gap: 'var(--s-gap, 16px)', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
       {node.items.map((item, i) => {
         // In multi-palette languages each tile gets a rotating accent edge + spark hue.
         const paletteAccent = design.policy.multiPalette ? CHART_PALETTE[i % CHART_PALETTE.length] : undefined;
@@ -1322,28 +1585,30 @@ function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStr
           ? item.tone
           : (paletteAccent as AccentName | undefined);
         return (
-          <div key={i} className="s-tile relative overflow-hidden px-4 py-3">
+          <div key={i} className="s-tile relative overflow-hidden px-5 py-4">
             {paletteAccent ? (
               <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: accentColor(paletteAccent) }} />
             ) : null}
-            <div className="break-words text-[10px] font-medium uppercase tracking-wide text-text-muted">{item.label}</div>
-            {/* wrap (not clip): values/deltas can be long phrases, and tiles narrow as the surface shrinks. */}
-            <div className="mt-1 flex flex-wrap items-end justify-between gap-x-2 gap-y-1">
+            <div className="s-label break-words">{item.label}</div>
+            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
               {(() => {
                 const v = resolveDisplay(item.value, scope);
-                return v.unbound ? (
-                  <UnboundMarker path={v.unbound} />
-                ) : (
+                if (v.unbound) return <UnboundMarker path={v.unbound} />;
+                // Word values (verdicts/statuses) become tone pills; numerals
+                // auto-fit their type step so they never wrap mid-word or clip.
+                if (isWordyMetric(v.text)) return <StatusPill value={v.text} className="!px-3 !py-1 !text-[12.5px] font-semibold" />;
+                return (
                   <span
-                    className="min-w-0 break-words font-semibold leading-tight text-text-primary"
-                    style={{ fontSize: 'var(--s-kpi-size, 22px)' }}
+                    className="min-w-0 font-semibold leading-tight text-text-primary"
+                    style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(v.text || '—')})`, letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums' }}
+                    title={v.text.length > 12 ? v.text : undefined}
                   >
                     {v.text || '—'}
                   </span>
                 );
               })()}
               {item.delta != null ? (
-                <span className={clsx('min-w-0 break-words text-[11px] font-medium', item.tone ? textClasses({ tone: item.tone }) : 'text-success')}>
+                <span className={clsx('min-w-0 break-words rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium tabular-nums', item.tone ? textClasses({ tone: item.tone }) : 'text-success')}>
                   {String(resolveBindable(item.delta, scope) ?? '')}
                 </span>
               ) : null}
@@ -1356,37 +1621,35 @@ function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStr
   );
 }
 
+/**
+ * Hero = the PAGE HEADER (kit anatomy): breadcrumb-grade eyebrow, a real page
+ * title, supporting copy, and the ACTION BAR on the right — the operability
+ * gate's synthesis target for workflow actions. Clean header over content;
+ * no gradient banner card (the old hero panel read as decoration).
+ */
 function HeroView({ node, scope }: { node: Extract<ViewNode, { type: 'Hero' }>; scope?: Record<string, unknown> }) {
-  const resolved = useResolvedScope(scope);
-  const accent = accentColor(node.style?.accent);
-  const media = node.media != null ? String(resolveBindable(node.media, resolved) ?? '') : '';
   return (
-    <div
-      className="s-round relative overflow-hidden border border-line"
-      style={{
-        padding: 'var(--s-pad, 22px)',
-        background: `linear-gradient(135deg, color-mix(in srgb, ${accent} 16%, var(--color-surface)) 0%, var(--color-surface) 62%)`,
-      }}
-    >
-      <div className="relative z-10 max-w-2xl">
-        {node.eyebrow ? <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: accent }}>{node.eyebrow}</div> : null}
-        <h1 className="font-semibold leading-tight text-text-primary" style={{ fontSize: 'calc(var(--s-heading-size, 18px) + 6px)' }}>{node.title}</h1>
-        {node.subtitle ? <p className="mt-2 text-[14px] leading-relaxed text-text-secondary">{node.subtitle}</p> : null}
-        {node.actions?.length ? (
-          <div className="mt-4 flex flex-wrap gap-2">
-            {node.actions.map((a, i) => <ActionButton key={i} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={scope} variant={i === 0 ? 'primary' : 'secondary'} />)}
-          </div>
-        ) : null}
+    <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 pb-1">
+      <div className="min-w-0 max-w-2xl">
+        {node.eyebrow ? <div className="s-label mb-1.5 !text-accent">{node.eyebrow}</div> : null}
+        <h1 className="font-semibold leading-[1.15] text-text-primary" style={{ fontSize: 'var(--s-heading-size, 26px)', letterSpacing: '-0.02em' }}>
+          {node.title}
+        </h1>
+        {node.subtitle ? <p className="mt-1.5 text-[14px] leading-relaxed text-text-secondary">{node.subtitle}</p> : null}
       </div>
-      {media ? <img src={media} alt="" className="pointer-events-none absolute -right-6 top-1/2 z-0 h-[150%] -translate-y-1/2 object-contain opacity-90" /> : null}
-    </div>
+      {node.actions?.length ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {node.actions.map((a, i) => <ActionButton key={i} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={scope} variant={i === 0 ? 'primary' : 'secondary'} />)}
+        </div>
+      ) : null}
+    </header>
   );
 }
 
 function ToolbarView({ node, scope, path }: { node: Extract<ViewNode, { type: 'Toolbar' }>; scope?: Record<string, unknown>; path: number[] }) {
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-line pb-2">
-      {node.title ? <span className="mr-auto text-[13px] font-semibold text-text-primary">{node.title}</span> : null}
+      {node.title ? <span className="s-title mr-auto">{node.title}</span> : null}
       {node.children.map((c, i) => <ViewRenderer key={i} node={c} scope={scope} path={[...path, i]} />)}
     </div>
   );
@@ -1406,7 +1669,7 @@ function TabsView({ node, scope, path }: { node: Extract<ViewNode, { type: 'Tabs
             aria-selected={i === active}
             onClick={(event) => { event.stopPropagation(); setActive(i); }}
             className={clsx(
-              '-mb-px border-b-2 px-3 py-1.5 text-[12px] font-medium',
+              '-mb-px border-b-2 px-3.5 py-2 text-[13px] font-medium transition-colors',
               i === active ? 'border-accent text-text-primary' : 'border-transparent text-text-muted hover:text-text-secondary',
             )}
           >
@@ -1414,7 +1677,7 @@ function TabsView({ node, scope, path }: { node: Extract<ViewNode, { type: 'Tabs
           </button>
         ))}
       </div>
-      <div className="flex flex-col gap-3 pt-3">
+      <div className="flex flex-col gap-4 pt-4">
         {(current?.children ?? []).map((c, j) => <ViewRenderer key={j} node={c} scope={scope} editable={false} path={[...path, j]} />)}
       </div>
     </div>
@@ -1498,7 +1761,7 @@ function BoundTimeline({ node }: { node: Extract<ViewNode, { type: 'Timeline' }>
   const { rows, loading } = useBoundRows(node.bind);
   if (loading) return <SkeletonRows />;
   const items: TimelineRow[] = rows.map((row) => ({
-    title: String(row[node.titleField ?? 'title'] ?? row.name ?? row.id ?? 'Event'),
+    title: displayLabel(String(row[node.titleField ?? 'title'] ?? row.name ?? ''), row.id != null ? String(row.id) : undefined, 'Event'),
     ...(node.detailField ? { detail: String(row[node.detailField] ?? '') } : {}),
     ...(node.atField ? { at: String(row[node.atField] ?? '') } : {}),
   }));
@@ -1574,7 +1837,7 @@ function ChatShell({ title, channel, messages, send, placeholder, sendArgs }: { 
         <Composer
           label="Send"
           placeholder={placeholder}
-          onSend={(text) => invoke(send.action, { content: text, ...(sendArgs ?? {}), ...resolveArgs(send.args, resolvedScope) })}
+          onSend={async (text) => { await invoke(send.action, { content: text, ...(sendArgs ?? {}), ...resolveArgs(send.args, resolvedScope) }); }}
         />
       ) : null}
     </div>
@@ -1850,7 +2113,7 @@ function CollectionInbox({ node, bind }: { node: Extract<ViewNode, { type: 'Inbo
               className={clsx('flex w-full flex-col gap-0.5 border-b border-line px-3 py-2 text-left', active ? 'bg-accent-soft' : 'hover:bg-surface-2')}
             >
               <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-primary">{String(row[node.titleField ?? 'title'] ?? row.name ?? 'Conversation')}</span>
+                <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-primary">{displayLabel(String(row[node.titleField ?? 'title'] ?? row.name ?? ''), id, 'Conversation')}</span>
                 {channel != null ? <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[9px] capitalize text-text-muted">{String(channel)}</span> : null}
               </div>
               {node.subtitleField ? <span className="truncate text-[11px] text-text-muted">{String(row[node.subtitleField] ?? '')}</span> : null}
@@ -1882,7 +2145,7 @@ function InboxThread({ bind, convId, matchField, roleField, contentField, send }
         ))}
       </div>
       {send ? (
-        <Composer label="Send" onSend={(text) => invoke(send.action, { conversationId: convId, content: text, ...resolveArgs(send.args, resolvedScope) })} />
+        <Composer label="Send" onSend={async (text) => { await invoke(send.action, { conversationId: convId, content: text, ...resolveArgs(send.args, resolvedScope) }); }} />
       ) : null}
     </div>
   );
@@ -2059,20 +2322,18 @@ function GaugeView({ node, scope }: { node: Extract<ViewNode, { type: 'Gauge' }>
   );
 }
 
-function formatCell(value: unknown, format?: string): React.ReactNode {
-  if (value == null) return '-';
-  if (format === 'boolean') return value ? 'Yes' : 'No';
-  if (format === 'badge') return <span className="rounded-full bg-canvas px-2 py-0.5 text-[11px]">{String(value)}</span>;
-  if (format === 'date') return new Date(String(value)).toLocaleString();
-  return String(value);
+/** All cell/value rendering delegates to the kit formatter (format.tsx) — links,
+ * humanized status pills, relative dates, grouped numerals, safe truncation. */
+function formatCell(value: unknown, format?: string, key?: string): React.ReactNode {
+  return formatDisplay(value, { format, key });
 }
 
-function SkeletonRows() {
+export function SkeletonRows() {
   return <div className="flex flex-col gap-2">{[0, 1, 2].map((i) => <div key={i} className="h-8 animate-pulse rounded-btn bg-canvas" />)}</div>;
 }
 
 /** Compact relative time ("4m ago", "2h ago", "3d ago") for run timestamps. */
-function relativeTime(iso: string): string {
+export function relativeTime(iso: string): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return '';
   const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
@@ -2080,86 +2341,6 @@ function relativeTime(iso: string): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
-}
-
-/**
- * Workflow Control Plane (Agentic-Apps, Phase E) — the App's OWN workflows with
- * purpose, order, trigger kind, last run, and a run control per row. App-scoped:
- * it reads the current App from the runtime and loads the E0 control-plane endpoint
- * (`GET /apps/:id/workflows`), so an agent drops it in with no binding. This is the
- * control that was missing: an operator can see why each workflow exists, the order
- * they run, their last status, and start one — without leaving the App.
- */
-function WorkflowControlBlock({ node }: { node: Extract<ViewNode, { type: 'WorkflowControl' }> }) {
-  const { appId, dataRevision } = useRuntime();
-  const [rows, setRows] = useState<AppWorkflowSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setRows(await appsApi.listWorkflows(appId));
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not load workflows');
-    }
-  }, [appId]);
-
-  useEffect(() => { void load(); }, [load, dataRevision]);
-
-  const run = useCallback(async (wfId: string) => {
-    setBusyId(wfId);
-    try {
-      await appsApi.runAppWorkflow(appId, wfId);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not start the workflow');
-    } finally {
-      setBusyId(null);
-    }
-  }, [appId, load]);
-
-  const icon = <Workflow size={15} className="text-text-secondary" />;
-  const title = node.title ?? (rows ? `Workflows · ${rows.length}` : 'Workflows');
-
-  if (error) return <PanelShell title={node.title ?? 'Workflows'} icon={icon}><EmptyState label="Couldn't load workflows" hint={error} /></PanelShell>;
-  if (rows === null) return <PanelShell title={node.title ?? 'Workflows'} icon={icon}><SkeletonRows /></PanelShell>;
-  if (rows.length === 0) return <PanelShell title={title} icon={icon}><EmptyState label="No workflows yet" hint="Add a workflow to give this app logic." /></PanelShell>;
-
-  return (
-    <PanelShell title={title} icon={icon}>
-      <div className="flex flex-col">
-        {rows.map((wf, i) => {
-          const status = wf.lastRun?.status;
-          const dot = status === 'running' ? 'bg-accent' : status === 'failed' ? 'bg-danger' : wf.enabled === false ? 'bg-text-disabled' : status === 'completed' ? 'bg-success' : 'bg-text-muted';
-          return (
-            <div key={wf.id} className={clsx('flex items-center gap-3 py-2.5', i > 0 && 'border-t border-line')}>
-              <span className={clsx('h-2 w-2 shrink-0 rounded-full', dot)} aria-hidden />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 text-[13px] text-text-primary">
-                  <span className="truncate">{wf.title}</span>
-                  {wf.dependsOn.length > 0 ? <span className="shrink-0 rounded border border-line px-1.5 py-px text-[10px] text-text-muted">after {wf.dependsOn.length}</span> : null}
-                  {wf.enabled === false ? <span className="shrink-0 rounded border border-line px-1.5 py-px text-[10px] text-text-muted">paused</span> : null}
-                </div>
-                {wf.purpose ? <div className="truncate text-[11px] text-text-muted">{wf.purpose}</div> : null}
-              </div>
-              {wf.triggerKind ? <span className="hidden shrink-0 rounded bg-surface-2 px-2 py-0.5 text-[10px] text-text-secondary sm:inline">{wf.triggerKind}</span> : null}
-              <span className="hidden w-[72px] shrink-0 text-right text-[11px] text-text-muted md:inline">{wf.lastRun ? relativeTime(wf.lastRun.at) : 'never run'}</span>
-              <button
-                type="button"
-                disabled={busyId === wf.id}
-                onClick={() => void run(wf.id)}
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-btn border border-line text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
-                aria-label={`Run ${wf.title}`}
-              >
-                {busyId === wf.id ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-    </PanelShell>
-  );
 }
 
 export function useDataRevision(appId: string): number {
@@ -2357,6 +2538,12 @@ registerBlock('ChatThread', (node) => (node.type === 'ChatThread' ? <ChatThreadV
 registerBlock('Inbox', (node) => (node.type === 'Inbox' ? <InboxView node={node} /> : null));
 registerBlock('Funnel', (node) => (node.type === 'Funnel' ? <FunnelView node={node} /> : null));
 registerBlock('Calendar', (node) => (node.type === 'Calendar' ? <CalendarView node={node} /> : null));
-registerBlock('WorkflowControl', (node) => (node.type === 'WorkflowControl' ? <WorkflowControlBlock node={node} /> : null));
+// 'WorkflowControl' registers in ./blocks/opsBlocks (aliased to OrchestrationPanel).
 registerBlock('CustomView', (node) => (node.type === 'CustomView' ? <CustomViewFrame node={node} /> : null));
 registerBlock('CodeSurface', (node) => (node.type === 'CodeSurface' ? <CodeSurfaceFrame node={node} /> : null));
+
+// Legacy kinds from removed grammar eras heal in place on READ (stored trees
+// upgrade at the persistence seam on their next write — see core genuiAudit).
+registerBlock('AgentConsole', (node) => (
+  <ActivityStreamView node={{ type: 'ActivityStream', title: (node as { title?: string }).title } as Extract<ViewNode, { type: 'ActivityStream' }>} />
+));

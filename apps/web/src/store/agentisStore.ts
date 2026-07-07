@@ -41,7 +41,7 @@ export interface ActiveRunSummary {
   startedAt: string;
 }
 
-export type SettingsTab = 'profile' | 'workspace' | 'connections' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
+export type SettingsTab = 'profile' | 'workspace' | 'channels' | 'mcp' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
 
 export interface AgentisStore {
   // Workspace + ambient context
@@ -73,6 +73,13 @@ export interface AgentisStore {
   activeRuns: Record<string, ActiveRunSummary>;
   upsertActiveRun: (run: ActiveRunSummary) => void;
   removeActiveRun: (runId: string) => void;
+
+  // Resource-name registry — pages that fetch an entity (app, workflow, agent,
+  // extension, …) register its human name here, keyed `${kind}:${id}`, so any
+  // id-only surface (the "Viewing" pill, node labels) can resolve a real name
+  // instead of leaking the raw identifier. See lib/resourceNames.
+  resourceNames: Record<string, string>;
+  registerResourceName: (kind: string, id: string, name: string) => void;
 }
 
 export const useAgentisStore = create<AgentisStore>((set) => ({
@@ -121,6 +128,15 @@ export const useAgentisStore = create<AgentisStore>((set) => ({
       delete next[runId];
       return { activeRuns: next };
     }),
+
+  resourceNames: {},
+  registerResourceName: (kind, id, name) =>
+    set((s) => {
+      const key = `${kind}:${id}`;
+      const value = name.trim();
+      if (!value || s.resourceNames[key] === value) return s;
+      return { resourceNames: { ...s.resourceNames, [key]: value } };
+    }),
 }));
 
 // Selector helpers — call sites import these instead of slicing the
@@ -129,6 +145,8 @@ export const selectPresence = (agentId: string) => (s: AgentisStore) =>
   s.presenceByAgent[agentId];
 export const selectActiveRunCount = (s: AgentisStore) =>
   Object.keys(s.activeRuns).length;
+export const selectResourceName = (kind: string, id: string) => (s: AgentisStore) =>
+  s.resourceNames[`${kind}:${id}`];
 
 function samePresence(a: AgentPresence | undefined, b: AgentPresence): boolean {
   return Boolean(a)

@@ -26,13 +26,23 @@ import type { SpecialistDemandRouter } from '../specialistDemandRouter.js';
 import type { SpecialistProfileService } from '../specialistProfileService.js';
 import type { SpecialistRuntimeService } from '../specialistRuntimeService.js';
 import type { OrchestratorModelRouter } from '../orchestratorModelRouter.js';
-import type { AbilityCreationService } from '../abilityCreationService.js';
 import type { MemoryStore } from '../memoryStore.js';
+import type { SharedIntelligenceService } from '../sharedIntelligence.js';
+import type { SkillService } from '../skillService.js';
 import type { PlanService } from '../planService.js';
 import type { ChannelBridge } from '../channelBridge.js';
 import type { BrowserPool } from '../browserPool.js';
 import type { ArtifactService } from '../artifactService.js';
+import type { AssetStore } from '../assetStore.js';
 import type { McpToolBridge } from '../mcpToolBridge.js';
+import type { CapabilityIndex } from '../capabilityIndex.js';
+import type { CommandModelService } from '../commandModel.js';
+import type { ConversationService } from '../conversationService.js';
+import type { MediaService } from '../mediaService.js';
+import type { ConnectionGrantService } from '../connectionGrants.js';
+import type { AgentSessionService } from '../agentSession.js';
+import type { ExperimentService } from '../experiments.js';
+import type { DurableEntityService } from '../durableEntities.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -48,6 +58,10 @@ export interface ToolHandlerDeps {
   knowledgeBases?: KnowledgeBaseService;
   /** §B4 — typed workspace memory facade over the unified episode substrate. */
   memory?: MemoryStore;
+  /** Backs agentis.brain.search — agent-initiated semantic recall over the Brain. */
+  sharedIntelligence?: SharedIntelligenceService;
+  /** Backs agentis.skill.load — returns a Skill's full SKILL.md body on demand. */
+  skills?: SkillService;
   /** Optional — used by NL workflow synthesis for structured-output LLM calls. */
   evaluatorRuntime?: EvaluatorRuntime;
   /** Optional — dedicated workflow-synthesis runtime (§6). Falls back to evaluatorRuntime. */
@@ -77,7 +91,6 @@ export interface ToolHandlerDeps {
   agentLibrary?: AgentLibraryService;
   /** Optional workspace-volume extension source library available to synthesis. */
   extensionLibrary?: ExtensionLibraryService;
-  abilityCreation?: AbilityCreationService;
   /**
    * Optional — Layer 2 specialist library. Lets build_workflow MATERIALIZE the
    * cast (commission real specialist agents for each agentRole and pin them to
@@ -103,6 +116,48 @@ export interface ToolHandlerDeps {
   browserPool?: BrowserPool;
   /** Artifact persistence + resolution — screenshots become referenceable, channel attachments resolve to bytes. */
   artifacts?: ArtifactService;
+  /** Content-addressed asset store — backs agentis.assets.save (dedup + register). */
+  assetStore?: AssetStore;
   /** External MCP tool bridge — backs agentis.mcp.list / agentis.mcp.call. */
   mcpBridge?: McpToolBridge;
+  /**
+   * Compressed, searchable map of the whole workspace — backs the
+   * agentis.capability.* reach tools and the Command Model briefing. Lets an
+   * agent know-of-everything and invoke anything (apps/nodes/phases/specialists/
+   * MCP) without holding it all in context.
+   */
+  capabilityIndex?: CapabilityIndex;
+  /**
+   * The fractal Command Model — backs agentis.command.review/note and the resident
+   * Command Briefing. Gives an orchestrator/manager progressive comprehension of
+   * what it manages (scoped inventory + progress/deltas + App minds).
+   */
+  commandModel?: CommandModelService;
+  /**
+   * The per-contact Conversation State Machine (GAP B1/B3). Backs
+   * agentis.conversation.define/.enroll — an App's declarative outreach script
+   * (deterministic greeting → agent pitch → classify → run_workflow → stop) that
+   * the channel dispatcher advances on each inbound reply, token-free where scripted.
+   */
+  conversation?: ConversationService;
+  /**
+   * Generic multimodal generation (image today; audio/speech/video as providers
+   * register). Backs agentis.media.generate. Provider-pluggable — no vendor lock-in.
+   */
+  media?: MediaService;
+  /**
+   * Per-agent scoped authority over connections (Agent-Native Platform Plan §3.3).
+   * Backs the send-door authorization check and agentis.connection.grant/.request/.grants.
+   * Absent → connections behave as pre-grant (open), so wiring is strictly additive.
+   */
+  connectionGrants?: ConnectionGrantService;
+  /**
+   * Agent session store — backs agentis.residency.remember (§3.1), letting a
+   * resident agent persist its plan/observations blocks across scheduled wakes.
+   */
+  sessionStore?: Pick<AgentSessionService, 'rememberResident' | 'residentState'>;
+  /** Experiment/variant substrate (§3.5) — backs agentis.experiment.define/assign/record/results. */
+  experiments?: ExperimentService;
+  /** Durable Entity spine (§3.0/§3.2) — backs agentis.subject.* (per-subject durable actors). */
+  durableEntities?: DurableEntityService;
 }

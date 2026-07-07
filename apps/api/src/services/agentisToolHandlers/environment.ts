@@ -19,13 +19,21 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
         id: 'agentis.approval.resolve',
         mcpExposed: true,
         family: 'environment',
-        description: 'Approve or reject a pending approval.',
+        description:
+          'Approve or reject a pending approval. For a human_input node, an approve MUST carry the form field '
+          + 'values in `data` (e.g. {"approved": true, "notes": "…"}) — the node re-parks and stays PAUSED if a '
+          + 'required field is missing, so an empty approve never green-washes a decision. A plain checkpoint '
+          + 'needs no data.',
         inputSchema: {
           type: 'object',
           properties: {
             approvalId: { type: 'string' },
             decision: { type: 'string', enum: ['approve', 'reject'] },
             reason: { type: 'string' },
+            data: {
+              type: 'object',
+              description: 'Form field values for a human_input node (key → value). Required fields must be present with a non-empty value.',
+            },
           },
           required: ['approvalId', 'decision'],
         },
@@ -37,6 +45,9 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
           approvalId: String(args.approvalId),
           decision: args.decision as 'approve' | 'reject',
           reason: args.reason ? String(args.reason) : undefined,
+          ...(args.data && typeof args.data === 'object' && !Array.isArray(args.data)
+            ? { data: args.data as Record<string, unknown> }
+            : {}),
         });
         return {
           approvalId: result.id,

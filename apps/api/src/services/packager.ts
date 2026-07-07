@@ -42,8 +42,7 @@ export interface UsePackageResult {
 }
 
 import type { Logger } from '../logger.js';
-import type { AbilityService } from './abilityService.js';
-import type { AbilityPackage } from '@agentis/core';
+import type { SkillService } from './skillService.js';
 
 export class PackagerService {
   constructor(
@@ -51,8 +50,8 @@ export class PackagerService {
       db: AgentisSqliteDb;
       bus?: EventBus;
       logger?: Logger;
-      /** Optional — when wired, agentis-bundle installs deploy abilities + pins. */
-      abilities?: AbilityService;
+      /** When wired, `skill` package installs create a Brain skill atom. */
+      skills?: SkillService;
     },
   ) {}
 
@@ -347,6 +346,22 @@ export class PackagerService {
     if (contents.kind === 'integration') {
       throw new AgentisError('VALIDATION_FAILED', 'integration packages are no longer exposed');
     }
+    if (contents.kind === 'skill') {
+      if (!this.deps.skills) {
+        throw new AgentisError('VALIDATION_FAILED', 'skill packages require the skill service');
+      }
+      // Install workspace-global by default; the operator can re-scope in the Brain.
+      const skill = this.deps.skills.upsertSkill({
+        workspaceId: scope.workspaceId,
+        scopeId: null,
+        name: contents.skill.name,
+        slug: contents.skill.slug,
+        description: contents.skill.description,
+        body: contents.skill.body,
+        source: 'operator',
+      });
+      return { kind: 'skill', resourceId: skill.id, path: '/brain' };
+    }
     if (contents.kind === 'agentis') {
       return this.activateAgentisPackage(scope, row, contents, now);
     }
@@ -468,64 +483,6 @@ export class PackagerService {
       ? this.createSeedKnowledgeBase(scope, row.name, contents.knowledgeSeeds, now)
       : null;
 
-    // Abilities install first so agent pin-slug lookups succeed.
-    const abilityIdBySlug = new Map<string, string>();
-    if (contents.abilities && contents.abilities.length > 0 && this.deps.abilities) {
-      for (const abilityContents of contents.abilities) {
-        try {
-          const pkg: AbilityPackage = {
-            format_version: '1.0',
-            manifest: {
-              name: abilityContents.name,
-              slug: abilityContents.slug,
-              version: abilityContents.version,
-              domain_tag: abilityContents.domain_tag,
-              icon_emoji: abilityContents.icon_emoji,
-              description: abilityContents.description,
-              compiled_prompt: abilityContents.compiled_prompt,
-              specs: abilityContents.specs,
-              rules_always: abilityContents.rules_always,
-              rules_never: abilityContents.rules_never,
-              tool_hints: abilityContents.tool_hints,
-              example_count: abilityContents.examples.length,
-            },
-            examples: abilityContents.examples.map((ex) => ({
-              input_text: ex.input_text,
-              output_text: ex.output_text,
-              input_media_url: ex.input_media_url ?? null,
-              media_description: ex.media_description ?? null,
-              quality_score: ex.quality_score,
-              source: ex.source,
-              embedding: ex.embedding ?? null,
-            })),
-            knowledge: abilityContents.knowledge.map((k) => ({
-              title: k.title ?? null,
-              content: k.content,
-              context_prefix: k.context_prefix ?? null,
-              embedding: k.embedding ?? null,
-              source_type: k.source_type,
-              source_url: k.source_url ?? null,
-              importance_score: k.importance_score,
-            })),
-          };
-          const imported = this.deps.abilities.importPackage({
-            workspaceId: scope.workspaceId,
-            pkg,
-            authorId: scope.userId,
-          });
-          abilityIdBySlug.set(abilityContents.slug, imported.id);
-          // Trigger background compile so the imported ability becomes available to dispatch.
-          try { this.deps.abilities.requestCompile(imported.id); } catch { /* best-effort */ }
-        } catch (err) {
-          this.deps.logger?.warn('packager.ability_import_failed', {
-            packageId: row.id,
-            abilitySlug: abilityContents.slug,
-            err: (err as Error).message,
-          });
-        }
-      }
-    }
-
     for (const agent of contents.agents) {
       const id = randomUUID();
       const colorHex = CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
@@ -554,28 +511,6 @@ export class PackagerService {
         .run();
       agentIds.set(agent.name, id);
       agentIds.set(this.slugFor(agent.name), id);
-      // Apply ability pins from the bundle. Skip unknown slugs gracefully.
-      if (this.deps.abilities && agent.pinnedAbilitySlugs && agent.pinnedAbilitySlugs.length > 0) {
-        for (const slug of agent.pinnedAbilitySlugs) {
-          const abilityId = abilityIdBySlug.get(slug);
-          if (!abilityId) {
-            this.deps.logger?.warn('packager.ability_pin_unresolved', {
-              packageId: row.id,
-              agentName: agent.name,
-              abilitySlug: slug,
-            });
-            continue;
-          }
-          try { this.deps.abilities.pinAbility(id, abilityId); }
-          catch (err) {
-            this.deps.logger?.warn('packager.ability_pin_failed', {
-              agentId: id,
-              abilityId,
-              err: (err as Error).message,
-            });
-          }
-        }
-      }
     }
 
     for (const workflow of contents.workflows) {

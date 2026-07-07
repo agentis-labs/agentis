@@ -63,9 +63,9 @@ function ChartEmpty({ height }: { height?: number }) {
 
 function Legend({ series }: { series: ChartSeries[] }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
       {series.map((s, i) => (
-        <span key={s.y} className="inline-flex items-center gap-1.5 text-[11px] text-text-secondary">
+        <span key={s.y} className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-text-secondary">
           <span className="h-2 w-2 rounded-full" style={{ background: seriesColor(i, s.color) }} />
           {s.label ?? s.y}
         </span>
@@ -156,10 +156,10 @@ function CartesianChart(props: DataChartProps) {
     <div className="s-panel p-3">
       <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }} role="img" preserveAspectRatio="none">
-        {/* gridlines + y labels */}
+        {/* gridlines + y labels — soft dashed horizontals (never a full grid box) */}
         {ticks.map((t, i) => (
           <g key={i}>
-            <line x1={PAD.l} x2={W - PAD.r} y1={y(t)} y2={y(t)} stroke="var(--color-line)" strokeWidth={1} />
+            <line x1={PAD.l} x2={W - PAD.r} y1={y(t)} y2={y(t)} stroke="var(--color-line)" strokeWidth={1} strokeDasharray="3 5" />
             <text x={PAD.l - 8} y={y(t) + 3} textAnchor="end" fontSize={10} fill="var(--color-text-muted)">{fmt(t)}</text>
           </g>
         ))}
@@ -216,7 +216,7 @@ function CartesianChart(props: DataChartProps) {
         ) : null}
       </svg>
         {hover != null ? (
-          <div className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 rounded-card border border-line-strong bg-glass px-2.5 py-1.5 text-[11px] shadow-dropdown" style={{ left: `${tipLeft}%` }}>
+          <div className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 rounded-[10px] border border-line bg-surface px-2.5 py-1.5 text-[11px] shadow-dropdown" style={{ left: `${tipLeft}%` }}>
             <div className="mb-0.5 font-medium text-text-primary">{categories[hover]}</div>
             {series.map((s, si) => (
               <div key={`t-${s.y}`} className="flex items-center gap-1.5 text-text-secondary">
@@ -244,7 +244,8 @@ function Bars({
   y: (v: number) => number;
   y0: number;
 }) {
-  const inner = bw * 0.7;
+  const inner = bw * 0.56;
+  const cap = Math.min(5, inner / 2);
   return (
     <>
       {rows.map((row, i) => {
@@ -258,7 +259,8 @@ function Bars({
                 const top = y(acc + v);
                 const bottom = y(acc);
                 acc += v;
-                return <rect key={s.y} x={center - inner / 2} y={top} width={inner} height={Math.max(0, bottom - top)} fill={seriesColor(si, s.color)} rx={1}><title>{`${s.label ?? s.y}: ${fmt(v)}`}</title></rect>;
+                const isTop = si === series.length - 1;
+                return <rect key={s.y} x={center - inner / 2} y={top} width={inner} height={Math.max(0, bottom - top)} fill={seriesColor(si, s.color)} rx={isTop ? cap : 0}><title>{`${s.label ?? s.y}: ${fmt(v)}`}</title></rect>;
               })}
             </g>
           );
@@ -270,7 +272,7 @@ function Bars({
               const v = num(row[s.y]);
               const top = y(v);
               const xPos = center - inner / 2 + sub * si;
-              return <rect key={s.y} x={xPos} y={top} width={Math.max(1, sub - 2)} height={Math.max(0, y0 - top)} fill={seriesColor(si, s.color)} rx={1}><title>{`${s.label ?? s.y}: ${fmt(v)}`}</title></rect>;
+              return <rect key={s.y} x={xPos} y={top} width={Math.max(2, sub - 2)} height={Math.max(0, y0 - top)} fill={seriesColor(si, s.color)} rx={Math.min(4, Math.max(1.5, sub / 3))}><title>{`${s.label ?? s.y}: ${fmt(v)}`}</title></rect>;
             })}
           </g>
         );

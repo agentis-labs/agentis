@@ -159,12 +159,19 @@ describe('/v1/mcp/rpc', () => {
         serverInfo: { name: string };
         protocolVersion: string;
         capabilities: { tools?: unknown; resources?: unknown };
+        instructions?: string;
       };
     };
     expect(body.result.serverInfo.name).toBe('agentis');
     expect(typeof body.result.protocolVersion).toBe('string');
     expect(body.result.capabilities.tools).toBeDefined();
     expect(body.result.capabilities.resources).toBeDefined();
+    // PAVED-ROAD P2 — doctrine at the door: external harnesses receive the
+    // build loop + data-flow contract in the initialize result.
+    expect(body.result.instructions).toBeTruthy();
+    expect(body.result.instructions).toContain('AGENTIS BUILD LOOP');
+    expect(body.result.instructions).toContain('agentis.workflow.dry_run');
+    expect(body.result.instructions).toContain('agentis.workflow.loop_status');
   });
 
   it('returns empty MCP resource discovery instead of method-not-found', async () => {

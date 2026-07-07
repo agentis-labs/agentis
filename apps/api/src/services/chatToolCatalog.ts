@@ -10,6 +10,72 @@
 import type { ToolDefinition } from '@agentis/core';
 
 export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
+  // ─── Capability plane (reach) ────────────────────────────────────────────
+  // The primary way to find and use anything in the workspace without holding it
+  // all in context: search by meaning → load the contract → invoke, down to a
+  // single node/phase, a specialist agent, or an MCP tool. See CAPABILITY MANIFEST.
+  {
+    name: 'agentis.capability.search',
+    description:
+      'Find the exact capability to use by MEANING — apps, workflows, individual nodes/phases, specialist agents, skills, and MCP tools — without holding the whole workspace in context. Returns ranked URNs. Use this FIRST whenever the operator refers to something you do not already have in hand.',
+    parameters: {
+      type: 'object',
+      properties: {
+        intent: { type: 'string', description: 'What you are trying to find or do, in plain language.' },
+        kind: { type: 'string', description: 'Optional filter.', enum: ['app', 'workflow', 'node', 'phase', 'agent', 'skill', 'mcp_tool', 'collection'] },
+        limit: { type: 'number', description: 'Max results (default 8, max 25).' },
+      },
+      required: ['intent'],
+    },
+  },
+  {
+    name: 'agentis.capability.load',
+    description:
+      'Page in the FULL typed contract for capability URNs from agentis.capability.search (input fields, node/phase structure, agent identity) so you invoke them correctly. Load only what the step needs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        urns: { type: 'array', items: { type: 'string' }, description: 'URNs from capability.search.' },
+        urn: { type: 'string', description: 'A single URN (alternative to urns).' },
+      },
+    },
+  },
+  {
+    name: 'agentis.capability.invoke',
+    description:
+      'Run a capability by URN — a whole workflow (wf:<id>), a single deep node (app:<id>/wf:<id>/node:<id>), an execution phase (.../phase:<id>), a specialist agent (agent:<id>, to hand off or converse), or an MCP tool (mcp:<slug>__<tool>). Pass input as the trigger/agent/tool payload; for a node/phase pass sourceRunId to pin the run to replay from. Returns the routed result or grounded guidance.',
+    parameters: {
+      type: 'object',
+      properties: {
+        urn: { type: 'string', description: 'Capability URN from capability.search.' },
+        input: { type: 'object', description: 'Payload: workflow trigger inputs, agent { task }, or MCP tool arguments.' },
+        sourceRunId: { type: 'string', description: 'For node/phase: the run to replay from (defaults to the workflow\'s latest run).' },
+      },
+      required: ['urn'],
+    },
+  },
+  // ─── Command Model (comprehension) ───────────────────────────────────────
+  // You MANAGE what you own — review it, act on it, and record what you learn.
+  {
+    name: 'agentis.command.review',
+    description:
+      'Review what YOU manage right now — your scoped inventory, live progress and what changed since you last looked, what needs you, and what your apps have learned. Call this at the start of a management turn or whenever you want a fresh picture, before acting.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'agentis.command.note',
+    description:
+      'Record a management decision, objective, progress note, or learning to YOUR mind so your future self and next session recall it — how comprehension compounds instead of resetting each turn.',
+    parameters: {
+      type: 'object',
+      properties: {
+        note: { type: 'string', description: 'The decision/objective/progress/learning, in your own words.' },
+        kind: { type: 'string', enum: ['decision', 'objective', 'progress', 'learning'], description: 'Default decision.' },
+        tags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['note'],
+    },
+  },
   // ─── Platform Control ────────────────────────────────────────────────────
   {
     name: 'agentis.workflow.run',
@@ -589,6 +655,53 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
       required: ['documentId', 'knowledgeBaseId'],
     },
   },
+  {
+    name: 'agentis.brain.search',
+    description:
+      'Search YOUR Brain by meaning, mid-task — durable memories, workspace knowledge, and (on request) your Skill library — instead of guessing when you need a fact, rule, or procedure you were not handed up front. Returns ranked atoms ({ id, kind, title, snippet, score }). Skills/examples are EXCLUDED by default; pass kind:"skill" (or "example"/"all") to include them, then read a skill\'s full procedure with agentis.skill.load. Prefer short keyword-first queries. Example: {"query":"deploy migrations safely","kind":"skill"}.',
+    examples: [
+      { description: 'Recall a durable rule or fact mid-task.', input: { query: 'customer refund policy over $500' } },
+      { description: 'Find a relevant procedure in the skill library.', input: { query: 'triage stripe webhook failures', kind: 'skill' } },
+    ],
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What you are looking for (natural language or keywords).' },
+        kind: { type: 'string', enum: ['memory', 'knowledge', 'skill', 'example', 'all'], description: 'Restrict the search. Omit to search durable memory + knowledge (skill library excluded). Use "skill"/"example" for the skill library, or "all" for everything.' },
+        limit: { type: 'number', description: 'Max results (1–20, default 6).' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'agentis.skill.load',
+    description:
+      "Load a Living Skill's full procedure (its SKILL.md body) by id or slug. The short description is discoverable via agentis.brain.search; call this to read the WHOLE procedure before applying it. (This is distinct from agentis.skill.inspect, which inspects an executable workflow extension.) Example: {\"skill\":\"deploy-migrations-safely\"}.",
+    examples: [
+      { description: 'Read the full procedure for a skill found via brain.search.', input: { skill: 'deploy-migrations-safely' } },
+    ],
+    parameters: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'Skill id or slug.' },
+      },
+      required: ['skill'],
+    },
+  },
+  {
+    name: 'agentis.skill.promote_example',
+    description:
+      "Save a worked input→output pair as an EXAMPLE of a skill done right — the skill's demonstration set grows from real wins and rides along the next time it is loaded. Use after a skill produced a genuinely good result worth teaching. Example: {\"skill\":\"deploy-migrations-safely\",\"input\":\"add a column\",\"output\":\"flagged, migrated, verified, flipped\"}.",
+    parameters: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'Skill id or slug the example demonstrates.' },
+        input: { type: 'string', description: 'The task/input the skill handled.' },
+        output: { type: 'string', description: 'The good result the skill produced.' },
+      },
+      required: ['skill', 'input', 'output'],
+    },
+  },
 
   // ─── Decisions & Approvals ───────────────────────────────────────────────
   {
@@ -839,6 +952,31 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.workflow.restore_blueprint',
+    description:
+      'Restore a workflow to its BLESSED blueprint — the exact graph of its last ACCOMPLISHED production run. Use when a repair or edit broke a previously-working workflow ("it was perfect, now it fails"). Returns restored:false with the reason when nothing proven exists to restore.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string', description: 'The workflow to roll back.' },
+      },
+      required: ['workflowId'],
+    },
+  },
+  {
+    name: 'agentis.workflow.bless',
+    description:
+      'BLESS a workflow: mark a run\'s graph as the proven blueprint ("this works"), granting blueprint protection — self-heal will never autonomously restructure it, and restore_blueprint can always roll back to it. Defaults to the latest COMPLETED run; pass runId to pick one. Use after the operator confirms a workflow works, especially when no formal verdict ran.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string', description: 'The workflow to bless.' },
+        runId: { type: 'string', description: 'Optional: bless the graph that ran in this run.' },
+      },
+      required: ['workflowId'],
+    },
+  },
+  {
     name: 'agentis.workflow.patterns',
     description:
       'Retrieve robust workflow design patterns — proven control-flow shapes for the gates, fallbacks, loops, and rollback the happy path omits: ' +
@@ -949,7 +1087,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     description:
       'Give an App its DATA + INTERFACE in one call — the fast path to a real product. Defines the datastore collections (the data format) AND authors a real, data-bound operator surface (ActivityStream + a board/table/form bound to those collections, create actions wired). ' +
       'Use this whenever the operator asks for an app with an interface — a CRM, dashboard, tracker, pipeline, board, portal, or console. An App with logic but no UI or data is incomplete. ' +
-      'It picks a premium design language (aurora/soft/editorial/console) that fits the domain, so the surface looks designed — not a flat template. ' +
+      'Surfaces render on the flagship Agentis design system (premium in light AND dark, TailAdmin-grade cards/tables/charts, auto-formatted values) — no styling work needed. ' +
       'Pass collections to define the data model and prompt to describe the interface (mention the vibe — e.g. "exec dashboard", "friendly CRM" — to steer the look). More reliable than hand-authoring a ViewNode tree with ui_render.',
     parameters: {
       type: 'object',
@@ -1009,9 +1147,12 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.ui.render',
     description:
-      'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Split/Tabs/Hero/KPIStrip/Metric/Chart/Table/List/DataBoard/Funnel/Timeline/Form/Button/ActivityStream/WorkflowControl/ChatThread/Inbox/CustomView…). ' +
-      'On the ROOT node set style.theme AND style.design to pick the LOOK — design:"aurora" (glass/glow dashboards), "soft" (consumer/CRM), "editorial" (content), "console" (ops), "operations" (default); when in doubt for a dashboard use "aurora". Lead an App overview DASHBOARD-FIRST: a Hero + KPIStrip, and a WorkflowControl panel (the App\'s own workflows, each with a run button — no bind) when the App owns workflows, THEN charts + a table; never a flat card stack and never data-entry Forms at the top. ' +
-      'Table/List/Chart/DataBoard bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Button/Form reference an action declared with agentis.ui.action_schema.',
+      'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Split/Tabs/Hero/KPIStrip/Metric/Chart/Table/List/Kanban/RecordMaster/Roadmap/PipelineFlow/DataBoard/Funnel/Timeline/Form/Button/ActivityStream/OrchestrationPanel/RunMonitor/AgentFeed/ApprovalsInbox/ChatThread/Inbox/CustomView…). ' +
+      'Every surface renders on the flagship Agentis design system (light+dark, premium by construction). ROOT style options: theme (content width/density), appearance:"light"|"dark" to pin one, accent to re-brand, and optional design VARIANTS ("aurora" bigger numerals · "soft" rounder · "editorial" big flat type · "console" dense) — default flagship needs nothing. Compose an App home MISSION-CONTROL-FIRST: Hero (title + subtitle + actions:[{action}] = the page action bar — put declared workflow actions HERE), KPIStrip/PipelineFlow, an OrchestrationPanel (the App\'s workflows with rules — schedule/chains/concurrency — and run buttons; no bind), then Grid[ working composite (span 2) | Stack[RunMonitor, AgentFeed] (span 1) ] so the operator watches agents work LIVE; never a flat card stack, never Forms at the top. ' +
+      'OPERABILITY CONTRACT (hard-gated: RENDERED ≠ OPERABLE): every action you declare MUST be reachable from a control — workflow actions on Hero.actions or a Button, "<col>.insert" behind a Form, "<col>.update" powering Kanban drag + the record drawer, "<col>.delete" as a Table rowAction. A Button/Form referencing an UNDECLARED action is stripped by the gate; a declared-but-unwired workflow action gets auto-wired into the header (and flagged) — author it operable the first time. Values format themselves (URLs→links, SCREAMING_SNAKE→humanized pills, ISO dates→relative): never hand-format. ' +
+      'Pick the working composite for the data: Kanban (status/stage fields; give update:{action:"<declared col.update action>"} so drag writes back) · RecordMaster (CRM/ERP record workspaces w/ sections+related) · Roadmap (date fields → time lanes) · PipelineFlow (stage funnel + conversion) · Chart/Table (metrics/logs). ' +
+      'The runtime wraps surfaces in an App Shell (sidebar pages + topbar + ops drawer): author page CONTENT, never navigation — each surface becomes a page, so real products = several focused surfaces (home, board, records, roadmap, inbox). ' +
+      'Table/List/Chart/Kanban/RecordMaster/Roadmap bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Button/Form/Kanban-update reference an action declared with agentis.ui.action_schema.',
     parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, view: { type: 'object' } }, required: ['surface', 'view'] },
   },
   {
@@ -1021,8 +1162,13 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     name: 'agentis.ui.action_schema',
-    description: 'Declare a surface\'s actions. Each resolves to a workflow run, an agent tool, or a datastore op ("collection.insert"|"update"|"upsert"|"delete"). { name, kind, target, inputSchema? }.',
+    description: 'Declare a surface\'s actions. Each resolves to a workflow run, an agent tool, or a datastore op ("collection.insert"|"update"|"upsert"|"delete"). { name, kind, target, inputSchema? }. Declaring re-runs the operability gate: a declared workflow action that no control references gets auto-wired into the page header (RENDERED ≠ OPERABLE — an unreachable action cannot persist).',
     parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, actions: { type: 'array' } }, required: ['surface', 'actions'] },
+  },
+  {
+    name: 'agentis.ui.lint',
+    description: 'Lint a surface against the layout floor + operability gate WITHOUT persisting — the UI dry-run. Pass view (+ actions) to check a PROPOSED tree before ui.render, or just surface to audit the stored one. Returns operable + the exact fixes the gate would apply. Flow: author → lint → render.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, view: { type: 'object' }, actions: { type: 'array' } } },
   },
   {
     name: 'agentis.plan',

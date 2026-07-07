@@ -26,7 +26,7 @@ import type {
   ToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt, formatToolManifestAwareness, stripProcessNoise } from './markerToolProtocol.js';
 import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
 import { codexServiceTierArgs } from './codexServiceTier.js';
@@ -224,8 +224,10 @@ export class CodexAdapter implements AgentAdapter {
     try {
       const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(task.abilityEnv ?? {}) });
       // Isolated per-task directory when the engine allocated one (parallel swarm
-      // subtask); otherwise the adapter's single-agent configured cwd.
-      const spawnCwd = task.workdir ?? this.opts.cwd;
+      // subtask); otherwise the adapter's single-agent configured cwd. Re-validate
+      // (and re-create) it every spawn: a managed home can vanish after the adapter
+      // was registered, and a missing cwd makes a present binary throw ENOENT.
+      const spawnCwd = resolveSpawnCwd(task.workdir ?? this.opts.cwd, { create: true });
       const target = resolveSpawnTarget(binary, args, spawnCwd ?? process.cwd(), env);
       childProcess = spawn(target.command, target.args, {
         cwd: spawnCwd,

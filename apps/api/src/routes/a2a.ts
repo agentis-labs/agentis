@@ -154,21 +154,9 @@ function buildAgentCard(deps: A2aRoutesDeps, agent: typeof schema.agents.$inferS
   const capabilities = deps.adapters.capabilities(agent.id);
   const affordances = capabilities?.affordances ?? {};
   const tags = Array.isArray(agent.capabilityTags) ? (agent.capabilityTags as string[]) : [];
-  const abilities = deps.db
-    .select({ name: schema.abilities.name, slug: schema.abilities.slug, domainTag: schema.abilities.domainTag })
-    .from(schema.agentAbilityPins)
-    .innerJoin(schema.abilities, eq(schema.agentAbilityPins.abilityId, schema.abilities.id))
-    .where(and(eq(schema.agentAbilityPins.agentId, agent.id), eq(schema.agentAbilityPins.enabled, true)))
-    .all();
 
   const affordanceTags = Object.entries(affordances).filter(([, v]) => v === true).map(([k]) => k);
   const skills = [
-    ...abilities.map((ab) => ({
-      id: `ability:${ab.slug}`,
-      name: ab.name,
-      description: ab.domainTag ? `${ab.name} (${ab.domainTag})` : ab.name,
-      tags: ['ability', ...(ab.domainTag ? [ab.domainTag] : [])],
-    })),
     ...tags.map((t) => ({ id: `tag:${t}`, name: t, description: `Capability tag: ${t}`, tags: ['capability'] })),
   ];
 

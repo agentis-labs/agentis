@@ -45,7 +45,7 @@ import type {
   ToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt, extractMarkerToolCalls, formatToolManifestAwareness, stripProcessNoise } from './markerToolProtocol.js';
 import { linkAbortSignal } from './abort.js';
 import {
@@ -299,9 +299,10 @@ export class AntigravityAdapter implements AgentAdapter {
     return new Promise((resolve) => {
       let child: ReturnType<typeof spawn>;
       try {
-        const target = resolveSpawnTarget(binary, input.args, input.cwd ?? process.cwd(), env);
+        const cwd = resolveSpawnCwd(input.cwd, { create: true });
+        const target = resolveSpawnTarget(binary, input.args, cwd ?? process.cwd(), env);
         child = spawn(target.command, target.args, {
-          cwd: input.cwd, env, windowsHide: true, signal: controller.signal, stdio: ['pipe', 'pipe', 'pipe'],
+          cwd, env, windowsHide: true, signal: controller.signal, stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (err) {
         unlink();

@@ -17,6 +17,8 @@ import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { ExtensionStudioModal } from '../extensions/ExtensionStudioModal';
+import { isIdLike, shortRef } from '../../lib/prettyRef';
+import { useAgentisStore, selectResourceName } from '../../store/agentisStore';
 
 export interface InstalledExtensionOption {
   id: string;
@@ -135,7 +137,15 @@ export function ExtensionCombobox({
     ? matchedInstalled
     : matchedInstalled.slice(0, INSTALLED_SHOW_CAP);
   const hiddenCount = matchedInstalled.length - INSTALLED_SHOW_CAP;
-  const selectedName = installed.find((s) => s.id === value)?.name ?? value;
+  const selectedMatch = installed.find((s) => s.id === value);
+  // Fall back to the app-wide resource-name registry (populated when extensions
+  // are fetched elsewhere) before giving up on resolving a real name.
+  const registryName = useAgentisStore(selectResourceName('extension', value));
+  // When the referenced extension can't be resolved at all, show a clean short
+  // reference instead of leaking the raw UUID as if it were the extension's name.
+  const selectedName = selectedMatch?.name
+    ?? registryName
+    ?? (isIdLike(value) ? `unresolved extension (${shortRef(value)})` : value);
 
   return (
     <div className="space-y-2">

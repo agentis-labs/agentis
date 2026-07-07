@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getBezierPath,
+  getSmoothStepPath,
   useReactFlow,
   type EdgeProps,
 } from '@xyflow/react';
@@ -70,13 +70,18 @@ export function AgentisEdge(props: EdgeProps) {
     setDraft(label);
   }, [label]);
 
-  const [edgePath, labelX, labelY] = getBezierPath({
+  // Orthogonal routing with rounded corners (reference-builder parity): edges
+  // travel the gutters between cards and bands as tidy staircases instead of
+  // long diagonals slashing across the graph.
+  const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
     sourcePosition,
     targetX,
     targetY,
     targetPosition,
+    borderRadius: 14,
+    offset: 16,
   });
 
   function commit(next: string) {
@@ -155,7 +160,7 @@ export function AgentisEdge(props: EdgeProps) {
               tabIndex={0}
               title="Double-click to rename"
               className={clsx(
-                'inline-flex max-w-[10rem] items-center rounded-full border bg-surface px-2 py-0.5 font-mono text-[10px] tracking-tight transition',
+                'inline-flex max-w-[9rem] items-center rounded-full border bg-surface px-1.5 py-px text-[9.5px] tracking-tight transition',
                 selected
                   ? 'border-accent/60 text-accent shadow-glow'
                   : 'border-line text-text-muted hover:border-accent/40 hover:text-text-primary',

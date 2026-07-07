@@ -1,16 +1,17 @@
 /**
- * designLanguage — the look bundles behind an Agentic App surface.
+ * designLanguage — STRUCTURE bundles for the Agentis App design system.
  *
- * A DesignLanguage is a named set of *visual decisions* (radii, card treatment,
- * shadow/elevation, gradient policy, type scale, palette, spacing) expressed as
- * scoped CSS custom properties. The renderer applies one bag to the surface root,
- * and every premium primitive reads `var(--s-*)` from it — so the SAME ViewNode
- * tree renders in genuinely different, all-premium styles.
+ * INTERFACE-OVERHAUL-10X replaced the five parallel "look" languages with ONE
+ * flagship system (`agentis`): the palette + card paint live in `styles.css`
+ * under the `.s-surface` scope (theme-responsive — designed light AND dark),
+ * and this file contributes only STRUCTURE — radius, padding, gap, and the
+ * type scale — as `--s-*` CSS vars applied to the surface root.
  *
- * This is the single place those decisions live. Agents never write CSS; they
- * pick a language id (enum, validated in `@agentis/core`), and the operator can
- * override it. All values compose existing `styles.css` tokens, so dark/light and
- * accent theming keep working for free.
+ * The legacy ids (`operations` / `aurora` / `soft` / `editorial` / `console`)
+ * stay schema-valid forever: they resolve to structural VARIANTS of the
+ * flagship so every stored surface upgrades in place with zero migration.
+ * Agents never write CSS; they may pick a variant id, and the operator can
+ * override it.
  */
 import type { CSSProperties } from 'react';
 import type { DesignLanguage } from '@agentis/core';
@@ -32,151 +33,94 @@ export interface ResolvedDesign {
 }
 
 /**
- * `--s-*` contract (what primitives read):
+ * `--s-*` contract (structure only — paint comes from `.s-surface`'s `--app-*`):
  *   --s-radius        card/control corner radius
  *   --s-pad           default panel padding
- *   --s-gap           default stack gap
- *   --s-card-bg       panel background (may be a gradient)
- *   --s-card-border   panel border
- *   --s-card-shadow   panel elevation
- *   --s-kpi-size      hero KPI/metric number size
- *   --s-kpi-bg        KPI tile background
- *   --s-heading-size  section/hero heading size
- *   --s-accent-glow   focus/active glow (used by heroes, agent regions)
+ *   --s-gap           default stack/grid gap
+ *   --s-kpi-size      KPI numeral size (the scale's loudest step; auto-fit shrinks it)
+ *   --s-heading-size  page-title size
+ *   --s-title-size    panel/section title size
+ *   --s-body-size     row/body copy size
+ *   --s-card-bg / --s-card-border / --s-card-shadow / --s-kpi-bg
+ *                     delegate to the appearance-aware `--app-*` paint tokens
+ *   --s-accent-glow   focus/active glow
+ *
+ * TYPE SCALE DOCTRINE (frontend-design skill): the scale must JUMP — 11px
+ * tracked labels → 13.5px body → 15px titles → 26px page titles → 32-40px
+ * numerals. Color belongs to DATA (status pills, charts, pulses); chrome quiet.
  */
-const LANGUAGES: Record<DesignLanguage, ResolvedDesign> = {
-  // Elevated version of today's dense command center — the safe default.
+const FLAGSHIP_VARS: CSSProperties = {
+  '--s-radius': '14px',
+  '--s-pad': '20px',
+  '--s-gap': '14px',
+  '--s-card-bg': 'var(--app-card-bg)',
+  '--s-card-border': 'var(--app-card-border)',
+  '--s-card-shadow': 'var(--app-card-shadow)',
+  '--s-kpi-bg': 'var(--app-tile-bg)',
+  '--s-kpi-size': '32px',
+  '--s-heading-size': '26px',
+  '--s-title-size': '15px',
+  '--s-body-size': '13.5px',
+  '--s-accent-glow': 'var(--shadow-glow)',
+} as CSSProperties;
+
+interface VariantDef {
+  label: string;
+  hint: string;
+  /** Structural overrides layered over the flagship bundle. */
+  vars?: CSSProperties;
+  policy?: Partial<ResolvedDesign['policy']>;
+}
+
+const VARIANTS: Record<DesignLanguage, VariantDef> = {
+  agentis: {
+    label: 'Agentis',
+    hint: 'The flagship system — premium cards, real type scale, light & dark.',
+  },
+  // Legacy ids → structural variants of the flagship (zero-migration upgrades).
   operations: {
-    id: 'operations',
-    label: 'Operations',
-    hint: 'Dense command center — elevated, restrained, fast to scan.',
-    vars: {
-      '--s-radius': '12px',
-      '--s-pad': '14px',
-      '--s-gap': '12px',
-      '--s-card-bg': 'var(--color-surface)',
-      '--s-card-border': '1px solid var(--color-line-strong)',
-      '--s-card-shadow': 'var(--shadow-card)',
-      '--s-kpi-size': '26px',
-      '--s-kpi-bg': 'var(--color-surface-2)',
-      '--s-heading-size': '16px',
-      '--s-accent-glow': 'var(--shadow-glow)',
-    } as CSSProperties,
-    policy: { gradientCharts: true, multiPalette: false },
+    label: 'Operations (variant)',
+    hint: 'Flagship structure, single-accent charts — dense command centers.',
+    policy: { multiPalette: false },
   },
-
-  // Glass + ambient glow + gradient accents — the "wow" dashboard (image 4).
   aurora: {
-    id: 'aurora',
-    label: 'Aurora',
-    hint: 'Glass cards, ambient glow, gradient accents — cinematic.',
-    vars: {
-      '--s-radius': '18px',
-      '--s-pad': '20px',
-      '--s-gap': '16px',
-      '--s-card-bg': 'linear-gradient(160deg, color-mix(in srgb, var(--color-accent) 8%, var(--color-surface)) 0%, var(--color-surface) 70%)',
-      '--s-card-border': '1px solid var(--color-glass-border)',
-      '--s-card-shadow': 'var(--shadow-floating)',
-      '--s-kpi-size': '34px',
-      '--s-kpi-bg': 'color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-2))',
-      '--s-heading-size': '18px',
-      '--s-accent-glow': 'var(--shadow-glow)',
-    } as CSSProperties,
-    policy: { gradientCharts: true, multiPalette: true },
+    label: 'Aurora (variant)',
+    hint: 'Bigger numerals, rounder cards — executive dashboards.',
+    vars: { '--s-radius': '16px', '--s-pad': '22px', '--s-kpi-size': '38px', '--s-heading-size': '28px' } as CSSProperties,
   },
-
-  // Rounded consumer cards, pastel multi-color tiles, friendly (image 3).
   soft: {
-    id: 'soft',
-    label: 'Soft',
-    hint: 'Rounded consumer cards, colorful tiles, friendly spacing.',
-    vars: {
-      '--s-radius': '20px',
-      '--s-pad': '22px',
-      '--s-gap': '18px',
-      '--s-card-bg': 'var(--color-surface)',
-      '--s-card-border': '1px solid var(--color-line)',
-      '--s-card-shadow': '0 10px 30px rgba(0,0,0,0.28)',
-      '--s-kpi-size': '32px',
-      '--s-kpi-bg': 'var(--color-surface-2)',
-      '--s-heading-size': '17px',
-      '--s-accent-glow': 'var(--shadow-glow)',
-    } as CSSProperties,
-    policy: { gradientCharts: true, multiPalette: true },
+    label: 'Soft (variant)',
+    hint: 'Rounder, friendlier spacing — consumer/CRM products.',
+    vars: { '--s-radius': '18px', '--s-pad': '22px', '--s-gap': '16px', '--s-body-size': '14px' } as CSSProperties,
   },
-
-  // Big type, generous whitespace, restrained color — content-forward.
   editorial: {
-    id: 'editorial',
-    label: 'Editorial',
-    hint: 'Big type, generous whitespace, restrained color.',
-    vars: {
-      '--s-radius': '8px',
-      '--s-pad': '24px',
-      '--s-gap': '24px',
-      '--s-card-bg': 'transparent',
-      '--s-card-border': '1px solid var(--color-line)',
-      '--s-card-shadow': 'none',
-      '--s-kpi-size': '40px',
-      '--s-kpi-bg': 'transparent',
-      '--s-heading-size': '22px',
-      '--s-accent-glow': 'none',
-    } as CSSProperties,
+    label: 'Editorial (variant)',
+    hint: 'Big type, generous whitespace, flat color — content & reports.',
+    vars: { '--s-radius': '10px', '--s-pad': '26px', '--s-gap': '22px', '--s-kpi-size': '40px', '--s-heading-size': '30px', '--s-title-size': '16px', '--s-body-size': '15px' } as CSSProperties,
     policy: { gradientCharts: false, multiPalette: false },
   },
-
-  // Dense neon-on-black terminal — tight grid, mono accents.
   console: {
-    id: 'console',
-    label: 'Console',
-    hint: 'Dense neon-on-black terminal — tight grid, ops/SRE.',
-    vars: {
-      '--s-radius': '6px',
-      '--s-pad': '12px',
-      '--s-gap': '10px',
-      '--s-card-bg': 'var(--color-canvas)',
-      '--s-card-border': '1px solid var(--color-line-strong)',
-      '--s-card-shadow': 'inset 0 0 0 1px rgba(255,255,255,0.02)',
-      '--s-kpi-size': '24px',
-      '--s-kpi-bg': 'var(--color-canvas)',
-      '--s-heading-size': '14px',
-      '--s-accent-glow': 'var(--shadow-glow)',
-    } as CSSProperties,
-    policy: { gradientCharts: true, multiPalette: true },
+    label: 'Console (variant)',
+    hint: 'Tight grid, compact scale — ops/SRE monitors.',
+    vars: { '--s-radius': '10px', '--s-pad': '14px', '--s-gap': '10px', '--s-kpi-size': '26px', '--s-heading-size': '20px', '--s-title-size': '13.5px', '--s-body-size': '12.5px' } as CSSProperties,
   },
 };
 
-export const DESIGN_LANGUAGES: ResolvedDesign[] = Object.values(LANGUAGES);
-export const DEFAULT_DESIGN: DesignLanguage = 'operations';
+export const DEFAULT_DESIGN: DesignLanguage = 'agentis';
 
-/**
- * Monochrome brand base — applied to EVERY App surface root (under each design
- * language). App Interfaces use ghost-white highlights on the near-black canvas
- * (a Linear/Vercel monochrome aesthetic), not the platform's emerald accent. These
- * overrides are scoped to the surface subtree via the inline `--s-*`/`--color-*` vars
- * on the root, so the rest of the platform (home, canvas, chrome) is untouched.
- *
- * The brand accent + positive/success emphasis go monochrome; genuine *status* hues
- * (danger red, warning amber, info blue) keep their meaning. Because the design
- * languages compose `var(--color-accent)` / `var(--shadow-glow)`, re-pointing those
- * here re-skins all five languages at once — aurora's accent-tinted glass becomes a
- * soft white sheen, KPI tints go monochrome, focus glows turn white.
- */
-const MONOCHROME_BASE_VARS: CSSProperties = {
-  '--color-accent': '#e8eaee',
-  '--color-accent-hover': '#ffffff',
-  '--color-accent-soft': 'rgba(255,255,255,0.08)',
-  '--color-accent-muted': 'rgba(255,255,255,0.18)',
-  '--color-on-accent': '#08090b',
-  '--color-success': '#e8eaee',
-  '--color-success-soft': 'rgba(255,255,255,0.08)',
-  '--shadow-glow': '0 0 0 1px rgba(255,255,255,0.16), 0 0 22px rgba(255,255,255,0.06)',
-} as CSSProperties;
+function build(id: DesignLanguage): ResolvedDesign {
+  const variant = VARIANTS[id] ?? VARIANTS[DEFAULT_DESIGN];
+  return {
+    id,
+    label: variant.label,
+    hint: variant.hint,
+    vars: { ...FLAGSHIP_VARS, ...variant.vars } as CSSProperties,
+    policy: { gradientCharts: true, multiPalette: true, ...variant.policy },
+  };
+}
+
+export const DESIGN_LANGUAGES: ResolvedDesign[] = (Object.keys(VARIANTS) as DesignLanguage[]).map(build);
 
 export function resolveDesign(id?: DesignLanguage): ResolvedDesign {
-  const lang = LANGUAGES[id ?? DEFAULT_DESIGN] ?? LANGUAGES[DEFAULT_DESIGN];
-  // Merge the monochrome base UNDER the language vars: the base provides the
-  // `--color-*`/glow overrides the language's `--s-*` values resolve against, while
-  // any explicit `--s-*` the language sets still wins.
-  return { ...lang, vars: { ...MONOCHROME_BASE_VARS, ...lang.vars } };
+  return build(id && VARIANTS[id] ? id : DEFAULT_DESIGN);
 }

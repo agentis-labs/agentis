@@ -53,16 +53,33 @@ export const NODE_KIND_META: Record<string, NodeKindMeta> = {
   subflow: { label: 'Subflow', glyph: '⊞', category: 'control' },
   wait: { label: 'Wait', glyph: '◷', category: 'control' },
   loop: { label: 'Loop', glyph: '↻', category: 'control' },
+  pursue: { label: 'Pursue', glyph: '◎', category: 'control' },
   converge: { label: 'Converge', glyph: '⟳', category: 'control' },
   parallel: { label: 'Parallel', glyph: '⇉', category: 'control' },
+  stop_error: { label: 'Stop & error', glyph: '⛔', category: 'control' },
   // Data & logic — deterministic, zero LLM tokens
   transform: { label: 'Transform', glyph: 'ƒ', category: 'data' },
   filter: { label: 'Filter', glyph: '▽', category: 'data' },
   integration: { label: 'Integration', glyph: '⧉', category: 'data' },
   http_request: { label: 'HTTP request', glyph: '↯', category: 'data' },
+  // MCP capability plane: one deterministic tool call on a mounted MCP server
+  // (Supabase, Linear, …) — the workflow-side twin of agentis.mcp.call.
+  mcp: { label: 'MCP tool', glyph: '⌬', category: 'data' },
+  data_query: { label: 'Data query', glyph: '⌕', category: 'data' },
+  data_mutate: { label: 'Data mutate', glyph: '✎', category: 'data' },
+  aggregate_window: { label: 'Aggregate', glyph: '∑', category: 'data' },
   workflow_store: { label: 'Workflow memory', glyph: '▤', category: 'data' },
   workspace_store: { label: 'Workspace memory', glyph: '▦', category: 'data' },
   scratchpad: { label: 'Scratchpad', glyph: '◈', category: 'data' },
+  code: { label: 'Code', glyph: '⌗', category: 'data' },
+  datetime: { label: 'Date & time', glyph: '◷', category: 'data' },
+  crypto_util: { label: 'Crypto', glyph: '⚿', category: 'data' },
+  markdown: { label: 'Markdown', glyph: '⓶', category: 'data' },
+  xml_parse: { label: 'XML', glyph: '‹›', category: 'data' },
+  html_extract: { label: 'HTML extract', glyph: '⧉', category: 'data' },
+  json_schema_validate: { label: 'Validate schema', glyph: '✔', category: 'data' },
+  spreadsheet: { label: 'Spreadsheet', glyph: '▦', category: 'data' },
+  graphql: { label: 'GraphQL', glyph: '◭', category: 'data' },
   // Intelligence — LLM-powered
   agent_task: { label: 'Agent task', glyph: '◎', category: 'intelligence' },
   agent_session: { label: 'Agent session', glyph: '◍', category: 'intelligence' },
@@ -74,15 +91,20 @@ export const NODE_KIND_META: Record<string, NodeKindMeta> = {
   guardrails: { label: 'Guardrails', glyph: '⊘', category: 'intelligence' },
   // Knowledge Base (RAG over uploaded docs) — distinct from the Brain (memory).
   knowledge: { label: 'Knowledge search', glyph: '◇', category: 'knowledge' },
+  knowledge_ingest: { label: 'Knowledge ingest', glyph: '⇪', category: 'knowledge' },
   artifact_collect: { label: 'Collect artifacts', glyph: '⊡', category: 'knowledge' },
   // Output surface
   return_output: { label: 'Return output', glyph: '▣', category: 'output' },
   artifact_save: { label: 'Save artifact', glyph: '⭳', category: 'output' },
   notify: { label: 'Notify me', glyph: '✉', category: 'output' },
+  sticky_note: { label: 'Sticky note', glyph: '✎', category: 'output' },
   // Native browser control
   browser: { label: 'Browser', glyph: '◐', category: 'browser' },
   // Human interaction
   checkpoint: { label: 'Checkpoint', glyph: '✓', category: 'human' },
+  human_input: { label: 'Human input', glyph: '✍', category: 'human' },
+  // Fires a workflow when another workflow's run fails.
+  error_trigger: { label: 'Error trigger', glyph: '⚠', category: 'trigger' },
 };
 
 const FALLBACK: NodeKindMeta = { label: 'Step', glyph: '•', category: 'data' };

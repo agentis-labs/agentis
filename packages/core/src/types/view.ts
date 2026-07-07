@@ -71,7 +71,7 @@ export type SurfaceTheme = z.infer<typeof surfaceThemeSchema>;
  * in genuinely different, all-premium styles. Absent → `operations` (elevated).
  * Agents pick an id from this enum — never raw CSS (same contract as StyleIntent).
  */
-export const designLanguageSchema = z.enum(['operations', 'aurora', 'soft', 'editorial', 'console']);
+export const designLanguageSchema = z.enum(['agentis', 'operations', 'aurora', 'soft', 'editorial', 'console']);
 export type DesignLanguage = z.infer<typeof designLanguageSchema>;
 
 /**
@@ -95,8 +95,21 @@ export const styleIntentSchema = z.object({
   theme: surfaceThemeSchema.optional(),
   /** Root-only: the surface design language (look bundle → scoped CSS vars). */
   design: designLanguageSchema.optional(),
+  /**
+   * Root-only: pin the surface appearance. `auto` (default) follows the platform
+   * theme; `light`/`dark` lock the app's own appearance regardless of the chrome.
+   */
+  appearance: z.enum(['auto', 'light', 'dark']).optional(),
   /** Root-only: information density. */
   density: z.enum(['comfortable', 'compact']).optional(),
+  /**
+   * Root-only: the App Shell mode. `full` = product chrome (sidebar pages, topbar
+   * with live status, ops drawer); `minimal` = topbar only; `none` = bare content
+   * (embeds/public shares). Absent → the runtime decides (full when the app has
+   * multiple surfaces or bound workflows). The shell is RUNTIME chrome — agents
+   * author page content, never navigation.
+   */
+  shell: z.enum(['full', 'minimal', 'none']).optional(),
 });
 export type StyleIntent = z.infer<typeof styleIntentSchema>;
 
@@ -211,6 +224,29 @@ type ViewNodeBase =
   // order, trigger kind, last run, and a run/pause control per row. App-scoped: it
   // reads the current App from the runtime (no bind), so an agent just drops it in.
   | { type: 'WorkflowControl'; title?: string }
+  // ── Live operations plane (APP-INTERFACE-10X §2.2/§2.3) — app-scoped, no bind ──
+  // Mission control for the App's workflows: live status, rules (order / schedule /
+  // depends-on chains / concurrency), enable-pause, run + run-all. Supersedes
+  // WorkflowControl (which stays as a thin alias).
+  | { type: 'OrchestrationPanel'; title?: string; controls?: boolean }
+  // The App's runs, live: status pulse, node progress, elapsed, cancel/pause/resume,
+  // expandable per-run activity. `workflowIds` narrows; absent = all app workflows.
+  | { type: 'RunMonitor'; title?: string; workflowIds?: string[]; limit?: number; controls?: boolean }
+  // "Watch the agent think" — live reasoning/tool/node stream from the app's runs.
+  | { type: 'AgentFeed'; title?: string; limit?: number }
+  // Pending human-gate approvals for this App's workflows, approve/deny inline.
+  | { type: 'ApprovalsInbox'; title?: string; limit?: number }
+  // ── Interactive archetype composites (APP-INTERFACE-10X §2.4) ──
+  // A real kanban over a collection: drag a card across columns to write
+  // `groupBy` back through the declared `update` data action (target "col.update").
+  | { type: 'Kanban'; bind: DataBind; groupBy: string; columns?: string[]; titleField?: string; subtitleField?: string; badgeField?: string; valueField?: string; update?: ActionRef; cardActions?: ActionRef[] }
+  // CRM/ERP master-detail: searchable record list + full record page with field
+  // sections, related child collections, and per-record actions.
+  | { type: 'RecordMaster'; bind: DataBind; titleField?: string; subtitleField?: string; statusField?: string; searchFields?: string[]; sections?: Array<{ title?: string; fields: string[] }>; related?: Array<{ collection: string; foreignKey: string; title?: string; titleField?: string }>; recordActions?: ActionRef[] }
+  // Time lanes (roadmap / release plan / campaign calendar) from date fields.
+  | { type: 'Roadmap'; title?: string; bind: DataBind; labelField: string; startField: string; endField?: string; laneField?: string; statusField?: string; scale?: 'weeks' | 'months' | 'quarters' }
+  // Staged pipeline with counts/values + stage-to-stage conversion.
+  | { type: 'PipelineFlow'; title?: string; bind?: DataBind; stageField?: string; valueField?: string; stages?: Array<{ key: string; label?: string; description?: string }> }
   /**
    * Escape hatch (§4.5/§4.6) — agent-written HTML/JS rendered in a hardened,
    * null-origin sandboxed iframe. NO network egress (CSP connect-src 'none');
@@ -299,6 +335,56 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     z.object({ type: z.literal('Calendar'), title: z.string().optional(), bind: dataBindSchema.optional(), dateField: z.string().optional(), labelField: z.string().optional(), events: z.array(z.object({ date: z.string(), label: z.string(), tone: toneSchema.optional() })).optional(), ...styled }),
     z.object({ type: z.literal('Gauge'), label: z.string().optional(), value: bindableSchema, max: z.number().positive().optional(), tone: toneSchema.optional(), ...styled }),
     z.object({ type: z.literal('WorkflowControl'), title: z.string().optional(), ...styled }),
+    z.object({ type: z.literal('OrchestrationPanel'), title: z.string().optional(), controls: z.boolean().optional(), ...styled }),
+    z.object({ type: z.literal('RunMonitor'), title: z.string().optional(), workflowIds: z.array(z.string()).optional(), limit: z.number().int().positive().max(50).optional(), controls: z.boolean().optional(), ...styled }),
+    z.object({ type: z.literal('AgentFeed'), title: z.string().optional(), limit: z.number().int().positive().max(200).optional(), ...styled }),
+    z.object({ type: z.literal('ApprovalsInbox'), title: z.string().optional(), limit: z.number().int().positive().max(50).optional(), ...styled }),
+    z.object({
+      type: z.literal('Kanban'),
+      bind: dataBindSchema,
+      groupBy: z.string().min(1),
+      columns: z.array(z.string()).optional(),
+      titleField: z.string().optional(),
+      subtitleField: z.string().optional(),
+      badgeField: z.string().optional(),
+      valueField: z.string().optional(),
+      update: actionRefSchema.optional(),
+      cardActions: z.array(actionRefSchema).optional(),
+      ...styled,
+    }),
+    z.object({
+      type: z.literal('RecordMaster'),
+      bind: dataBindSchema,
+      titleField: z.string().optional(),
+      subtitleField: z.string().optional(),
+      statusField: z.string().optional(),
+      searchFields: z.array(z.string()).optional(),
+      sections: z.array(z.object({ title: z.string().optional(), fields: z.array(z.string()).min(1) })).optional(),
+      related: z.array(z.object({ collection: z.string().min(1), foreignKey: z.string().min(1), title: z.string().optional(), titleField: z.string().optional() })).optional(),
+      recordActions: z.array(actionRefSchema).optional(),
+      ...styled,
+    }),
+    z.object({
+      type: z.literal('Roadmap'),
+      title: z.string().optional(),
+      bind: dataBindSchema,
+      labelField: z.string().min(1),
+      startField: z.string().min(1),
+      endField: z.string().optional(),
+      laneField: z.string().optional(),
+      statusField: z.string().optional(),
+      scale: z.enum(['weeks', 'months', 'quarters']).optional(),
+      ...styled,
+    }),
+    z.object({
+      type: z.literal('PipelineFlow'),
+      title: z.string().optional(),
+      bind: dataBindSchema.optional(),
+      stageField: z.string().optional(),
+      valueField: z.string().optional(),
+      stages: z.array(z.object({ key: z.string().min(1), label: z.string().optional(), description: z.string().optional() })).optional(),
+      ...styled,
+    }),
     z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
     z.object({ type: z.literal('CodeSurface'), code: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
   ]) as z.ZodType<ViewNode>,
@@ -332,7 +418,16 @@ export function collectionsInView(view: ViewNode | null | undefined): Set<string
       case 'MediaGen':
       case 'Funnel':
       case 'Calendar':
+      case 'PipelineFlow':
         if (n.bind) out.add(n.bind.collection);
+        return;
+      case 'Kanban':
+      case 'Roadmap':
+        out.add(n.bind.collection);
+        return;
+      case 'RecordMaster':
+        out.add(n.bind.collection);
+        for (const rel of n.related ?? []) out.add(rel.collection);
         return;
       case 'Inbox':
         if (n.bind) out.add(n.bind.collection);

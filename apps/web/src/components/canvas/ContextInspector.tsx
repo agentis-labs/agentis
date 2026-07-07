@@ -185,7 +185,7 @@ export function ContextInspector({
   const needsSkills = kind === 'skill_task' || kind === 'skill' || kind === 'extension_task';
   const needsWorkflows = kind === 'subflow' || kind === 'loop';
   const needsKnowledge = kind === 'knowledge';
-  const needsCredentials = kind === 'integration';
+  const needsCredentials = kind === 'integration' || kind === 'http_request';
 
   useEffect(() => {
     const d = selection.data ?? {};
@@ -219,6 +219,10 @@ export function ContextInspector({
       void api<{ integrations: IntegrationManifestLite[] }>('/v1/integrations').then((d) => setIntegrations(d.integrations ?? [])).catch(() => {});
     }
   }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length, integrations.length]);
+
+  // Resource-name registry — lets the node explainer resolve an extension id to
+  // its real name instead of showing a raw identifier.
+  const resourceNames = useAgentisStore((s) => s.resourceNames);
 
   const refreshIntegrations = () => {
     void api<{ integrations: IntegrationManifestLite[] }>('/v1/integrations').then((d) => setIntegrations(d.integrations ?? [])).catch(() => {});
@@ -259,7 +263,14 @@ export function ContextInspector({
   const headingLabel = meta.label ?? selection.nodeType ?? 'Node';
   // Prefer a config-specific explanation ("Emails the digest to you, 0 9 * * *")
   // over the generic per-kind blurb so the node explains itself in context.
-  const nodeReason = selection.kind === 'node' ? (explainNode(kind, editData) || meta.reason) : null;
+  const resolveExtensionName = (idOrSlug: string): string | undefined => {
+    if (!idOrSlug) return undefined;
+    const bySkill = skills.find((s) => s.id === idOrSlug || s.slug === idOrSlug);
+    return bySkill?.name ?? resourceNames[`extension:${idOrSlug}`];
+  };
+  const nodeReason = selection.kind === 'node'
+    ? (explainNode(kind, editData, { resolveExtensionName }) || meta.reason)
+    : null;
   const readiness = selection.kind === 'node'
     ? evaluateNodeReadiness(editData, { integrations, credentialTypes: credentials.map((credential) => credential.credentialType) })
     : null;
@@ -524,8 +535,10 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <FilterForm data={data} update={update} upstream={upstream} />;
     case 'integration':
       return <IntegrationForm data={data} update={update} upstream={upstream} credentials={credentials} oauthProviders={oauthProviders} integrations={integrations} refreshCredentials={refreshCredentials} refreshIntegrations={refreshIntegrations} />;
+    case 'mcp':
+      return <McpForm data={data} update={update} />;
     case 'http_request':
-      return <HttpRequestForm data={data} update={update} upstream={upstream} />;
+      return <HttpRequestForm data={data} update={update} upstream={upstream} credentials={credentials} />;
     case 'workflow_store':
       return <WorkflowStoreForm data={data} update={update} />;
     case 'workspace_store':
@@ -803,7 +816,60 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
           />
         </div>
       </Field>
+      <OutputKeysField data={data} update={update} />
     </>
+  );
+}
+
+/**
+ * Typed outputs (reference-builder parity): the agent's declared output keys as
+ * pills with "+ Add output". These are the node's OUTPUT CONTRACT — downstream
+ * nodes read them by name, the dry-run mocks them, and the runtime reshapes /
+ * typed-empty-fills against them.
+ */
+function OutputKeysField({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  const [draft, setDraft] = useState('');
+  const keys = Array.isArray(data.outputKeys) ? (data.outputKeys as unknown[]).map(String).filter(Boolean) : [];
+  const commit = () => {
+    const key = draft.trim().replace(/\s+/g, '_');
+    if (!key || keys.includes(key)) { setDraft(''); return; }
+    update({ outputKeys: [...keys, key] });
+    setDraft('');
+  };
+  return (
+    <Field label="Outputs" hint="The keys this agent MUST return — its output contract. Downstream nodes read them by name (e.g. nodes['this-node'].caption).">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {keys.map((key) => (
+          <span key={key} className="inline-flex items-center gap-1 rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-text-primary">
+            {key}
+            <button
+              type="button"
+              aria-label={`Remove output ${key}`}
+              className="text-text-muted hover:text-danger"
+              onClick={() => update({ outputKeys: keys.filter((k) => k !== key) })}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          value={draft}
+          placeholder={keys.length === 0 ? 'caption' : 'another_key'}
+          className="w-28 rounded-full border border-dashed border-line bg-transparent px-2 py-0.5 font-mono text-[11px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); } }}
+          onBlur={commit}
+        />
+        <button
+          type="button"
+          onClick={commit}
+          className="text-[11px] font-medium text-accent hover:underline"
+        >
+          + Add output
+        </button>
+      </div>
+    </Field>
   );
 }
 
@@ -960,10 +1026,16 @@ function ExtensionTaskForm({ data, update, skills, onSkillsChange }: { data: Rec
           placeholder="execute"
         />
       </Field>
-      <Field label="Input mapping" hint="Map operation inputs to trigger or upstream values.">
+      <Field label="Input mapping" hint="Map operation inputs to trigger or upstream values. Empty = the whole upstream input passes through.">
         <RawMappingEditor
           mapping={(data.inputMapping as Record<string, string>) || {}}
           onChange={(inputMapping) => update({ inputMapping })}
+        />
+      </Field>
+      <Field label="Output mapping" hint="Copy operation output keys onto the run scratchpad: output key → scratchpad key. Empty = output flows downstream only.">
+        <RawMappingEditor
+          mapping={(data.outputMapping as Record<string, string>) || {}}
+          onChange={(outputMapping) => update({ outputMapping })}
         />
       </Field>
     </>
@@ -1617,8 +1689,129 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
   );
 }
 
-function HttpRequestForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
+/** One bridged MCP tool as served by GET /v1/mcp-servers/bridge/tools. */
+interface BridgedMcpTool {
+  id: string;
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  description: string;
+  inputSchema?: { properties?: Record<string, { description?: string; type?: string }>; required?: string[] } | null;
+}
+
+/**
+ * MCP node — pick a tool from the workspace's MOUNTED MCP servers and map its
+ * arguments. The picker uses the bridge's NAMESPACED ids (mcp__<slug>__<tool>),
+ * the exact ids the engine executes — never hand-assembled.
+ */
+function McpForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  const { setSettingsOpen } = useAgentisStore();
+  const [tools, setTools] = useState<BridgedMcpTool[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    void api<{ tools: BridgedMcpTool[] }>('/v1/mcp-servers/bridge/tools')
+      .then((d) => setTools(d.tools ?? []))
+      .catch((err) => { setTools([]); setLoadError((err as Error).message); });
+  }, []);
+
+  const toolId = asStr(data.toolId);
+  const selected = tools?.find((t) => t.id === toolId) ?? null;
+  const byServer = new Map<string, BridgedMcpTool[]>();
+  for (const t of tools ?? []) {
+    const group = byServer.get(t.serverName) ?? [];
+    group.push(t);
+    byServer.set(t.serverName, group);
+  }
+  const schemaProps = selected?.inputSchema?.properties ?? {};
+  const requiredArgs = new Set(selected?.inputSchema?.required ?? []);
+
+  return (
+    <>
+      <Field label="Tool" hint="Tools from the workspace's mounted MCP servers. Secrets stay on the mount (vault) — never in this node.">
+        {tools === null ? (
+          <div className="text-[11px] text-text-muted">Loading mounted servers…</div>
+        ) : tools.length === 0 ? (
+          <div className="rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] leading-4 text-text-secondary">
+            No MCP servers are mounted yet. Mount one (Supabase, GitHub, …) — its tools then appear here AND in every agent&apos;s own toolset. Secrets stay in the vault.
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true, 'mcp')}
+              className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-white hover:bg-accent/90"
+            >
+              Mount an MCP server →
+            </button>
+            {loadError ? <div className="mt-1 text-danger">({loadError})</div> : null}
+          </div>
+        ) : (
+          <select
+            className={selectCls + ' font-mono'}
+            value={toolId}
+            onChange={(e) => update({ toolId: e.target.value || undefined })}
+          >
+            <option value="">Choose a tool…</option>
+            {[...byServer.entries()].map(([server, group]) => (
+              <optgroup key={server} label={server}>
+                {group.map((t) => (
+                  <option key={t.id} value={t.id}>{t.toolName}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        )}
+      </Field>
+      {selected && (
+        <p className="-mt-1 text-[11px] leading-4 text-text-muted">{selected.description}</p>
+      )}
+      {selected && Object.keys(schemaProps).length > 0 && (
+        <Field label="Tool inputs" hint="What this tool accepts — map them in Arguments below.">
+          <div className="space-y-0.5">
+            {Object.entries(schemaProps).map(([key, prop]) => (
+              <div key={key} className="text-[11px] leading-4">
+                <span className="font-mono text-text-primary">{key}</span>
+                {requiredArgs.has(key) ? <span className="text-danger"> *</span> : null}
+                {prop.type ? <span className="text-text-muted"> ({prop.type})</span> : null}
+                {prop.description ? <span className="text-text-muted"> — {prop.description}</span> : null}
+              </div>
+            ))}
+          </div>
+        </Field>
+      )}
+      <Field label="Arguments (JSON)" hint="Values support {{templates}} — e.g. {'table': 'leads', 'row': '{{nodes.normalize.record}}'}.">
+        <textarea
+          rows={5}
+          spellCheck={false}
+          className={textareaCls + ' font-mono text-[11px]'}
+          value={JSON.stringify(typeof data.arguments === 'object' && data.arguments ? data.arguments : {}, null, 2)}
+          onChange={(e) => {
+            try { update({ arguments: JSON.parse(e.target.value) as unknown }); }
+            catch { /* keep prior until valid */ }
+          }}
+        />
+      </Field>
+      <Field label="Output key" hint="Store the tool result under this key (default: result).">
+        <input
+          type="text"
+          className={inputCls + ' font-mono'}
+          value={asStr(data.outputKey)}
+          placeholder="result"
+          onChange={(e) => update({ outputKey: e.target.value || undefined })}
+        />
+      </Field>
+    </>
+  );
+}
+
+function HttpRequestForm({ data, update, upstream, credentials = [] }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[]; credentials?: CredentialRow[] }) {
   const method = asStr(data.method) || 'GET';
+  const auth = (typeof data.auth === 'object' && data.auth ? data.auth : {}) as { type?: string; credentialId?: string; header?: string };
+  const authType = auth.type ?? 'none';
+  const responseMapping = (typeof data.responseMapping === 'object' && data.responseMapping ? data.responseMapping : {}) as { outputKey?: string; bodyPath?: string };
+  const setAuth = (next: { type: string; credentialId?: string; header?: string }) => {
+    // `none` clears the field entirely — the runtime treats absent and
+    // {type:'none'} identically, and absent keeps configs minimal.
+    if (next.type === 'none') { update({ auth: undefined }); return; }
+    update({ auth: next });
+  };
   return (
     <>
       <Field label="Method">
@@ -1683,6 +1876,78 @@ function HttpRequestForm({ data, update, upstream }: { data: Record<string, unkn
           </div>
         </Field>
       )}
+      <Accordion title="Authentication">
+        <Field label="Auth type" hint="Credentials are stored in the encrypted vault; the secret is injected at run time, never saved on the node.">
+          <select
+            className={selectCls}
+            value={authType}
+            onChange={(e) => {
+              const type = e.target.value;
+              if (type === 'none') setAuth({ type: 'none' });
+              else setAuth({ type, credentialId: auth.credentialId ?? '', ...(type === 'api_key' ? { header: auth.header ?? 'x-api-key' } : {}) });
+            }}
+          >
+            <option value="none">None</option>
+            <option value="bearer">Bearer token (Authorization: Bearer …)</option>
+            <option value="api_key">API key header</option>
+            <option value="basic">Basic (username:password)</option>
+          </select>
+        </Field>
+        {authType !== 'none' && (
+          <>
+            <Field label="Credential" hint="Pick the vault credential holding the secret.">
+              <select
+                className={selectCls}
+                value={auth.credentialId ?? ''}
+                onChange={(e) => setAuth({ type: authType, credentialId: e.target.value, ...(authType === 'api_key' ? { header: auth.header ?? 'x-api-key' } : {}) })}
+              >
+                <option value="">Choose a credential…</option>
+                {credentials.map((credential) => (
+                  <option key={credential.id} value={credential.id}>{credential.name} ({credential.credentialType})</option>
+                ))}
+              </select>
+            </Field>
+            {authType === 'api_key' && (
+              <Field label="Header name" hint="The header that carries the key.">
+                <input
+                  type="text"
+                  className={inputCls + ' font-mono'}
+                  value={auth.header ?? 'x-api-key'}
+                  onChange={(e) => setAuth({ type: 'api_key', credentialId: auth.credentialId ?? '', header: e.target.value })}
+                />
+              </Field>
+            )}
+          </>
+        )}
+      </Accordion>
+      <Accordion title="Response Extraction">
+        <Field label="Output key" hint="Store the (extracted) response under this key. Leave empty to pass the raw response through.">
+          <input
+            type="text"
+            className={inputCls + ' font-mono'}
+            value={responseMapping.outputKey ?? ''}
+            placeholder="items"
+            onChange={(e) => {
+              const outputKey = e.target.value.trim();
+              update({ responseMapping: outputKey ? { outputKey, ...(responseMapping.bodyPath ? { bodyPath: responseMapping.bodyPath } : {}) } : undefined });
+            }}
+          />
+        </Field>
+        {responseMapping.outputKey ? (
+          <Field label="Body path" hint="Dot path into the response body, e.g. data.items — empty = whole body.">
+            <input
+              type="text"
+              className={inputCls + ' font-mono'}
+              value={responseMapping.bodyPath ?? ''}
+              placeholder="data.items"
+              onChange={(e) => {
+                const bodyPath = e.target.value.trim();
+                update({ responseMapping: { outputKey: responseMapping.outputKey!, ...(bodyPath ? { bodyPath } : {}) } });
+              }}
+            />
+          </Field>
+        ) : null}
+      </Accordion>
       <Accordion title="Advanced Settings">
         <Field label="Timeout (ms)" hint="Max 120000 (2 minutes).">
           <input
@@ -1693,6 +1958,17 @@ function HttpRequestForm({ data, update, upstream }: { data: Record<string, unkn
             value={typeof data.timeoutMs === 'number' ? data.timeoutMs : ''}
             placeholder="30000"
             onChange={(e) => update({ timeoutMs: e.target.value === '' ? undefined : Number(e.target.value) })}
+          />
+        </Field>
+        <Field label="Max retries" hint="Retry attempts after the first dispatch (default 0).">
+          <input
+            type="number"
+            className={inputCls}
+            min={0}
+            max={10}
+            value={typeof data.maxRetries === 'number' ? data.maxRetries : ''}
+            placeholder="0"
+            onChange={(e) => update({ maxRetries: e.target.value === '' ? undefined : Number(e.target.value) })}
           />
         </Field>
         <Field label="Retry on status codes" hint="Comma-separated list, e.g. 429, 503.">
@@ -2265,6 +2541,72 @@ function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>
           <span className="text-[12px] text-text-primary">Show a real browser window on the host (else headless)</span>
         </label>
       </Field>
+      <Accordion title="Advanced Settings">
+        {(op === 'serve_html' || op === 'screenshot') && (
+          <Field label="Full page">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={data.fullPage === true}
+                onChange={(e) => update({ fullPage: e.target.checked ? true : undefined })}
+                className="rounded border-line bg-surface-2 accent-accent"
+              />
+              <span className="text-[12px] text-text-primary">Capture the full scrollable page (else the viewport)</span>
+            </label>
+          </Field>
+        )}
+        <Field label="Viewport (px)" hint="Browser window size; empty = default.">
+          <div className="flex items-center gap-1.5">
+            <input
+              type="number"
+              className={inputCls}
+              min={100}
+              placeholder="1280"
+              value={typeof (data.viewport as { width?: number } | undefined)?.width === 'number' ? (data.viewport as { width: number }).width : ''}
+              onChange={(e) => {
+                const width = e.target.value === '' ? undefined : Number(e.target.value);
+                const height = (data.viewport as { height?: number } | undefined)?.height;
+                update({ viewport: width && height ? { width, height } : width ? { width, height: 800 } : undefined });
+              }}
+            />
+            <span className="text-[11px] text-text-muted">×</span>
+            <input
+              type="number"
+              className={inputCls}
+              min={100}
+              placeholder="800"
+              value={typeof (data.viewport as { height?: number } | undefined)?.height === 'number' ? (data.viewport as { height: number }).height : ''}
+              onChange={(e) => {
+                const height = e.target.value === '' ? undefined : Number(e.target.value);
+                const width = (data.viewport as { width?: number } | undefined)?.width;
+                update({ viewport: width && height ? { width, height } : height ? { width: 1280, height } : undefined });
+              }}
+            />
+          </div>
+        </Field>
+        <Field label="Timeout (ms)" hint="Bounded by the engine to 120000 (2 minutes); default 30000.">
+          <input
+            type="number"
+            className={inputCls}
+            min={1}
+            max={120000}
+            placeholder="30000"
+            value={typeof data.timeout === 'number' ? data.timeout : ''}
+            onChange={(e) => update({ timeout: e.target.value === '' ? undefined : Number(e.target.value) })}
+          />
+        </Field>
+        {(op === 'serve_html' || op === 'screenshot' || op === 'pdf') && (
+          <Field label="Artifact name" hint="Filename for the saved screenshot/PDF asset.">
+            <input
+              type="text"
+              className={inputCls + ' font-mono'}
+              placeholder={op === 'pdf' ? 'page.pdf' : 'screenshot.png'}
+              value={asStr(data.artifactName)}
+              onChange={(e) => update({ artifactName: e.target.value || undefined })}
+            />
+          </Field>
+        )}
+      </Accordion>
     </>
   );
 }

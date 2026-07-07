@@ -1,5 +1,5 @@
 /**
- * PackagesPage - unified library for workflows, abilities, and extensions.
+ * PackagesPage - unified library for apps, agents, workflows, and extensions.
  *
  * Extensions are first-class deterministic runtime units here: operators can
  * inspect installed extensions and create local node-worker extensions without
@@ -42,14 +42,6 @@ import { api, apiErrorMessage } from '../lib/api';
 import { appsApi } from '../lib/appsApi';
 import { isWorkspaceBundle } from '../lib/workspaceBundle';
 import { WorkspaceBundleModal } from '../components/packages/WorkspaceBundleModal';
-import {
-  abilitiesApi,
-  compileStatusLabel,
-  compileStatusTone,
-  downloadAbilityPackage,
-  type Ability,
-  type AbilityPackage,
-} from '../lib/abilities';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
 import { Button } from '../components/shared/Button';
@@ -59,8 +51,8 @@ import { EmptyState } from '../components/shared/EmptyState';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { ExtensionStudioModal } from '../components/extensions/ExtensionStudioModal';
 
-type LibraryFilter = 'all' | 'apps' | 'agents' | 'abilities' | 'workflows' | 'extensions';
-type LibraryKind = 'app' | 'agent' | 'ability' | 'workflow' | 'extension';
+type LibraryFilter = 'all' | 'apps' | 'agents' | 'workflows' | 'extensions';
+type LibraryKind = 'app' | 'agent' | 'workflow' | 'extension';
 type ExtensionPermission =
   | 'network' | 'credentials' | 'workspace.read' | 'workspace.write' | 'filesystem'
   | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write';
@@ -132,7 +124,7 @@ interface LibraryItem {
   version?: string;
   description?: string | null;
   searchText: string;
-  source: WorkflowPackage | Ability | WorkspaceExtension | AppRecord;
+  source: WorkflowPackage | WorkspaceExtension | AppRecord;
 }
 
 const PERMISSIONS: Array<{
@@ -219,7 +211,6 @@ export function PackagesPage() {
   const toast = useToast();
   const confirm = useConfirm();
   const [workflows, setWorkflows] = useState<WorkflowPackage[]>([]);
-  const [abilities, setAbilities] = useState<Ability[]>([]);
   const [extensions, setExtensions] = useState<WorkspaceExtension[]>([]);
   const [apps, setApps] = useState<AppRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -234,9 +225,8 @@ export function PackagesPage() {
   async function refresh() {
     setLoading(true);
     try {
-      const [packageRes, abilityRes, extensionRes, appRes] = await Promise.allSettled([
+      const [packageRes, extensionRes, appRes] = await Promise.allSettled([
         api<{ packages: WorkflowPackage[] }>('/v1/packages'),
-        abilitiesApi.list(),
         api<{ extensions: WorkspaceExtension[] }>('/v1/extensions'),
         appsApi.list(),
       ]);
@@ -245,12 +235,10 @@ export function PackagesPage() {
           ? (packageRes.value.packages ?? []).filter((pkg) => !pkg.isTemplate && (pkg.kind === 'workflow' || pkg.kind === 'agent'))
           : [],
       );
-      setAbilities(abilityRes.status === 'fulfilled' ? abilityRes.value.abilities ?? [] : []);
       setExtensions(extensionRes.status === 'fulfilled' ? extensionRes.value.extensions ?? [] : []);
       setApps(appRes.status === 'fulfilled' ? appRes.value ?? [] : []);
     } catch {
       setWorkflows([]);
-      setAbilities([]);
       setExtensions([]);
       setApps([]);
     } finally {
@@ -283,16 +271,6 @@ export function PackagesPage() {
       searchText: [pkg.name, pkg.slug, pkg.description].filter(Boolean).join(' ').toLowerCase(),
       source: pkg,
     }));
-    const abilityItems = abilities.map((ability): LibraryItem => ({
-      id: `ability:${ability.id}`,
-      kind: 'ability',
-      name: ability.name,
-      slug: ability.slug,
-      version: ability.version,
-      description: ability.description,
-      searchText: [ability.name, ability.slug, ability.domainTag, ability.description].filter(Boolean).join(' ').toLowerCase(),
-      source: ability,
-    }));
     const extensionItems = extensions.map((extension): LibraryItem => ({
       id: `extension:${extension.id}`,
       kind: 'extension',
@@ -310,17 +288,16 @@ export function PackagesPage() {
       ].filter(Boolean).join(' ').toLowerCase(),
       source: extension,
     }));
-    return [...appItems, ...extensionItems, ...abilityItems, ...packageItems];
-  }, [abilities, apps, extensions, workflows]);
+    return [...appItems, ...extensionItems, ...packageItems];
+  }, [apps, extensions, workflows]);
 
   const counts = useMemo(() => ({
     all: items.length,
     apps: apps.length,
     agents: items.filter((item) => item.kind === 'agent').length,
-    abilities: abilities.length,
     workflows: items.filter((item) => item.kind === 'workflow').length,
     extensions: extensions.length,
-  }), [abilities.length, apps.length, items, extensions.length]);
+  }), [apps.length, items, extensions.length]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -334,7 +311,7 @@ export function PackagesPage() {
   async function handleImport() {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.agentisapp,.agentiswf,.agentisagt,.agentisab,.agentisext,.agentis,.json,application/json';
+    input.accept = '.agentisapp,.agentiswf,.agentisagt,.agentisext,.agentis,.json,application/json';
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
@@ -363,11 +340,6 @@ export function PackagesPage() {
       const envelope = json as unknown as AppManifestEnvelope;
       const preview = await appsApi.previewImport(envelope);
       await appsApi.importApp(envelope, preview.permissions ?? []);
-      return;
-    }
-    // Ability — `.agentisab` carries an ability shape under `manifest`.
-    if (fileName.endsWith('.agentisab') || fileName.endsWith('.ability') || isAbilityPackage(json)) {
-      await abilitiesApi.import(json as unknown as AbilityPackage);
       return;
     }
     // Extension — a raw node-worker manifest with operations + permissions.
@@ -403,16 +375,6 @@ export function PackagesPage() {
       const envelope = await appsApi.exportApp(app.id);
       downloadJson(envelope, `${app.slug || slugify(app.name)}.agentisapp`);
       toast.success('Exported', app.name);
-    } catch (err) {
-      toast.error('Export failed', apiErrorMessage(err));
-    }
-  }
-
-  async function handleExportAbility(ability: Ability) {
-    try {
-      const pkg = await abilitiesApi.export(ability.id);
-      downloadAbilityPackage(pkg, ability.slug || slugify(ability.name));
-      toast.success('Exported', ability.name);
     } catch (err) {
       toast.error('Export failed', apiErrorMessage(err));
     }
@@ -480,7 +442,6 @@ export function PackagesPage() {
   function handleOpenItem(item: LibraryItem) {
     if (item.kind === 'app') nav(`/apps/${(item.source as AppRecord).id}`);
     if (item.kind === 'workflow' || item.kind === 'agent') setOpenWorkflow(item.source as WorkflowPackage);
-    if (item.kind === 'ability') nav(`/abilities/${(item.source as Ability).id}`);
     if (item.kind === 'extension') setOpenExtension(item.source as WorkspaceExtension);
   }
 
@@ -488,8 +449,6 @@ export function PackagesPage() {
     ? 'No apps yet'
     : filter === 'extensions'
       ? 'No extensions installed yet'
-      : filter === 'abilities'
-        ? 'No abilities yet'
         : filter === 'workflows'
           ? 'No workflow packages yet'
           : filter === 'agents'
@@ -500,13 +459,11 @@ export function PackagesPage() {
     ? 'Apps you build or install appear here. Create one from the Apps page, or import an .agentisapp package.'
     : filter === 'extensions'
       ? 'Create a sandboxed node-worker extension to make deterministic runtime work available to workflows.'
-      : filter === 'abilities'
-        ? 'Abilities you create will appear here alongside apps, workflows, and extensions.'
         : filter === 'workflows'
           ? 'Workflows are mirrored into packages automatically when you create or update them.'
           : filter === 'agents'
             ? 'Agents can be packaged to carry their full configuration (instructions, role, memory configuration).'
-            : 'Create apps, workflows, abilities, or extensions to fill this workspace library.';
+            : 'Create apps, workflows, agents, or extensions to fill this workspace library.';
 
   return (
     <div className="flex h-full flex-col">
@@ -514,7 +471,7 @@ export function PackagesPage() {
         <div>
           <h1 className="text-display text-text-primary">Packages</h1>
           <div className="mt-0.5 text-[12px] text-text-muted">
-            One library for Agentic Apps, agents, runtime extensions, specialist abilities, and reusable workflows.
+            One library for Agentic Apps, agents, runtime extensions, and reusable workflows.
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -576,7 +533,6 @@ export function PackagesPage() {
                 onOpen={() => handleOpenItem(item)}
                 onExportWorkflow={() => void handleExportWorkflow(item.source as WorkflowPackage)}
                 onExportApp={() => void handleExportApp(item.source as AppRecord)}
-                onExportAbility={() => void handleExportAbility(item.source as Ability)}
                 onExportExtension={() => handleExportExtension(item.source as WorkspaceExtension)}
                 onDuplicateWorkflow={() => void handleDuplicateWorkflow(item.source as WorkflowPackage)}
                 onDeleteWorkflow={() => void handleDeleteWorkflow(item.source as WorkflowPackage)}
@@ -639,7 +595,6 @@ function FilterTabs({
     { value: 'all', label: 'All', icon: <Boxes size={12} /> },
     { value: 'apps', label: 'Apps', icon: <LayoutGrid size={12} /> },
     { value: 'agents', label: 'Agents', icon: <Bot size={12} /> },
-    { value: 'abilities', label: 'Abilities', icon: <Zap size={12} /> },
     { value: 'workflows', label: 'Workflows', icon: <WorkflowIcon size={12} /> },
     { value: 'extensions', label: 'Extensions', icon: <Puzzle size={12} /> },
   ];
@@ -722,7 +677,6 @@ function LibraryCard({
   onOpen,
   onExportWorkflow,
   onExportApp,
-  onExportAbility,
   onExportExtension,
   onDuplicateWorkflow,
   onDeleteWorkflow,
@@ -731,7 +685,6 @@ function LibraryCard({
   onOpen: () => void;
   onExportWorkflow: () => void;
   onExportApp: () => void;
-  onExportAbility: () => void;
   onExportExtension: () => void;
   onDuplicateWorkflow: () => void;
   onDeleteWorkflow: () => void;
@@ -741,9 +694,6 @@ function LibraryCard({
   }
   if (item.kind === 'extension') {
     return <ExtensionCard extension={item.source as WorkspaceExtension} onOpen={onOpen} onExport={onExportExtension} />;
-  }
-  if (item.kind === 'ability') {
-    return <AbilityCard ability={item.source as Ability} onOpen={onOpen} onExport={onExportAbility} />;
   }
   if (item.kind === 'agent') {
     return (
@@ -842,44 +792,6 @@ function ExtensionCard({ extension, onOpen, onExport }: { extension: WorkspaceEx
         >
           <Copy size={12} /> Slug
         </button>
-      </div>
-    </article>
-  );
-}
-
-function AbilityCard({ ability, onOpen, onExport }: { ability: Ability; onOpen: () => void; onExport: () => void }) {
-  const tone = compileStatusTone(ability.compileStatus);
-  const badgeTone = tone === 'green' ? 'accent' : tone === 'amber' ? 'warn' : tone === 'red' ? 'danger' : 'muted';
-  return (
-    <article className="group rounded-card border border-line bg-surface p-4 transition-colors hover:border-line-strong hover:bg-surface-2">
-      <div className="flex items-start gap-3">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-amber-400/20 bg-amber-500/10 text-[16px]">
-          {ability.iconEmoji ?? '\u26A1'}
-        </span>
-        <div className="min-w-0 flex-1">
-          <button type="button" onClick={onOpen} className="block w-full truncate text-left text-subheading text-text-primary hover:underline">
-            {ability.name}
-          </button>
-          <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{ability.slug}{ability.version ? `@${ability.version}` : ''}</div>
-          {ability.description && (
-            <div className="mt-2 line-clamp-2 text-[12px] leading-5 text-text-secondary">{ability.description}</div>
-          )}
-        </div>
-        <StatusBadge
-          tone={badgeTone as 'accent' | 'warn' | 'danger' | 'muted'}
-          label={compileStatusLabel(ability.compileStatus)}
-          pulse={ability.compileStatus === 'compiling'}
-          size="sm"
-        />
-      </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        {ability.domainTag && <Pill icon={<Sparkles size={11} />} label={ability.domainTag.replace(/_/g, ' ')} />}
-        <Pill icon={<FileJson size={11} />} label={`${ability.exampleCount} examples`} />
-        <Pill icon={<Database size={11} />} label={`${ability.knowledgeCount} knowledge`} />
-      </div>
-      <div className="mt-4 flex gap-1.5">
-        <Button variant="secondary" size="sm" iconLeft={<Zap size={12} />} onClick={onOpen}>Open ability</Button>
-        <Button variant="ghost" size="sm" iconLeft={<ArrowUpFromLine size={11} />} onClick={onExport}>Export</Button>
       </div>
     </article>
   );
@@ -1511,16 +1423,6 @@ function schemaType(value: string): string {
   }
 }
 
-/** An exported ability package is tagged `format_version` and wraps a `manifest.compiled_prompt`. */
-function isAbilityPackage(json: Record<string, unknown>): boolean {
-  const manifest = json.manifest;
-  return Boolean(
-    json.format_version
-    && manifest && typeof manifest === 'object'
-    && 'compiled_prompt' in (manifest as Record<string, unknown>),
-  );
-}
-
 /** A node-worker extension manifest is identified by its runtime + operations. */
 function isExtensionManifest(json: Record<string, unknown>): boolean {
   return json.runtime === 'node_worker' && Array.isArray(json.operations);
@@ -1529,7 +1431,6 @@ function isExtensionManifest(json: Record<string, unknown>): boolean {
 function pluralKind(kind: LibraryKind): Exclude<LibraryFilter, 'all'> {
   if (kind === 'app') return 'apps';
   if (kind === 'agent') return 'agents';
-  if (kind === 'ability') return 'abilities';
   if (kind === 'workflow') return 'workflows';
   return 'extensions';
 }

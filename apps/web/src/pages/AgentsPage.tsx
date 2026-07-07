@@ -24,7 +24,6 @@ import { AgentCreateWizard } from '../components/agents/AgentCreateWizard';
 import { AgentHierarchyCanvas } from '../components/agents/AgentHierarchyCanvas';
 import type { AgentHierarchyCreatePreset } from '../components/agents/AgentHierarchyCanvas';
 import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
-import { AbilitiesModal } from '../components/abilities/AbilitiesModal';
 import { REALTIME_EVENTS, isSpecialistRole } from '@agentis/core';
 
 interface AgentRow {
@@ -128,7 +127,6 @@ export function AgentsPage() {
   // When creating a specialist to OWN a subdomain, remember which one to assign.
   const [pendingOwnerSubdomain, setPendingOwnerSubdomain] = useState<{ subdomainId: string; parentManagerId: string | null } | null>(null);
   const [creatingReportsTo, setCreatingReportsTo] = useState<string | null>(null);
-  const [abilitiesOpen, setAbilitiesOpen] = useState(false);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
   const [selectedAgent, setSelectedAgent] = useState<AgentRow | null>(null);
@@ -361,14 +359,6 @@ export function AgentsPage() {
               <ListIcon size={12} /> Table
             </button>
           </div>
-          <button
-            type="button"
-            className="btn-premium-highlight btn-premium-abilities"
-            onClick={() => setAbilitiesOpen(true)}
-          >
-            <Zap size={14} className="btn-icon-zap mr-2" />
-            <span>Abilities</span>
-          </button>
           <Button variant="secondary" size="md" iconLeft={<Download size={14} />} onClick={() => setImportingAgents(true)}>
             Import agents
           </Button>
@@ -491,11 +481,11 @@ export function AgentsPage() {
             return;
           }
           // Specialists open straight into their detail subpage — the "complete"
-          // surface where mind (memory & knowledge) and abilities are configured.
+          // surface where mind (memory & knowledge) is configured.
           const isSpecialist = agent.role && agent.role !== 'orchestrator' && agent.role !== 'manager';
           if (isSpecialist) {
             void refresh();
-            nav(`/agents/${agent.id}?tab=abilities`);
+            nav(`/agents/${agent.id}?tab=knowledge`);
             return;
           }
           // Orchestrator/manager stay on the fleet canvas so users see the
@@ -542,7 +532,6 @@ export function AgentsPage() {
           void refresh();
         }}
       />
-      {abilitiesOpen && <AbilitiesModal onClose={() => setAbilitiesOpen(false)} />}
       <ImportAgentsWizard
         open={importingAgents}
         onClose={() => setImportingAgents(false)}

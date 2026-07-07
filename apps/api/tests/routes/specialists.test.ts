@@ -15,14 +15,12 @@ import { randomUUID } from 'node:crypto';
 import { buildSpecialistRoutes, type SpecialistSummary } from '../../src/routes/specialists.js';
 import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
 import { AgentLibraryService } from '../../src/services/agentLibrary.js';
-import { SpecialistLoadoutService } from '../../src/services/specialistLoadoutService.js';
 import { SpecialistProfileService } from '../../src/services/specialistProfileService.js';
 import { SpecialistMindService } from '../../src/services/specialistMindService.js';
 import { SpecialistRuntimeService } from '../../src/services/specialistRuntimeService.js';
 import { SpecialistEvalService } from '../../src/services/specialistEvalService.js';
 import { SpecialistDemandRouter } from '../../src/services/specialistDemandRouter.js';
 import { SpecialistTemplateService } from '../../src/services/specialistTemplateService.js';
-import { AbilityService } from '../../src/services/abilityService.js';
 import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
 import { createLogger } from '../../src/logger.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
@@ -31,8 +29,6 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 let ctx: TestContext;
 let specialists: SpecialistAgentService;
 let agentLibrary: AgentLibraryService;
-let loadouts: SpecialistLoadoutService;
-let abilities: AbilityService;
 let profiles: SpecialistProfileService;
 let mind: SpecialistMindService;
 let runtime: SpecialistRuntimeService;
@@ -46,16 +42,14 @@ beforeEach(async () => {
   dataDir = await mkdtemp(path.join(tmpdir(), 'agentis-spec-route-'));
   agentLibrary = new AgentLibraryService(new WorkspaceVolumeService(dataDir));
   specialists = new SpecialistAgentService(ctx.db, agentLibrary);
-  loadouts = new SpecialistLoadoutService(ctx.db);
   const logger = createLogger({ level: 'error' });
-  abilities = new AbilityService(ctx.db, logger);
   profiles = new SpecialistProfileService(ctx.db);
   mind = new SpecialistMindService({ db: ctx.db, logger, embeddings: () => new StubEmbeddingProvider() });
   runtime = new SpecialistRuntimeService(ctx.db);
   evals = new SpecialistEvalService(ctx.db, mind);
   templates = new SpecialistTemplateService(ctx.db);
   templates.seedPlatformTemplates();
-  router = new SpecialistDemandRouter({ db: ctx.db, logger, specialists, profiles, loadouts, abilities, mind, runtime });
+  router = new SpecialistDemandRouter({ db: ctx.db, logger, specialists, profiles, mind, runtime });
 });
 
 afterEach(async () => {
@@ -67,14 +61,8 @@ afterEach(async () => {
 
 function app() {
   return ctx.buildApp([
-    { path: '/v1/specialists', app: buildSpecialistRoutes({ db: ctx.db, auth: ctx.auth, specialists, agentLibrary, loadouts, abilities, profiles, mind, router, runtime, evals, templates }) },
+    { path: '/v1/specialists', app: buildSpecialistRoutes({ db: ctx.db, auth: ctx.auth, specialists, agentLibrary, profiles, mind, router, runtime, evals, templates }) },
   ]);
-}
-
-function seedAbility(name: string): string {
-  const id = randomUUID();
-  ctx.db.insert(schema.abilities).values({ id, workspaceId: ctx.workspace.id, name, slug: name.toLowerCase().replace(/\s+/g, '_'), compileStatus: 'ready' }).run();
-  return id;
 }
 
 describe('GET /v1/specialists', () => {
@@ -136,49 +124,8 @@ describe('POST /v1/specialists', () => {
   });
 });
 
-describe('Ability loadouts', () => {
-  it('PUT sets a loadout entry and GET returns it joined with the ability', async () => {
-    const abilityId = seedAbility('Design Taste');
-    const put = await app().request(`/v1/specialists/frontend_architect/abilities/${abilityId}`, {
-      method: 'PUT',
-      headers: ctx.authHeaders,
-      body: JSON.stringify({ mode: 'required', priority: 5 }),
-    });
-    expect(put.status).toBe(200);
-
-    const get = await app().request('/v1/specialists/frontend_architect/abilities', { headers: ctx.authHeaders });
-    const body = (await get.json()) as { loadout: Array<{ abilityId: string; mode: string; ability: { name: string } | null }>; abilities: unknown[] };
-    expect(body.loadout).toHaveLength(1);
-    expect(body.loadout[0]!.mode).toBe('required');
-    expect(body.loadout[0]!.ability?.name).toBe('Design Taste');
-    expect(body.abilities.length).toBeGreaterThan(0);
-  });
-
-  it('PUT for an unknown ability is 404; DELETE removes the entry', async () => {
-    const missing = await app().request('/v1/specialists/frontend_architect/abilities/nope', {
-      method: 'PUT', headers: ctx.authHeaders, body: JSON.stringify({ mode: 'required' }),
-    });
-    expect(missing.status).toBe(404);
-
-    const abilityId = seedAbility('Legacy jQuery');
-    await app().request(`/v1/specialists/frontend_architect/abilities/${abilityId}`, {
-      method: 'PUT', headers: ctx.authHeaders, body: JSON.stringify({ mode: 'forbidden' }),
-    });
-    const del = await app().request(`/v1/specialists/frontend_architect/abilities/${abilityId}`, { method: 'DELETE', headers: ctx.authHeaders });
-    expect(del.status).toBe(200);
-    const get = await app().request('/v1/specialists/frontend_architect/abilities', { headers: ctx.authHeaders });
-    const body = (await get.json()) as { loadout: unknown[] };
-    expect(body.loadout).toHaveLength(0);
-  });
-});
-
 describe('Specialist profile + card (Phase 1)', () => {
   it('GET /:role returns a lazily-created profile; GET /:role/card synthesizes a card', async () => {
-    const ability = seedAbility('Design Taste');
-    await app().request(`/v1/specialists/coder/abilities/${ability}`, {
-      method: 'PUT', headers: ctx.authHeaders, body: JSON.stringify({ mode: 'required' }),
-    });
-
     const prof = await app().request('/v1/specialists/coder', { headers: ctx.authHeaders });
     expect(prof.status).toBe(200);
     const profBody = (await prof.json()) as { profile: { role: string; status: string } };
@@ -188,7 +135,7 @@ describe('Specialist profile + card (Phase 1)', () => {
     const card = await app().request('/v1/specialists/coder/card', { headers: ctx.authHeaders });
     const cardBody = (await card.json()) as { card: { role: string; abilities: Array<{ name: string; mode: string }>; tools: string[] } };
     expect(cardBody.card.role).toBe('coder');
-    expect(cardBody.card.abilities).toEqual([{ name: 'Design Taste', mode: 'required' }]);
+    expect(cardBody.card.abilities).toEqual([]);
     expect(cardBody.card.tools.length).toBeGreaterThan(0);
   });
 

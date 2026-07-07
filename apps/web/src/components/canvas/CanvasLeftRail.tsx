@@ -36,10 +36,12 @@ export function CanvasLeftRail({
   onClearFocus,
   onAskAgentForPhases,
 }: CanvasLeftRailProps) {
-  const [mode, setMode] = useState<RailMode>('phases');
+  // Structure-first when the workflow has phases; otherwise open on the
+  // palette so an empty/flat canvas leads with "add a step".
+  const [mode, setMode] = useState<RailMode>(phases.length > 0 ? 'phases' : 'nodes');
 
   return (
-    <aside className="flex min-h-0 w-52 shrink-0 flex-col border-r border-line bg-surface">
+    <aside className="flex min-h-0 w-60 shrink-0 flex-col border-r border-line bg-surface">
       <div className="flex shrink-0 justify-center border-b border-line p-2">
         <SegmentedControl segments={SEGMENTS} value={mode} onChange={setMode} size="sm" />
       </div>

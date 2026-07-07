@@ -16,16 +16,15 @@ import { schema } from '@agentis/db/sqlite';
 import { commissionAgent, type AgentCommissionDeps } from './agentCommission.js';
 import type { HarnessMemoryIngestionService, HarnessMemoryCandidate, IngestionCommitResult } from './harnessMemoryIngestion.js';
 import type { IngestibleAgent } from './harnessMemoryIngestion.js';
-import type { AbilityCreationService } from './abilityCreationService.js';
-import type { AbilityService } from './abilityService.js';
+import type { SkillService } from './skillService.js';
 import { discoverAgents, readAgentInputs } from './harnessImport/registry.js';
 import type { DiscoveredAgent, ImportSkill } from './harnessImport/types.js';
 
 export interface HarnessImportDeps extends AgentCommissionDeps {
   ingestion: HarnessMemoryIngestionService;
-  /** Optional: when present, harness skills transition into Abilities (B7). */
-  abilityCreation?: AbilityCreationService;
-  abilities?: AbilityService;
+  /** Optional: when present, harness SKILL.md files become agent-scoped Brain
+   * `skill` atoms (Living Skills) — scoping to the agent replaces old pinning. */
+  skills?: SkillService;
 }
 
 export interface ImportScanOptions {
@@ -227,7 +226,7 @@ export async function previewAgentImport(deps: HarnessImportDeps, workspaceId: s
       name: s.name,
       description: s.description ?? null,
       origin: s.origin,
-      alreadyImported: deps.abilities ? abilityExists(deps, workspaceId, s.name) : false,
+      alreadyImported: abilityExists(deps, workspaceId, s.name),
     })),
     scannedFiles: preview.scannedFiles,
   };
@@ -296,10 +295,11 @@ export async function importAgents(
 }
 
 /**
- * Transition a discovered agent's skills into Agentis Abilities (B7), pinned to
- * the agent. Idempotent: a skill whose name already exists as an Ability is
- * reused + pinned, never duplicated. Marketplace skills are imported only when
- * explicitly accepted (opt-in).
+ * Transition a discovered agent's SKILL.md files into agent-scoped Brain `skill`
+ * atoms (Living Skills). Idempotent: a skill whose name already exists for the
+ * agent is updated in place (upsert by slug within scope), never duplicated —
+ * scoping to the agent replaces the old ability-pin. Marketplace skills are
+ * imported only when explicitly accepted (opt-in).
  */
 async function importSkills(
   deps: HarnessImportDeps,
@@ -309,7 +309,8 @@ async function importSkills(
   skills: ImportSkill[],
   acceptedPaths: string[] | undefined,
 ): Promise<{ created: number; reused: number }> {
-  if (!deps.abilityCreation || !deps.abilities || skills.length === 0) return { created: 0, reused: 0 };
+  void userId;
+  if (!deps.skills || skills.length === 0) return { created: 0, reused: 0 };
   const accept = acceptedPaths ? new Set(acceptedPaths) : null;
   let created = 0;
   let reused = 0;
@@ -319,27 +320,17 @@ async function importSkills(
     const chosen = accept ? accept.has(skill.path) : skill.origin !== 'marketplace';
     if (!chosen) continue;
 
-    const existing = abilityIdByName(deps, workspaceId, skill.name);
-    if (existing) {
-      deps.abilities.pinAbility(agentId, existing);
-      reused += 1;
-      continue;
-    }
+    const alreadyAttached = deps.skills.getByScopeAndSlug(workspaceId, agentId, skill.name) !== null;
     try {
-      const draft = await deps.abilityCreation.draft({
+      deps.skills.upsertSkill({
         workspaceId,
-        authorId: userId,
-        from: 'material',
-        material: skill.content,
-        materialTitle: skill.name,
+        scopeId: agentId,
         name: skill.name,
-        domainTag: 'transitioned',
+        description: skill.description ?? '',
+        body: skill.content,
+        source: 'agent',
       });
-      const abilityId = draft.ability?.id;
-      if (abilityId) {
-        deps.abilities.pinAbility(agentId, abilityId);
-        created += 1;
-      }
+      if (alreadyAttached) reused += 1; else created += 1;
     } catch (err) {
       deps.logger.warn('harness.skill.import_failed', { workspaceId, agentId, skill: skill.name, message: (err as Error).message });
     }
@@ -347,33 +338,17 @@ async function importSkills(
   return { created, reused };
 }
 
-function abilityIdByName(deps: HarnessImportDeps, workspaceId: string, name: string): string | null {
-  const row = deps.db
-    .select({ id: schema.abilities.id })
-    .from(schema.abilities)
-    .where(and(eq(schema.abilities.workspaceId, workspaceId), eq(schema.abilities.name, name.trim())))
-    .get();
-  return row?.id ?? null;
-}
-
 function abilityExists(deps: HarnessImportDeps, workspaceId: string, name: string): boolean {
-  return abilityIdByName(deps, workspaceId, name) !== null;
+  return deps.skills ? deps.skills.getByScopeAndSlug(workspaceId, null, name) !== null : false;
 }
 
 function pendingSkillCount(deps: HarnessImportDeps, workspaceId: string, agentId: string, skills: ImportSkill[]): number {
-  if (!deps.abilities || skills.length === 0) return 0;
+  if (!deps.skills || skills.length === 0) return 0;
   return skills.filter((skill) => skill.origin !== 'marketplace' && !skillAlreadyAttached(deps, workspaceId, agentId, skill.name)).length;
 }
 
 function skillAlreadyAttached(deps: HarnessImportDeps, workspaceId: string, agentId: string, name: string): boolean {
-  const abilityId = abilityIdByName(deps, workspaceId, name);
-  if (!abilityId) return false;
-  const pin = deps.db
-    .select({ abilityId: schema.agentAbilityPins.abilityId })
-    .from(schema.agentAbilityPins)
-    .where(and(eq(schema.agentAbilityPins.agentId, agentId), eq(schema.agentAbilityPins.abilityId, abilityId), eq(schema.agentAbilityPins.enabled, true)))
-    .get();
-  return Boolean(pin);
+  return deps.skills ? deps.skills.getByScopeAndSlug(workspaceId, agentId, name) !== null : false;
 }
 
 // ────────────────────────────────────────────────────────────

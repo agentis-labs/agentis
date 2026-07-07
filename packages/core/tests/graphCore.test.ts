@@ -153,8 +153,11 @@ describe('workflow phases', () => {
     expect(result.positions.get('B')!.x).toBe(result.positions.get('C')!.x);
     expect(result.positions.get('B')!.y).not.toBe(result.positions.get('C')!.y);
     // Lanes flow left-to-right, so the unassigned lane (holding M) sits to the
-    // right of the work lane.
+    // right of the work lane and shares its top edge.
     expect(result.positions.get('M')!.x).toBeGreaterThan(result.positions.get('B')!.x);
+    const [workLane, unassignedLane] = result.lanes;
+    expect(unassignedLane!.y).toBe(workLane!.y);
+    expect(unassignedLane!.x).toBeGreaterThan(workLane!.x + workLane!.width - 1);
     const laid = layoutWorkflowGraphByPhases(source);
     expect(laid.nodes.find((node) => node.id === 'M')!.position.x).toBeGreaterThan(0);
   });

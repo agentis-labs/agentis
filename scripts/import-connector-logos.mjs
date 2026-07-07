@@ -12,7 +12,11 @@ import { join, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
-const n8nRoot = process.argv[2] || 'C:/Users/antar/OneDrive/Documentos/n8n';
+const n8nRoot = process.argv[2] || process.env.N8N_ROOT;
+if (!n8nRoot) {
+  console.error('Usage: node scripts/import-connector-logos.mjs <path-to-n8n-checkout>  (or set N8N_ROOT)');
+  process.exit(1);
+}
 const nodesBase = join(n8nRoot, 'packages/nodes-base');
 const nodesDir = join(nodesBase, 'nodes');
 const langchainDir = join(n8nRoot, 'packages/@n8n/nodes-langchain/nodes');

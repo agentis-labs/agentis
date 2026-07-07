@@ -40,11 +40,13 @@ import type { EventBus } from '../event-bus.js';
 import type { ScratchpadService, BlackboardIdentity } from './scratchpad.js';
 import type { AgentToolRuntime } from './agentToolRuntime.js';
 import type { BridgedToolSpec } from './mcpToolBridge.js';
+import type { ArtifactRetentionPolicy } from './artifactRetentionPolicy.js';
 import {
   AgentSessionService,
   estimateTokens,
   type AgentSession,
   type MemoryBlock,
+  type SessionMessage,
 } from './agentSession.js';
 import type { PlanService, TaskCompletionJudge } from './planService.js';
 
@@ -122,6 +124,8 @@ export interface SessionRunContext {
   nodeId: string;
   agentId: string;
   workflowId: string;
+  appId?: string | null;
+  artifactPolicy?: ArtifactRetentionPolicy | null;
   planId?: string | null;
   role?: AgentRole;
   /** Workspace / Brain / memory context injected as a system addendum each step. */
@@ -171,6 +175,17 @@ export interface AgentSessionRuntimeDeps {
    * cannot be self-evolved (the tool degrades to an honest "unavailable").
    */
   evolvePlan?: (args: { runId: string; patch: WorkflowGraphPatch }) => Promise<EvolveResult>;
+  /**
+   * PAVED-ROAD P3 — late-bound bridge to the AgentisToolRegistry so an in-run
+   * session can walk the SAME build loop the chat/MCP surfaces get
+   * (dry_run_workflow → check_run) instead of authoring sub-workflows blind.
+   * One seam, no duplicated handlers. Absent = the tools degrade honestly.
+   */
+  platformTool?: (
+    toolId: string,
+    args: Record<string, unknown>,
+    ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: ArtifactRetentionPolicy | null },
+  ) => Promise<{ ok: boolean; output?: unknown; error?: string }>;
 }
 
 // Control-tool names — a closed set so we never branch on magic strings.
@@ -191,6 +206,8 @@ const TOOL = {
   runWorkflow: 'run_workflow',
   buildWorkflow: 'build_workflow',
   evolvePlan: 'evolve_plan',
+  dryRunWorkflow: 'dry_run_workflow',
+  checkRun: 'check_run',
   awaitEvent: 'await_event',
   sleepUntil: 'sleep_until',
   requestApproval: 'request_approval',
@@ -207,6 +224,8 @@ const YIELD_TOOLS = new Set<string>([TOOL.delegateTask, TOOL.spawnTeam, TOOL.run
  */
 const GRANT_EXEMPT_TOOLS = new Set<string>([
   TOOL.completeTask, TOOL.memoryUpdate, TOOL.memorySearch, TOOL.scratchpadRead, TOOL.readChannel, TOOL.runInspect,
+  // Read-only run introspection — cannot affect the run or the world.
+  TOOL.checkRun,
 ]);
 
 /** True when `tool` may run under `grant`. No grant or no allowlist = unrestricted. */
@@ -317,10 +336,22 @@ export class AgentSessionRuntime {
         return { kind: 'max_steps', output: { task: session.taskBlock, plan: session.planBlock, observations: session.observationsBlock, stoppedFor: 'token_budget' } };
       }
 
-      await this.#maybeCompact(session);
+      // One context-window read per step, shared between the compaction check
+      // and reconstruction — `contextMessages()` used to be queried twice here,
+      // doubling DB load across a multi-step advance() loop for no reason.
+      let inContext = this.deps.sessions.contextMessages(sessionId);
+      const { compacted } = await this.#maybeCompact(session, inContext);
+      // Compaction rewrites the observations memory block and evicts messages —
+      // both must be re-read so reconstruction reflects the post-compaction state.
+      let contextSession = session;
+      if (compacted) {
+        inContext = this.deps.sessions.contextMessages(sessionId);
+        contextSession = this.deps.sessions.get(sessionId) ?? session;
+      }
 
-      const messages = this.deps.sessions.reconstructContext(this.deps.sessions.get(sessionId)!, {
+      const messages = this.deps.sessions.reconstructContext(contextSession, {
         runContext: runCtx.runContextBlock,
+        inContext,
       });
 
       let result;
@@ -656,6 +687,22 @@ export class AgentSessionRuntime {
       }
       case TOOL.evolvePlan:
         return this.#execEvolvePlan(args, runCtx);
+      case TOOL.dryRunWorkflow: {
+        // PAVED-ROAD P3 — the in-run half of the build loop: test what you
+        // build without leaving the session. Same handler the chat/MCP
+        // surfaces use, via the late-bound registry bridge.
+        const dryArgs: Record<string, unknown> = {};
+        const workflowId = args.workflow_id ?? args.workflowId;
+        if (typeof workflowId === 'string' && workflowId.trim()) dryArgs.workflowId = workflowId.trim();
+        if (args.graph && typeof args.graph === 'object') dryArgs.graph = args.graph;
+        if (args.inputs && typeof args.inputs === 'object') dryArgs.inputs = args.inputs;
+        return this.#execPlatformLoopTool('agentis.workflow.dry_run', dryArgs, runCtx);
+      }
+      case TOOL.checkRun: {
+        const runId = args.run_id ?? args.runId;
+        if (typeof runId !== 'string' || !runId.trim()) return { ok: false, error: 'check_run requires run_id.' };
+        return this.#execPlatformLoopTool('agentis.run.status', { runId: runId.trim() }, runCtx);
+      }
       default:
         if (name.startsWith('mcp__')) return this.#execBridgedTool(name, args, runCtx);
         return this.#execRoleTool(name, args, runCtx);
@@ -706,6 +753,29 @@ export class AgentSessionRuntime {
   }
 
   /**
+   * PAVED-ROAD P3 — invoke a platform loop tool (dry_run / run status) through
+   * the late-bound AgentisToolRegistry bridge. Honest degradation when unwired.
+   */
+  async #execPlatformLoopTool(toolId: string, args: Record<string, unknown>, runCtx: SessionRunContext): Promise<unknown> {
+    if (!this.deps.platformTool) {
+      return { ok: false, error: `${toolId} is not available for this run.` };
+    }
+    try {
+      const res = await this.deps.platformTool(toolId, args, {
+        workspaceId: runCtx.workspaceId,
+        ...(runCtx.userId ? { userId: runCtx.userId } : {}),
+        agentId: runCtx.agentId,
+        runId: runCtx.runId,
+        appId: runCtx.appId ?? null,
+        artifactPolicy: runCtx.artifactPolicy ?? null,
+      });
+      return res.ok ? { ok: true, result: res.output } : { ok: false, error: res.error ?? 'tool failed' };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /**
    * Execute a bridged MCP tool (`mcp__*`). The delegation-scope gate already ran
    * in `#runToolCalls`, so a scoped delegate only reaches here for a tool its
    * grant allows; bridged tools sit outside the static role manifest.
@@ -715,7 +785,13 @@ export class AgentSessionRuntime {
     const toolArgs = args.args && typeof args.args === 'object' && !Array.isArray(args.args)
       ? args.args as Record<string, unknown>
       : args;
-    const res = await this.deps.agentTools.executeBridged(runCtx.workspaceId, name, toolArgs);
+    const res = await this.deps.agentTools.executeBridged(runCtx.workspaceId, name, toolArgs, {
+      userId: runCtx.userId,
+      agentId: runCtx.agentId,
+      workflowId: runCtx.workflowId,
+      runId: runCtx.runId,
+      artifactPolicy: runCtx.artifactPolicy ?? null,
+    });
     return res.ok ? { ok: true, result: res.result } : { ok: false, error: res.error };
   }
 
@@ -772,6 +848,9 @@ export class AgentSessionRuntime {
     const res = await this.deps.agentTools.execute(runCtx.workspaceId, name as AgentTool, toolArgs, runCtx.role, {
       workflowId: runCtx.workflowId,
       agentId: runCtx.agentId,
+      runId: runCtx.runId,
+      appId: runCtx.appId ?? undefined,
+      artifactPolicy: runCtx.artifactPolicy ?? null,
     });
     return res.ok ? { ok: true, result: res.result } : { ok: false, error: res.error };
   }
@@ -780,17 +859,17 @@ export class AgentSessionRuntime {
   // Compaction (§IX)
   // ────────────────────────────────────────────────────────────
 
-  async #maybeCompact(session: AgentSession): Promise<void> {
+  /** @param inContext caller's already-fetched context window (avoids a duplicate query). */
+  async #maybeCompact(session: AgentSession, inContext: SessionMessage[]): Promise<{ compacted: boolean }> {
     const budget = CONSTANTS.SESSION_CONTEXT_TOKEN_BUDGET;
     const threshold = budget * CONSTANTS.SESSION_COMPACTION_THRESHOLD;
-    const inContext = this.deps.sessions.contextMessages(session.id);
     const used =
       estimateTokens([session.personaBlock, session.taskBlock, session.planBlock, session.observationsBlock].join('\n')) +
       inContext.reduce((sum, m) => sum + (m.tokenCount ?? estimateTokens(m.content)), 0);
-    if (used < threshold) return;
+    if (used < threshold) return { compacted: false };
 
     const victims = this.deps.sessions.evictOldest(session.id, CONSTANTS.SESSION_COMPACTION_EVICT_FRACTION);
-    if (victims.length === 0) return;
+    if (victims.length === 0) return { compacted: false };
 
     const transcript = victims.map((v) => `[${v.role}] ${v.content}`).join('\n');
     let summary: string;
@@ -804,6 +883,7 @@ export class AgentSessionRuntime {
       : `## Compacted (${new Date().toISOString()})\n${summary}`;
     this.deps.sessions.updateMemoryBlock(session.id, 'observations', merged);
     this.deps.logger.info('session.compacted', { sessionId: session.id, evicted: victims.length });
+    return { compacted: true };
   }
 
   // ────────────────────────────────────────────────────────────
@@ -1072,7 +1152,8 @@ const CONTROL_TOOLS: ToolDefinition[] = [
     description:
       'Author a NEW saved workflow and persist it (validated). Use when you discover a repeatable process worth ' +
       'capturing as a reusable tool — build it once, then run it with run_workflow now and in future runs. Returns the ' +
-      'new workflowId.',
+      'new workflowId. FOLLOW THE LOOP: after building, dry_run_workflow it (free, catches broken data flow), and only ' +
+      'then run_workflow.',
     parameters: {
       type: 'object',
       properties: {
@@ -1080,6 +1161,34 @@ const CONTROL_TOOLS: ToolDefinition[] = [
         graph: { type: 'object', description: 'An Agentis WorkflowGraph JSON (version, nodes, edges, viewport).' },
       },
       required: ['title', 'graph'],
+    },
+  },
+  {
+    name: TOOL.dryRunWorkflow,
+    description:
+      'DRY-RUN a workflow at ZERO cost before trusting it: executes the deterministic nodes for real, MOCKS the ' +
+      'ai/integration/agent nodes, threads sample I/O through the whole graph, and returns a per-node trace (what each ' +
+      'node received + produced) plus blocking issues and the next step. Pass workflow_id for a saved workflow (e.g. ' +
+      'one you just built) or graph for an unsaved draft, plus optional sample inputs. ALWAYS dry-run between ' +
+      'build_workflow and run_workflow — a workflow that never dry-ran green will fail silently.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflow_id: { type: 'string', description: 'Dry-run a saved workflow by id.' },
+        graph: { type: 'object', description: 'Or dry-run an unsaved WorkflowGraph draft directly.' },
+        inputs: { type: 'object', description: 'Optional sample trigger inputs.' },
+      },
+    },
+  },
+  {
+    name: TOOL.checkRun,
+    description:
+      'Check a workflow run: status, progress, failed nodes with their raw errors, and the exact next call. Use it on ' +
+      'any run id you hold — a run you started, your own surrounding run, or a past run you are diagnosing.',
+    parameters: {
+      type: 'object',
+      properties: { run_id: { type: 'string', description: 'The run to inspect.' } },
+      required: ['run_id'],
     },
   },
   {

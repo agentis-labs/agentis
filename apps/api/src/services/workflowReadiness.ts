@@ -29,7 +29,9 @@ import {
   type AgentAffordance,
   type WorkflowGraph,
 } from '@agentis/core';
+import { connectorReadiness } from '@agentis/integrations';
 import { listIntegrationManifests } from './integrationRegistry.js';
+import { mcpCatalogForConnector } from './mcpServerCatalog.js';
 
 const HAL_AGENT_NODE_KINDS = new Set(['agent_task', 'agent_session', 'agent_swarm', 'dynamic_swarm']);
 
@@ -122,6 +124,27 @@ export function analyzeWorkflowReadiness(
       const slug = String(cfg.integrationId ?? '').toLowerCase();
       if (!slug) continue;
       const manifest = manifests.get(slug);
+      // HONESTY (CONNECTIONS-HONESTY §C4): a connector that isn't runnable out of
+      // the box (generic-HTTP fallback → throws at run time) must NOT pass the
+      // build silently. Name the real path: connect its MCP server + use an mcp
+      // node, or supply the raw URL. `runnable` (implemented/templated) connectors
+      // and workspace-custom manifests skip this.
+      const isCustom = Boolean((manifest as { packageId?: string | null } | undefined)?.packageId);
+      // Only for a CATALOGED built-in connector that isn't runnable (the false-
+      // advertising case). An unknown/custom integration takes the credential
+      // path below, not this honesty warning.
+      if (manifest && !isCustom && connectorReadiness(slug) === 'needs_setup') {
+        const catalog = mcpCatalogForConnector(slug);
+        requirements.push({
+          nodeId: node.id,
+          nodeTitle: title,
+          kind: 'config',
+          integration: slug,
+          message: catalog
+            ? `“${manifest?.name ?? slug}” has no native runtime yet — connect its MCP server (Settings → Connections → “${catalog.name}”) and use an mcp node instead of this integration node.`
+            : `“${manifest?.name ?? slug}” is catalog-only (no native runtime) — it will fail at run time unless you provide a raw URL. Prefer an http_request or mcp node.`,
+        });
+      }
       // Operation sanity: flag an operationId the connector doesn't support, so
       // the run doesn't dead-end at "operation 'X' is not supported by Y".
       const op = String(cfg.operationId ?? '');

@@ -15,6 +15,7 @@ import { and, desc, eq, like } from 'drizzle-orm';
 import { AgentisError, ARTIFACT_TYPES, isArtifactType, type AgentisToolContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
+import { parseDataUrl } from '../artifactService.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 const ARTIFACT_ORIGINS = ['agent', 'app', 'workflow', 'channel', 'manual'] as const;
@@ -156,6 +157,65 @@ export function registerAssetTools(registry: AgentisToolRegistry, deps: ToolHand
           metadata: row.metadata,
           truncated,
           content: truncated ? content.slice(0, MAX_READ_CHARS) : content,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.assets.save',
+        family: 'run',
+        description:
+          'Save generated media/content as an asset — the ONLY correct way to persist a file you produced. Pass `content` as a data: URL (image/video/pdf/binary) or plain text, plus a `name`. The bytes are stored ONCE by content hash (identical media dedups automatically) and registered in the Assets library. Do NOT write generated media to the filesystem — use this so it is owned, deduped, and never bloats the repo. Returns { id, ref, url, hash, size, deduped }.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string', description: 'A data: URL (e.g. data:image/png;base64,…) for binary, or plain text.' },
+            name: { type: 'string', description: 'File name incl. extension (e.g. "hero.mp4", "report.csv").' },
+            title: { type: 'string', description: 'Display title (defaults to name).' },
+            type: { type: 'string', enum: [...ARTIFACT_TYPES], description: 'Asset type; inferred from the content MIME when omitted.' },
+            mime: { type: 'string', description: 'MIME type for text content (defaults from name/text).' },
+            appId: { type: 'string', description: 'Scope to an App. Omit to use the App currently open.' },
+          },
+          required: ['content', 'name'],
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.assetStore) throw new AgentisError('INTERNAL_ERROR', 'asset store is not available on this deployment');
+        const content = typeof args.content === 'string' ? args.content : '';
+        const name = typeof args.name === 'string' ? args.name.trim() : '';
+        if (!content) throw new AgentisError('VALIDATION_FAILED', "'content' must be a non-empty string");
+        if (!name) throw new AgentisError('VALIDATION_FAILED', "'name' must be a non-empty string");
+        let bytes: Buffer;
+        let mime: string | undefined;
+        if (content.startsWith('data:')) {
+          const parsed = parseDataUrl(content);
+          if (!parsed) throw new AgentisError('VALIDATION_FAILED', 'content is not a valid data: URL');
+          bytes = parsed.buffer;
+          mime = parsed.mimeType;
+        } else {
+          bytes = Buffer.from(content, 'utf8');
+          mime = typeof args.mime === 'string' ? args.mime : undefined;
+        }
+        const stored = await deps.assetStore.put({
+          workspaceId: ctx.workspaceId,
+          bytes,
+          name,
+          mime,
+          title: typeof args.title === 'string' ? args.title : name,
+          type: isArtifactType(args.type) ? args.type : undefined,
+          origin: 'agent',
+          agentId: ctx.agentId ?? null,
+          appId: optionalAppId(args, ctx) ?? null,
+          runId: ctx.runId ?? null,
+          conversationId: ctx.conversationId ?? null,
+          savedBy: 'agent',
+        });
+        return {
+          id: stored.id, ref: stored.ref, url: stored.url, type: stored.type,
+          hash: stored.hash, size: stored.size, mime: stored.mime, deduped: stored.deduped,
         };
       },
     },

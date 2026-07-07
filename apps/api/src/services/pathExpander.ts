@@ -1,4 +1,4 @@
-import { accessSync, constants as fsConstants, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -238,4 +238,137 @@ export function resolveSpawnTarget(
   }
 
   return { command: executable, args };
+}
+
+/**
+ * Resolve a SAFE working directory for spawning a child process.
+ *
+ * On Windows, `child_process.spawn(cmd, args, { cwd })` throws a MISLEADING
+ * `Error: spawn <cmd> ENOENT` when `cwd` does not exist — it blames the command
+ * (so a present, working binary looks "missing" / the runtime looks "unavailable"),
+ * not the absent directory (nodejs/node#7331). Agent harness cwds are long-lived
+ * managed/project dirs that can disappear AFTER the adapter was registered — an
+ * external cleanup, a deleted project checkout, or OneDrive / Files-On-Demand
+ * dehydration — so a cwd that existed at registration is often gone by spawn time.
+ * A one-shot `mkdir` at registration cannot cover that. Re-validate (and, for owned
+ * agent homes, re-create) the cwd on EVERY spawn so a transient/again-missing
+ * directory self-heals instead of surfacing as a phantom binary/runtime failure.
+ *
+ * - empty/undefined `preferred` → `undefined` (inherit the parent process cwd).
+ * - `preferred` is an existing directory → returned unchanged.
+ * - missing & `create` → `mkdir -p`; returned on success.
+ * - otherwise → nearest existing ancestor, else the parent process cwd, else
+ *   `undefined` (inherit rather than force a value we know is bad).
+ */
+export function resolveSpawnCwd(preferred?: string | null, opts?: { create?: boolean }): string | undefined {
+  const value = typeof preferred === 'string' ? preferred.trim() : '';
+  if (!value) return undefined;
+  if (isDirectory(value)) return value;
+  if (opts?.create) {
+    try {
+      mkdirSync(value, { recursive: true });
+      if (isDirectory(value)) return value;
+    } catch {
+      // Creation can fail (permissions, a file occupying the path, an unavailable
+      // drive) — degrade to an existing ancestor rather than re-throwing ENOENT.
+    }
+  }
+  const ancestor = nearestExistingDir(value);
+  if (ancestor) return ancestor;
+  const parentCwd = safeProcessCwd();
+  return parentCwd && isDirectory(parentCwd) ? parentCwd : undefined;
+}
+
+function isDirectory(candidate: string): boolean {
+  try {
+    return statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Nearest existing ancestor directory of a (possibly missing) path, or null. */
+function nearestExistingDir(start: string): string | null {
+  let dir: string;
+  try {
+    dir = path.dirname(path.isAbsolute(start) ? start : path.resolve(start));
+  } catch {
+    // path.resolve() calls process.cwd() for a relative path, which itself throws
+    // if the server's own cwd was deleted — never let the resolver rethrow that.
+    return null;
+  }
+  for (;;) {
+    if (isDirectory(dir)) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // reached the filesystem root
+    dir = parent;
+  }
+}
+
+/** `process.cwd()` throws ENOENT if the server's own cwd was removed — guard it. */
+function safeProcessCwd(): string | null {
+  try {
+    return process.cwd();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the Claude Code binary, self-healing a stale Claude-Desktop version pin.
+ *
+ * Claude Desktop installs versioned binaries at
+ *   <base>/Claude/claude-code/<version>/claude(.exe)
+ * and DELETES old version dirs on auto-update. A config that pins one exact
+ * version therefore 404s (`spawn … claude.exe ENOENT`) the moment Claude updates —
+ * a recurring, self-inflicted outage. When the configured path is one of these
+ * managed versioned paths, re-resolve to the NEWEST currently-installed version at
+ * call time; if the managed dir is gone entirely, fall back to `claude` on PATH.
+ * A NON-managed configured path (a custom binary) is passed through unchanged — we
+ * only self-heal the rotating Claude-Desktop paths, never override a deliberate one.
+ */
+export function resolveClaudeBinary(configured?: string | null): string {
+  const value = typeof configured === 'string' ? configured.trim() : '';
+  if (!value) return 'claude';
+  const managed = value.match(/^(.*[\\/]claude-code)[\\/][^\\/]+[\\/](claude(?:\.exe)?)$/i);
+  if (managed) {
+    const newest = newestManagedClaude(managed[1]!, managed[2]!);
+    if (newest) return newest;
+    // The pinned version rotated out AND no sibling version remains → PATH.
+    return existsSync(value) ? value : 'claude';
+  }
+  // Non-managed path: pass through unchanged (resolveSpawnTarget resolves it via
+  // PATH/cwd), so a deliberately-configured custom binary is never overridden.
+  return value;
+}
+
+/** The newest-versioned `<baseDir>/<version>/<exeName>` that actually exists. */
+function newestManagedClaude(baseDir: string, exeName: string): string | null {
+  let versions: string[];
+  try {
+    versions = readdirSync(baseDir);
+  } catch {
+    return null;
+  }
+  const found = versions
+    .map((name) => ({ name, exe: path.join(baseDir, name, exeName) }))
+    .filter((entry) => existsSync(entry.exe));
+  if (found.length === 0) return null;
+  found.sort((a, b) => compareVersionDesc(a.name, b.name));
+  return found[0]!.exe;
+}
+
+/** Descending numeric-dotted version compare (2.1.197 before 2.1.187 before 2.1.9). */
+function compareVersionDesc(a: string, b: string): number {
+  const pa = a.split('.');
+  const pb = b.split('.');
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i += 1) {
+    const xi = Number.parseInt(pa[i] ?? '0', 10);
+    const yi = Number.parseInt(pb[i] ?? '0', 10);
+    const x = Number.isFinite(xi) ? xi : 0;
+    const y = Number.isFinite(yi) ? yi : 0;
+    if (x !== y) return y - x;
+  }
+  return 0;
 }

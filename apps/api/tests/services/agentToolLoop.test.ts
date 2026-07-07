@@ -117,6 +117,20 @@ describe('AgentToolLoop', () => {
     expect(res.steps[0]?.error).toMatch(/not available/);
   });
 
+  it('s6 loop guard: blocks a tool repeated with identical args past the threshold', async () => {
+    await volume.write(WS, 'notes/spec.md', 'x');
+    const call = { thought: 'read again', action: 'tool', tool: 'read_file', args: { path: 'notes/spec.md' } };
+    // Four identical calls, then finish. The guard lets the first two through
+    // and blocks the 3rd/4th without executing them.
+    const llm = scriptedLlm([call, call, call, call, { action: 'final', output: 'done' }]);
+    const loop = new AgentToolLoop({ runtime, llm });
+    const res = await loop.run({ workspaceId: WS, role: 'coder', task: 'read repeatedly', tools: ['read_file'], maxSteps: 10 });
+
+    expect(res.stoppedReason).toBe('final');
+    expect(res.toolCalls).toBe(2); // only the first two executed; 3rd+ blocked
+    expect(res.steps.some((s) => (s.error ?? '').includes('LOOP GUARD'))).toBe(true);
+  });
+
   it('caps at maxSteps and still produces a final answer', async () => {
     // Always asks for a tool; never finishes on its own.
     const llm: StructuredLlm = {

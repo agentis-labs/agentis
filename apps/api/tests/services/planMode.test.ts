@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../../src/logger.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
+import { parseModeCommand, PLAN_MODE_SYSTEM_ADDENDUM } from '../../src/services/chatPermissionMode.js';
 
 describe('Plan mode', () => {
   it('blocks mutating registry tools before their handler can run', async () => {
@@ -52,5 +53,16 @@ describe('Plan mode', () => {
     });
 
     expect(result.ok).toBe(true);
+  });
+
+  it('asks plan-mode turns for a separate architecture canvas payload', () => {
+    expect(parseModeCommand('/plan build a workflow for ad research')).toEqual({
+      mode: 'plan',
+      rest: 'build a workflow for ad research',
+    });
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('<proposed_plan>');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('<architecture_canvas>');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('"kind":"workflow|extension|app|system"');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('Do not create or save the real workflow/app/extension in Plan mode');
   });
 });

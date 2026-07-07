@@ -6,14 +6,16 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Check, X, Eye, RotateCcw, AlertTriangle, XCircle, Clock } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Bell, Check, Eye, RotateCcw, AlertTriangle, XCircle, Clock } from 'lucide-react';
 import clsx from 'clsx';
 import { ManagerGlyph, OrchestratorGlyph } from '../agents/AgentRoleGlyphs';
 import { api, apiErrorMessage } from '../../lib/api';
 import { refreshWorkspaceSnapshot, useWorkspaceData } from '../../lib/workspaceData';
 import { useToast } from './Toast';
 import { openRunModal } from '../../lib/runModal';
+import { openApprovalModal } from '../../lib/approvalModal';
+import { useRealtime } from '../../lib/realtime';
+import { REALTIME_EVENTS } from '@agentis/core';
 
 export interface AgentisNotification {
   id: string;
@@ -50,10 +52,26 @@ export function NotificationPanel() {
   const [open, setOpen] = useState(false);
   const { workspaceId, notifications: items, loading } = useWorkspaceData();
   const ref = useRef<HTMLDivElement>(null);
-  const nav = useNavigate();
   const toast = useToast();
   const [acknowledgedIds, setAcknowledgedIds] = useState<Set<string>>(new Set());
   const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
+
+  useRealtime([REALTIME_EVENTS.RUN_COMPLETED], (env) => {
+    const payload = env.payload as Record<string, unknown>;
+    const runId = payload.runId as string | undefined;
+    const workflowId = payload.workflowId as string | undefined;
+    const title = (payload.workflowName as string) || (payload.title as string) || 'Workflow succeeded';
+    
+    toast.push({
+      title: 'Run completed successfully',
+      body: title,
+      tone: 'success',
+      action: runId ? {
+        label: 'View details',
+        onClick: () => openRunModal({ runId, workflowId, source: 'toast' }),
+      } : undefined,
+    });
+  });
 
   useEffect(() => {
     const saved = readAcknowledgedNotificationIds(workspaceId);
@@ -130,36 +148,6 @@ export function NotificationPanel() {
     };
   }, [open]);
 
-  async function handleApprove(n: AgentisNotification) {
-    if (!n.approvalId) return;
-    try {
-      await api(`/v1/approvals/${n.approvalId}/resolve`, {
-        method: 'POST',
-        body: JSON.stringify({ decision: 'approve' }),
-      });
-      acknowledgeNotifications([n.id]);
-      toast.success('Approved');
-      void refreshWorkspaceSnapshot();
-    } catch (e) {
-      toast.error('Failed to approve', apiErrorMessage(e));
-    }
-  }
-
-  async function handleReject(n: AgentisNotification) {
-    if (!n.approvalId) return;
-    try {
-      await api(`/v1/approvals/${n.approvalId}/resolve`, {
-        method: 'POST',
-        body: JSON.stringify({ decision: 'reject' }),
-      });
-      acknowledgeNotifications([n.id]);
-      toast.success('Rejected');
-      void refreshWorkspaceSnapshot();
-    } catch (e) {
-      toast.error('Failed to reject', apiErrorMessage(e));
-    }
-  }
-
   async function handleRetry(n: AgentisNotification) {
     if (!n.runId) return;
     try {
@@ -206,7 +194,8 @@ export function NotificationPanel() {
               onClick={() => {
                 acknowledgeNotifications(panelItems.map((item) => item.id));
                 setOpen(false);
-                nav('/history?tab=activity');
+                const firstApproval = panelItems.find((item) => item.type === 'approval' && item.approvalId);
+                if (firstApproval?.approvalId) openApprovalModal({ approvalId: firstApproval.approvalId });
               }}
               className="text-[12px] text-text-muted hover:text-text-primary"
             >
@@ -241,22 +230,33 @@ export function NotificationPanel() {
                     <div className="mt-1 text-[11px] text-text-muted">{relativeTime(n.timestamp)}</div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {n.type === 'approval' && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => handleApprove(n)}
-                            className="inline-flex h-7 items-center gap-1 rounded-btn bg-accent px-2.5 text-[11px] font-medium text-canvas transition-colors hover:bg-accent-hover"
-                          >
-                            <Check size={11} /> Approve
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleReject(n)}
-                            className="inline-flex h-7 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary"
-                          >
-                            <X size={11} /> Reject
-                          </button>
-                        </>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpen(false);
+                            if (n.approvalId) openApprovalModal({ approvalId: n.approvalId });
+                          }}
+                          className="inline-flex h-7 items-center gap-1 rounded-btn bg-accent px-2.5 text-[11px] font-medium text-canvas transition-colors hover:bg-accent-hover"
+                        >
+                          <Eye size={11} /> Review
+                        </button>
+                      )}
+                      {n.type === 'completion' && n.runId && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            acknowledgeNotifications([n.id]);
+                            setOpen(false);
+                            openRunModal({
+                              runId: n.runId,
+                              workflowId: n.workflowId,
+                              source: 'notification',
+                            });
+                          }}
+                          className="inline-flex h-7 items-center gap-1 rounded-btn border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary"
+                        >
+                          <Eye size={11} /> View details
+                        </button>
                       )}
                       {n.type === 'failure' && (
                         <>

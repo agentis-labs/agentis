@@ -1,6 +1,14 @@
 /**
  * AppContactService — the relationship entity (LIVING-APPS-10X Phase 3).
  *
+ * ⚠️ LEGACY NAME / PARALLEL PATH (Agent-Native Platform Plan §3.2). This is a
+ * lead/contact-flavored precursor to the general **Subject** primitive on the Durable
+ * Entity spine (`durable_entities` kind=`subject`, `SubjectRuntime`, `agentis.subject.*`).
+ * New per-entity/lifecycle work should target the Subject spine, NOT extend contacts.
+ * Folding this table's data + behavior into the spine (retiring the contact/follow-up
+ * names) is a tracked post-soak migration — see the plan's implementation log. Do not
+ * add generic per-entity features here.
+ *
  * An App talks to many people across many channels. `app_contacts` is the
  * durable record of each — the thing that turns a pile of threads into a
  * pipeline. It carries the person's identity (handle + cross-channel peerId),

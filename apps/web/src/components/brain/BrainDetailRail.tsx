@@ -695,6 +695,8 @@ const MEMORY_KIND_LABEL: Record<string, string> = {
   pattern: 'Pattern',
   rule: 'Rule',
   lesson: 'Lesson',
+  skill: 'Skill',
+  example: 'Example',
 };
 
 function TypeBadge({ type, kind }: { type: BrainNodeType; kind?: string }) {
@@ -718,7 +720,7 @@ function atomIdentity(node: BrainNode): { atomId: string; atomKind: KnowledgeAto
 }
 
 function isKnowledgeAtomKind(value: string | null): value is KnowledgeAtomKind {
-  return value === 'kb_chunk' || value === 'knowledge_chunk' || value === 'episode' || value === 'memory' || value === 'pattern';
+  return value === 'kb_chunk' || value === 'knowledge_chunk' || value === 'episode' || value === 'memory' || value === 'pattern' || value === 'skill' || value === 'example';
 }
 
 function badgeLabel(type: BrainNodeType): string {

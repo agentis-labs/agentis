@@ -25,12 +25,12 @@ describe('workflow pattern library', () => {
     );
   });
 
-  it('exposes the convergence loop as a converge-node fragment (D7)', () => {
+  it('exposes the pursuit (cognitive loop) as a pursue-node fragment (D7)', () => {
     const conv = getWorkflowPattern('convergence-loop')!;
     expect(conv.doctrine).toBe('D7');
-    const node = conv.nodes.find((n) => n.kind === 'converge')!;
+    const node = conv.nodes.find((n) => n.kind === 'pursue')!;
     expect(node).toBeDefined();
-    expect((node.config as { continuation?: { type?: string } }).continuation?.type).toBeDefined();
+    expect((node.config as { doneWhen?: { type?: string } }).doneWhen?.type).toBeDefined();
   });
 
   it('includes the exception branches, not just the happy path', () => {

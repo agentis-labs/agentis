@@ -22,7 +22,7 @@ const CHAIN_EVENTS = new Set<string>([
   REALTIME_EVENTS.NODE_FAILED,
 ]);
 
-interface SchedulerDeps {
+export interface SchedulerDeps {
   db: AgentisSqliteDb;
   bus: EventBus;
   engine: WorkflowEngine;
@@ -31,7 +31,7 @@ interface SchedulerDeps {
   issues?: { sweepDue(now: Date): Promise<number> };
 }
 
-interface QueueWorkflowArgs {
+export interface QueueWorkflowArgs {
   workflowId: string;
   workspaceId: string;
   ambientId: string | null;
@@ -332,7 +332,14 @@ export class EventChainService {
   }
 }
 
-async function queueWorkflowRun(deps: SchedulerDeps, args: QueueWorkflowArgs): Promise<QueuedWorkflowRun> {
+/**
+ * The single enqueue-a-workflow-run seam: validates the graph, writes the run +
+ * queue rows in one transaction, publishes RUN_QUEUED, and drains. Exported so
+ * other orchestration layers (event chains here, the AppOrchestrator's
+ * dependsOn-chains + binding schedules) start runs through the SAME path —
+ * never a forked execution.
+ */
+export async function queueWorkflowRun(deps: SchedulerDeps, args: QueueWorkflowArgs): Promise<QueuedWorkflowRun> {
   const workflow = deps.db
     .select()
     .from(schema.workflows)

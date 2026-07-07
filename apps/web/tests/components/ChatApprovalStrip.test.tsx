@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 const state = vi.hoisted(() => ({
-  approvals: [] as Array<{ id: string; title?: string; source?: string; workflowName?: string; summary?: string; createdAt: string }>,
+  approvals: [] as Array<{ id: string; title?: string; source?: string; workflowName?: string; summary?: string; createdAt: string; payload?: Record<string, unknown> | null }>,
   apiCalls: [] as Array<{ path: string; init: unknown }>,
   refreshed: 0,
 }));
@@ -45,7 +45,7 @@ describe('<ChatApprovalStrip />', () => {
     expect(screen.getByText(/Approve running Send Email/)).toBeTruthy();
 
     await act(async () => {
-      fireEvent.click(screen.getByText(/Approve & run/i));
+      fireEvent.click(screen.getByText(/^Approve$/i));
     });
 
     await waitFor(() => expect(state.apiCalls.length).toBe(1));
@@ -79,10 +79,48 @@ describe('<ChatApprovalStrip />', () => {
     expect(screen.getByText(/missed its declared location field/)).toBeTruthy();
 
     await act(async () => {
-      fireEvent.click(screen.getByText(/Approve fix/i));
+      fireEvent.click(screen.getByText(/^Approve$/i));
     });
 
     await waitFor(() => expect(state.apiCalls.length).toBe(1));
+    expect(JSON.parse((state.apiCalls[0]!.init as { body: string }).body)).toEqual({ decision: 'approve' });
+  });
+
+  it('requires review for structured approval payloads and resolves from the modal', async () => {
+    state.approvals = [{
+      id: 'ap_structured',
+      title: 'Approve Supabase seed',
+      summary: 'Approve Supabase seed for the verified store identity and brand config.',
+      createdAt: new Date().toISOString(),
+      payload: {
+        approvalPreview: {
+          action: { label: 'Seed Supabase', fields: [{ key: 'table', value: 'store_identity' }] },
+          records: {
+            store_identity: { name: 'Nexseed', service_role_key: '[Redacted]' },
+            brand_config: { primary: '#111111' },
+          },
+        },
+      },
+    }];
+    render(<ChatApprovalStrip />);
+
+    expect(screen.getByText('Approve Supabase seed')).toBeTruthy();
+    expect(screen.queryByText(/^Approve$/i)).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Review/i));
+    });
+
+    expect(screen.getAllByText(/Seed Supabase/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/store identity/i).length).toBeGreaterThan(0);
+    expect(screen.getByText('[Redacted]')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByText(/^Approve$/i).at(-1)!);
+    });
+
+    await waitFor(() => expect(state.apiCalls.length).toBe(1));
+    expect(state.apiCalls[0]!.path).toBe('/v1/approvals/ap_structured/resolve');
     expect(JSON.parse((state.apiCalls[0]!.init as { body: string }).body)).toEqual({ decision: 'approve' });
   });
 });

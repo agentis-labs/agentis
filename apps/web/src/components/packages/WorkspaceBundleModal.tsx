@@ -181,7 +181,6 @@ function ImportPreview({
         <Stat label="Agents" value={c.agents} />
         <Stat label="Workflows" value={c.workflows} />
         <Stat label="Extensions" value={c.extensions} />
-        <Stat label="Abilities" value={c.abilities} />
         <Stat label="Knowledge" value={c.knowledgeSeeds} />
         <Stat label="Creds" value={c.credentialSlots} />
       </div>

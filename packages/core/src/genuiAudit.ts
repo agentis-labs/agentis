@@ -10,12 +10,20 @@
  * hand-authored via ui_render) passes through it. Mirrors the workflow robustness
  * auditor pattern.
  */
-import type { DesignLanguage, SurfaceTheme, ViewNode } from './types/view.js';
+import type { ActionRef, DesignLanguage, SurfaceAction, SurfaceTheme, ViewNode } from './types/view.js';
 
 export interface AuditResult {
   view: ViewNode;
   fixes: string[];
 }
+
+/** Client-built-in action names usable without a declaration (see useActionInvoker). */
+const BUILTIN_ACTIONS = new Set(['navigate', 'setState']);
+
+/** Legacy / removed kinds healed in place (zero-migration upgrades at the seam). */
+const KIND_RENAME: Record<string, ViewNode['type']> = {
+  AgentConsole: 'ActivityStream',
+};
 
 interface Ctx {
   collections: Set<string>;
@@ -25,9 +33,9 @@ interface Ctx {
 }
 
 /** Nodes that render a panel of collection rows — counted + capped. */
-const DATA_PANEL = new Set(['Table', 'Chart', 'DataBoard', 'List']);
+const DATA_PANEL = new Set(['Table', 'Chart', 'DataBoard', 'List', 'Kanban', 'RecordMaster', 'Roadmap']);
 /** Nodes whose `bind.collection` must exist (else the panel is dead). */
-const REQUIRES_BIND = new Set(['Table', 'Chart', 'DataBoard', 'List', 'Inbox']);
+const REQUIRES_BIND = new Set(['Table', 'Chart', 'DataBoard', 'List', 'Inbox', 'Kanban', 'RecordMaster', 'Roadmap', 'PipelineFlow']);
 /** Layout containers that are pointless when empty. */
 const LAYOUT = new Set(['Stack', 'Row', 'Grid', 'Card', 'Section', 'Toolbar']);
 
@@ -42,6 +50,14 @@ function hasChildren(node: ViewNode): node is ViewNode & { children: ViewNode[] 
 }
 
 function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
+  // 0. Legacy kind → current kind (a stored tree from a removed grammar era).
+  const renamed = KIND_RENAME[node.type as string];
+  if (renamed) {
+    ctx.fixes.push(`migrated legacy ${node.type} to ${renamed}`);
+    const legacy = node as { title?: string; style?: ViewNode['style'] };
+    node = { type: renamed, ...(legacy.title ? { title: legacy.title } : {}), ...(legacy.style ? { style: legacy.style } : {}) } as ViewNode;
+  }
+
   // 1. Garbled image-banner header — a row/grid/stack that is mostly images. Drop it.
   if ((node.type === 'Row' || node.type === 'Grid' || node.type === 'Stack') && Array.isArray(node.children) && node.children.length >= 2) {
     const imgs = node.children.filter(isImageish).length;
@@ -117,8 +133,8 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
 
 function inferTheme(view: ViewNode): SurfaceTheme {
   const json = JSON.stringify(view);
-  if (json.includes('"DataBoard"') || json.includes('"Inbox"') || json.includes('"ChatThread"')) return 'product';
-  if (json.includes('"Chart"') || json.includes('"KPIStrip"') || json.includes('"Gauge"')) return 'analytics';
+  if (json.includes('"DataBoard"') || json.includes('"Inbox"') || json.includes('"ChatThread"') || json.includes('"Kanban"') || json.includes('"RecordMaster"') || json.includes('"Roadmap"')) return 'product';
+  if (json.includes('"Chart"') || json.includes('"KPIStrip"') || json.includes('"Gauge"') || json.includes('"PipelineFlow"')) return 'analytics';
   return 'operations';
 }
 
@@ -136,16 +152,202 @@ function inferDesign(theme: SurfaceTheme): DesignLanguage {
   }
 }
 
+// ── Operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X §2.1) ────
+// The DB-proven failure mode: an agent declares `run_factory (workflow→…)` and
+// authors zero interactive elements — the action is unreachable from any pixel.
+// This pass makes that state unrepresentable: every declared workflow action
+// gets a control, delete actions get row actions, dead references are stripped,
+// and an app that drives workflows always exposes its orchestration panel.
+
+function humanizeAction(name: string): string {
+  const spaced = name.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** Every action name any interactive element references, anywhere in the tree. */
+function collectReferencedActions(node: unknown, out: Set<string>): void {
+  if (Array.isArray(node)) { node.forEach((n) => collectReferencedActions(n, out)); return; }
+  if (!node || typeof node !== 'object') return;
+  const obj = node as Record<string, unknown>;
+  const ref = obj as Partial<ActionRef>;
+  if (typeof ref.action === 'string' && ref.action.length > 0 && Object.keys(obj).every((k) => k === 'action' || k === 'args')) {
+    out.add(ref.action);
+  }
+  for (const value of Object.values(obj)) collectReferencedActions(value, out);
+}
+
+/** Drop interactive elements whose action is not declared (they would 404 on click). */
+function stripDeadInteractives(node: ViewNode, declared: Set<string>, fixes: string[]): ViewNode | null {
+  const known = (name: string) => declared.has(name) || BUILTIN_ACTIONS.has(name);
+  if (node.type === 'Button' && !known(node.action.action)) {
+    fixes.push(`removed button bound to undeclared action "${node.action.action}"`);
+    return null;
+  }
+  if (node.type === 'Form' && !known(node.submit.action)) {
+    fixes.push(`removed form bound to undeclared action "${node.submit.action}"`);
+    return null;
+  }
+  if (node.type === 'Table' && node.rowActions?.some((a) => !known(a.action))) {
+    const kept = node.rowActions.filter((a) => known(a.action));
+    fixes.push('removed undeclared row actions');
+    return { ...node, rowActions: kept.length > 0 ? kept : undefined } as ViewNode;
+  }
+  if (node.type === 'Kanban' && node.update && !known(node.update.action)) {
+    fixes.push(`kanban drag disabled: undeclared action "${node.update.action}"`);
+    return { ...node, update: undefined } as ViewNode;
+  }
+  if (node.type === 'Hero' && node.actions?.some((a) => !known(a.action))) {
+    const kept = node.actions.filter((a) => known(a.action));
+    fixes.push('removed undeclared header actions');
+    return { ...node, actions: kept.length > 0 ? kept : undefined } as ViewNode;
+  }
+  // Recurse containers.
+  if (node.type === 'Split') {
+    const left = stripDeadInteractives(node.left, declared, fixes);
+    const right = stripDeadInteractives(node.right, declared, fixes);
+    if (!left && !right) return null;
+    if (!left) return right;
+    if (!right) return left;
+    return { ...node, left, right };
+  }
+  if (node.type === 'Tabs') {
+    const tabs = node.tabs.map((t) => ({ ...t, children: t.children.map((c) => stripDeadInteractives(c, declared, fixes)).filter((x): x is ViewNode => x != null) }));
+    return { ...node, tabs };
+  }
+  if (node.type === 'Accordion') {
+    const sections = node.sections.map((s) => ({ ...s, children: s.children.map((c) => stripDeadInteractives(c, declared, fixes)).filter((x): x is ViewNode => x != null) }));
+    return { ...node, sections };
+  }
+  if (hasChildren(node)) {
+    return { ...node, children: node.children.map((c) => stripDeadInteractives(c, declared, fixes)).filter((x): x is ViewNode => x != null) } as ViewNode;
+  }
+  return node;
+}
+
+function findFirst(node: ViewNode, type: ViewNode['type']): boolean {
+  if (node.type === type) return true;
+  if (node.type === 'Split') return findFirst(node.left, type) || findFirst(node.right, type);
+  if (node.type === 'Tabs') return node.tabs.some((t) => t.children.some((c) => findFirst(c, type)));
+  if (node.type === 'Accordion') return node.sections.some((s) => s.children.some((c) => findFirst(c, type)));
+  if (hasChildren(node)) return node.children.some((c) => findFirst(c, type));
+  return false;
+}
+
+/** Wire declared-but-unreachable workflow actions into the page header (or a toolbar). */
+function wireOrphanWorkflowActions(root: ViewNode, orphans: SurfaceAction[], fixes: string[]): ViewNode {
+  if (orphans.length === 0) return root;
+  const refs: ActionRef[] = orphans.map((a) => ({ action: a.name }));
+  // Root with children: append to the first Hero's action bar, else prepend a toolbar.
+  if (hasChildren(root)) {
+    const heroIdx = root.children.findIndex((c) => c.type === 'Hero');
+    if (heroIdx >= 0) {
+      const hero = root.children[heroIdx] as Extract<ViewNode, { type: 'Hero' }>;
+      const children = [...root.children];
+      children[heroIdx] = { ...hero, actions: [...(hero.actions ?? []), ...refs] } as ViewNode;
+      fixes.push(`wired ${orphans.length} workflow action(s) into the page header`);
+      return { ...root, children } as ViewNode;
+    }
+    const toolbar: ViewNode = {
+      type: 'Toolbar',
+      children: orphans.map((a) => ({ type: 'Button', label: humanizeAction(a.name), action: { action: a.name }, variant: 'primary' } as ViewNode)),
+    };
+    fixes.push(`added an action bar for ${orphans.length} unreachable workflow action(s)`);
+    return { ...root, children: [toolbar, ...root.children] } as ViewNode;
+  }
+  // Root without a children[] (Split/Tabs/…): wrap it, moving root-only style up.
+  const { style, ...rest } = root as ViewNode & { style?: ViewNode['style'] };
+  fixes.push(`added an action bar for ${orphans.length} unreachable workflow action(s)`);
+  return {
+    type: 'Stack',
+    gap: 16,
+    ...(style ? { style } : {}),
+    children: [
+      { type: 'Toolbar', children: orphans.map((a) => ({ type: 'Button', label: humanizeAction(a.name), action: { action: a.name }, variant: 'primary' } as ViewNode)) },
+      rest as ViewNode,
+    ],
+  } as ViewNode;
+}
+
+/** Give tables of a collection with a declared delete action a per-row delete. */
+function wireRowDeletes(node: ViewNode, deletesByCollection: Map<string, string>, fixes: string[]): ViewNode {
+  if (node.type === 'Table') {
+    const actionName = deletesByCollection.get(node.bind.collection);
+    if (actionName && !node.rowActions?.some((a) => a.action === actionName)) {
+      fixes.push(`wired row delete (${actionName}) on ${node.bind.collection} table`);
+      return { ...node, rowActions: [...(node.rowActions ?? []), { action: actionName, args: { id: { $row: 'id' } } }] } as ViewNode;
+    }
+    return node;
+  }
+  if (node.type === 'Split') {
+    return { ...node, left: wireRowDeletes(node.left, deletesByCollection, fixes), right: wireRowDeletes(node.right, deletesByCollection, fixes) };
+  }
+  if (node.type === 'Tabs') {
+    return { ...node, tabs: node.tabs.map((t) => ({ ...t, children: t.children.map((c) => wireRowDeletes(c, deletesByCollection, fixes)) })) };
+  }
+  if (node.type === 'Accordion') {
+    return { ...node, sections: node.sections.map((s) => ({ ...s, children: s.children.map((c) => wireRowDeletes(c, deletesByCollection, fixes)) })) };
+  }
+  if (hasChildren(node)) {
+    return { ...node, children: node.children.map((c) => wireRowDeletes(c, deletesByCollection, fixes)) } as ViewNode;
+  }
+  return node;
+}
+
+function auditOperability(root: ViewNode, actions: SurfaceAction[], fixes: string[]): ViewNode {
+  let out = root;
+  const declared = new Set(actions.map((a) => a.name));
+
+  // A) Strip interactive elements whose action does not exist (would 404 on click).
+  out = stripDeadInteractives(out, declared, fixes) ?? { type: 'Stack', gap: 16, children: [] };
+
+  // B) Every declared workflow action must be reachable from some pixel.
+  const referenced = new Set<string>();
+  collectReferencedActions(out, referenced);
+  const orphanWorkflows = actions.filter((a) => a.kind === 'workflow' && !referenced.has(a.name));
+  out = wireOrphanWorkflowActions(out, orphanWorkflows, fixes);
+
+  // C) Declared data deletes get a per-row control on the matching table.
+  const deletes = new Map<string, string>();
+  for (const a of actions) {
+    if (a.kind !== 'data') continue;
+    const [collection, op] = a.target.split('.');
+    if (collection && op === 'delete') deletes.set(collection, a.name);
+  }
+  if (deletes.size > 0) out = wireRowDeletes(out, deletes, fixes);
+
+  // D) An app that drives workflows always exposes its control plane.
+  const drivesWorkflows = actions.some((a) => a.kind === 'workflow');
+  if (drivesWorkflows && !findFirst(out, 'OrchestrationPanel') && !findFirst(out, 'WorkflowControl') && !findFirst(out, 'RunMonitor')) {
+    if (hasChildren(out)) {
+      const heroIdx = out.children.findIndex((c) => c.type === 'Hero');
+      const children = [...out.children];
+      children.splice(heroIdx >= 0 ? heroIdx + 1 : 0, 0, { type: 'OrchestrationPanel' } as ViewNode);
+      out = { ...out, children } as ViewNode;
+      fixes.push('added the orchestration panel (app drives workflows)');
+    }
+  }
+
+  return out;
+}
+
 /**
- * Repair an agent-authored surface so it meets the layout floor. Idempotent.
- * `collections` is the list of the app's real collection names (for bind validation).
+ * Repair an agent-authored surface so it meets the layout floor AND the
+ * operability contract. Idempotent. `collections` = the app's real collection
+ * names (bind validation); `actions` = the surface's declared actions (the
+ * operability gate wires/strips against them).
  */
-export function repairSurface(view: ViewNode | null | undefined, opts: { collections?: string[] } = {}): AuditResult {
+export function repairSurface(
+  view: ViewNode | null | undefined,
+  opts: { collections?: string[]; actions?: SurfaceAction[] } = {},
+): AuditResult {
   const collections = new Set(opts.collections ?? []);
   const ctx: Ctx = { collections, fixes: [], panels: 0, maxPanels: Math.max(4, collections.size * 2) };
 
   let out = view ? repair(view, ctx, 0) : null;
   if (!out) out = { type: 'Stack', gap: 16, children: [] };
+
+  // Operability gate — only when the caller supplied the declared actions.
+  if (opts.actions) out = auditOperability(out, opts.actions, ctx.fixes);
 
   // Guarantee a root theme so the surface is always coherently styled.
   if (!out.style?.theme) {

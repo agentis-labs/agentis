@@ -12,6 +12,10 @@ export interface McpServer {
   name: string;
   url: string;
   headerKeys: string[];
+  /** Vault credential resolved into headers at call time (secrets plane). */
+  credentialId?: string;
+  /** Least-privilege tool allowlist; empty/absent = all tools. */
+  allowedTools?: string[];
   createdAt: string;
 }
 
@@ -25,8 +29,12 @@ export function listMcpServers() {
   return api<{ servers: McpServer[] }>('/v1/mcp-servers');
 }
 
-export function addMcpServer(input: { name: string; url: string; headers?: Record<string, string> }) {
+export function addMcpServer(input: { name: string; url: string; headers?: Record<string, string>; credentialId?: string; allowedTools?: string[] }) {
   return api<{ server: McpServer }>('/v1/mcp-servers', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateMcpServer(id: string, patch: { allowedTools?: string[] | null; credentialId?: string | null; allowPrivateNetwork?: boolean }) {
+  return api<{ server: McpServer }>(`/v1/mcp-servers/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
 }
 
 export function deleteMcpServer(id: string) {
@@ -35,6 +43,36 @@ export function deleteMcpServer(id: string) {
 
 export function listMcpServerTools(id: string) {
   return api<{ serverId: string; tools: McpTool[] }>(`/v1/mcp-servers/${id}/tools`);
+}
+
+/** Actually handshake a mounted server — the truthful "is it connected?" check. */
+export function verifyMcpServer(id: string) {
+  return api<{ ok: boolean; serverId: string; toolCount?: number; tools?: string[]; error?: string }>(
+    `/v1/mcp-servers/${id}/verify`, { method: 'POST' },
+  );
+}
+
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  category: string;
+  url: string;
+  authType: 'none' | 'oauth' | 'token' | 'header';
+  authHint: string;
+  description: string;
+  docsUrl?: string;
+  connectorService?: string;
+}
+
+export function listMcpCatalog() {
+  return api<{ catalog: McpCatalogEntry[] }>('/v1/mcp-servers/catalog');
+}
+
+/** Begin the spec-compliant "Connect with X" OAuth flow for a mounted server. */
+export function beginMcpOAuth(serverId: string, origin: string) {
+  return api<{ url: string }>(`/v1/mcp-oauth/${serverId}/authorize`, {
+    method: 'POST', body: JSON.stringify({ origin }),
+  });
 }
 
 // ─── MCP: expose (Agentis as a server) ──────────────────────────────────────

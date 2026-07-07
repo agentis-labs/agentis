@@ -130,4 +130,21 @@ describe('analyzeWorkflowReadiness', () => {
     const graph = graphWith({ id: 'a', title: 'Summarize', config: { kind: 'agent_task', prompt: 'x', requires: { fileSystem: true } } });
     expect(analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph).ready).toBe(true);
   });
+
+  it('HONESTY: a cataloged connector with no native runtime is flagged, not passed silently', () => {
+    // `postgres` is a real catalog entry but manifest_only (generic-HTTP fallback
+    // → throws at run time). The build must warn instead of reporting success.
+    const graph = graphWith({ id: 'db', title: 'Insert Row', config: { kind: 'integration', integrationId: 'postgres', operationId: 'insert' } });
+    const r = analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph);
+    expect(r.ready).toBe(false);
+    const honesty = r.requirements.find((req) => /no native runtime|catalog-only/i.test(req.message));
+    expect(honesty).toBeTruthy();
+    expect(honesty!.nodeId).toBe('db');
+  });
+
+  it('HONESTY: a runnable (templated) connector like supabase is NOT flagged as needs-setup', () => {
+    const graph = graphWith({ id: 's', title: 'Insert', config: { kind: 'integration', integrationId: 'supabase', operationId: 'insert', credentialId: 'c1' } });
+    const r = analyzeWorkflowReadiness(ctx.db, ctx.workspace.id, graph);
+    expect(r.requirements.some((req) => /no native runtime|catalog-only/i.test(req.message))).toBe(false);
+  });
 });

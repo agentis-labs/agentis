@@ -7,6 +7,7 @@
  */
 
 import { nodeKindMeta } from './nodeKindMeta';
+import { isIdLike } from '../../lib/prettyRef';
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
@@ -19,7 +20,14 @@ function humanize(s: string): string {
   return s.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function explainNode(kind: string, config: Record<string, unknown>): string {
+export interface ExplainOpts {
+  /** Resolve an extension id/slug to its human name (from the installed list
+   *  or the resource-name registry), so the explainer reads the real name
+   *  instead of a raw identifier. */
+  resolveExtensionName?: (idOrSlug: string) => string | undefined;
+}
+
+export function explainNode(kind: string, config: Record<string, unknown>, opts: ExplainOpts = {}): string {
   switch (kind) {
     case 'trigger': {
       const t = str(config.triggerType);
@@ -77,6 +85,8 @@ export function explainNode(kind: string, config: Record<string, unknown>): stri
       return 'Pauses for a human to approve before continuing.';
     case 'loop':
       return 'Repeats the downstream steps once for each item.';
+    case 'pursue':
+      return 'Pursues an objective — re-runs a cohort, measures progress, and reflects when stuck until done, stalled, or out of budget.';
     case 'converge':
       return 'Re-runs a cohort of agents until a goal is met, stalls, or hits its budget.';
     case 'wait': {
@@ -86,9 +96,19 @@ export function explainNode(kind: string, config: Record<string, unknown>): stri
     case 'router':
       return 'Sends the run down different branches based on a condition.';
     case 'extension_task': {
-      const ext = str(config.extensionId) || str(config.extension);
-      const op = str(config.operation);
-      return ext ? `Runs the ${humanize(ext)}${op ? ` · ${humanize(op)}` : ''} extension operation.` : 'Runs an extension operation.';
+      // Prefer the resolved human name, then a readable slug — never a raw UUID.
+      const extId = str(config.extensionId) || str(config.extension);
+      const extSlug = str(config.extensionSlug);
+      const resolved = opts.resolveExtensionName?.(extId || extSlug);
+      const extRaw = (resolved && resolved.trim())
+        || (extSlug && !isIdLike(extSlug) ? extSlug : '')
+        || (extId && !isIdLike(extId) ? extId : '');
+      const ext = extRaw.trim();
+      const opRaw = str(config.operationName) || str(config.operation);
+      const op = opRaw && !isIdLike(opRaw) ? opRaw : '';
+      return ext
+        ? `Runs the ${humanize(ext)}${op ? ` · ${humanize(op)}` : ''} extension operation.`
+        : op ? `Runs the ${humanize(op)} extension operation.` : 'Runs an extension operation.';
     }
     case 'subflow':
       return 'Runs a reusable sub-workflow as a single step.';

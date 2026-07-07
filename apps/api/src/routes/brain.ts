@@ -324,7 +324,7 @@ function assertBrainAgent(db: AgentisSqliteDb, workspaceId: string, agentId: str
   return agent.id;
 }
 
-const knowledgeAtomKindSchema = z.enum(['kb_chunk', 'knowledge_chunk', 'episode', 'memory', 'pattern']);
+const knowledgeAtomKindSchema = z.enum(['kb_chunk', 'knowledge_chunk', 'episode', 'memory', 'pattern', 'skill', 'example']);
 const peerTypeSchema = z.enum(['user', 'agent']);
 const linkRelationSchema = z.enum(['supports', 'contradicts', 'refines', 'derived_from', 'co_observed']);
 const createLinkSchema = z.object({

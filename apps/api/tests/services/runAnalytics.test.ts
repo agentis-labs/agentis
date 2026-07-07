@@ -40,19 +40,33 @@ function seedRun(ctx: TestContext, workflowId: string, status: string): string {
   return id;
 }
 
-function seedNodeAudit(ctx: TestContext, runId: string, opts: { tokensIn?: number; tokensOut?: number; costCents?: number }): void {
+function seedNodeAudit(ctx: TestContext, runId: string, opts: { tokensIn?: number; tokensOut?: number; costCents?: number; agentId?: string | null }): void {
+  const agentId = opts.agentId === undefined ? 'agent-1' : opts.agentId;
   ctx.db.insert(schema.auditEntries).values({
     id: randomUUID(),
     workspaceId: ctx.workspace.id,
     runId,
     action: 'node.completed',
-    actorType: 'agent',
-    actorId: 'agent-1',
+    actorType: agentId ? 'agent' : 'system',
+    actorId: agentId ?? 'engine',
+    agentId,
     tokensIn: opts.tokensIn ?? null,
     tokensOut: opts.tokensOut ?? null,
     costCents: opts.costCents ?? null,
     at: '2026-06-29T10:00:10.000Z',
   }).run();
+}
+
+function seedAgent(ctx: TestContext, name: string): string {
+  const id = randomUUID();
+  ctx.db.insert(schema.agents).values({
+    id,
+    workspaceId: ctx.workspace.id,
+    userId: ctx.user.id,
+    name,
+    adapterType: 'http',
+  }).run();
+  return id;
 }
 
 describe('aggregateRunAnalytics', () => {
@@ -94,6 +108,27 @@ describe('aggregateRunAnalytics', () => {
     ]);
     expect(a.metered).toBe(true);
     expect(a.totalCostCents).toBe(25);
+  });
+
+  it('attributes token spend per agent and buckets agentless (evaluator) spend under System', () => {
+    const wf = seedWorkflow(ctx, 'Attributed flow', 'n1');
+    const analyst = seedAgent(ctx, 'Research Analyst');
+    const r1 = seedRun(ctx, wf, 'COMPLETED');
+    // Two agent-attributed node entries + one agentless (dedicated evaluator model).
+    seedNodeAudit(ctx, r1, { tokensIn: 1000, tokensOut: 300, agentId: analyst });
+    seedNodeAudit(ctx, r1, { tokensIn: 500, tokensOut: 100, agentId: analyst });
+    seedNodeAudit(ctx, r1, { tokensIn: 200, tokensOut: 60, agentId: null });
+
+    const a = aggregateRunAnalytics(ctx.db, ctx.workspace.id, [
+      { id: wf, title: 'Attributed flow', graph: { nodes: [], edges: [] } },
+    ]);
+
+    expect(a.perAgent).toHaveLength(2);
+    // Sorted by spend: the analyst leads, the System bucket trails.
+    expect(a.perAgent[0]).toMatchObject({ agentId: analyst, name: 'Research Analyst', totalTokens: 1900 });
+    expect(a.perAgent[1]).toMatchObject({ agentId: null, name: 'System · evaluation', totalTokens: 260 });
+    // Every token is attributed — the per-agent split reconciles with the total.
+    expect(a.perAgent.reduce((s, r) => s + r.totalTokens, 0)).toBe(a.totalTokens);
   });
 
   it('rolls up across an app\'s workflows with a per-workflow split', () => {

@@ -60,6 +60,7 @@ import {
   type GuardrailsNodeConfig,
   type LoopNodeConfig,
   type ConvergeNodeConfig,
+  type PursueNodeConfig,
   type ParallelNodeConfig,
   type ReturnOutputNodeConfig,
   type ArtifactSaveNodeConfig,
@@ -98,6 +99,7 @@ import {
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { detectStagnation, computeProgress, chooseReflection } from './pursuitControl.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { LedgerService } from '../services/ledger.js';
@@ -118,6 +120,7 @@ import { StructuredEvaluatorRuntime } from '../services/structuredEvaluatorRunti
 import { AdapterStructuredCompleter, FallbackStructuredCompleter, type StructuredCompleter } from '../services/structuredCompleter.js';
 import { WorkflowSelfHealService, type IntentAnchor, type RepairResourceContext, type DeepPlanArgs, type DeepPlanResult } from '../services/workflowSelfHeal.js';
 import { getSelfHealConfig, type SelfHealConfig } from '../services/selfHealSettings.js';
+import { selfHealGuardDecision } from '../services/workflowBlueprint.js';
 import {
   evaluateEvolution,
   summarizeContract,
@@ -127,6 +130,9 @@ import {
   type EvolutionRegression,
 } from '../services/atomicEvolution.js';
 import { type IntentManifest } from '../services/intentContract.js';
+import { graphContentHash, stampBuildLoop, readBuildLoop, type BuildLoopOutcomeHealth } from '../services/workflowCompass.js';
+import { readWorkflowSpec, type WorkflowSpec } from '../services/workflowSpec.js';
+import { evaluateRunVerdict, unwrapReturnEnvelope, type RunVerdict, type VerdictProbeDeps } from '../services/workflowVerdict.js';
 import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../services/workflowRecoveryPolicy.js';
 import { composeOperatingManual, getWorkspaceManual } from '../services/agentOperatingManual.js';
 import { loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../services/agentIdentity.js';
@@ -153,9 +159,6 @@ import type { AgentMemoryService } from '../services/agentMemory.js';
 import type { PersonalBrainService } from '../services/personalBrain.js';
 import type { FailureReflectionService } from '../services/failureReflection.js';
 import { FeynmanReflectionService, REPEAT_FAILURE_THRESHOLD, type FeynmanTrigger } from '../services/feynmanReflection.js';
-import type { AbilityService } from '../services/abilityService.js';
-import type { AbilityComposer, ComposerEntry, AbilityTier } from '../services/abilityComposer.js';
-import type { SpecialistLoadoutService } from '../services/specialistLoadoutService.js';
 import type { SpecialistMindService } from '../services/specialistMindService.js';
 import type { EmbeddingProvider } from '../services/embeddingProvider.js';
 import { embedText as embedTextHelper } from '../services/embeddingProvider.js';
@@ -177,6 +180,7 @@ import { assertSafeUrl } from '../services/safeUrl.js';
 import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
 import { getCustomIntegrationManifest } from '../services/integrationRegistry.js';
 import { routeModelForTask } from '../services/modelRoutingPolicy.js';
+import { artifactPolicyFromUnknown } from '../services/artifactRetentionPolicy.js';
 
 export interface EngineDeps {
   db: AgentisSqliteDb;
@@ -239,6 +243,9 @@ export interface EngineDeps {
   audit?: AuditTrailService;
   /** Self-improvement: analyzes failed runs for repeat patterns (Â§7.2). */
   instincts?: InstinctEngine;
+  /** SWIFT-T: fired when a hardened workflow regresses (production verdict not
+   *  accomplished) — bootstrap wires this to pause unattended triggers. */
+  onWorkflowDemoted?: (args: { workspaceId: string; workflowId: string; runId: string; verdict: RunVerdict }) => void;
   /** Role-scoped tool execution (Â§2.2.1) â€” consumed by the agentic tool-use loop. */
   agentTools?: AgentToolRuntime;
   /** Agent-scoped personal memory (Â§G11) â€” injected into each dispatched agent's preamble. */
@@ -249,16 +256,8 @@ export interface EngineDeps {
   failureReflection?: FailureReflectionService;
   /** Phase 4 — queued, grounded Feynman repair loop for stubborn failures. */
   feynmanReflection?: FeynmanReflectionService;
-  /** Behavioral specialization units â€” semantically scored + injected into agent prompts. */
-  abilities?: AbilityService;
-  /** Phase 3 â€” specialist ability loadouts (required/preferred/forbidden by role). */
-  loadouts?: SpecialistLoadoutService;
   /** Phase 2 - specialist-specific mind context (sources, atoms, visual patterns). */
   specialistMind?: SpecialistMindService;
-  /** Resolves the workspace's embedding provider for ability-relevance scoring. */
-  abilityEmbeddings?: (workspaceId: string) => EmbeddingProvider;
-  /** ABILITIES-10X — composes/reconciles the ability stack + prefix-cache ordering. */
-  abilityComposer?: AbilityComposer;
   /** Canonical shared brain graph retrieval and evaluator feedback. */
   sharedIntelligence?: SharedIntelligenceService;
   /**
@@ -267,6 +266,21 @@ export interface EngineDeps {
    * (AGENT-COOPERATION-10X §Pillar 1). Absent → only ms + the ceiling enforce.
    */
   resolveRunSpend?: (rootRunId: string) => { costCents: number; tokens: number };
+  /**
+   * Learn from a node failure (COGNITIVE-LOOPING — "fail-forward, don't dead-end").
+   * The engine emits every hard node failure; the wiring classifies instructive
+   * failures (guard/precondition/validation/contract) and records a workspace
+   * playbook lesson that `build_workflow` already recalls, so the NEXT build
+   * designs the corrective loop instead of repeating the dead-end. Non-throwing.
+   */
+  recordFailureLesson?: (args: {
+    workspaceId: string;
+    workflowId: string;
+    nodeId: string;
+    nodeTitle: string;
+    error: string;
+    agentId: string | null;
+  }) => void;
   /** Autonomous, intent-preserving workflow self-healing (AGENT-AUTONOMY §W7/W5.0). */
   selfHeal?: WorkflowSelfHealService;
   /**
@@ -673,8 +687,7 @@ export class WorkflowEngine {
             if (remaining <= 0) {
               queueMicrotask(fire);
             } else {
-              const timer = setTimeout(fire, remaining);
-              timer.unref?.();
+              this.#armTimer(remaining, fire);
             }
           } else if (exec.executorType === 'subflow' && this.deps.subflows) {
             // Durable delegation (1.4): a subflow parent must NOT be re-dispatched
@@ -781,7 +794,7 @@ export class WorkflowEngine {
           const remaining = Math.max(0, Date.parse(untilIso) - Date.now());
           const fire = () => void this.#wakeSession(ctx, node, session.id, runCtx, toolCallId, { sleptUntil: untilIso });
           if (remaining <= 0) queueMicrotask(fire);
-          else { const timer = setTimeout(fire, remaining); timer.unref?.(); }
+          else this.#armTimer(remaining, fire);
           recovered += 1;
         } else if (cond.startsWith('approval:')) {
           const approval = this.deps.db
@@ -978,7 +991,7 @@ export class WorkflowEngine {
     // be dry-run synchronously through #dispatchNode without setting up the
     // full callback machinery. Reject them explicitly so the UI can surface
     // a friendly message instead of hanging.
-    const asyncKinds: ReadonlyArray<string> = ['agent_task', 'agent_swarm', 'subflow', 'checkpoint', 'loop', 'converge', 'agent_session', 'dynamic_swarm', 'planner'];
+    const asyncKinds: ReadonlyArray<string> = ['agent_task', 'agent_swarm', 'subflow', 'checkpoint', 'loop', 'converge', 'pursue', 'agent_session', 'dynamic_swarm', 'planner'];
     if (asyncKinds.includes(node.config.kind)) {
       return {
         ok: false,
@@ -1113,7 +1126,7 @@ export class WorkflowEngine {
           break;
         }
         case 'code':
-          output = await this.#executeCode(ctx, node, resolvedConfig as CodeNodeConfig, args.inputs);
+          output = await this.#executeCode(ctx, node, resolvedConfig as CodeNodeConfig, args.inputs, tctx);
           break;
         case 'spreadsheet':
           output = await this.#executeSpreadsheet(node, resolvedConfig as SpreadsheetNodeConfig, args.inputs);
@@ -1403,6 +1416,66 @@ export class WorkflowEngine {
         diagnosis: capGap,
       };
     }
+
+    // ── CONFIG-AWARE: a missing env var / working directory / credential is a
+    //    configuration gap, not a graph fault — no graph rewrite can set it. The
+    //    old classifier only caught missing binaries, so store_factory's
+    //    "requires a working directory — set AGENTIS_STORES_DIR …" fell through to
+    //    structural repair and died as "could not derive a grounded repair". Now
+    //    we escalate with the exact remedy the extension already named.
+    const cfgGap = configGapReason(error);
+    if (cfgGap) {
+      this.#emitWorkStep(ctx, node, 'fail', `Configuration gap — ${cfgGap}`);
+      this.#audit(ctx, { nodeId: node.id, action: 'self_heal.config_gap', actorType: 'system', actorId: 'engine', outputSummary: cfgGap });
+      this.deps.logger.info('engine.self_heal.config_gap', { runId: ctx.runId, nodeId: node.id, reason: cfgGap });
+      return {
+        kind: 'none',
+        reason:
+          `This step failed on missing CONFIGURATION, not a broken graph — ${cfgGap}. `
+          + `No graph edit or agent swap can supply it: set the required environment/config on the server, `
+          + `or add it to this node's config (e.g. workingDir on an extension_task), then re-run. `
+          + `Self-healing left the workflow untouched — restructuring it would only break a working graph over a config gap.`,
+        diagnosis: `config gap: ${cfgGap}`,
+      };
+    }
+
+    // ── BRAIN-BLUEPRINT-10X — the guard law, consulted BEFORE any model-driven
+    //    planning. (1) A runtime-class failure (bad model, quota, auth, spawn,
+    //    timeout) never gets graph surgery — no graph edit can fix it. (2) A graph
+    //    whose current hash is BLESSED (blueprint/hardened stamp) is never
+    //    autonomously restructured: one bad run must not vandalize a
+    //    production-proven workflow. Deterministic runtime REBINDING (strategy 1
+    //    above) already ran — this only blocks the structural path.
+    try {
+      let blueprintHash: string | null = null;
+      let hardenedHash: string | null = null;
+      if (ctx.workflowId) {
+        const wfRow = this.deps.db
+          .select({ settings: schema.workflows.settings })
+          .from(schema.workflows)
+          .where(eq(schema.workflows.id, ctx.workflowId))
+          .get();
+        const loop = readBuildLoop(wfRow?.settings);
+        blueprintHash = loop.blueprint?.graphHash ?? null;
+        hardenedHash = loop.hardened?.graphHash ?? null;
+      }
+      const guard = selfHealGuardDecision({
+        error,
+        currentGraphHash: graphContentHash(ctx.graph),
+        blueprintHash,
+        hardenedHash,
+      });
+      if (!guard.allow) {
+        this.#emitWorkStep(ctx, node, 'fail', guard.reason);
+        this.#audit(ctx, { nodeId: node.id, action: `self_heal.guard.${guard.class}`, actorType: 'system', actorId: 'engine', outputSummary: guard.reason.slice(0, 300) });
+        this.deps.logger.info('engine.self_heal.guard_blocked', { runId: ctx.runId, nodeId: node.id, class: guard.class });
+        return {
+          kind: 'none',
+          reason: guard.reason,
+          diagnosis: guard.class === 'runtime' ? 'runtime-class failure — the graph was not changed' : 'blueprint-protected graph — autonomous restructure blocked',
+        };
+      }
+    } catch { /* the guard is best-effort — a read failure must never block healing */ }
 
     const prompt = (node.config as { prompt?: string }).prompt ?? '';
     const completer = this.#resolveSelfHealCompleter(ctx, node, prompt, error, cfg);
@@ -1825,12 +1898,28 @@ export class WorkflowEngine {
     const resourceLines = (args.resources?.agents ?? [])
       .map((a) => `- ${a.id}${a.role ? ` (${a.role})` : ''} [${a.status ?? 'unknown'}]${a.capabilities?.length ? ` caps: ${a.capabilities.join(',')}` : ''}`)
       .join('\n');
+    // BYPASS = full autonomy. The healer is a real coding harness that ALREADY has
+    // total desktop control (shell, files, scripts — its native tools run with
+    // --dangerously-skip-permissions). In bypass mode we STOP restricting it to a
+    // "return a graph" straitjacket and let it fix the WORLD like a human engineer:
+    // set config/env, create dirs, run setup, fix credentials, repair extension
+    // source — whatever the failure needs — then resume. Guarded keeps the safe
+    // "propose a graph for approval" path.
+    const autonomous = cfg.mode === 'bypass';
+    const powerLine = autonomous
+      ? 'YOU HAVE FULL CONTROL of this machine and workspace — the same power as your own coding sessions: shell, filesystem, running scripts, editing files, installing dependencies, setting configuration and credentials — PLUS every Agentis tool (create agents/extensions/abilities/workflows, patch graphs). Fix this failed run BY ANY MEANS a human engineer would use at a terminal. Do NOT hand config/setup work back to the human and do NOT give up because "no graph edit can fix it" — if the fix lives outside the graph (a missing directory, an unset env var, a bad credential, an unbuilt project), DO IT YOURSELF, then resume.'
+      : 'Prefer the real available agents below. If a needed capability is genuinely missing, you MAY create it (a new agent, extension, ability, or workflow) with your tools. Never reference a resource you have not verified exists or created.';
+    const closingLine = autonomous
+      ? 'When the run can now succeed, resume it. If the failure was ENVIRONMENTAL (missing config/dir/credential/setup/build) and the graph LOGIC is already correct, fix the environment with your tools, then return the SAME nodes/edges UNCHANGED with resumeNodeId set to the failed node — the engine re-runs it and it now passes. If the graph LOGIC is wrong, return the corrected nodes/edges. Do not rerun or cancel the live run yourself — the engine resumes after you finish; everything else on this machine is yours to fix.'
+      : 'Do not directly patch or rerun this live run with a tool. Create missing internal resources if needed, then RETURN the candidate repaired graph. The engine will validate, certify, checkpoint, apply, and resume.';
     const brief = [
-      'You are the orchestrator repairing a FAILED workflow run so it still achieves its goal.',
+      autonomous
+        ? 'You are an AUTONOMOUS ENGINEER repairing a FAILED workflow run so it still achieves its goal. You have root-level power over this machine and workspace.'
+        : 'You are the orchestrator repairing a FAILED workflow run so it still achieves its goal.',
       'Rules: change HOW, never WHAT (preserve the goal, input contract, and the meaning of declared outputs).',
       'NEVER alter the immutable (completed/active) nodes — their work is done; reusing it is mandatory and saves tokens.',
       'Resume from the minimal failed frontier; do not rebuild completed steps.',
-      'Prefer the real available agents below. If a needed capability is genuinely missing, you MAY create it (a new agent, extension, ability, or workflow) with your tools — full power. Never reference a resource you have not verified exists or created.',
+      powerLine,
       '',
       `GOAL: ${clip(args.intent.goal, 500)}`,
       `DECLARED OUTPUTS (meaning immutable): ${args.intent.declaredOutputKeys.join(', ')}`,
@@ -1843,16 +1932,16 @@ export class WorkflowEngine {
       `CURRENT NODES:\n${clip(JSON.stringify(args.graph.nodes), 9000)}`,
       `CURRENT EDGES:\n${clip(JSON.stringify(args.graph.edges), 4000)}`,
       '',
-      'Do not directly patch or rerun this live run with a tool. Create missing internal resources if needed, then RETURN the candidate repaired graph. The engine will validate, certify, checkpoint, apply, and resume.',
+      closingLine,
       'When the workflow can succeed, finish with EXACTLY one JSON object between <agentis_self_heal_repair> tags:',
       '<agentis_self_heal_repair>',
-      '{"nodes":[...full nodes...],"edges":[...full edges...],"resumeNodeId":"<node id to resume from>","grounding":"<one line citing the evidence>","preservesIntent":true,"grounded":true,"cannotRepair":false}',
+      '{"nodes":[...full nodes...],"edges":[...full edges...],"resumeNodeId":"<node id to resume from>","grounding":"<one line: what you did / the evidence>","preservesIntent":true,"grounded":true,"cannotRepair":false}',
       '</agentis_self_heal_repair>',
-      'If you cannot repair without breaking the rules, output <agentis_self_heal_repair>{"cannotRepair":true}</agentis_self_heal_repair>.',
+      'If you genuinely cannot make it succeed, output <agentis_self_heal_repair>{"cannotRepair":true}</agentis_self_heal_repair>.',
     ].join('\n');
     this.#emitWorkStep(ctx, node, 'thinking', 'Orchestrator is replanning the workflow with full power');
 
-    const chatPlan = await this.#chatReplanLoop(ctx, node, healerId, brief, clip);
+    const chatPlan = await this.#chatReplanLoop(ctx, node, healerId, brief, clip, autonomous);
     if (chatPlan) return chatPlan;
 
     // Fallback: read-only discovery loop when no chat-capable repair agent exists.
@@ -1884,19 +1973,28 @@ export class WorkflowEngine {
     healerId: string | null,
     brief: string,
     clip: (s: string, n: number) => string,
+    autonomous: boolean,
   ): Promise<DeepPlanResult | null> {
     if (!healerId) return null;
     const adapter = this.deps.adapters.get(healerId)?.adapter;
     if (!adapter?.chat || adapter.capabilities?.().interactiveChat === false) return null;
-    const systemAddendum = [
-      'SELF-HEALING MODE: you are repairing a live workflow run.',
-      'You may use ANY tool below — including creating new agents, abilities, extensions, or workflows — to make the run succeed.',
-      'Use normal chat tool calls while working; only the final answer must be the tagged repair JSON.',
-      '  {"thought":"...","action":"tool","toolId":"<id>","arguments":{...}}  — to use/create with a tool',
-      '  {"thought":"...","action":"final","output":{...repair graph...}}      — when the workflow can now succeed',
-      'Hard boundary: do not call agentis.workflow.patch, agentis.workflow.run, agentis.ephemeral.run, agentis.run.cancel, agentis.approval.resolve, or outbound channel-send tools for this repair. The engine applies and observes the repair after your final graph.',
-      'Final response contract: reply with only <agentis_self_heal_repair>{...}</agentis_self_heal_repair>. No prose outside the tags.',
-    ].join('\n');
+    const systemAddendum = (autonomous
+      ? [
+          'SELF-HEALING MODE (BYPASS / FULL AUTONOMY): you are an autonomous engineer fixing a live workflow run with root-level power.',
+          'Use ANY tool — your OWN shell/filesystem/desktop tools AND every Agentis tool — to make the run succeed. Create directories, run setup scripts, install dependencies, set environment/config, fix credentials, repair an extension\'s source, create agents/extensions/abilities/workflows, or change the graph. Do whatever a human engineer would do at a terminal.',
+          'You will NOT be asked to confirm — act. Only the final answer must be the tagged repair JSON.',
+          'Hard boundary (safety, not capability): do NOT call agentis.workflow.run, agentis.ephemeral.run, agentis.run.cancel, agentis.approval.resolve, or outbound channel-send tools — the engine resumes the run after you finish. Everything else on this machine and workspace is yours to fix.',
+          'Final response contract: reply with only <agentis_self_heal_repair>{...}</agentis_self_heal_repair>. If you fixed the ENVIRONMENT and the graph logic is correct, return the current nodes/edges UNCHANGED with resumeNodeId = the failed node.',
+        ]
+      : [
+          'SELF-HEALING MODE: you are repairing a live workflow run.',
+          'You may use ANY tool below — including creating new agents, skills, extensions, or workflows — to make the run succeed.',
+          'Use normal chat tool calls while working; only the final answer must be the tagged repair JSON.',
+          '  {"thought":"...","action":"tool","toolId":"<id>","arguments":{...}}  — to use/create with a tool',
+          '  {"thought":"...","action":"final","output":{...repair graph...}}      — when the workflow can now succeed',
+          'Hard boundary: do not call agentis.workflow.patch, agentis.workflow.run, agentis.ephemeral.run, agentis.run.cancel, agentis.approval.resolve, or outbound channel-send tools for this repair. The engine applies and observes the repair after your final graph.',
+          'Final response contract: reply with only <agentis_self_heal_repair>{...}</agentis_self_heal_repair>. No prose outside the tags.',
+        ]).join('\n');
     let text = '';
     let sawConfirmation = false;
     try {
@@ -1907,6 +2005,10 @@ export class WorkflowEngine {
         conversationId: `self-heal:${ctx.runId}:${node.id}`,
         clientTurnId: `self-heal:${ctx.runId}:${node.id}`,
         executionMode: 'chat',
+        // BYPASS = act without asking. In auto mode a mutating tool never raises a
+        // confirmation, so the repair agent can create/set/fix freely instead of
+        // aborting the heal at the first approval prompt. Guarded stays 'ask'.
+        ...(autonomous ? { permissionMode: 'auto' as const } : {}),
         runId: ctx.runId,
         ambientId: ctx.ambientId,
         viewport: {
@@ -1922,7 +2024,10 @@ export class WorkflowEngine {
       }, {
         tools: this.#selfHealChatTools(),
         maxTurns: 8,
-        maxToolCalls: 24,
+        // High backstop, not the governor — a real repair (diagnose → author fix →
+        // dry-run → verify) can take many tool steps; the old 24 clipped a
+        // legitimate heal mid-way. ChatProgressMonitor still stops true loops fast.
+        maxToolCalls: 2000,
         systemAddendum,
       })) {
         if (delta.type === 'text') text += delta.delta;
@@ -3209,8 +3314,8 @@ export class WorkflowEngine {
     // Settle: if no active executions, no in-flight dispatch chains, no
     // waiting inputs left to receive, and ready queue is empty, the run is
     // done. The inflightDispatches counter prevents settling mid-dispatch
-    // for passthrough nodes (trigger/merge/router/scratchpad/extension_task)
-    // which never register in activeExecutions.
+    // for passthrough nodes (trigger/merge/router/scratchpad) which never
+    // register in activeExecutions.
     if (
       ctx.state.readyQueue.length === 0 &&
       Object.keys(ctx.state.activeExecutions).length === 0 &&
@@ -3691,7 +3796,7 @@ export class WorkflowEngine {
         });
       }
       case 'code': {
-        const result = await this.#executeCode(ctx, node, resolvedConfig as CodeNodeConfig, item.inputData);
+        const result = await this.#executeCode(ctx, node, resolvedConfig as CodeNodeConfig, item.inputData, tctx);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -3736,6 +3841,15 @@ export class WorkflowEngine {
         await this.#dispatchConverge(ctx, node, resolvedConfig as ConvergeNodeConfig, item.inputData, tctx);
         return; // iterations resolve the node async
       }
+      case 'pursue': {
+        // A Pursuit is a `converge` with forward-reading names + ASSESS/REFLECT
+        // on by default. Normalize and reuse the whole converge machine — no
+        // fork (COGNITIVE-LOOPING-RFC §10). Stored `converge` graphs are
+        // untouched, so their content hash / blueprint blessing is preserved.
+        const asConverge = pursueConfigToConverge(resolvedConfig as unknown as PursueNodeConfig);
+        await this.#dispatchConverge(ctx, node, asConverge, item.inputData, tctx);
+        return; // iterations resolve the node async
+      }
       case 'parallel': {
         // Parallel is a pure passthrough at dispatch time — fan-out happens via
         // the regular edge mechanism (every outgoing edge fires concurrently).
@@ -3764,6 +3878,9 @@ export class WorkflowEngine {
           executorRef: cfg.workflowId,
           startedAt: new Date().toISOString(),
         };
+        // Persist the dispatch transition so observers see the child in flight
+        // (same staleness class as agent_task/wait).
+        await this.#persistRun(ctx).catch(() => {});
         await this.deps.subflows.start({
           parentRunId: ctx.runId,
           parentNodeId: node.id,
@@ -3813,17 +3930,36 @@ export class WorkflowEngine {
     inputData: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     const extensionInput = mapInputs(config.inputMapping, inputData, ctx.scratchpad?.snapshot ?? {});
-    const result = await this.deps.extensions.execute({
-      workspaceId: ctx.workspaceId,
-      extensionId: config.extensionId,
-      extensionSlug: config.extensionSlug,
-      operationName: config.operationName,
-      version: config.version,
-      runId: ctx.runId,
-      taskId: node.id,
-      input: extensionInput,
-      scratchpadSnapshot: ctx.scratchpad?.snapshot ?? {},
-    });
+    // Extensions can run long (node worker / docker sandbox) — register the
+    // in-flight execution and persist so observers see it (same staleness
+    // class as agent_task); removed in the finally below.
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `extension:${node.id}`,
+      nodeId: node.id,
+      executorType: 'extension',
+      executorRef: config.extensionId ?? config.extensionSlug ?? config.operationName,
+      startedAt: new Date().toISOString(),
+    };
+    await this.#persistRun(ctx).catch(() => {});
+    let result: Awaited<ReturnType<typeof this.deps.extensions.execute>>;
+    try {
+      result = await this.deps.extensions.execute({
+        workspaceId: ctx.workspaceId,
+        extensionId: config.extensionId,
+        extensionSlug: config.extensionSlug,
+        operationName: config.operationName,
+        version: config.version,
+        runId: ctx.runId,
+        taskId: node.id,
+        input: extensionInput,
+        scratchpadSnapshot: ctx.scratchpad?.snapshot ?? {},
+        // Run-scoped cancellation: Stop settles the node immediately with an
+        // honest ABORTED outcome (node_worker isolates are hard-stopped).
+        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+      });
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
 
     if (!result.ok) {
       throw new AgentisError(
@@ -4186,8 +4322,10 @@ export class WorkflowEngine {
       ...(runtimeAffordances.length > 0 ? { runtimeAffordances } : {}),
       maxSteps: config.maxToolSteps,
       workflowId: ctx.workflowId,
+      runId: ctx.runId,
       agentId,
       userId: ctx.userId,
+      artifactPolicy: artifactPolicyFromUnknown(config.artifactPolicy),
       // Stream the agent's live reasoning + tool use into the run room (the
       // immersive monitor/triage/canvas all read this), correctly attributed to
       // this node via taskId=node.id.
@@ -4225,6 +4363,9 @@ export class WorkflowEngine {
       stoppedReason: result.stoppedReason,
     };
     this.#recordNodeTokens(ctx, node.id, result.tokensIn, result.tokensOut);
+    // Attribute to the RESOLVED agent (more precise than the node's config, which
+    // may carry a role rather than a concrete agent id).
+    this.#attributeNodeTokens(ctx, node.id, agentId);
     this.#recordSpecialistResult(ctx, node, agentId, output);
     await this.#completeNode(ctx, node.id, output);
     return true;
@@ -4292,7 +4433,12 @@ export class WorkflowEngine {
       }, {
         tools,
         maxTurns: Math.max(2, Math.min(config.maxToolSteps ?? 8, 12)),
-        maxToolCalls: 24,
+        // A workflow agent doing real work is not a 24-step task. This is a high
+        // backstop, not the governor — ChatProgressMonitor stops true loops far
+        // sooner. The old 24 guillotined legitimate multi-step agent_task nodes
+        // mid-work (the same class of bug as the chat loop's old 80). Honor an
+        // explicit operator step budget when set; otherwise stay generous.
+        maxToolCalls: config.maxToolSteps && config.maxToolSteps > 24 ? config.maxToolSteps : 2000,
         systemAddendum,
       })) {
         if (delta.type === 'text') text += delta.delta;
@@ -4316,7 +4462,16 @@ export class WorkflowEngine {
       : { output: trimmed };
     this.#audit(ctx, { nodeId: node.id, action: 'agent.harness_tool_loop', actorType: 'agent', actorId: agentId, outputSummary: clip(trimmed, 200) });
     this.#recordSpecialistResult(ctx, node, agentId, output);
-    await this.#completeNode(ctx, node.id, output);
+    const completedOutput = await this.#completeNode(ctx, node.id, output);
+    // BRAIN-BLUEPRINT-10X — this harness tool-loop path was the ONE agent_task
+    // completion that never enqueued brain formation (dispatch/session/swarm all
+    // do). What the agent learned doing the work now flows through the same
+    // policy-gated pipeline, so it exists for future runs.
+    if (completedOutput) {
+      this.#enqueueSuccessfulBrainCapture(ctx, node.id, completedOutput, agentId, {
+        task: (node.config as { prompt?: string }).prompt ?? node.title,
+      });
+    }
     return true;
   }
 
@@ -4492,6 +4647,12 @@ export class WorkflowEngine {
       executorRef: agentId,
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition IMMEDIATELY (same reason as the wait
+    // node): an agent node runs for minutes, and until this write the DB row
+    // still shows it queued with activeExecutions:{} â€” every external observer
+    // (run.status, check_run, the UI, another agent) reads a phantom
+    // "dispatcher stalled" and may cancel a healthy run over it.
+    await this.#persistRun(ctx).catch(() => {});
 
     // Compose the system preamble: role identity (Layer 2) â†’ workspace context
     // (Layer 1) â†’ agent memory (Â§G11) â†’ the task
@@ -4523,8 +4684,8 @@ export class WorkflowEngine {
     // CONVERSATION THEATER: record the work hand-off (workflow → specialist).
     this.#recordSpecialistAssignment(ctx, node, agentId, config.prompt);
 
-    const routing = this.#routeAgentTaskModel(ctx, agentId, config, contextResult.preferredModel);
-    const preferredModel = routing.selectedModel ?? contextResult.preferredModel;
+    const routing = this.#routeAgentTaskModel(ctx, agentId, config, null);
+    const preferredModel = routing.selectedModel ?? null;
     this.deps.logger.info('engine.agent_task.model_routed', {
       runId: ctx.runId,
       workflowId: ctx.workflowId,
@@ -4549,23 +4710,34 @@ export class WorkflowEngine {
     // if this bound runtime returns empty / fails.
     this.#recordNodeInput(ctx, node.id, inputData);
 
-    await this.deps.adapters.dispatchTask({
-      taskId,
-      runId: ctx.runId,
-      workflowId: ctx.workflowId,
-      nodeId: node.id,
-      title: node.title,
-      description: prompt,
-      inputData,
-      scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
-      capabilityTags: config.capabilityTags,
-      timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
-      abilities: contextResult.abilities,
-      abilityEnv: contextResult.abilityEnv,
-      preferredModel,
-      // Run-scoped cancellation: Stop aborts this so the in-flight model call ends.
-      ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
-    }, agentId);
+    try {
+      await this.deps.adapters.dispatchTask({
+        taskId,
+        runId: ctx.runId,
+        workflowId: ctx.workflowId,
+        nodeId: node.id,
+        title: node.title,
+        description: prompt,
+        inputData,
+        scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
+        capabilityTags: config.capabilityTags,
+        timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
+        preferredModel,
+        // Run-scoped cancellation: Stop aborts this so the in-flight model call ends.
+        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+      }, agentId);
+    } catch (err) {
+      // A bare ADAPTER_UNAVAILABLE tells the operator nothing actionable —
+      // name the agent, the node, and the two real remedies.
+      if (err instanceof AgentisError && err.code === 'ADAPTER_UNAVAILABLE') {
+        throw new AgentisError(
+          'ADAPTER_UNAVAILABLE',
+          `Agent "${agentId}" has no live runtime for node "${node.title || node.id}": no harness is connected and no workspace model could be bound. `
+          + 'Connect the agent\'s harness (or set a default model in Settings), then re-run or replay from this node.',
+        );
+      }
+      throw err;
+    }
   }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4657,6 +4829,8 @@ export class WorkflowEngine {
       nodeId: node.id,
       agentId,
       workflowId: ctx.workflowId,
+      appId: this.deps.resolveAppIdForWorkflow?.(ctx.workspaceId, ctx.workflowId) ?? null,
+      artifactPolicy: artifactPolicyFromUnknown(config.artifactPolicy),
       planId: ctx.planId,
       role,
       runContextBlock,
@@ -4678,6 +4852,9 @@ export class WorkflowEngine {
       executorRef: sessionId,
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition so observers see the session in flight
+    // (fire-and-forget: this is observability, not a completion write).
+    void this.#persistRun(ctx).catch(() => {});
   }
 
   /** Drive a session to its next non-delegate outcome, then resolve the node. */
@@ -4750,6 +4927,12 @@ export class WorkflowEngine {
       return { ok: false, error: `no agent available for role '${y.role}'. Create it first or pass create_if_missing/temporary.` };
     }
     const { agentId } = resolved;
+    // Honor the specialist profile's runtime budget: a `maxDepth` cap refuses the
+    // delegation before spinning up a child session. Before this the profile's
+    // budget was authored but never enforced.
+    if (resolved.runtimeBudget?.maxDepth != null && depth > resolved.runtimeBudget.maxDepth) {
+      return { ok: false, error: `specialist role '${y.role}' profile caps delegation depth at ${resolved.runtimeBudget.maxDepth} (this delegate would run at depth ${depth})` };
+    }
     const child = this.deps.sessions!.create({
       agentId,
       workspaceId: ctx.workspaceId,
@@ -4786,7 +4969,15 @@ export class WorkflowEngine {
     // delegate (§8). The child can only ever narrow — never widen — its parent's
     // tool scope. A top-level session with no grant + no request stays
     // unrestricted, preserving existing behavior.
-    const grant = attenuateGrant(parentRunCtx.grant, { tools: y.allowedTools, paths: y.allowedPaths, maxTokens: y.maxTokens }, depth);
+    // Fold the profile budget's maxTokens into the delegate's grant (narrowest
+    // wins) so `runtimeProfile.budget.maxTokens` actually bounds the child.
+    const budgetMaxTokens = [y.maxTokens, resolved.runtimeBudget?.maxTokens]
+      .filter((value): value is number => typeof value === 'number' && value > 0);
+    const grant = attenuateGrant(
+      parentRunCtx.grant,
+      { tools: y.allowedTools, paths: y.allowedPaths, ...(budgetMaxTokens.length ? { maxTokens: Math.min(...budgetMaxTokens) } : {}) },
+      depth,
+    );
     const childRunContext = await this.#withWorkspaceContext(ctx, y.task, undefined, '', agentId);
     const childCtx: SessionRunContext = {
       workspaceId: ctx.workspaceId,
@@ -4850,7 +5041,7 @@ export class WorkflowEngine {
     node: WorkflowNode,
     parentAgentId: string,
     y: Extract<SessionYield, { kind: 'delegate' }>,
-  ): Promise<{ agentId: string; created?: boolean; instanceId?: string } | null> {
+  ): Promise<{ agentId: string; created?: boolean; instanceId?: string; runtimeBudget?: { maxTokens?: number; maxDollars?: number; maxDelegations?: number; maxDepth?: number } } | null> {
     const role = normalizeRole(y.role);
     let agentId = this.deps.specialists?.resolveRole(ctx.workspaceId, role) ?? this.#findAgentByRole(ctx.workspaceId, role);
     let created = false;
@@ -4886,7 +5077,8 @@ export class WorkflowEngine {
       leaseExpiresAt: leaseMinutes ? new Date(Date.now() + leaseMinutes * 60_000).toISOString() : null,
     });
 
-    return { agentId, ...(created ? { created } : {}), ...(instanceId ? { instanceId } : {}) };
+    const runtimeBudget = profile?.runtimeProfile?.budget;
+    return { agentId, ...(created ? { created } : {}), ...(instanceId ? { instanceId } : {}), ...(runtimeBudget ? { runtimeBudget } : {}) };
   }
 
   async #onSessionOutcome(
@@ -4939,10 +5131,9 @@ export class WorkflowEngine {
       }
       case 'sleep_until': {
         const remaining = Math.max(0, Date.parse(y.untilIso) - Date.now());
-        const timer = setTimeout(() => {
+        this.#armTimer(remaining, () => {
           void this.#wakeSession(ctx, node, sessionId, runCtx, y.toolCallId, { sleptUntil: y.untilIso });
-        }, remaining);
-        timer.unref?.();
+        });
         break;
       }
       case 'run_workflow': {
@@ -5043,6 +5234,23 @@ export class WorkflowEngine {
   #sessionWaiters(ctx: RunningContext): Map<string, SessionWaiter[]> {
     if (!ctx.sessionWaiters) ctx.sessionWaiters = new Map();
     return ctx.sessionWaiters;
+  }
+
+  /**
+   * `setTimeout`'s delay is a 32-bit signed int internally — Node clamps any
+   * delay beyond ~24.8 days (2147483647ms) to ~1ms, firing almost instantly
+   * instead of waiting. `wait` nodes and `sleep_until` sessions can be parked
+   * far longer than that, so long delays are chained in capped hops.
+   */
+  #armTimer(remainingMs: number, fire: () => void): void {
+    const MAX_DELAY_MS = 2_147_483_647;
+    if (remainingMs <= MAX_DELAY_MS) {
+      const timer = setTimeout(fire, Math.max(0, remainingMs));
+      timer.unref?.();
+      return;
+    }
+    const timer = setTimeout(() => this.#armTimer(remainingMs - MAX_DELAY_MS, fire), MAX_DELAY_MS);
+    timer.unref?.();
   }
 
   /**
@@ -5472,12 +5680,7 @@ export class WorkflowEngine {
     rolePrompt?: string,
     skillBlock?: string,
     agentId?: string
-  ): Promise<{
-    prompt: string;
-    abilities: { id: string; name: string; version: string; mode: 'compiled' | 'static' }[];
-    abilityEnv: Record<string, string>;
-    preferredModel: string | null;
-  }> {
+  ): Promise<{ prompt: string }> {
     // Authored workspace context (the operator "charter") and knowledge-base
     // passages are no longer injected as a separate block: they are atoms in
     // the DB brain now, surfaced by `brainBlock` below — the charter via the
@@ -5579,7 +5782,6 @@ export class WorkflowEngine {
       }
     }
 
-    const abilityResult = await this.#buildAbilityBlock(ctx, prompt, agentId);
     // W2 — the operating manual: brief the agent on its full agentic surface
     // (spawn/delegate/workflow-as-tool/replan) + the hard anti-hallucination rules,
     // layered by role. Leads the prompt so it frames everything below it.
@@ -5599,10 +5801,7 @@ export class WorkflowEngine {
     // extend it — which also gives an external harness the run handle it needs (M2).
     const evolutionBlock = this.#buildLivePlanBlock(ctx);
     return {
-      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, abilityResult.xml, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
-      abilities: abilityResult.abilities,
-      abilityEnv: abilityResult.env,
-      preferredModel: abilityResult.preferredModel,
+      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
     };
   }
 
@@ -5697,287 +5896,6 @@ export class WorkflowEngine {
     }
   }
 
-  /**
-   * Resolve the ability injection for this dispatch (Â§3 + Â§7.3 of ABILITIES.md):
-   *
-   *  1. Collect pinned abilities (always-on for this agent).
-   *  2. Score the rest of the workspace pool against the task embedding;
-   *     drop anything below ABILITY_MIN_RELEVANCE_SCORE.
-   *  3. Inject pinned first, then semantic matches, until the workspace token
-   *     budget is exhausted.
-   *  4. Record an ability_used episode + brain_quality_event for traceability.
-   *
-   * Best-effort: any failure (no embedder configured, runtime error, empty
-   * pool) returns the empty string â€” dispatch must never block on abilities.
-   */
-  async #buildAbilityBlock(ctx: RunningContext, task: string, agentId?: string): Promise<{
-    xml: string;
-    abilities: { id: string; name: string; version: string; mode: 'compiled' | 'static' }[];
-    env: Record<string, string>;
-    preferredModel: string | null;
-  }> {
-    const emptyResult = { xml: '', abilities: [], env: {}, preferredModel: null };
-    const svc = this.deps.abilities;
-    const providerFn = this.deps.abilityEmbeddings;
-    if (!svc || !providerFn) return emptyResult;
-    try {
-      const provider = providerFn(ctx.workspaceId);
-      const pinned = agentId
-        ? svc.listPinsForAgent(agentId).filter((pin) => pin.enabled)
-        : [];
-      const pinnedIds = new Set(pinned.map((p) => p.abilityId));
-
-      const compiled = svc.listCompiled(ctx.workspaceId);
-      if (compiled.length === 0) return emptyResult;
-
-      // Phase 3 â€” resolve the dispatched agent's specialist role loadout. Required
-      // abilities are force-injected; forbidden are excluded everywhere; preferred
-      // lower the semantic relevance threshold. Keyed by role, resolved from the
-      // agent row, so it applies to every materialized agent of that role.
-      let loadout = this.deps.loadouts?.resolveForRole(ctx.workspaceId, '');
-      if (this.deps.loadouts && agentId && this.deps.db) {
-        const roleRow = this.deps.db.select({ role: schema.agents.role }).from(schema.agents).where(eq(schema.agents.id, agentId)).get();
-        if (roleRow?.role) loadout = this.deps.loadouts.resolveForRole(ctx.workspaceId, roleRow.role);
-      }
-      const forbidden = loadout?.forbidden ?? new Set<string>();
-      const preferredThresholds = loadout?.preferred ?? new Map<string, number>();
-
-      let taskEmbedding: number[] | null = null;
-      const taskText = task.trim().length > 0 ? task : '';
-      if (taskText) {
-        try {
-          taskEmbedding = await embedTextHelper(provider, taskText.slice(0, 4000));
-        } catch (err) {
-          this.deps.logger.warn('engine.ability.task_embed_failed', { runId: ctx.runId, err: (err as Error).message });
-        }
-      }
-
-      const requiredIds = loadout?.required ?? new Set<string>();
-      const scored = taskEmbedding ? svc.scoreAbilitiesForTask(ctx.workspaceId, taskEmbedding) : [];
-      const semantic = scored
-        .filter((s) => !pinnedIds.has(s.ability.id) && !requiredIds.has(s.ability.id) && !forbidden.has(s.ability.id) && s.ability.gate?.always !== true)
-        .filter((s) => {
-          const base = s.ability.minRelevanceScore ?? CONSTANTS.ABILITY_MIN_RELEVANCE_SCORE;
-          // A preferred loadout ability clears a lowered threshold.
-          const threshold = preferredThresholds.has(s.ability.id) ? Math.min(preferredThresholds.get(s.ability.id)!, base) : base;
-          return s.score >= threshold;
-        });
-
-      // Required loadout abilities are force-injected (like pins), ahead of all else.
-      const requiredRecords = [...requiredIds]
-        .filter((id) => !pinnedIds.has(id))
-        .map((id) => ({ ability: svc.tryGet(id), score: 1.0 }))
-        .filter((r): r is { ability: NonNullable<ReturnType<AbilityService['tryGet']>>; score: number } =>
-          Boolean(r.ability && r.ability.compileStatus === 'ready'),
-        );
-
-      // Resolve pinned ability records (skip dirty/unready ones; honor forbidden).
-      const pinnedRecords = pinned
-        .filter((p) => !forbidden.has(p.abilityId))
-        .map((p) => ({ ability: svc.tryGet(p.abilityId), score: 1.0 }))
-        .filter((r): r is { ability: NonNullable<ReturnType<AbilityService['tryGet']>>; score: number } =>
-          Boolean(r.ability && r.ability.compileStatus === 'ready'),
-        );
-
-      const alwaysOn = compiled
-        .filter((a) => a.gate?.always === true && !pinnedIds.has(a.id) && !requiredIds.has(a.id) && !forbidden.has(a.id))
-        .map((a) => ({ ability: a as NonNullable<ReturnType<AbilityService['tryGet']>>, score: 1.0 }));
-
-      const currentOs = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux';
-      const availableAffordances = ['terminal', 'fileSystem']; // Basic affordances for now
-
-      const preMerged = [...requiredRecords, ...pinnedRecords, ...alwaysOn, ...semantic.map((s) => ({ ability: s.ability, score: s.score }))];
-
-      const merged = preMerged.filter((entry) => {
-        const gate = entry.ability.gate;
-        if (!gate) return true;
-        if (gate.os && gate.os !== currentOs) return false;
-        if (gate.requiresEnv && gate.requiresEnv.length > 0) {
-          if (!gate.requiresEnv.every((k) => process.env[k] !== undefined)) return false;
-        }
-        if (gate.requiresAffordances && gate.requiresAffordances.length > 0) {
-          if (!gate.requiresAffordances.every((a) => availableAffordances.includes(a))) return false;
-        }
-        return true;
-      }).slice(0, CONSTANTS.ABILITY_MAX_INJECTED);
-
-      if (merged.length === 0) return emptyResult;
-
-      // ABILITIES-10X — resolve the stack: precedence reconciliation, rule-conflict
-      // detection, and content-hash-stable ordering of the cacheable (task-invariant)
-      // prefix. Falls back to the pre-existing order when no composer is wired.
-      let composedConflicts: Array<{ kind: string; detail: string }> = [];
-      if (this.deps.abilityComposer) {
-        const tierOf = (id: string): AbilityTier =>
-          requiredIds.has(id) ? 'required'
-            : pinnedIds.has(id) ? 'pinned'
-              : compiled.find((a) => a.id === id)?.gate?.always === true ? 'always'
-                : 'semantic';
-        const composerEntries: ComposerEntry[] = merged.map((entry) => ({
-          id: entry.ability.id,
-          name: entry.ability.name,
-          contentHash: entry.ability.contentHash ?? null,
-          depth: entry.ability.depth,
-          tier: tierOf(entry.ability.id),
-          score: entry.score,
-          rulesAlways: entry.ability.rulesAlways ?? [],
-          rulesNever: entry.ability.rulesNever ?? [],
-          toolHints: entry.ability.toolHints ?? [],
-        }));
-        const composed = this.deps.abilityComposer.compose(composerEntries);
-        const rank = new Map(composed.ordered.map((e, i) => [e.id, i]));
-        merged.sort((a, b) => (rank.get(a.ability.id) ?? 0) - (rank.get(b.ability.id) ?? 0));
-        composedConflicts = composed.conflicts.map((c) => ({ kind: c.kind, detail: c.detail }));
-      }
-
-      const workspaceBudget = await this.#abilityWorkspaceBudget(ctx.workspaceId);
-      let usedTokens = 0;
-      const blocks: string[] = [];
-      const injected: Array<{ id: string; name: string; score: number; tokens: number }> = [];
-      const outAbilities: Array<{ id: string; name: string; version: string; mode: 'compiled' | 'static' }> = [];
-      let mergedEnv: Record<string, string> = {};
-      let outPreferredModel: string | null = null;
-
-      for (const entry of merged) {
-        const remaining = workspaceBudget - usedTokens;
-        if (remaining < CONSTANTS.MIN_ABILITY_TOKENS) break;
-        const perAbilityBudget = Math.min(
-          entry.ability.tokenBudget ?? workspaceBudget,
-          remaining,
-        );
-        const result = await svc.buildContextBlock({
-          abilityId: entry.ability.id,
-          task: taskText,
-          taskEmbedding: taskEmbedding ?? [],
-          provider,
-          tokenBudget: perAbilityBudget,
-        });
-        if (!result) continue;
-        // ABILITIES-10X D3 — a "Method" ability changes HOW the agent works:
-        // append its execution policy (tool plan / verify checks) to the block.
-        const execXml = this.#renderExecutionPolicy(entry.ability);
-        const blockXml = execXml ? `${result.xml}\n${execXml}` : result.xml;
-        blocks.push(blockXml);
-        usedTokens += result.tokens;
-        injected.push({ id: entry.ability.id, name: entry.ability.name, score: entry.score, tokens: result.tokens });
-        outAbilities.push({
-          id: entry.ability.id,
-          name: entry.ability.name,
-          version: entry.ability.version ?? '1',
-          mode: entry.ability.mode ?? 'compiled'
-        });
-
-        if (this.deps.vault) {
-          const env = await svc.resolveEnv(entry.ability.id, this.deps.vault);
-          mergedEnv = { ...mergedEnv, ...env };
-        }
-        // ABILITIES-10X D4 — a "Conductor" ability picks the engine: its routing
-        // policy's preferred model wins over the legacy preferredModel column.
-        const routed = entry.ability.routingPolicy?.preferredModel ?? entry.ability.preferredModel;
-        if (routed && !outPreferredModel) {
-          outPreferredModel = routed;
-        }
-      }
-
-      if (blocks.length === 0) return emptyResult;
-
-      // Episodic record + quality event so Brain surfaces show ability usage.
-      this.#recordAbilityUsage(ctx, agentId, taskText, injected);
-
-      // ABILITIES-10X — append to the activation ledger (the free flywheel):
-      // which abilities fired, what conflicts were resolved, on which run.
-      try {
-        svc.recordActivation({
-          workspaceId: ctx.workspaceId,
-          runId: ctx.runId,
-          agentId: agentId ?? null,
-          model: outPreferredModel,
-          abilityIds: injected.map((i) => i.id),
-          conflictsResolved: composedConflicts,
-          outcome: null,
-        });
-      } catch (err) {
-        this.deps.logger.warn('engine.ability.activation_record_failed', { runId: ctx.runId, err: (err as Error).message });
-      }
-
-      return {
-        xml: blocks.join('\n\n'),
-        abilities: outAbilities,
-        env: mergedEnv,
-        preferredModel: outPreferredModel,
-      };
-    } catch (err) {
-      this.deps.logger.warn('engine.ability.block_failed', {
-        runId: ctx.runId,
-        err: (err as Error).message,
-      });
-      return emptyResult;
-    }
-  }
-
-  /** ABILITIES-10X D3 — render an ability's execution policy as a compact directive. */
-  #renderExecutionPolicy(ability: { executionPolicy: import('@agentis/core').AbilityExecutionPolicy | null }): string | null {
-    const p = ability.executionPolicy;
-    if (!p) return null;
-    const lines: string[] = [];
-    if (p.toolPlan && p.toolPlan.length) lines.push(`  <tool-plan>${p.toolPlan.map((t) => String(t)).join(' → ')}</tool-plan>`);
-    if (p.verify && p.verify.length) lines.push(`  <verify>${p.verify.map((v) => String(v)).join('; ')}</verify>`);
-    if (typeof p.maxRetries === 'number') lines.push(`  <max-retries>${p.maxRetries}</max-retries>`);
-    return lines.length ? `<execution-policy>\n${lines.join('\n')}\n</execution-policy>` : null;
-  }
-
-  async #abilityWorkspaceBudget(workspaceId: string): Promise<number> {
-    try {
-      const row = this.deps.db
-        .select({ settings: schema.workspaces.brainSettings })
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .get();
-      const settings = (row?.settings ?? {}) as Record<string, unknown>;
-      const candidate = settings?.['ability_token_budget'];
-      if (typeof candidate === 'number' && candidate > 0) return Math.floor(candidate);
-    } catch {
-      /* fall through to default */
-    }
-    return CONSTANTS.ABILITY_TOKEN_BUDGET;
-  }
-
-  #recordAbilityUsage(
-    ctx: RunningContext,
-    agentId: string | undefined,
-    task: string,
-    injected: Array<{ id: string; name: string; score: number; tokens: number }>,
-  ): void {
-    if (injected.length === 0) return;
-    // Ability activations are recorded as brain quality events (below) for
-    // analytics and pin suggestions — not written into the agent's memory,
-    // which is reserved for durable lessons, not per-dispatch telemetry.
-    // Brain quality event for analytics / pin suggestions.
-    try {
-      const totalTokens = injected.reduce((sum, i) => sum + i.tokens, 0);
-      for (const inj of injected) {
-        this.deps.db.insert(schema.brainQualityEvents).values({
-          id: randomUUID(),
-          workspaceId: ctx.workspaceId,
-          scopeId: null,
-          agentId: agentId ?? null,
-          eventType: 'ability_used',
-          atomId: null,
-          abilityId: inj.id,
-          runId: ctx.runId,
-          delta: inj.score,
-          metadata: { tokens: inj.tokens, totalTokens, task: task.slice(0, 200) } as unknown as Record<string, unknown>,
-          createdAt: new Date().toISOString(),
-        }).run();
-      }
-    } catch (err) {
-      this.deps.logger.warn('engine.ability.brain_event_failed', {
-        runId: ctx.runId,
-        err: (err as Error).message,
-      });
-    }
-  }
-
   #logContextFailure(ctx: RunningContext, err: unknown): void {
     this.deps.logger.warn('engine.workspace_context.failed', {
       runId: ctx.runId,
@@ -6032,6 +5950,7 @@ export class WorkflowEngine {
             runId: ctx.runId,
             workflowId: ctx.state.workflowId,
             agentId: null,
+            appId: this.#appScopeId(ctx.workspaceId, ctx.state.workflowId),
             origin: 'workflow',
             conversationId: null,
             nodeId: node.id,
@@ -6124,6 +6043,8 @@ export class WorkflowEngine {
       executorRef: agentId,
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition so observers see the swarm in flight.
+    await this.#persistRun(ctx).catch(() => {});
     const initial = Math.min(maxParallel, items.length);
     for (let i = 0; i < initial; i++) {
       void this.#dispatchSwarmSubtask(ctx, node, swarm, swarm.next++);
@@ -6210,9 +6131,6 @@ export class WorkflowEngine {
           // instead of letting them run (and bill) to completion.
           signal: ctx.abortController?.signal,
           workdir,
-          abilities: contextResult.abilities,
-          abilityEnv: contextResult.abilityEnv,
-          preferredModel: contextResult.preferredModel,
         },
         swarm.agentId,
       );
@@ -6479,7 +6397,8 @@ export class WorkflowEngine {
     config: RouterNodeConfig,
     inputData: Record<string, unknown>,
   ): Promise<string[]> {
-    const evaluator = this.#resolveEvaluationRuntime(ctx, node);
+    const resolved = this.#resolveEvaluationRuntime(ctx, node);
+    const evaluator = resolved?.runtime;
     if (!evaluator) {
       this.deps.logger.warn('engine.router.llm_route.no_runtime', { nodeId: node.id });
       return this.#executeRouter(ctx, { ...config, routingMode: 'first_match' }, inputData);
@@ -6491,6 +6410,8 @@ export class WorkflowEngine {
         input: inputData,
         branches: config.branches.map((b) => ({ branchId: b.branchId, label: b.label, condition: b.condition })),
       });
+      // Meter + attribute the routing model's spend (same sink as agents/evaluators).
+      this.#recordEvaluationTokens(ctx, node.id, evaluator.lastUsage, resolved?.agentId ?? null);
       if (decision && branchIds.includes(decision)) {
         return [decision];
       }
@@ -6636,6 +6557,7 @@ export class WorkflowEngine {
           runId,
           workflowId: ctx.workflowId,
           agentId: null,
+          appId: this.#appScopeId(ctx.workspaceId, ctx.workflowId),
           origin: 'workflow',
           conversationId: null,
           nodeId: node.id,
@@ -6677,7 +6599,12 @@ export class WorkflowEngine {
       fullPage: config.fullPage,
       headless: config.headless,
       viewport: config.viewport,
-      timeout: config.timeout,
+      // Bounded like http_request: an uncapped/omitted timeout must never let
+      // a browser op hold the node (and the run) open indefinitely.
+      timeout: Math.max(1, Math.min(config.timeout ?? 30_000, 120_000)),
+      // Run-scoped cancellation: Stop closes the page so in-flight Chromium
+      // work rejects immediately instead of running to its timeout.
+      ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
     };
     ctx.state.activeExecutions[node.id] = {
       taskId: `browser:${node.id}`,
@@ -6686,6 +6613,8 @@ export class WorkflowEngine {
       executorRef: config.operation,
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition so observers see the browser op in flight.
+    await this.#persistRun(ctx).catch(() => {});
     try {
       switch (config.operation) {
         case 'serve_html':
@@ -6748,6 +6677,7 @@ export class WorkflowEngine {
     if (!config.operationId) {
       throw new AgentisError('VALIDATION_FAILED', 'integration node missing operationId');
     }
+    this.#enforceSpecConstraints(ctx, config.integrationId, `${config.integrationId}.${config.operationId}`);
     const credential = this.#resolveIntegrationCredential(ctx.workspaceId, config);
     ctx.state.activeExecutions[node.id] = {
       taskId: `integration:${node.id}`,
@@ -6757,26 +6687,69 @@ export class WorkflowEngine {
       startedAt: new Date().toISOString(),
     };
     try {
-      const executeOptions = {
+      return await this.#invokeConnector(ctx.workspaceId, config.integrationId, {
         operation: config.operationId,
         params: config.inputs ?? {},
         credential,
         inputData,
-      };
-      if (this.deps.connectors?.has(config.integrationId)) {
-        return await this.deps.connectors.execute(config.integrationId, executeOptions);
-      }
-      const customManifest = this.#customIntegrationManifest(ctx.workspaceId, config.integrationId);
-      if (customManifest) {
-        return await manifestHttpConnector(customManifest).execute(executeOptions);
-      }
-      if (!this.deps.connectors) {
-        throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'integration node present but ConnectorRegistry not wired');
-      }
-      return await this.deps.connectors.execute(config.integrationId, executeOptions);
+      });
     } finally {
       delete ctx.state.activeExecutions[node.id];
     }
+  }
+
+  /**
+   * Invoke a connector operation, preferring a registered connector, then a
+   * workspace custom manifest, then the registry fallback. Shared by the
+   * `integration` node path and the agent-facing {@link runIntegrationOperation}
+   * so both resolve the same connector the same way.
+   */
+  async #invokeConnector(
+    workspaceId: string,
+    integrationId: string,
+    executeOptions: { operation: string; params: Record<string, unknown>; credential: Record<string, unknown> | null; inputData: Record<string, unknown> },
+  ): Promise<Record<string, unknown>> {
+    if (this.deps.connectors?.has(integrationId)) {
+      return await this.deps.connectors.execute(integrationId, executeOptions);
+    }
+    const customManifest = this.#customIntegrationManifest(workspaceId, integrationId);
+    if (customManifest) {
+      return await manifestHttpConnector(customManifest).execute(executeOptions);
+    }
+    if (!this.deps.connectors) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'integration node present but ConnectorRegistry not wired');
+    }
+    return await this.deps.connectors.execute(integrationId, executeOptions);
+  }
+
+  /**
+   * Run a connector operation standalone — the agent-facing analog of an
+   * `integration` node, backing `agentis.integration.call`. Resolves the
+   * workspace-bound (or explicit) credential from the vault exactly as node
+   * execution does, so an agent inside a task can deploy to Vercel, write to
+   * Supabase, etc. WITHOUT first adding a node to the graph. Secrets stay in the
+   * vault; the agent never sees them.
+   */
+  async runIntegrationOperation(
+    workspaceId: string,
+    integrationId: string,
+    operationId: string,
+    params: Record<string, unknown>,
+    opts?: { credentialId?: string },
+  ): Promise<Record<string, unknown>> {
+    if (!integrationId?.trim()) throw new AgentisError('VALIDATION_FAILED', 'integrationId is required');
+    if (!operationId?.trim()) throw new AgentisError('VALIDATION_FAILED', 'operationId is required');
+    const credential = this.#resolveIntegrationCredential(workspaceId, {
+      integrationId,
+      operationId,
+      ...(opts?.credentialId ? { credentialId: opts.credentialId } : {}),
+    } as IntegrationNodeConfig);
+    return this.#invokeConnector(workspaceId, integrationId, {
+      operation: operationId,
+      params: params ?? {},
+      credential,
+      inputData: {},
+    });
   }
 
   /** `mcp` node — call a registered MCP server's tool via the bridge. */
@@ -6787,6 +6760,10 @@ export class WorkflowEngine {
     if (!config.toolId) {
       throw new AgentisError('VALIDATION_FAILED', 'mcp node missing toolId');
     }
+    // Spec constraint plane: mcp__<slug>__<tool> is in scope when the slug (or
+    // its `mcp:<slug>` form) is allowed.
+    const mcpSlug = config.toolId.match(/^mcp__([^_]+(?:_[^_]+)*?)__/u)?.[1] ?? config.toolId;
+    this.#enforceSpecConstraints(ctx, mcpSlug, config.toolId, `mcp:${mcpSlug}`);
     ctx.state.activeExecutions[node.id] = {
       taskId: `mcp:${node.id}`,
       nodeId: node.id,
@@ -7123,6 +7100,7 @@ export class WorkflowEngine {
     node: WorkflowNode,
     config: CodeNodeConfig,
     inputData: Record<string, unknown>,
+    tctx?: TemplateContext,
   ): Promise<Record<string, unknown>> {
     const input = config.inputKeys && config.inputKeys.length > 0
       ? Object.fromEntries(config.inputKeys.map((k) => [k, inputData[k]]))
@@ -7134,7 +7112,22 @@ export class WorkflowEngine {
     };
 
     if (config.language === 'javascript') {
-      const result = evaluateExpression<unknown>(config.code, { input }, { timeoutMs: config.timeoutMs });
+      // Unified Expression Contract: `code` bodies get the SAME scope as
+      // transform/filter (nodes/trigger/scratchpad/store/workspace/run/loop) —
+      // previously only `input` was bound, so the other names resolved to a
+      // silent empty object.
+      const scope = tctx
+        ? {
+            trigger: tctx.trigger,
+            nodes: tctx.nodes,
+            scratchpad: tctx.scratchpad,
+            store: tctx.store,
+            ...(tctx.workspace ? { workspace: tctx.workspace } : {}),
+            ...(tctx.run ? { run: tctx.run } : {}),
+            ...(tctx.loop ? { loop: tctx.loop } : {}),
+          }
+        : undefined;
+      const result = evaluateExpression<unknown>(config.code, { input, ...(scope ? { ctx: scope } : {}) }, { timeoutMs: config.timeoutMs });
       return wrapResult(result);
     }
 
@@ -7154,7 +7147,9 @@ export class WorkflowEngine {
   ): Promise<unknown> {
     const { spawn } = await import('node:child_process');
     const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
-    const timeout = Math.max(1, Math.min(timeoutMs ?? 15_000, 120_000));
+    // Cap raised to 15min so `code`(python) nodes can shell out to long-running
+    // build/deploy scripts (store-demo seed + Vercel deploy) via subprocess.
+    const timeout = Math.max(1, Math.min(timeoutMs ?? 15_000, 900_000));
     // The user code reads `input` (a dict) and assigns `output`; we print it as JSON.
     const program = [
       'import sys, json',
@@ -7424,7 +7419,8 @@ export class WorkflowEngine {
     if (!config.targetPath) {
       throw new AgentisError('VALIDATION_FAILED', 'evaluator node missing targetPath');
     }
-    const evaluator = this.#resolveEvaluationRuntime(ctx, node, config.targetPath);
+    const resolved = this.#resolveEvaluationRuntime(ctx, node, config.targetPath);
+    const evaluator = resolved?.runtime;
     if (!evaluator) {
       // RELIABILITY: a missing evaluation runtime is an infra gap, not a quality
       // failure. Don't kill the run — DEGRADE to a visible pass so downstream work
@@ -7459,6 +7455,8 @@ export class WorkflowEngine {
       executorRef: 'llm_judge',
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition so observers see the judge in flight.
+    await this.#persistRun(ctx).catch(() => {});
     try {
       // Track FAILâ†’retry cycles via a tagged inputData field â€” the evaluator-retry
       // pattern routes back to the upstream agent_task, which receives a bumped
@@ -7471,6 +7469,9 @@ export class WorkflowEngine {
         rubric: config.rubric,
         passThreshold: config.passThreshold,
       });
+      // Meter the judge's model spend onto this node (so it counts in run/agent
+      // totals) and attribute it to the agent whose model ran the evaluation.
+      this.#recordEvaluationTokens(ctx, node.id, evaluator.lastUsage, resolved?.agentId ?? null);
       try {
         this.deps.sharedIntelligence?.applyEvaluatorVerdict({
           workspaceId: ctx.workspaceId,
@@ -7505,7 +7506,7 @@ export class WorkflowEngine {
     ctx: RunningContext,
     node: WorkflowNode,
     targetPath?: string,
-  ): EvaluationRuntime | undefined {
+  ): { runtime: EvaluationRuntime; agentId: string | null } | undefined {
     const config = node.config.kind === 'evaluator' ? node.config : null;
     const evaluationTask = config
       ? `${config.criteria}${config.rubric ? `\n${config.rubric}` : ''}`
@@ -7513,7 +7514,9 @@ export class WorkflowEngine {
     const dedicated =
       this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'evaluation', { task: evaluationTask, purpose: 'workflow_evaluation' })
       ?? this.deps.evaluatorRuntime;
-    if (dedicated) return dedicated;
+    // The dedicated evaluator is a system model (no owning agent) — its spend is
+    // metered but attributed to the evaluation role, not a workspace agent.
+    if (dedicated) return { runtime: dedicated, agentId: null };
     if (this.deps.modelAssistedRuntimeEnabled?.(ctx.workspaceId) === false) return undefined;
 
     const preferred = this.#evaluationAgentCandidates(ctx, node, targetPath);
@@ -7544,10 +7547,14 @@ export class WorkflowEngine {
         agentId,
         adapterType: adapter.adapterType,
       });
-      return new StructuredEvaluatorRuntime(
-        new AdapterStructuredCompleter(adapter, `agent:${agentId}`, preferredModel),
-        this.deps.logger,
-      );
+      return {
+        runtime: new StructuredEvaluatorRuntime(
+          new AdapterStructuredCompleter(adapter, `agent:${agentId}`, preferredModel),
+          this.deps.logger,
+        ),
+        // The evaluation ran on THIS agent's model — attribute its spend here.
+        agentId,
+      };
     }
     return undefined;
   }
@@ -7644,6 +7651,9 @@ export class WorkflowEngine {
       executorRef: `${items.length} items, c=${concurrency}, chunk=${chunkSize}`,
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition so observers see the loop in flight
+    // (same staleness class as agent_task/wait).
+    await this.#persistRun(ctx).catch(() => {});
 
     // Run loop fully async; complete/fail the node once all chunks settle.
     void this.#runLoop(ctx, node, config, items, concurrency, chunkSize, errorPolicy)
@@ -7823,6 +7833,8 @@ export class WorkflowEngine {
       executorRef: config.bodyWorkflowId,
       startedAt: new Date().toISOString(),
     };
+    // Persist the dispatch transition so observers see the converge in flight.
+    await this.#persistRun(ctx).catch(() => {});
     void this.#runConverge(ctx, node, config, inputData).catch((err) => {
       delete ctx.state.activeExecutions[node.id];
       void this.#failNode(ctx, node.id, (err as Error).message);
@@ -7865,8 +7877,31 @@ export class WorkflowEngine {
     let lastOutput: Record<string, unknown> = priorState.lastOutput ?? {};
     let stallStreak = priorState.stallStreak ?? 0;
 
+    // ASSESS + REFLECT (COGNITIVE-LOOPING-RFC). `assess` off + `maxPivots` 0 →
+    // exact `converge` parity; a `pursue` node turns both on via the normalizer.
+    const assess = config.assess ?? false;
+    // A graded done-check yields a real 0..1 progress (judge score / objective
+    // acceptance-pass fraction) → enables the plateau (s3) + regression (s4)
+    // stall signals. Deterministic/signal checks are binary, so they rely on s1/s5.
+    const graded = config.continuation.type === 'judge' || config.continuation.type === 'objective';
+    const maxPivots = Math.max(0, config.maxPivots ?? 0);
+    const deltaTrajectory: number[] = [...(priorState.deltaTrajectory ?? [])];
+    const reflections: string[] = [...(priorState.reflections ?? [])];
+    const pivotsUsed: string[] = [...(priorState.pivotsUsed ?? [])];
+    const signatureRing: string[] = [...(priorState.signatureRing ?? [])];
+    let pendingReflection: string | undefined;
+
     try {
-      while (iteration < maxIterations) {
+      // ASSESS on entry (RFC §7.4): on a durable resume, if the prior output
+      // already satisfies the done-check, settle WITHOUT acting — the cheapest
+      // iteration is the one we skip. Gated on real prior state so a fresh run
+      // never pays for an extra evaluation (and `converge` never enters here).
+      if (assess && (Object.keys(accumulated).length > 0 || Object.keys(lastOutput).length > 0)) {
+        const seed = Object.keys(accumulated).length > 0 ? accumulated : lastOutput;
+        const entry = await this.#evaluateConvergeContinuation(ctx, node, config, seed, iteration);
+        if (!entry.continue) verdictKind = 'goal_met';
+      }
+      while (verdictKind !== 'goal_met' && iteration < maxIterations) {
         // Budget breaker — wall clock (always) + real recorded cost / tokens
         // across this run and its descendant cohort runs (when a spend resolver
         // is wired). Any crossed limit stops the loop with an honest verdict.
@@ -7883,8 +7918,12 @@ export class WorkflowEngine {
             stateKey,
             state: carry === 'replace' ? lastOutput : accumulated,
             workspace: worktree?.path ? { path: worktree.path, mode: worktree.mode } : undefined,
+            // REFLECT rung 1: the previous stall's self-critique, so the body
+            // changes tack this pass instead of repeating (RFC §8).
+            reflection: pendingReflection,
           },
         };
+        pendingReflection = undefined; // one-shot — consumed by this iteration
 
         const rawOutput = await this.#runConvergeIteration(ctx, node, config, iterInput, iteration);
         // The body must not feed our control envelope back into shared state — a
@@ -7909,11 +7948,26 @@ export class WorkflowEngine {
 
         const decision = await this.#evaluateConvergeContinuation(ctx, node, config, output, iteration);
 
-        // Stall detection — the efficiency guard. Two consecutive no-change
-        // iterations (default) means we're spinning; stop with an honest verdict.
+        // ASSESS + multi-signal stagnation detection (RFC §3.2/§6). Measure the
+        // distance-to-goal delta, then vote across structural repeat / oscillation
+        // / progress plateau / regression. For a plain `converge` (assess off,
+        // graded off) this collapses to the original single-signal behaviour.
         const signature = convergeStableSignature(output);
-        if (lastSignature !== undefined && signature === lastSignature) stallStreak += 1;
-        else stallStreak = 0;
+        const progress = computeProgress(decision);
+        deltaTrajectory.push(progress);
+        const stag = detectStagnation({
+          signature,
+          prevSignature: lastSignature,
+          signatureRing,
+          deltaTrajectory,
+          window: stallWindow,
+          prevStallStreak: stallStreak,
+          assess,
+          graded,
+        });
+        stallStreak = stag.stallStreak;
+        signatureRing.push(signature);
+        if (signatureRing.length > 8) signatureRing.shift();
         lastSignature = signature;
 
         const record: ConvergeIterationRecord = {
@@ -7924,15 +7978,30 @@ export class WorkflowEngine {
           score: decision.score,
           critique: decision.critique,
           stallStreak,
+          progress: graded ? progress : undefined,
+          stallReasons: stag.reasons.length ? stag.reasons : undefined,
         };
         history.push(record);
         iteration += 1;
 
-        await this.#persistConvergeState(ctx, node, { history, accumulated, lastSignature, lastOutput, stallStreak });
+        await this.#persistConvergeState(ctx, node, {
+          history,
+          accumulated,
+          lastSignature,
+          lastOutput,
+          stallStreak,
+          deltaTrajectory,
+          reflections,
+          pivotsUsed,
+          signatureRing,
+        });
         this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONVERGE_ITERATION, {
           runId: ctx.runId,
           nodeId: node.id,
           ...record,
+          // ASSESS — distance-to-goal, so the canvas can show "progress N%".
+          delta: graded ? Math.max(0, 1 - progress) : undefined,
+          pivots: pivotsUsed.length,
           spendMs: Date.now() - startedAt,
           maxIterations,
         });
@@ -7941,7 +8010,34 @@ export class WorkflowEngine {
           verdictKind = 'goal_met';
           break;
         }
-        if (config.stallPolicy && stallStreak + 1 >= stallWindow) {
+
+        // A stall is actionable only when the author asked for it: a `converge`
+        // node needs a stallPolicy (parity); a `pursue` node opts in via
+        // maxPivots. On a stall we REFLECT (feed a self-critique forward and try
+        // a different tack) up to the pivot budget, and only then settle
+        // `stalled` — the "pivot, don't quit" rule (RFC §8).
+        const stallActive = !!config.stallPolicy || maxPivots > 0;
+        if (stallActive && stag.stalled) {
+          if (pivotsUsed.length < maxPivots) {
+            const reflection = chooseReflection(decision.critique, stag.reasons, pivotsUsed.length + 1);
+            reflections.push(reflection);
+            pivotsUsed.push('reflect');
+            pendingReflection = reflection;
+            this.deps.scratchpad.write(
+              ctx.runId,
+              `${stateKey}.reflection.${iteration - 1}`,
+              { reflection, reasons: stag.reasons },
+              { namespace: stateKey, iteration: iteration - 1, identity: CONVERGE_IDENTITY },
+            );
+            this.deps.logger.info('pursuit.reflect', {
+              nodeId: node.id,
+              iteration: iteration - 1,
+              reasons: stag.reasons,
+              pivot: pivotsUsed.length,
+              maxPivots,
+            });
+            continue; // REFLECT → ACT
+          }
           verdictKind = 'stalled';
           break;
         }
@@ -7964,6 +8060,10 @@ export class WorkflowEngine {
         history,
         output: lastOutput,
         state: accumulated,
+        // ASSESS/REFLECT observability — the progress trajectory and any
+        // self-critiques the Pursuit generated on the way (RFC §3.2/§8).
+        ...(deltaTrajectory.length ? { deltaTrajectory } : {}),
+        ...(reflections.length ? { reflections, pivots: pivotsUsed.length } : {}),
       };
       if (preserveResult.preserved) {
         result['branch'] = preserveResult.branch;
@@ -8051,8 +8151,43 @@ export class WorkflowEngine {
       return { continue: !done, verdict: done ? 'signalled_done' : 'open' };
     }
 
+    if (cont.type === 'objective') {
+      // P1 (RFC): the done-check IS the workflow's scoped Objective. Verify the
+      // iteration output against the spec's acceptance checks through the SAME
+      // world-probe path the run-settle verdict uses — no self-report trusted.
+      const spec = this.#specForRun(ctx);
+      if (!spec || !spec.acceptance?.length) {
+        this.deps.logger.warn('pursuit.objective.no_spec', { nodeId: node.id });
+        // No scoped Objective to verify against — stop honestly rather than spin.
+        return { continue: false, verdict: 'no_objective_spec' };
+      }
+      const nodeOutputs: Record<string, Record<string, unknown>> = {};
+      for (const [nid, ns] of Object.entries(ctx.state.nodeStates)) {
+        if (ns?.outputData && typeof ns.outputData === 'object') nodeOutputs[nid] = ns.outputData as Record<string, unknown>;
+      }
+      const verdict = await evaluateRunVerdict({
+        spec,
+        graphHash: graphContentHash(ctx.graph),
+        output: unwrapReturnEnvelope(output),
+        nodeOutputs,
+        mode: 'full',
+        deps: this.#verdictProbeDeps(ctx, spec),
+      });
+      const total = verdict.checks.length || 1;
+      const passed = verdict.checks.filter((c) => c.passed).length;
+      const accomplished = verdict.outcome === 'accomplished';
+      return {
+        continue: !accomplished,
+        verdict: verdict.outcome,
+        // Progress = fraction of acceptance checks passing → a real distance-to-goal (0..10).
+        score: Math.round((passed / total) * 100) / 10,
+        critique: accomplished ? undefined : verdict.deficiencies.map((d) => d.detail).join('; ').slice(0, 400) || undefined,
+      };
+    }
+
     // judge
-    const evaluator = this.#resolveEvaluationRuntime(ctx, node, cont.targetPath);
+    const resolved = this.#resolveEvaluationRuntime(ctx, node, cont.targetPath);
+    const evaluator = resolved?.runtime;
     if (!evaluator) {
       this.deps.logger.warn('converge.continuation.no_evaluator', { nodeId: node.id });
       // Without a judge we cannot assess convergence — stop to avoid an unbounded loop.
@@ -8066,6 +8201,8 @@ export class WorkflowEngine {
       rubric: cont.rubric,
       passThreshold: cont.passThreshold,
     });
+    // Meter + attribute the convergence judge's model spend.
+    this.#recordEvaluationTokens(ctx, node.id, evaluator.lastUsage, resolved?.agentId ?? null);
     try {
       this.deps.sharedIntelligence?.applyEvaluatorVerdict({
         workspaceId: ctx.workspaceId,
@@ -8220,6 +8357,7 @@ export class WorkflowEngine {
       title: approvalCopy.title,
       summary: approvalCopy.summary,
       confidence: null,
+      payload: approvalCopy.payload,
     });
     this.#pendingApprovals(ctx).set(approval.id, { kind: 'checkpoint', targetId: node.id });
     // Mark node WAITING; an explicit operator approval will resume the run
@@ -8279,6 +8417,11 @@ export class WorkflowEngine {
       title: (config.prompt?.trim() || `Provide input: ${node.title}`).slice(0, 200),
       summary: `Fill ${fieldCount} field(s) to continue.`,
       confidence: null,
+      // Carry the form spec so the operator UI can render inputs and submit real
+      // `data` — without it, a UI approve sends no field values and the node
+      // re-parks. (The realtime NODE_WAITING_FOR_INPUT event carries the same
+      // spec for live surfaces; this persists it for the approvals list.)
+      payload: { humanInputForm: { targetId: node.id, prompt: config.prompt ?? null, fields: config.fields ?? [] } },
     });
     this.#pendingApprovals(ctx).set(approval.id, { kind: 'checkpoint', targetId: node.id });
     const ns = ctx.state.nodeStates[node.id]!;
@@ -8290,6 +8433,60 @@ export class WorkflowEngine {
       REALTIME_EVENTS.NODE_WAITING_FOR_INPUT,
       { runId: ctx.runId, nodeId: node.id, reason: 'human_input', approvalId: approval.id, form: { prompt: config.prompt ?? null, fields: config.fields } },
     );
+  }
+
+  /**
+   * An "approve" arrived for a human_input node without its required fields.
+   * Keep the node WAITING and open a FRESH pending approval that names the gap,
+   * so the run stays paused for a real decision instead of completing empty.
+   * (The prior approval row was already consumed by the inbox.)
+   */
+  async #reparkHumanInput(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: HumanInputNodeConfig,
+    missing: string[],
+  ): Promise<void> {
+    const fieldCount = Array.isArray(config.fields) ? config.fields.length : 0;
+    const gap = `Missing required field(s): ${missing.join(', ')}.`;
+    const approval = await this.deps.approvals.create({
+      workspaceId: ctx.workspaceId,
+      ambientId: ctx.ambientId,
+      userId: ctx.userId,
+      runId: ctx.runId,
+      taskId: null,
+      targetId: node.id,
+      gatewayId: null,
+      source: 'checkpoint',
+      title: (config.prompt?.trim() || `Provide input: ${node.title}`).slice(0, 200),
+      summary: `${gap} Fill ${fieldCount} field(s) to continue.`,
+      confidence: null,
+      payload: { humanInputForm: { targetId: node.id, prompt: config.prompt ?? null, fields: config.fields ?? [], blocked: gap } },
+    });
+    this.#pendingApprovals(ctx).set(approval.id, { kind: 'checkpoint', targetId: node.id });
+    const ns = ctx.state.nodeStates[node.id];
+    if (ns) ns.status = 'WAITING';
+    await this.#persistRun(ctx).catch(() => {});
+    this.#audit(ctx, {
+      nodeId: node.id,
+      action: 'human_input.repark',
+      actorType: 'system',
+      actorId: 'engine',
+      outputSummary: gap,
+    });
+    this.deps.bus.publish(
+      REALTIME_ROOMS.run(ctx.runId),
+      REALTIME_EVENTS.NODE_WAITING_FOR_INPUT,
+      {
+        runId: ctx.runId,
+        nodeId: node.id,
+        reason: 'human_input',
+        approvalId: approval.id,
+        blocked: gap,
+        form: { prompt: config.prompt ?? null, fields: config.fields },
+      },
+    );
+    this.deps.logger.info('engine.human_input.reparked', { runId: ctx.runId, nodeId: node.id, missing });
   }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -8391,6 +8588,29 @@ export class WorkflowEngine {
       tokensIn: prev.tokensIn + Math.max(0, Math.round(tokensIn)),
       tokensOut: prev.tokensOut + Math.max(0, Math.round(tokensOut)),
     });
+  }
+
+  /**
+   * Attribute a node's recorded tokens to a specific agent, overriding the
+   * node-kind default on the terminal `node.completed` audit entry. Used by paths
+   * where the spending agent is known but the completing node is NOT an
+   * `agent_task` (the tool loop's resolved agent; an evaluator/router whose model
+   * ran on a workspace agent) — so no agent's spend reads as anonymous "engine".
+   */
+  #attributeNodeTokens(ctx: RunningContext, nodeId: string, agentId: string | null | undefined): void {
+    if (!agentId) return;
+    if (!ctx.nodeTokenAttribution) ctx.nodeTokenAttribution = new Map();
+    ctx.nodeTokenAttribution.set(nodeId, agentId);
+  }
+
+  /** Meter an evaluator/router LLM call: record its usage on the node AND, when
+   * the judge ran on a workspace agent's model, attribute the spend to that agent.
+   * A dedicated (agentless) evaluator model records tokens but stays system-scoped. */
+  #recordEvaluationTokens(ctx: RunningContext, nodeId: string, usage: { tokensIn: number; tokensOut: number } | null | undefined, agentId: string | null): void {
+    if (usage && (usage.tokensIn > 0 || usage.tokensOut > 0)) {
+      this.#recordNodeTokens(ctx, nodeId, usage.tokensIn, usage.tokensOut);
+      this.#attributeNodeTokens(ctx, nodeId, agentId);
+    }
   }
 
   /** Capture an agent node's resolved input so the reliability fallback can rebuild its task. */
@@ -8524,12 +8744,20 @@ export class WorkflowEngine {
    * phase gate). The resume target is looked up from the in-memory map keyed by
    * the approval id. Public â€” called from the approval-resolution wiring.
    */
-  async resolveApproval(args: { runId: string; approvalId: string; decision: 'approve' | 'reject'; data?: Record<string, unknown> }): Promise<void> {
+  async resolveApproval(args: { runId: string; approvalId: string; decision: 'approve' | 'reject' | 'revise'; data?: Record<string, unknown>; feedback?: string }): Promise<void> {
     const ctx = this.#runs.get(args.runId) ?? this.#ensureRecoveredCtx(args.runId);
     if (!ctx) return;
     const pending = ctx.pendingApprovals?.get(args.approvalId) ?? this.#recoverPendingApproval(ctx, args.approvalId);
     if (!pending) return;
     ctx.pendingApprovals!.delete(args.approvalId);
+    // `revise` — the operator sends a new instruction back INSTEAD of approving
+    // or cancelling. The run is never torn down: an agent session is woken with
+    // the note (it decides what to do and may re-request approval); any other
+    // gate is re-parked so it stays waiting with the operator's note attached.
+    if (args.decision === 'revise') {
+      await this.#reviseApproval(ctx, pending, args.feedback ?? '');
+      return;
+    }
     if (pending.kind === 'phase_gate') {
       if (args.decision === 'approve') await this.resumePhaseGate({ runId: args.runId, phaseId: pending.targetId });
       else await this.failRunForGate({ runId: args.runId, phaseId: pending.targetId, reason: 'Phase gate rejected' });
@@ -8599,6 +8827,17 @@ export class WorkflowEngine {
       if (args.decision === 'approve') {
         const cfg = resolvedNode.config as HumanInputNodeConfig;
         const submitted = args.data ?? {};
+        // ENFORCE THE NODE'S OWN CONTRACT. An "approve" that omits the required
+        // form fields is not a decision — it is a missing decision. Completing
+        // with `{}` silently passes an empty payload downstream (the exact
+        // "seed-approval → {} → gate throws BLOCKED" failure). Instead, keep the
+        // node WAITING and re-open a fresh pending approval naming the gap, so
+        // the run stays paused for a REAL decision rather than green-washing one.
+        const missing = missingRequiredHumanInputFields(cfg, submitted);
+        if (missing.length > 0) {
+          await this.#reparkHumanInput(ctx, resolvedNode, cfg, missing);
+          return;
+        }
         const output = cfg.outputKey ? { [cfg.outputKey]: submitted } : submitted;
         await this.notifyTaskCompleted({ runId: args.runId, nodeId: pending.targetId, output });
       } else {
@@ -8612,6 +8851,54 @@ export class WorkflowEngine {
     if (args.decision === 'approve') {
       await this.notifyTaskCompleted({ runId: args.runId, nodeId: pending.targetId, output: { approved: true } });
     }
+  }
+
+  /**
+   * `revise` — the operator's third decision. Instead of approving or cancelling
+   * (which loses the run), they send a new instruction back to whoever is
+   * waiting. For an agent session (orchestrator/manager parked on
+   * `request_approval`) we WAKE it with the note so it can adjust and continue —
+   * the run never dies. For a deterministic gate (plain checkpoint / human_input
+   * / phase gate / self-heal) there is no agent to talk to, so we RE-PARK a fresh
+   * pending approval carrying the note, keeping the run WAITING and actionable.
+   */
+  async #reviseApproval(ctx: RunningContext, pending: PendingApproval, feedback: string): Promise<void> {
+    const note = feedback.trim();
+    const node = ctx.graph.nodes.find((n) => n.id === pending.targetId);
+    if (pending.kind === 'session') {
+      if (!pending.sessionId || !pending.toolCallId || !pending.runCtx || !node) return;
+      // The note becomes the result of the agent's `request_approval` tool call.
+      await this.#wakeSession(ctx, node, pending.sessionId, pending.runCtx, pending.toolCallId, {
+        approved: false,
+        decision: 'revise',
+        feedback: note,
+      });
+      this.#audit(ctx, { nodeId: pending.targetId, action: 'approval.revised', actorType: 'user', actorId: 'operator', outputSummary: note ? `operator instruction: ${note.slice(0, 160)}` : 'operator asked for a change' });
+      return;
+    }
+    // Deterministic gate: re-park so the run stays alive with the note attached.
+    const approval = await this.deps.approvals.create({
+      workspaceId: ctx.workspaceId,
+      ambientId: ctx.ambientId,
+      userId: ctx.userId,
+      runId: ctx.runId,
+      taskId: null,
+      targetId: pending.targetId,
+      gatewayId: null,
+      source: pending.kind === 'phase_gate' ? 'phase_gate' : pending.kind === 'self_heal' ? 'self_heal' : 'checkpoint',
+      title: node ? `Revise: ${node.title ?? pending.targetId}` : 'Approval needs a decision',
+      summary: note ? `Operator asked for a change:\n\n${note}` : 'Operator asked for a change before approving.',
+      confidence: null,
+      payload: note ? { operatorNote: note } : null,
+    });
+    this.#pendingApprovals(ctx).set(approval.id, pending);
+    await this.#persistRun(ctx).catch(() => {});
+    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_WAITING_FOR_INPUT, {
+      runId: ctx.runId,
+      nodeId: pending.targetId,
+      reason: 'approval_revise',
+    });
+    this.#audit(ctx, { nodeId: pending.targetId, action: 'approval.revised', actorType: 'user', actorId: 'operator', outputSummary: note ? `operator note: ${note.slice(0, 160)}` : 'operator asked for a change' });
   }
 
   #recoverPendingApproval(ctx: RunningContext, approvalId: string): PendingApproval | null {
@@ -8963,8 +9250,29 @@ export class WorkflowEngine {
         const filled = normalizeDeclaredNodeOutputResult(completedNode, normalizedOutput, { fillTypedDefaults: true });
         normalizedOutput = filled.output;
         normalization = { ...filled, missingKeys: filled.defaultedKeys };
+        // fall through to the tripwire below — a typed-empty fill on a floored
+        // key must trip NOW, not 20 nodes later.
         if (filled.defaultedKeys.length > 0) {
           this.deps.logger.info('engine.output_adapted', { runId: ctx.runId, nodeId, defaultedKeys: filled.defaultedKeys });
+        }
+      }
+    }
+    // ── SWIFT V6 — mid-run sufficiency tripwire (anti-hollow). A producer
+    // handing a hollow payload downstream trips a LOGIC failure NOW (with the
+    // named deficiency) instead of 20 nodes later at the verdict. Only fires
+    // when the workflow's spec declares floors for keys this node produced;
+    // control-flow kinds (filter legitimately yields empty) are exempt, and a
+    // node may opt out with `allowEmptyOutput: true`.
+    if (completedNode && this.#sufficiencyTripwireApplies(completedNode)) {
+      const violation = this.#sufficiencyViolation(ctx, completedNode, normalizedOutput);
+      if (violation) {
+        const message = `SUFFICIENCY_FLOOR: ${violation} — downstream steps (and the acceptance checks) need real content here, not a hollow payload.`;
+        const heal = await this.#runSelfHeal(ctx, completedNode, normalizedOutput, message);
+        if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return null;
+        if (heal.kind === 'output_fixed' && !this.#sufficiencyViolation(ctx, completedNode, heal.output)) {
+          normalizedOutput = heal.output;
+        } else {
+          throw new Error(message);
         }
       }
     }
@@ -9002,11 +9310,17 @@ export class WorkflowEngine {
     }
     if (completedNode) this.#emitWorkStep(ctx, completedNode, 'complete');
     const nodeTokens = ctx.nodeTokenUsage?.get(nodeId);
+    // Prefer an explicit token attribution (tool-loop resolved agent, or an
+    // evaluator/router that ran on an agent's model) so the spend is stamped with
+    // the real agent even when the completing node isn't an `agent_task`. Falls
+    // back to the node-kind default (agent_task/swarm → its agent, else engine).
+    const attributedAgentId = ctx.nodeTokenAttribution?.get(nodeId);
+    const isAgentNode = completedNode !== undefined && (completedNode.config.kind === 'agent_task' || completedNode.config.kind === 'agent_swarm');
     this.#audit(ctx, {
       nodeId,
       action: 'node.completed',
-      actorType: completedNode && (completedNode.config.kind === 'agent_task' || completedNode.config.kind === 'agent_swarm') ? 'agent' : 'system',
-      actorId: completedNode ? nodeActorId(completedNode) : 'engine',
+      actorType: attributedAgentId || isAgentNode ? 'agent' : 'system',
+      actorId: attributedAgentId ?? (completedNode ? nodeActorId(completedNode) : 'engine'),
       outputSummary: summarizeForAudit(normalizedOutput),
       costCents: completedNode ? nodeCostCents(completedNode) : null,
       tokensIn: nodeTokens?.tokensIn ?? null,
@@ -9015,6 +9329,7 @@ export class WorkflowEngine {
     // Usage has been persisted on the terminal entry; drop it so a re-dispatch
     // of the same node id (retry / loop body) starts a fresh tally.
     ctx.nodeTokenUsage?.delete(nodeId);
+    ctx.nodeTokenAttribution?.delete(nodeId);
     ctx.eventsSinceSnapshot += 1;
 
     // Phase governance (Layer 5): accrue cost; on budget overrun, halt the run
@@ -9270,7 +9585,13 @@ export class WorkflowEngine {
       await this.#pauseNodeBlocked(ctx, nodeId, resourceBlockerReason(error));
       return;
     }
-    if (!isSelfHealTerminalError(error)) {
+    // Organ 4 — POLICY class: a deliberate gate throw (`BLOCKED_*`) is the
+    // workflow WORKING AS INTENDED (an approval/policy boundary refusing to
+    // pass). It is not a bug: never run the self-heal ladder or retries on it
+    // — the "repair" a healer derives for an approval gate is always wrong.
+    // Error-edge routing below still applies (a graph may catch the block).
+    const policyBlock = isPolicyBlockError(error);
+    if (!isSelfHealTerminalError(error) && !policyBlock) {
       if (node && isSelfHealableNode(node)) {
         const heal = await this.#runSelfHeal(ctx, node, {}, error);
         if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return;
@@ -9297,18 +9618,37 @@ export class WorkflowEngine {
       await this.#pauseNodeBlocked(ctx, nodeId, friendlyBlockedReason(error));
       return;
     }
-    if (!isSelfHealTerminalError(error) && node?.config.kind === 'agent_task') {
+    if (!isSelfHealTerminalError(error) && !policyBlock && node?.config.kind === 'agent_task') {
       const retried = await this.#tryLegacyAgentTaskSelfHealRetry(ctx, node, error);
       if (retried) return;
     }
     if (node?.config.kind === 'agent_task') {
       this.#reflectHardNodeFailure(ctx, node, error);
     }
+    // Learn from EVERY hard node failure (any kind) — "fail-forward, don't
+    // dead-end". The wiring keeps only instructive failures (guard / precondition
+    // / validation / contract) as a workspace playbook lesson, which build_workflow
+    // already recalls so the next build wires a corrective loop instead of a hard
+    // stop. Must never break the failure path.
+    if (node && this.deps.recordFailureLesson) {
+      try {
+        this.deps.recordFailureLesson({
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
+          nodeId: node.id,
+          nodeTitle: node.title,
+          error,
+          agentId: (node.config as { agentId?: string }).agentId ?? null,
+        });
+      } catch (err) {
+        this.deps.logger.warn('engine.failure_lesson.failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
+      }
+    }
     // Generic per-node retryPolicy: bounded re-dispatch of transient IO /
     // deterministic failures BEFORE error-edge routing, so any non-agent node
     // gets the resilience that previously only agent_task had. Agent-like kinds
     // are excluded (they use self-heal / AgentRetryPolicy above).
-    if (node && this.#shouldGenericRetry(node, error)) {
+    if (node && !policyBlock && this.#shouldGenericRetry(node, error)) {
       const attempts = this.#nodeRetryAttempts(ctx);
       const prior = attempts.get(nodeId) ?? 0;
       const cap = Math.min(Math.max(node.retryPolicy!.maxAttempts, 0), 10);
@@ -9743,6 +10083,27 @@ export class WorkflowEngine {
       }
     }
 
+    // ── SWIFT layer 3 — the run verdict (SWIFT-WORKFLOW-QUALITY-10X §2-T). ──
+    // COMPLETED is a topology fact; ACCOMPLISHED is a world fact. When the
+    // workflow carries a spec, every completed run is verified against the
+    // WORLD (probes + judge, never the run's self-report) and the verdict is
+    // stamped into runState. A deficient PRODUCTION run gets one bounded
+    // outcome-heal attempt (deficiency-driven re-work of the producing node);
+    // a debug run surfaces the deficiencies raw for the iterating agent.
+    let runVerdict: RunVerdict | null = null;
+    if (status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION' || status === 'COMPLETED_WITH_ERRORS') {
+      const spec = this.#specForRun(ctx);
+      if (spec) {
+        runVerdict = await this.#evaluateVerdict(ctx, spec);
+        if (runVerdict) {
+          (ctx.state as unknown as { verdict?: RunVerdict }).verdict = runVerdict;
+          if (runVerdict.outcome !== 'accomplished' && await this.#healDeficientOutcome(ctx, spec, runVerdict)) {
+            return; // re-work applied — the run resumes; the next settle re-verifies.
+          }
+        }
+      }
+    }
+
     const previous = ctx.state.status;
     ctx.state.status = status;
     const finishing = status === 'COMPLETED'
@@ -9791,7 +10152,109 @@ export class WorkflowEngine {
           workflowId: ctx.workflowId,
           runId: ctx.runId,
           state: ctx.state,
+          // PAVED-ROAD P4 — the Sentinel files Issues only for production runs;
+          // a debug run's failure is the building agent's business, not backlog.
+          debugRun: this.#debugRuns.has(ctx.runId),
+          userId: ctx.userId,
         });
+      }
+      // PAVED-ROAD P1 â€” close the build loop on the workflow row: a debug run
+      // stamps debugRun evidence, a production run stamps productionRun, both
+      // keyed to the current graph hash so a later edit stales them. This is
+      // what lets loop_status / the compass answer "was this graph ever proven
+      // by a real run?" without folklore. Best-effort; never affects the run.
+      if (status !== 'CANCELLED') {
+        try {
+          const wfRow = this.deps.db
+            .select({ graph: schema.workflows.graph, settings: schema.workflows.settings })
+            .from(schema.workflows)
+            .where(eq(schema.workflows.id, ctx.workflowId))
+            .get();
+          if (wfRow?.graph) {
+            const stamp = {
+              at: new Date().toISOString(),
+              runId: ctx.runId,
+              status,
+              graphHash: graphContentHash(wfRow.graph as WorkflowGraph),
+              ...(runVerdict ? { verdict: runVerdict.outcome } : {}),
+            };
+            const isDebug = this.#debugRuns.has(ctx.runId);
+            // SWIFT-T: roll the production accomplishment health (the metric the
+            // Sentinel and the health indicator read). Debug runs never count.
+            let healthPatch: { outcomeHealth?: BuildLoopOutcomeHealth } = {};
+            if (!isDebug && runVerdict) {
+              const prior = readBuildLoop(wfRow.settings).outcomeHealth;
+              const recent: Array<0 | 1> = [runVerdict.outcome === 'accomplished' ? 1 : 0, ...(prior?.recent ?? [])].slice(0, 20) as Array<0 | 1>;
+              healthPatch = {
+                outcomeHealth: {
+                  recent,
+                  ...(runVerdict.outcome !== 'accomplished'
+                    ? { lastDeficientRunId: ctx.runId }
+                    : prior?.lastDeficientRunId
+                      ? { lastDeficientRunId: prior.lastDeficientRunId }
+                      : {}),
+                },
+              };
+            }
+            stampBuildLoop(
+              this.deps.db,
+              ctx.workflowId,
+              isDebug ? { debugRun: stamp } : { productionRun: stamp, ...healthPatch },
+            );
+            // BRAIN-BLUEPRINT-10X — BLESS: an ACCOMPLISHED production run ratchets
+            // the blueprint stamp to the graph that actually RAN (ctx.graph — its
+            // bytes live in the run's graphSnapshot). Unlike productionRun (which
+            // every terminal run overwrites, including failures), this only moves
+            // forward on proof. It is what the self-heal guard respects and what
+            // agentis.workflow.restore_blueprint rolls back to.
+            if (!isDebug && runVerdict?.outcome === 'accomplished') {
+              const blessedHash = graphContentHash(ctx.graph);
+              stampBuildLoop(this.deps.db, ctx.workflowId, {
+                blueprint: { at: stamp.at, runId: ctx.runId, graphHash: blessedHash },
+              });
+              this.#audit(ctx, {
+                action: 'workflow.blessed',
+                actorType: 'system',
+                actorId: 'verdict-engine',
+                outputSummary: `blueprint blessed @${blessedHash.slice(0, 12)} by accomplished run ${ctx.runId}`,
+              });
+            }
+            // A hardened workflow whose production run is no longer accomplished
+            // has REGRESSED: demote the hardened stamp (hash-keyed honesty) and
+            // let the Sentinel file the Issue + pause unattended triggers.
+            if (!isDebug && runVerdict && runVerdict.outcome !== 'accomplished') {
+              const loop = readBuildLoop(wfRow.settings);
+              if (loop.hardened && loop.hardened.graphHash === stamp.graphHash) {
+                stampBuildLoop(this.deps.db, ctx.workflowId, { hardened: undefined });
+                this.#audit(ctx, {
+                  action: 'workflow.demoted',
+                  actorType: 'system',
+                  actorId: 'verdict-engine',
+                  outputSummary: `hardened stamp cleared: production run ${ctx.runId} verdict ${runVerdict.outcome}`,
+                });
+                this.deps.onWorkflowDemoted?.({
+                  workspaceId: ctx.workspaceId,
+                  workflowId: ctx.workflowId,
+                  runId: ctx.runId,
+                  verdict: runVerdict,
+                });
+              }
+              // Sentinel on outcomes: a deficient production run files an Issue
+              // exactly like a failed one — silence is not an option.
+              if (this.deps.instincts) {
+                void this.deps.instincts.onRunDeficient?.({
+                  workspaceId: ctx.workspaceId,
+                  workflowId: ctx.workflowId,
+                  runId: ctx.runId,
+                  verdict: runVerdict,
+                  userId: ctx.userId,
+                });
+              }
+            }
+          }
+        } catch {
+          /* stamping is bookkeeping â€” never fail a terminal transition */
+        }
       }
     }
 
@@ -9881,6 +10344,297 @@ export class WorkflowEngine {
     const finalNodeId = ctx.state.completedNodeIds.at(-1);
     const out = (finalNodeId && ctx.state.nodeStates[finalNodeId]?.outputData) || {};
     return (out && typeof out === 'object' && !Array.isArray(out)) ? (out as Record<string, unknown>) : {};
+  }
+
+  // ─── SWIFT layer 3 — verdict + outcome heal ────────────────────────────────
+
+  /** The workflow's spec, loaded once per run (cached on the context). */
+  #specForRun(ctx: RunningContext): WorkflowSpec | null {
+    const holder = ctx as unknown as { __swiftSpec?: WorkflowSpec | null };
+    if (holder.__swiftSpec !== undefined) return holder.__swiftSpec;
+    try {
+      const row = this.deps.db
+        .select({ settings: schema.workflows.settings })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.id, ctx.workflowId))
+        .get();
+      holder.__swiftSpec = row ? readWorkflowSpec(row.settings) : null;
+    } catch {
+      holder.__swiftSpec = null;
+    }
+    return holder.__swiftSpec;
+  }
+
+  /**
+   * SWIFT V8 — compile-to-enforcement of `spec.constraints` at external-call
+   * dispatch. Out-of-scope service → BLOCKED_POLICY_SERVICE (a POLICY-class
+   * failure: self-heal skips it — the fix is widening the spec, not retrying).
+   * Every external call counts against `maxMutatingCalls` when set.
+   */
+  #enforceSpecConstraints(ctx: RunningContext, service: string, callRef: string, ...aliases: string[]): void {
+    const constraints = this.#specForRun(ctx)?.constraints;
+    if (!constraints) return;
+    const allowed = constraints.allowedServices;
+    if (allowed && allowed.length > 0) {
+      const candidates = [service, ...aliases].map((s) => s.toLowerCase());
+      if (!allowed.some((a) => candidates.includes(a.toLowerCase()))) {
+        throw new AgentisError(
+          'INTEGRATION_OPERATION_FAILED',
+          `BLOCKED_POLICY_SERVICE: "${callRef}" uses service "${service}", which is outside this workflow's scoped allowedServices [${allowed.join(', ')}]. Widen the scope explicitly via agentis.workflow.scope if this call is intended.`,
+        );
+      }
+    }
+    if (constraints.maxMutatingCalls !== undefined) {
+      const holder = ctx.state as unknown as { externalCallCount?: number };
+      const next = (holder.externalCallCount ?? 0) + 1;
+      if (next > constraints.maxMutatingCalls) {
+        throw new AgentisError(
+          'INTEGRATION_OPERATION_FAILED',
+          `BLOCKED_POLICY_BUDGET: external-call budget exhausted (${constraints.maxMutatingCalls} per run, per the workflow spec). "${callRef}" was call #${next}.`,
+        );
+      }
+      holder.externalCallCount = next;
+    }
+  }
+
+  /** Producer kinds the sufficiency tripwire watches. Control-flow kinds are
+   *  exempt (a filter legitimately yields empty); explicit opt-out honored. */
+  #sufficiencyTripwireApplies(node: WorkflowNode): boolean {
+    const cfg = node.config as { kind?: string; allowEmptyOutput?: boolean };
+    if (cfg.allowEmptyOutput === true) return false;
+    return ['agent_task', 'agent_session', 'agent_swarm', 'integration', 'mcp', 'extension_task', 'code', 'http_request', 'browser', 'subflow', 'transform'].includes(cfg.kind ?? '');
+  }
+
+  /** First floor violation in this node's output, or null. */
+  #sufficiencyViolation(ctx: RunningContext, node: WorkflowNode, output: Record<string, unknown>): string | null {
+    const spec = this.#specForRun(ctx);
+    if (!spec?.sufficiency?.length) return null;
+    for (const floor of spec.sufficiency) {
+      if (!(floor.key in output)) continue;
+      const value = output[floor.key];
+      const empty = value === null
+        || (typeof value === 'string' && value.trim() === '')
+        || (Array.isArray(value) && value.length === 0)
+        || (typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === 0);
+      if (floor.nonEmpty && empty) return `"${node.title}" produced an empty "${floor.key}"`;
+      if (floor.minItems !== undefined && Array.isArray(value) && value.length < floor.minItems) {
+        return `"${node.title}" produced ${value.length} item(s) in "${floor.key}" but the spec requires ≥${floor.minItems}`;
+      }
+      if (floor.minLength !== undefined && typeof value === 'string' && value.trim().length < floor.minLength) {
+        return `"${node.title}" produced ${value.trim().length} chars in "${floor.key}" but the spec requires ≥${floor.minLength}`;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Execute the spec's acceptance checks against the WORLD (never the run's
+   * self-report) and return the verdict. Never throws — an unverifiable run is
+   * a `partial`, not a crash.
+   */
+  async #evaluateVerdict(ctx: RunningContext, spec: WorkflowSpec): Promise<RunVerdict | null> {
+    try {
+      const isDebug = this.#debugRuns.has(ctx.runId);
+      const nodeOutputs: Record<string, Record<string, unknown>> = {};
+      for (const [nodeId, ns] of Object.entries(ctx.state.nodeStates)) {
+        if (ns?.outputData && typeof ns.outputData === 'object') nodeOutputs[nodeId] = ns.outputData as Record<string, unknown>;
+      }
+      // Terminal DATA surface: collectFinalOutput merged with return_output
+      // viewer envelopes unwrapped — acceptance checks target the payload.
+      const terminalNodes = ctx.graph.nodes.filter((n) => {
+        const cfg = n.config as { kind?: string; isOutput?: boolean };
+        return cfg.kind === 'return_output' || cfg.isOutput === true;
+      });
+      let verdictOutput: Record<string, unknown>;
+      if (terminalNodes.length > 0) {
+        verdictOutput = {};
+        for (const n of terminalNodes) {
+          const out = ctx.state.nodeStates[n.id]?.outputData;
+          if (out && typeof out === 'object' && !Array.isArray(out)) Object.assign(verdictOutput, unwrapReturnEnvelope(out as Record<string, unknown>));
+        }
+      } else {
+        verdictOutput = unwrapReturnEnvelope(this.#collectFinalOutput(ctx));
+      }
+      const verdict = await evaluateRunVerdict({
+        spec,
+        graphHash: graphContentHash(ctx.graph),
+        output: verdictOutput,
+        nodeOutputs,
+        trigger: (ctx.state.nodeStates[ctx.graph.nodes.find((n) => (n.config as { kind?: string }).kind === 'trigger')?.id ?? '']?.outputData ?? {}) as Record<string, unknown>,
+        // Debug runs always get the full verdict; production honors the spec's
+        // verification mode (probes_only for high-frequency crons).
+        mode: !isDebug && spec.verification === 'probes_only' ? 'probes_only' : 'full',
+        deps: this.#verdictProbeDeps(ctx, spec),
+      });
+      this.deps.logger.info('engine.run.verdict', {
+        runId: ctx.runId,
+        outcome: verdict.outcome,
+        checks: verdict.checks.length,
+        deficiencies: verdict.deficiencies.length,
+      });
+      this.#audit(ctx, {
+        action: 'run.verdict',
+        actorType: 'system',
+        actorId: 'verdict-engine',
+        outputSummary: `${verdict.outcome}: ${verdict.checks.filter((c) => c.passed).length}/${verdict.checks.length} checks passed${verdict.deficiencies.length > 0 ? `; deficiencies: ${verdict.deficiencies.map((d) => d.claim).join(' | ').slice(0, 300)}` : ''}`,
+      });
+      return verdict;
+    } catch (err) {
+      this.deps.logger.warn('engine.run.verdict_failed', { runId: ctx.runId, error: (err as Error).message });
+      return null;
+    }
+  }
+
+  /**
+   * Build the world-probe deps for the verdict engine — the http / browser /
+   * data / file probes + the judge seam. Shared by the run-settle verdict AND
+   * the `pursue` node's `doneWhen: { type: 'objective' }` done-check, so both
+   * verify against the world through exactly the same evidence path (RFC P1).
+   */
+  #verdictProbeDeps(ctx: RunningContext, spec: WorkflowSpec): VerdictProbeDeps {
+    const evaluator = this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'evaluation', { task: spec.objective, purpose: 'run_verdict' })
+      ?? this.deps.evaluatorRuntime;
+    return {
+      allowPrivateNetwork: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
+      ...(this.deps.browserPool
+        ? {
+            browser: {
+              navigate: async (url: string) => this.deps.browserPool!.navigate({ url }),
+              screenshot: async (url: string) => this.deps.browserPool!.screenshot({ url }),
+            },
+          }
+        : {}),
+      runIntegration: async (integration, operation, params) =>
+        this.runIntegrationOperation(ctx.workspaceId, integration, operation, params),
+      ...(evaluator
+        ? {
+            judge: async (a: { target: unknown; criteria: string }) => {
+              const v = await evaluator.evaluate({ workspaceId: ctx.workspaceId, target: a.target, criteria: a.criteria });
+              return { score: v.score, passed: v.passed, critique: v.critique };
+            },
+          }
+        : {}),
+      saveEvidence: async (name, content, mimeType) => this.#saveVerdictEvidence(ctx, name, content, mimeType),
+      statPath: async (p: string) => this.#statVerdictPath(p),
+    };
+  }
+
+  /** Persist probe evidence (screenshots…) as a workspace artifact. */
+  async #saveVerdictEvidence(ctx: RunningContext, name: string, content: Buffer | string, mimeType: string): Promise<string | undefined> {
+    try {
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      this.deps.db.insert(schema.artifacts).values({
+        id,
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        type: mimeType.startsWith('image/') ? 'image' : 'file',
+        title: name,
+        content: Buffer.isBuffer(content) ? content.toString('base64') : content,
+        thumbnailUrl: null,
+        runId: ctx.runId.startsWith('test-') ? null : ctx.runId,
+        workflowId: ctx.workflowId,
+        agentId: null,
+        appId: this.#appScopeId(ctx.workspaceId, ctx.workflowId),
+        origin: 'workflow',
+        conversationId: null,
+        nodeId: null,
+        metadata: { name, savedBy: 'verdict-engine', mimeType },
+        createdAt: now,
+        updatedAt: now,
+      }).run();
+      return id;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Stat a local path for a `file_probe` acceptance check — the filesystem is
+   * the world for a local harvest/build (this is what catches an agent_task that
+   * fabricated "15 products harvested" while the directory is empty). Path-
+   * guarded: only paths that resolve WITHIN the API's working tree (cwd) or the
+   * configured data dir are readable — a probe can never stat `/etc/passwd`.
+   * Returns null when the path does not exist. For a directory, counts files and
+   * total bytes ONE level deep (enough to prove a harvest wrote real output).
+   */
+  async #statVerdictPath(rawPath: string): Promise<{ isDir: boolean; fileCount: number; totalBytes: number } | null> {
+    try {
+      const path = await import('node:path');
+      const fs = await import('node:fs/promises');
+      const roots = [process.cwd(), process.env.AGENTIS_DATA_DIR ? path.resolve(process.env.AGENTIS_DATA_DIR) : null]
+        .filter((r): r is string => Boolean(r))
+        .map((r) => path.resolve(r));
+      const resolved = path.resolve(rawPath);
+      if (!roots.some((root) => resolved === root || resolved.startsWith(root + path.sep))) {
+        this.deps.logger.warn('engine.verdict.file_probe_out_of_root', { path: resolved });
+        return null;
+      }
+      const stat = await fs.stat(resolved).catch(() => null);
+      if (!stat) return null;
+      if (!stat.isDirectory()) return { isDir: false, fileCount: 1, totalBytes: stat.size };
+      const entries = await fs.readdir(resolved, { withFileTypes: true }).catch(() => []);
+      let fileCount = 0;
+      let totalBytes = 0;
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const info = await fs.stat(path.join(resolved, entry.name)).catch(() => null);
+        if (info) { fileCount += 1; totalBytes += info.size; }
+      }
+      return { isDir: true, fileCount, totalBytes };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Outcome heal (SWIFT §2-T3) — the outcome-level sibling of self-heal. A
+   * PRODUCTION run whose verdict is deficient gets bounded re-work: the first
+   * deficient producing node is re-run through the self-heal seam with the
+   * deficiency (and its evidence) as the briefing. Debug runs never re-work —
+   * `#runSelfHeal` already no-ops for them, surfacing raw truth to the
+   * iterating agent. Returns true when the run resumed (do not finish it).
+   */
+  async #healDeficientOutcome(ctx: RunningContext, spec: WorkflowSpec, verdict: RunVerdict): Promise<boolean> {
+    if (this.#debugRuns.has(ctx.runId)) return false;
+    const budget = spec.reworkBudget ?? 1;
+    const holder = ctx.state as unknown as { outcomeRework?: { attempts: number; nodesReworked: string[] } };
+    const attempts = holder.outcomeRework?.attempts ?? 0;
+    if (attempts >= budget) {
+      // Converge-honest: budget exhausted, the verdict stands — never faked.
+      verdict.rework = { attempts, nodesReworked: holder.outcomeRework?.nodesReworked ?? [] };
+      return false;
+    }
+    const target = verdict.deficiencies
+      .flatMap((d) => d.producingNodeIds.map((nodeId) => ({ nodeId, deficiency: d })))
+      .map(({ nodeId, deficiency }) => ({ node: ctx.graph.nodes.find((n) => n.id === nodeId), deficiency }))
+      .find(({ node }) => node && isSelfHealableNode(node));
+    if (!target?.node) return false;
+    const briefing = [
+      `OUTCOME VERIFICATION FAILED (verdict: ${verdict.outcome}). The run completed but did not accomplish its objective: "${spec.objective}".`,
+      `Deficiency on this node's output: ${target.deficiency.detail}`,
+      ...verdict.deficiencies.slice(0, 4).map((d) => `- ${d.claim}: ${d.detail}`),
+      'Re-do this step so its output SATISFIES the acceptance evidence above — real content, no placeholders, no advisory text.',
+    ].join('\n');
+    this.deps.logger.info('engine.run.outcome_rework', { runId: ctx.runId, nodeId: target.node.id, attempt: attempts + 1, budget });
+    const heal = await this.#runSelfHeal(ctx, target.node, {}, briefing);
+    if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval' || heal.kind === 'output_fixed') {
+      holder.outcomeRework = { attempts: attempts + 1, nodesReworked: [...(holder.outcomeRework?.nodesReworked ?? []), target.node.id] };
+      verdict.rework = holder.outcomeRework;
+      this.#audit(ctx, {
+        nodeId: target.node.id,
+        action: 'run.outcome_rework',
+        actorType: 'system',
+        actorId: 'verdict-engine',
+        outputSummary: `attempt ${attempts + 1}/${budget}: re-working "${target.node.title}" — ${target.deficiency.claim}`,
+      });
+      // output_fixed patched the node's data in place — re-verify by falling
+      // through to a fresh transition attempt rather than resuming dispatch.
+      if (heal.kind === 'output_fixed') return false;
+      return true;
+    }
+    verdict.rework = { attempts, nodesReworked: holder.outcomeRework?.nodesReworked ?? [] };
+    return false;
   }
 
   async #maybeSnapshot(ctx: RunningContext): Promise<void> {
@@ -9977,6 +10731,13 @@ interface RunningContext {
    * reports usage, estimated from prompt+output text otherwise.
    */
   nodeTokenUsage?: Map<string, { tokensIn: number; tokensOut: number }>;
+  /**
+   * Explicit agent attribution for a node's recorded tokens, keyed by node id.
+   * Set by paths that know the spending agent but complete a non-`agent_task`
+   * node (the tool loop's resolved agent; an evaluator/router run on an agent's
+   * model). `node.completed` uses it to stamp `agent_id` so no spend is anonymous.
+   */
+  nodeTokenAttribution?: Map<string, string>;
   /** Estimated input tokens of a dispatched task prompt, keyed by node id —
    *  combined with the returned output to attribute tokens for the dispatch path. */
   nodeDispatchInputTokens?: Map<string, number>;
@@ -10210,6 +10971,10 @@ const WORKFLOW_AGENT_TOOL_BLOCKLIST = new Set<string>([
   'agentis.build_workflow',
   'agentis.workflow.patch',
   'agentis.workflow.run',
+  // deliver builds + runs + repairs a whole workflow — an agent INSIDE a
+  // workflow must never recursively deliver new apps (runaway). The top-level
+  // chat orchestrator keeps it; agent_task nodes do not.
+  'agentis.workflow.deliver',
   'agentis.ephemeral.run',
   'agentis.run.cancel',
   'agentis.approval.resolve',
@@ -10222,6 +10987,29 @@ export function capabilityGapReason(error: string): string | null {
     );
   if (!matched) return null;
   return error.replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+/**
+ * A CONFIG gap — the step failed because required CONFIGURATION isn't set (an
+ * environment variable, a working directory, a credential/token), NOT because
+ * the graph is wrong. Like a capability gap, no graph edit or agent swap can
+ * supply it, so structural self-heal is pointless (it just burns replans and
+ * emits "could not derive a grounded repair" — the exact mush the operator saw
+ * on the store_factory `AGENTIS_STORES_DIR` failure). The failing extension's own
+ * message usually carries the remedy verbatim ("set AGENTIS_STORES_DIR … or pass
+ * workingDir/storesDir"), so we surface it as the fix. Returns the trimmed
+ * reason+remedy, or null when the failure may genuinely be graph/data-class.
+ */
+export function configGapReason(error: string): string | null {
+  const e = (error ?? '').replace(/\s+/g, ' ').trim();
+  const matched =
+    /requires (?:a |an )?(?:working directory|environment variable|configuration|config|credential|directory|api key|token)/i.test(e)
+    || /\bset [A-Z][A-Z0-9_]{3,}\b/.test(e)                                  // "set AGENTIS_STORES_DIR"
+    || /\bpass (?:workingDir|storesDir|working directory)\b/i.test(e)
+    || /environment variable [\w.$-]+ (?:is )?(?:not set|missing|required|undefined|empty)/i.test(e)
+    || /(?:credential|api key|token|secret|env(?:ironment)? var(?:iable)?) (?:is )?(?:missing|not set|not configured|required|undefined)/i.test(e);
+  if (!matched) return null;
+  return e.slice(0, 240);
 }
 
 function selfHealFailureMessage(error: string, heal: SelfHealEngineResult | null): string {
@@ -10395,6 +11183,17 @@ function isResourceFailure(error: string): boolean {
     || /login wall|captcha required|\b403\b|access denied|401 unauthorized|permission denied/.test(e)
     || /\b(502|503|504)\b|service unavailable|temporarily unavailable|bad gateway|gateway timeout/.test(e)
     || /econnreset|etimedout|enotfound|socket hang up/.test(e);
+}
+
+/**
+ * Organ 4 — POLICY class: a DELIBERATE gate throw. Workflow authors signal
+ * "stop here until a human/policy condition is met" by throwing an error whose
+ * message carries a `BLOCKED_*` marker (e.g. `BLOCKED_SEED_NOT_APPROVED: …`).
+ * That is the workflow working as intended — never a repairable logic bug, so
+ * the self-heal ladder and retries must not touch it.
+ */
+function isPolicyBlockError(error: string): boolean {
+  return /\bBLOCKED_[A-Z0-9_]{2,}\b/.test(error || '');
 }
 
 /** Operator-facing reason for a resource quarantine (distinct from a logic failure). */
@@ -10670,16 +11469,48 @@ function worksheetToRows(ws: unknown, hasHeaders: boolean): Array<Record<string,
  * or agent task), so the operator sees exactly what they're approving. Not
  * specialised to any one connector.
  */
+/**
+ * The required fields a human_input submission is missing. A field is present
+ * when its key exists with a non-empty value; a boolean `false` counts as
+ * present (an explicit negative decision), an empty string / null / undefined
+ * does not. Non-required fields never block completion.
+ */
+function missingRequiredHumanInputFields(
+  config: HumanInputNodeConfig,
+  submitted: Record<string, unknown>,
+): string[] {
+  const fields = Array.isArray(config.fields) ? config.fields : [];
+  const missing: string[] = [];
+  for (const field of fields) {
+    if (!field?.required) continue;
+    const value = submitted[field.key];
+    const present = value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '');
+    if (!present) missing.push(field.label?.trim() || field.key);
+  }
+  return missing;
+}
+
 function checkpointApprovalCopy(
   ctx: RunningContext,
   node: WorkflowNode,
   inputData: Record<string, unknown>,
-): { title: string; summary: string } {
+): { title: string; summary: string; payload: Record<string, unknown> } {
   const action = checkpointGuardedAction(ctx, node, inputData);
   if (!action) {
     return {
       title: node.title || 'Checkpoint approval',
       summary: `Approve to continue workflow run ${ctx.runId}.`,
+      payload: {
+        approvalPreview: {
+          kind: 'checkpoint',
+          runId: ctx.runId,
+          workflowId: ctx.workflowId,
+          gatedNode: approvalNodeRef(node),
+          input: redactApprovalPreviewValue(inputData),
+          assets: collectApprovalAssets(inputData),
+          records: extractApprovalRecords(inputData),
+        },
+      },
     };
   }
   const title = node.title && !/^checkpoint\b/i.test(node.title)
@@ -10687,7 +11518,34 @@ function checkpointApprovalCopy(
     : `Approve: ${action.label}`;
   const parts = [`Approve running ${action.label}.`];
   for (const [key, value] of action.fields) parts.push(`${key}: ${value}.`);
-  return { title, summary: parts.join(' ') };
+  const sourcePreview = {
+    upstream: inputData,
+    resolvedAction: action.payload,
+  };
+  return {
+    title,
+    summary: parts.join(' '),
+    payload: {
+      approvalPreview: {
+        kind: 'checkpoint',
+        runId: ctx.runId,
+        workflowId: ctx.workflowId,
+        gatedNode: approvalNodeRef(node),
+        action: {
+          nodeId: action.nodeId,
+          title: action.nodeTitle,
+          type: action.nodeType,
+          kind: action.kind,
+          label: action.label,
+          fields: action.fields.map(([key, value]) => ({ key, value })),
+        },
+        input: redactApprovalPreviewValue(inputData),
+        resolvedAction: redactApprovalPreviewValue(action.payload),
+        assets: collectApprovalAssets(sourcePreview),
+        records: extractApprovalRecords(sourcePreview),
+      },
+    },
+  };
 }
 
 /**
@@ -10699,7 +11557,15 @@ function checkpointGuardedAction(
   ctx: RunningContext,
   node: WorkflowNode,
   inputData: Record<string, unknown>,
-): { label: string; fields: Array<[string, string]> } | null {
+): {
+  nodeId: string;
+  nodeTitle: string;
+  nodeType: string;
+  kind: string;
+  label: string;
+  fields: Array<[string, string]>;
+  payload: Record<string, unknown>;
+} | null {
   const target = (ctx.downstreamEdges.get(node.id) ?? [])
     .map((edge) => ctx.graph.nodes.find((candidate) => candidate.id === edge.target))
     .find((candidate): candidate is WorkflowNode => {
@@ -10715,16 +11581,61 @@ function checkpointGuardedAction(
     const integrationId = String(cfg.integrationId ?? 'integration');
     const op = cfg.operationId ? ` · ${String(cfg.operationId)}` : '';
     const inputs = resolveTemplateDeep((cfg.inputs as Record<string, unknown>) ?? {}, tctx) as Record<string, unknown>;
-    return { label: `${target.title || integrationId} (${integrationId}${op})`, fields: previewFields(inputs) };
+    return {
+      ...approvalActionRef(target, cfg.kind),
+      label: `${target.title || integrationId} (${integrationId}${op})`,
+      fields: previewFields(inputs),
+      payload: { integrationId, operationId: cfg.operationId ?? null, inputs },
+    };
   }
   if (cfg.kind === 'http_request') {
     const url = resolveTemplate(String(cfg.url ?? ''), tctx);
     const method = String(cfg.method ?? 'GET').toUpperCase();
-    return { label: `${target.title || 'HTTP request'} (${method} ${url ? redactUrl(url) : 'unset URL'})`, fields: previewFields({ body: (cfg as { body?: unknown }).body }) };
+    const headers = resolveTemplateDeep((cfg.headers as Record<string, unknown>) ?? {}, tctx) as Record<string, unknown>;
+    const body = resolveTemplateDeep((cfg as { body?: unknown }).body ?? {}, tctx);
+    return {
+      ...approvalActionRef(target, cfg.kind),
+      label: `${target.title || 'HTTP request'} (${method} ${url ? redactUrl(url) : 'unset URL'})`,
+      fields: previewFields({ url: redactUrl(url), method, body }),
+      payload: { method, url: redactUrl(url), headers, body },
+    };
   }
   // agent_task / agent_session
   const prompt = previewText(resolveTemplate(String((cfg as { prompt?: unknown }).prompt ?? ''), tctx));
-  return { label: target.title || 'agent task', fields: prompt ? [['Task', prompt]] : [] };
+  return {
+    ...approvalActionRef(target, cfg.kind ?? 'agent_task'),
+    label: target.title || 'agent task',
+    fields: prompt ? [['Task', prompt]] : [],
+    payload: {
+      prompt,
+      agentId: typeof cfg.agentId === 'string' ? cfg.agentId : null,
+      sessionId: typeof cfg.sessionId === 'string' ? cfg.sessionId : null,
+    },
+  };
+}
+
+function approvalNodeRef(node: WorkflowNode): Record<string, unknown> {
+  const cfg = node.config as { kind?: unknown } | undefined;
+  return {
+    id: node.id,
+    title: node.title ?? node.id,
+    type: node.type,
+    kind: typeof cfg?.kind === 'string' ? cfg.kind : null,
+  };
+}
+
+function approvalActionRef(node: WorkflowNode, kind: string): {
+  nodeId: string;
+  nodeTitle: string;
+  nodeType: string;
+  kind: string;
+} {
+  return {
+    nodeId: node.id,
+    nodeTitle: node.title || node.id,
+    nodeType: node.type,
+    kind,
+  };
 }
 
 /** First few non-empty, resolved input fields of a node, for a compact approval preview. */
@@ -10736,6 +11647,86 @@ function previewFields(inputs: Record<string, unknown>): Array<[string, string]>
     if (out.length >= 5) break;
   }
   return out;
+}
+
+const APPROVAL_SECRET_KEY = /(password|secret|token|api[-_ ]?key|service[-_ ]?role|credential|authorization|bearer|private[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret)/i;
+const APPROVAL_RECORD_KEY = /^(store_identity|brand_config|brandConfig|storeIdentity|records|diff|tables)$/i;
+
+function redactApprovalPreviewValue(value: unknown, depth = 0): unknown {
+  if (depth > 8) return '[Truncated]';
+  if (Array.isArray(value)) return value.slice(0, 200).map((item) => redactApprovalPreviewValue(item, depth + 1));
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = APPROVAL_SECRET_KEY.test(key) ? '[Redacted]' : redactApprovalPreviewValue(nested, depth + 1);
+  }
+  return out;
+}
+
+function extractApprovalRecords(value: unknown): Record<string, unknown> | undefined {
+  const records: Record<string, unknown> = {};
+  const visit = (node: unknown, depth: number) => {
+    if (depth > 6 || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node.slice(0, 60)) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, nested] of Object.entries(node as Record<string, unknown>)) {
+      if (APPROVAL_RECORD_KEY.test(key)) {
+        records[key] = redactApprovalPreviewValue(nested);
+      } else if (nested && typeof nested === 'object') {
+        visit(nested, depth + 1);
+      }
+    }
+  };
+  visit(value, 0);
+  return Object.keys(records).length > 0 ? records : undefined;
+}
+
+function collectApprovalAssets(value: unknown): Array<Record<string, unknown>> {
+  const assets: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+  const push = (asset: Record<string, unknown>) => {
+    const key = String(asset.artifactId ?? asset.ref ?? asset.url ?? '');
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    assets.push(asset);
+  };
+  const visit = (node: unknown, depth: number) => {
+    if (depth > 8 || assets.length >= 16 || !node) return;
+    if (typeof node === 'string') {
+      if (/^artifact:[\w-]+/.test(node)) {
+        push({ ref: node, artifactId: node.replace(/^artifact:/, ''), title: 'Artifact', type: 'artifact' });
+      } else if (/^https?:\/\/.+\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(node) || /^data:image\//i.test(node)) {
+        push({ url: node, title: 'Image preview', type: 'image' });
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node.slice(0, 80)) visit(item, depth + 1);
+      return;
+    }
+    if (typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    const artifactId = typeof obj.artifactId === 'string' ? obj.artifactId : typeof obj.id === 'string' && obj.type === 'artifact' ? obj.id : null;
+    const ref = typeof obj.ref === 'string' ? obj.ref : null;
+    const url = typeof obj.url === 'string' ? obj.url : typeof obj.thumbnailUrl === 'string' ? obj.thumbnailUrl : null;
+    const mimeType = typeof obj.mimeType === 'string' ? obj.mimeType : null;
+    const type = typeof obj.type === 'string' ? obj.type : mimeType?.startsWith('image/') ? 'image' : undefined;
+    if (artifactId || ref || url) {
+      push({
+        ...(artifactId ? { artifactId } : {}),
+        ...(ref ? { ref } : {}),
+        ...(url ? { url } : {}),
+        title: typeof obj.title === 'string' ? obj.title : typeof obj.name === 'string' ? obj.name : artifactId ?? ref ?? 'Asset',
+        ...(type ? { type } : {}),
+        ...(mimeType ? { mimeType } : {}),
+      });
+    }
+    for (const nested of Object.values(obj)) visit(nested, depth + 1);
+  };
+  visit(value, 0);
+  return assets;
 }
 
 function checkpointTemplateContext(ctx: RunningContext, inputData: Record<string, unknown>): TemplateContext {
@@ -11620,6 +12611,10 @@ interface ConvergeIterationRecord {
   critique?: string;
   /** Consecutive no-change iterations leading up to (and including) this one. */
   stallStreak: number;
+  /** ASSESS — distance-to-goal progress 0..1 for this iteration (graded checks only). */
+  progress?: number;
+  /** Which stagnation signals fired this iteration (RFC §6). */
+  stallReasons?: string[];
 }
 
 /** Persisted controller state — enough to resume a loop mid-flight after a crash. */
@@ -11629,6 +12624,39 @@ interface ConvergeRunState {
   lastSignature?: string;
   lastOutput?: Record<string, unknown>;
   stallStreak?: number;
+  /** ASSESS — progress 0..1 per iteration (the PRM-style trajectory). */
+  deltaTrajectory?: number[];
+  /** REFLECT — verbal self-critiques generated on stalls, fed forward. */
+  reflections?: string[];
+  /** REFLECT — pivots spent, so a resume respects the pivot budget. */
+  pivotsUsed?: string[];
+  /** Recent-K output signatures, for oscillation detection. */
+  signatureRing?: string[];
+}
+
+/**
+ * Normalize a friendly `pursue` config into the internal `converge` shape so the
+ * one engine loop serves both (COGNITIVE-LOOPING-RFC §10). ASSESS + REFLECT
+ * default ON for a Pursuit; a raw `converge` keeps them OFF for exact parity.
+ */
+function pursueConfigToConverge(cfg: PursueNodeConfig): ConvergeNodeConfig {
+  const carryMap = { keep: 'accumulate', latest: 'replace', delta: 'diff' } as const;
+  return {
+    kind: 'converge',
+    bodyWorkflowId: cfg.bodyWorkflowId,
+    continuation: cfg.doneWhen,
+    maxIterations: cfg.maxIterations,
+    budget: cfg.budget,
+    stallPolicy: cfg.stopWhenStalled
+      ? { window: cfg.stopWhenStalled.after, on: cfg.stopWhenStalled.on }
+      : undefined,
+    stateKey: cfg.stateKey,
+    carryStrategy: cfg.carry ? carryMap[cfg.carry] : undefined,
+    isolation: cfg.isolation,
+    preserve: cfg.preserve,
+    assess: cfg.assess ?? true,
+    maxPivots: cfg.maxPivots ?? 2,
+  };
 }
 
 /**

@@ -192,7 +192,9 @@ describe('GET /v1/agents', () => {
         runsToday: 1,
         spendTodayCents: 25,
         pendingApprovals: 1,
-        connectionCounts: { workflows: 1 },
+        // ownedWorkflows joined the payload with the owner-agent domain work;
+        // match the seeded count without pinning the whole nested shape.
+        connectionCounts: expect.objectContaining({ workflows: 1 }),
       }),
     ]);
   });

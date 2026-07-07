@@ -16,7 +16,6 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import type { AbilityService } from '../services/abilityService.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { WorkspacePackager } from '../services/workspacePackager.js';
@@ -44,7 +43,6 @@ export function buildWorkspaceBundleRoutes(deps: {
   auth: AuthService;
   bus?: EventBus;
   logger?: Logger;
-  abilities?: AbilityService;
   /** Data dir for the `backup` profile (whole-install snapshot). */
   dataDir?: string;
   /** RSA keypair (PEM) used to sign `sell` bundles. */
@@ -55,7 +53,6 @@ export function buildWorkspaceBundleRoutes(deps: {
     db: deps.db,
     ...(deps.bus ? { bus: deps.bus } : {}),
     ...(deps.logger ? { logger: deps.logger } : {}),
-    ...(deps.abilities ? { abilities: deps.abilities } : {}),
     ...(deps.signer ? { signer: deps.signer } : {}),
   });
   app.use('*', requireAuth(deps), requireWorkspace(deps));

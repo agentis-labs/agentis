@@ -68,6 +68,12 @@ export interface BrowserRenderOptions {
   formData?: Record<string, string>;
   /** For fill_form: optional element to click after filling (submit). */
   submitSelector?: string;
+  /**
+   * Run-scoped cancellation: aborting closes the page, so an in-flight
+   * navigation/screenshot rejects immediately instead of holding the node
+   * (and the run) open until its timeout.
+   */
+  signal?: AbortSignal;
 }
 
 export class BrowserPool {
@@ -95,7 +101,7 @@ export class BrowserPool {
 
   /** Full-page (configurable) screenshot of a URL or inline HTML → PNG bytes. */
   async screenshot(opts: BrowserRenderOptions): Promise<Buffer> {
-    return this.#withPage(opts.headless, async (page) => {
+    return this.#withPage(opts, async (page) => {
       await this.#applyViewport(page, opts.viewport);
       await this.#load_(page, opts);
       return page.screenshot({ fullPage: opts.fullPage ?? true, type: 'png' });
@@ -104,7 +110,7 @@ export class BrowserPool {
 
   /** Render a URL or inline HTML to PDF bytes. */
   async pdf(opts: BrowserRenderOptions): Promise<Buffer> {
-    return this.#withPage(true, async (page) => {
+    return this.#withPage({ headless: true, signal: opts.signal }, async (page) => {
       await this.#load_(page, opts);
       await page.emulateMedia({ media: 'print' });
       return page.pdf({ printBackground: true, format: 'A4' });
@@ -113,7 +119,7 @@ export class BrowserPool {
 
   /** Navigate to a URL and return its title + visible text + final HTML. */
   async navigate(opts: BrowserRenderOptions): Promise<{ title: string; text: string; html: string }> {
-    return this.#withPage(opts.headless, async (page) => {
+    return this.#withPage(opts, async (page) => {
       await this.#load_(page, opts);
       const [title, text, html] = await Promise.all([
         page.title(),
@@ -126,7 +132,7 @@ export class BrowserPool {
 
   /** Extract visible text under a selector (or whole body). */
   async extractText(opts: BrowserRenderOptions): Promise<string> {
-    return this.#withPage(opts.headless, async (page) => {
+    return this.#withPage(opts, async (page) => {
       await this.#load_(page, opts);
       return page.innerText(opts.selector ?? 'body').catch(() => '');
     });
@@ -134,7 +140,7 @@ export class BrowserPool {
 
   /** Fill form fields by selector, optionally submit; returns read-back values + final HTML. */
   async fillForm(opts: BrowserRenderOptions): Promise<{ title: string; html: string; values: Record<string, string> }> {
-    return this.#withPage(opts.headless, async (page) => {
+    return this.#withPage(opts, async (page) => {
       await this.#load_(page, opts);
       const selectors = Object.keys(opts.formData ?? {});
       for (const selector of selectors) {
@@ -157,7 +163,7 @@ export class BrowserPool {
 
   /** Extract a `<table>` (by selector, default first) into an array of row objects. */
   async extractTable(opts: BrowserRenderOptions): Promise<Array<Record<string, string | null>>> {
-    return this.#withPage(opts.headless, async (page) => {
+    return this.#withPage(opts, async (page) => {
       await this.#load_(page, opts);
       const sel = JSON.stringify(opts.selector ?? 'table');
       const expr = `(() => {
@@ -189,14 +195,28 @@ export class BrowserPool {
 
   // ── internals ──────────────────────────────────────────────────────────
 
-  async #withPage<T>(headless: boolean | undefined, fn: (page: PWPage) => Promise<T>): Promise<T> {
+  async #withPage<T>(
+    opts: { headless?: boolean; signal?: AbortSignal },
+    fn: (page: PWPage) => Promise<T>,
+  ): Promise<T> {
+    if (opts.signal?.aborted) {
+      throw new AgentisError('BROWSER_OPERATION_FAILED', 'browser op cancelled before it started (run aborted)');
+    }
     await this.#acquire();
     let page: PWPage | null = null;
     let ephemeral: PWBrowser | null = null;
+    // Cancellation: closing the page makes every in-flight Playwright call
+    // (goto/screenshot/pdf/…) reject immediately — the only reliable way to
+    // interrupt Chromium work mid-operation.
+    const onAbort = () => {
+      if (page) void page.close().catch(() => {});
+      if (ephemeral) void ephemeral.close().catch(() => {});
+    };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
     try {
       await this.ensureReady();
       let browser: PWBrowser;
-      if (headless === false) {
+      if (opts.headless === false) {
         // Visible window: a dedicated browser we don't pool.
         ephemeral = await this.#pw!.chromium.launch({ headless: false });
         browser = ephemeral;
@@ -204,11 +224,18 @@ export class BrowserPool {
         browser = await this.#sharedBrowser();
       }
       page = await browser.newPage();
+      if (opts.signal?.aborted) {
+        throw new Error('run aborted');
+      }
       await this.#guardNetworkRequests(page);
       return await fn(page);
     } catch (err) {
+      if (opts.signal?.aborted) {
+        throw new AgentisError('BROWSER_OPERATION_FAILED', 'browser op cancelled (run aborted)');
+      }
       throw new AgentisError('BROWSER_OPERATION_FAILED', `browser op failed: ${(err as Error).message}`);
     } finally {
+      opts.signal?.removeEventListener('abort', onAbort);
       if (page) await page.close().catch(() => {});
       if (ephemeral) await ephemeral.close().catch(() => {});
       this.#release();

@@ -76,6 +76,15 @@ export type AgentisErrorCode =
   | 'CHANNEL_CONNECTION_INACTIVE'
   | 'CHANNEL_BRIDGE_UNAVAILABLE'
   | 'CHANNEL_DISCORD_INBOUND_UNAVAILABLE'
+  // Connection authority (Agent-Native Platform Plan §3.3)
+  | 'CONNECTION_GRANTS_UNAVAILABLE'
+  | 'CONNECTION_SCOPE_MISSING'
+  // Code-mode (Agent-Native Platform Plan §3.7)
+  | 'CODE_MODE_ERROR'
+  | 'CODE_MODE_LIMIT'
+  // Media generation
+  | 'MEDIA_UNAVAILABLE'
+  | 'MEDIA_PROVIDER_ERROR'
   // Packages / library
   | 'PACKAGE_NOT_FOUND'
   | 'PACKAGE_IMPORT_INVALID'
@@ -210,9 +219,15 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'LISTENER_SOURCE_UNAVAILABLE':
     case 'LISTENER_RUNTIME_UNAVAILABLE':
     case 'CHANNEL_BRIDGE_UNAVAILABLE':
+    case 'CONNECTION_GRANTS_UNAVAILABLE':
     case 'INTEGRATION_OPERATION_FAILED':
     case 'BROWSER_OPERATION_FAILED':
       return 503;
+    case 'CONNECTION_SCOPE_MISSING':
+      return 403;
+    case 'CODE_MODE_ERROR':
+    case 'CODE_MODE_LIMIT':
+      return 400;
     case 'ADAPTER_TIMEOUT':
     case 'EXTENSION_TIMEOUT':
       return 504;

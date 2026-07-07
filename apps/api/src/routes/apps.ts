@@ -59,6 +59,7 @@ import type { AppLearningService } from '../services/appLearning.js';
 import { AppLearningService as AppLearningStatic } from '../services/appLearning.js';
 import type { ConversationSimulatorService } from '../services/conversationSimulator.js';
 import type { OutboundPolicyService } from '../services/outboundPolicy.js';
+import type { AppOrchestratorService } from '../services/appOrchestrator.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -88,6 +89,8 @@ export interface AppRoutesDeps {
   presence?: AppPresenceService;
   /** Outbound safety envelope (G7) — records operator sends against the App's rolling counter. */
   outboundPolicy?: OutboundPolicyService;
+  /** Multi-workflow rules executor (APP-INTERFACE-10X §2.3) — chains, schedules, run-all. */
+  orchestrator?: AppOrchestratorService;
 }
 
 const addMemberSchema = z.object({
@@ -428,6 +431,18 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       }).from(schema.workflowRuns)
         .where(and(eq(schema.workflowRuns.workspaceId, ws.workspaceId), eq(schema.workflowRuns.workflowId, row.id)))
         .orderBy(desc(schema.workflowRuns.createdAt)).limit(1).get();
+      const activeRun = deps.db.select({
+        id: schema.workflowRuns.id,
+        status: schema.workflowRuns.status,
+        startedAt: schema.workflowRuns.startedAt,
+        createdAt: schema.workflowRuns.createdAt,
+      }).from(schema.workflowRuns)
+        .where(and(
+          eq(schema.workflowRuns.workspaceId, ws.workspaceId),
+          eq(schema.workflowRuns.workflowId, row.id),
+          inArray(schema.workflowRuns.status, ['RUNNING', 'WAITING', 'PAUSED']),
+        ))
+        .orderBy(desc(schema.workflowRuns.createdAt)).limit(1).get();
       return {
         id: row.id,
         title: row.title,
@@ -437,9 +452,26 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         dependsOn: binding.dependsOn ?? [],
         triggerKind: triggerKindOf(row.graph as WorkflowGraph),
         lastRun: lastRun ? { id: lastRun.id, status: lastRun.status, at: lastRun.startedAt ?? lastRun.createdAt } : null,
+        activeRun: activeRun ? { id: activeRun.id, status: activeRun.status, startedAt: activeRun.startedAt ?? activeRun.createdAt } : null,
+        schedule: binding.schedule ? { cron: binding.schedule.cron, enabled: binding.schedule.enabled } : null,
+        nextRunAt: deps.orchestrator?.nextScheduledFire(row.id) ?? null,
+        concurrency: binding.concurrency ?? 'parallel',
+        chainOn: binding.chainOn ?? 'success',
       };
     }).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
     return c.json({ data: summaries });
+  });
+
+  // Run every enabled root workflow (no dependsOn), in order; dependsOn chains
+  // cascade from the AppOrchestrator as each upstream settles.
+  app.post('/:id/workflows/run-all', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    if (!deps.orchestrator) throw new AgentisError('INTERNAL_ERROR', 'app orchestrator is not available in this runtime');
+    const results = await deps.orchestrator.runAll(ws.workspaceId, appId, user.id);
+    return c.json({ data: { results } }, 202);
   });
 
   app.post('/:id/workflows/:wid/run', async (c) => {
@@ -482,6 +514,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     deps.db.update(schema.workflows)
       .set({ settings: { ...(row.settings as Record<string, unknown>), appBinding: next }, updatedAt: new Date().toISOString() })
       .where(eq(schema.workflows.id, wid)).run();
+    // Rules changed — re-arm the App-level schedule for this workflow.
+    deps.orchestrator?.rearm(wid);
     return c.json({ data: next });
   });
 

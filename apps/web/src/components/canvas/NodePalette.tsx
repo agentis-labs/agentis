@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
+import { Boxes, Search } from 'lucide-react';
 import { api } from '../../lib/api';
+import type { IntegrationManifestLite } from './nodeConfigRegistry';
+import { connectorAccent, connectorLogoUrl } from './connectorLogo';
+import { nodeKindColor } from './nodeKindMeta';
+import { nodeKindIcon } from './nodeKindIcon';
 
 /**
  * NodePalette — the canvas tool tray.
@@ -41,7 +46,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'merge',    label: 'Merge',    glyph: '⤳', description: 'Join multiple branches together', defaults: { requiredInputs: 'all' } },
       { type: 'wait',     label: 'Wait',     glyph: '⏲', description: 'Pause for a duration before resuming', defaults: { delayMs: 60_000 } },
       { type: 'loop',     label: 'Loop',     glyph: '↻', description: 'Iterate over an array with concurrency control', defaults: { maxConcurrency: 1, onIterationError: 'stop_all', outputArrayKey: 'results' } },
-      { type: 'converge', label: 'Converge', glyph: '⟳', description: 'Re-run a cohort until a goal is met, stalls, or hits budget', defaults: { continuation: { type: 'judge', targetPath: 'output', criteria: 'The objective is fully met.' }, maxIterations: 8, isolation: 'auto', stallPolicy: { window: 2 } } },
+      { type: 'pursue',   label: 'Pursue',   glyph: '◎', description: 'Pursue an objective — re-run a cohort, measure progress, reflect when stuck', defaults: { doneWhen: { type: 'judge', targetPath: 'output', criteria: 'The objective is fully met.' }, maxIterations: 8, isolation: 'auto', stopWhenStalled: { after: 2 }, assess: true, maxPivots: 2 } },
       { type: 'parallel', label: 'Parallel', glyph: '⫴', description: 'Fan out to N branches in parallel', defaults: { waitFor: 'all', onBranchError: 'fail_all', mergeStrategy: 'merge_keys' } },
       { type: 'subflow',  label: 'Subflow',  glyph: '▦', description: 'Embed another workflow inline', defaults: { inputMapping: {}, outputMapping: {} } },
       { type: 'stop_error', label: 'Stop & Error', glyph: '⛔', description: 'Terminate the run with a custom error', defaults: { errorMessage: 'Stopped' } },
@@ -54,6 +59,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'transform',      label: 'Transform',      glyph: '⇄', description: 'Reshape data with a JS expression', defaults: { expression: 'input' } },
       { type: 'filter',         label: 'Filter',         glyph: '◓', description: 'Gate on a boolean expression', defaults: { condition: 'true' } },
       { type: 'integration',    label: 'Integration',    glyph: '⚙', description: 'Call a built-in connector (Slack, Gmail, …)', defaults: { inputs: {} } },
+      { type: 'mcp',            label: 'MCP Tool',       glyph: '⌬', description: 'Call a tool on a mounted MCP server (Supabase, Linear, …)', defaults: { toolId: '', arguments: {} } },
       { type: 'http_request',   label: 'HTTP Request',   glyph: '↗', description: 'Raw outbound HTTP call', defaults: { method: 'GET', url: '', headers: {} } },
       { type: 'workflow_store',  label: 'Workflow Store',  glyph: '◧', description: 'Read/write workflow-scoped persistent KV', defaults: { operations: [] } },
       { type: 'workspace_store', label: 'Workspace Store', glyph: '▤', description: 'Read/write workspace-wide KV (shared across all workflows)', defaults: { operations: [] } },
@@ -124,6 +130,8 @@ interface ReusableWorkflow {
   name?: string;
 }
 
+type PaletteTab = 'steps' | 'apps';
+
 export function NodePalette({
   onPick,
   className,
@@ -135,106 +143,212 @@ export function NodePalette({
   bare?: boolean;
 }) {
   const [reusable, setReusable] = useState<ReusableWorkflow[]>([]);
-  const [collapsed, setCollapsed] = useState<Record<PaletteTier, boolean>>({
-    control: false,
-    data: false,
-    intel: false,
-    knowledge: false,
-    output: false,
-    human: false,
-  });
+  const [integrations, setIntegrations] = useState<IntegrationManifestLite[]>([]);
+  const [tab, setTab] = useState<PaletteTab>('steps');
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     void api<{ workflows: ReusableWorkflow[] }>('/v1/workflows?isReusable=true')
       .then((d) => setReusable(d.workflows ?? []))
       .catch(() => {});
+    void api<{ integrations: IntegrationManifestLite[] }>('/v1/integrations')
+      .then((d) => setIntegrations(d.integrations ?? []))
+      .catch(() => {});
   }, []);
 
-  const toggle = (tier: PaletteTier) => setCollapsed((c) => ({ ...c, [tier]: !c[tier] }));
+  const needle = query.trim().toLowerCase();
+  const visibleSections = useMemo(() => {
+    if (!needle) return SECTIONS;
+    return SECTIONS.map((section) => ({
+      ...section,
+      nodes: section.nodes.filter((node) =>
+        `${node.label} ${node.type} ${node.description}`.toLowerCase().includes(needle),
+      ),
+    })).filter((section) => section.nodes.length > 0);
+  }, [needle]);
 
-  const dragPayload = useMemo(() => {
-    return (node: PaletteNodeType): string => {
-      if (!node.defaults) return node.type;
-      return JSON.stringify({ type: node.type, ...node.defaults });
-    };
-  }, []);
+  const visibleApps = useMemo(() => {
+    const sorted = [...integrations].sort((a, b) => a.name.localeCompare(b.name));
+    if (!needle) return sorted;
+    return sorted.filter((manifest) =>
+      `${manifest.name} ${manifest.service} ${manifest.category ?? ''}`.toLowerCase().includes(needle),
+    );
+  }, [integrations, needle]);
+
+  const visibleReusable = useMemo(() => {
+    if (!needle) return reusable;
+    return reusable.filter((wf) => (wf.title ?? wf.name ?? '').toLowerCase().includes(needle));
+  }, [reusable, needle]);
+
+  const startDrag = (event: React.DragEvent, payload: Record<string, unknown> | string) => {
+    event.dataTransfer.setData(
+      'application/x-agentis-node',
+      typeof payload === 'string' ? payload : JSON.stringify(payload),
+    );
+    event.dataTransfer.effectAllowed = 'copy';
+  };
+
+  const appDefaults = (manifest: IntegrationManifestLite): Record<string, unknown> => ({
+    label: manifest.name,
+    integrationId: manifest.service,
+    operationId: manifest.operations[0],
+    inputs: {},
+  });
 
   return (
     <aside
       className={clsx(
-        'flex min-h-0 flex-col gap-1 overflow-x-hidden overflow-y-auto p-2 text-xs',
-        bare ? 'flex-1' : 'w-48 shrink-0 border-r border-line bg-surface',
+        'flex min-h-0 flex-col text-xs',
+        bare ? 'flex-1' : 'w-60 shrink-0 border-r border-line bg-surface',
         className,
       )}
     >
-      {!bare && (
-        <h3 className="px-1 pb-1 text-[10px] uppercase tracking-wider text-text-muted">Palette</h3>
-      )}
-
-      {SECTIONS.map((section) => (
-        <div key={section.tier} className="flex flex-col gap-1">
-          <button
-            type="button"
-            onClick={() => toggle(section.tier)}
-            className="mt-1 flex items-center justify-between rounded-sm px-1 py-0.5 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-secondary"
-            title={`${collapsed[section.tier] ? 'Expand' : 'Collapse'} ${section.title}`}
-          >
-            <span>{section.title}</span>
-            <span aria-hidden>{collapsed[section.tier] ? '+' : '–'}</span>
-          </button>
-          {!collapsed[section.tier] && section.nodes.map((n) => (
+      <div className="shrink-0 space-y-2 p-2 pb-1.5">
+        <label className="flex h-8 items-center gap-2 rounded-input border border-line bg-surface-2 px-2.5 focus-within:border-accent/50">
+          <Search size={13} className="shrink-0 text-text-muted" aria-hidden />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={tab === 'apps' ? 'Search apps…' : 'Search steps…'}
+            className="w-full bg-transparent text-[12px] text-text-primary placeholder:text-text-muted focus:outline-none"
+          />
+        </label>
+        <div className="flex rounded-input border border-line bg-surface-2 p-0.5">
+          {(['steps', 'apps'] as const).map((value) => (
             <button
-              key={n.type}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData('application/x-agentis-node', dragPayload(n));
-                e.dataTransfer.effectAllowed = 'copy';
-              }}
-              onClick={() => onPick?.(n.type, n.defaults)}
-              className="flex items-start gap-2 rounded-md border border-transparent bg-surface-2 px-2 py-1.5 text-left hover:border-accent/40"
-              title={n.description}
+              key={value}
+              type="button"
+              onClick={() => setTab(value)}
+              className={clsx(
+                'flex-1 rounded-[6px] px-2 py-1 text-[11px] font-medium capitalize transition-colors',
+                tab === value ? 'bg-surface-3 text-text-primary shadow-card' : 'text-text-muted hover:text-text-secondary',
+              )}
             >
-              <span className="text-base leading-none">{n.glyph}</span>
-              <span className="flex min-w-0 flex-col">
-                <span className="font-medium text-text-primary">{n.label}</span>
-                <span className="truncate text-[10px] text-text-muted">{n.description}</span>
-              </span>
+              {value}
             </button>
           ))}
         </div>
-      ))}
+      </div>
 
-      {reusable.length > 0 && (
-        <>
-          <div className="my-1 border-t border-line/60" />
-          <h3 className="px-1 pb-1 text-[10px] uppercase tracking-wider text-text-muted">Reusable</h3>
-          {reusable.map((wf) => {
-            const label = wf.title ?? wf.name ?? 'Untitled workflow';
-            return (
-              <button
-                key={wf.id}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData(
-                    'application/x-agentis-node',
-                    JSON.stringify({ type: 'subflow', workflowId: wf.id, label, inputMapping: {}, outputMapping: {} }),
-                  );
-                  e.dataTransfer.effectAllowed = 'copy';
-                }}
-                onClick={() => onPick?.('subflow', { workflowId: wf.id, label, inputMapping: {}, outputMapping: {} })}
-                className="flex items-start gap-2 rounded-md border border-transparent bg-surface-2 px-2 py-1.5 text-left hover:border-accent/40"
-                title={`Subflow: ${label}`}
-              >
-                <span className="text-base leading-none">▦</span>
-                <span className="flex flex-col">
-                  <span className="font-medium text-text-primary">{label}</span>
-                  <span className="text-[10px] text-text-muted">Subflow</span>
-                </span>
-              </button>
-            );
-          })}
-        </>
-      )}
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-3">
+        {tab === 'steps' ? (
+          <>
+            {visibleSections.map((section) => (
+              <div key={section.tier} className="mt-2 first:mt-1">
+                <h3 className="px-1 pb-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted">
+                  {section.title}
+                </h3>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {section.nodes.map((n) => {
+                    const Icon = nodeKindIcon(n.type);
+                    const color = nodeKindColor(n.type);
+                    return (
+                      <button
+                        key={n.type}
+                        draggable
+                        onDragStart={(e) => startDrag(e, n.defaults ? { type: n.type, ...n.defaults } : n.type)}
+                        onClick={() => onPick?.(n.type, n.defaults)}
+                        className="group flex flex-col items-center gap-1 rounded-xl border border-transparent bg-surface-2 px-1 py-2 text-center transition-colors hover:border-accent/40 hover:bg-surface-3"
+                        title={`${n.label} — ${n.description}`}
+                      >
+                        <span
+                          className="flex h-[30px] w-[30px] items-center justify-center rounded-[9px]"
+                          style={{ backgroundColor: `${color}1c`, color, boxShadow: `inset 0 0 0 1px ${color}2e` }}
+                          aria-hidden
+                        >
+                          <Icon size={15} strokeWidth={1.9} />
+                        </span>
+                        <span className="w-full truncate px-0.5 text-[9.5px] leading-tight text-text-secondary group-hover:text-text-primary">
+                          {n.label}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {visibleSections.length === 0 && (
+              <p className="px-1 py-6 text-center text-[11px] text-text-muted">No steps match “{query}”.</p>
+            )}
+
+            {visibleReusable.length > 0 && (
+              <div className="mt-3 border-t border-line/60 pt-2">
+                <h3 className="px-1 pb-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted">
+                  Reusable workflows
+                </h3>
+                <div className="flex flex-col gap-1">
+                  {visibleReusable.map((wf) => {
+                    const label = wf.title ?? wf.name ?? 'Untitled workflow';
+                    const payload = { type: 'subflow', workflowId: wf.id, label, inputMapping: {}, outputMapping: {} };
+                    return (
+                      <button
+                        key={wf.id}
+                        draggable
+                        onDragStart={(e) => startDrag(e, payload)}
+                        onClick={() => onPick?.('subflow', { workflowId: wf.id, label, inputMapping: {}, outputMapping: {} })}
+                        className="flex items-center gap-2 rounded-lg border border-transparent bg-surface-2 px-2 py-1.5 text-left transition-colors hover:border-accent/40"
+                        title={`Subflow: ${label}`}
+                      >
+                        <Boxes size={13} className="shrink-0 text-text-muted" aria-hidden />
+                        <span className="min-w-0 truncate text-[11px] font-medium text-text-primary">{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="mt-1 grid grid-cols-3 gap-1.5">
+              {visibleApps.map((manifest) => (
+                <button
+                  key={manifest.id ?? manifest.service}
+                  draggable
+                  onDragStart={(e) => startDrag(e, { type: 'integration', ...appDefaults(manifest) })}
+                  onClick={() => onPick?.('integration', appDefaults(manifest))}
+                  className="group flex flex-col items-center gap-1 rounded-xl border border-transparent bg-surface-2 px-1 py-2 text-center transition-colors hover:border-accent/40 hover:bg-surface-3"
+                  title={`${manifest.name}${manifest.description ? ` — ${manifest.description}` : ''}`}
+                >
+                  <AppLogo manifest={manifest} />
+                  <span className="w-full truncate px-0.5 text-[9.5px] leading-tight text-text-secondary group-hover:text-text-primary">
+                    {manifest.name}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {visibleApps.length === 0 && (
+              <p className="px-1 py-6 text-center text-[11px] text-text-muted">
+                {integrations.length === 0 ? 'No connected apps yet.' : `No apps match “${query}”.`}
+              </p>
+            )}
+          </>
+        )}
+      </div>
     </aside>
+  );
+}
+
+/** Brand logo tile with the colored-initial fallback (no broken-img flash). */
+function AppLogo({ manifest }: { manifest: IntegrationManifestLite }) {
+  const [failed, setFailed] = useState(false);
+  const url = connectorLogoUrl(manifest.icon ?? manifest.service);
+  if (!url || failed) {
+    const accent = connectorAccent(manifest.service);
+    return (
+      <span
+        className="flex h-[30px] w-[30px] items-center justify-center rounded-[9px] text-[13px] font-semibold"
+        style={{ backgroundColor: `color-mix(in srgb, ${accent} 18%, transparent)`, color: accent }}
+        aria-hidden
+      >
+        {manifest.name.slice(0, 1).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    <span className="flex h-[30px] w-[30px] items-center justify-center rounded-[9px] bg-surface-3" aria-hidden>
+      <img src={url} alt="" className="h-[18px] w-[18px] object-contain" onError={() => setFailed(true)} />
+    </span>
   );
 }

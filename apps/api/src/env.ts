@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { z } from 'zod';
 import { CONSTANTS } from '@agentis/core';
 import { resolveDefaultDataDir } from './defaultDataDir.js';
@@ -6,6 +7,14 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   AGENTIS_MODE: z.enum(['embedded', 'standard']).optional(),
   AGENTIS_DATA_DIR: z.string().optional(),
+  // Content-addressed asset store root. Holds all agent/app-generated media
+  // (blobs). Defaults to `{AGENTIS_DATA_DIR}/assets` but can point anywhere —
+  // an external drive, OneDrive, a NAS — so large media never bloats the system
+  // disk or (critically) the source tree. Never inside the repo.
+  AGENTIS_ASSETS_DIR: z.string().optional(),
+  // Working root for the store-factory (Instagram fetch / curation scratch).
+  // Defaults under the assets dir; overridable. Must never be a repo path.
+  AGENTIS_STORES_DIR: z.string().optional(),
   AGENTIS_HTTP_PORT: z.coerce.number().int().positive().default(CONSTANTS.DEFAULT_HTTP_PORT),
   AGENTIS_HTTP_HOST: z.string().default('127.0.0.1'),
   // Comma-separated web UI origins permitted to connect to the realtime socket.
@@ -97,6 +106,13 @@ const envSchema = z.object({
   AGENTIS_ORCHESTRATOR_API_KEY: z.string().optional(),
   AGENTIS_ORCHESTRATOR_MODEL: z.string().optional(),
 
+  // Media generation (image today). Point BASE_URL at ANY OpenAI-compatible
+  // /images endpoint — this is one pluggable provider, not a vendor commitment.
+  // Absent API key ⇒ the media capability simply isn't offered (no error).
+  AGENTIS_MEDIA_IMAGE_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
+  AGENTIS_MEDIA_IMAGE_API_KEY: z.string().optional(),
+  AGENTIS_MEDIA_IMAGE_MODEL: z.string().default('gpt-image-1'),
+
   // Idle watchdog for streaming chat turns (HermesAdapter/LocalLlmAdapter). If a
   // model endpoint sends no bytes for this many ms — while waiting for the first
   // token or mid-stream — the request is aborted and surfaced as an error rather
@@ -139,15 +155,23 @@ const envSchema = z.object({
   OAUTH_TWITTER_X_CLIENT_SECRET: z.string().optional(),
 });
 
-// `loadEnv` always resolves AGENTIS_DATA_DIR to a concrete path (default when
-// unset), so consumers can treat it as a required string.
-export type AgentisEnv = z.infer<typeof envSchema> & { AGENTIS_DATA_DIR: string };
+// `loadEnv` always resolves AGENTIS_DATA_DIR / AGENTIS_ASSETS_DIR / AGENTIS_STORES_DIR
+// to concrete paths (defaults when unset), so consumers can treat them as required.
+export type AgentisEnv = z.infer<typeof envSchema> & {
+  AGENTIS_DATA_DIR: string;
+  AGENTIS_ASSETS_DIR: string;
+  AGENTIS_STORES_DIR: string;
+};
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AgentisEnv {
   const parsed = envSchema.parse(source);
+  const dataDir = parsed.AGENTIS_DATA_DIR ?? resolveDefaultDataDir();
+  const assetsDir = parsed.AGENTIS_ASSETS_DIR ?? join(dataDir, 'assets');
   return {
     ...parsed,
-    AGENTIS_DATA_DIR: parsed.AGENTIS_DATA_DIR ?? resolveDefaultDataDir(),
+    AGENTIS_DATA_DIR: dataDir,
+    AGENTIS_ASSETS_DIR: assetsDir,
+    AGENTIS_STORES_DIR: parsed.AGENTIS_STORES_DIR ?? join(assetsDir, 'stores'),
     AGENTIS_OAUTH_PROXY_URL: parsed.AGENTIS_OAUTH_PROXY_URL === undefined
       ? 'https://connect.agentis.dev'
       : parsed.AGENTIS_OAUTH_PROXY_URL,

@@ -10,7 +10,7 @@ import type { ExtensionExecutionOutcome, ExtensionManifest, ExtensionOperation, 
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
-import { runBuiltin } from './builtinExtensions.js';
+import { runBuiltin, BUILTIN_LONG_RUNNING_TIMEOUTS } from './builtinExtensions.js';
 import { runNodeWorkerExtension } from '../extensions/nodeWorkerRuntime.js';
 import { runDockerSandboxExtension } from '../extensions/dockerSandboxRuntime.js';
 import type { ExtensionKvStore } from '../extensions/kv.js';
@@ -41,6 +41,13 @@ export interface ExtensionExecuteArgs {
   taskId?: string;
   input: Record<string, unknown>;
   scratchpadSnapshot: Record<string, unknown>;
+  /**
+   * Run-scoped cancellation. Aborting resolves the execution with an honest
+   * EXTENSION_ABORTED outcome immediately; the node_worker isolate is disposed
+   * (real termination), and other sandboxes remain bounded by their own
+   * timeout — cancellation never leaves the caller waiting.
+   */
+  signal?: AbortSignal;
 }
 
 export class ExtensionRuntime {
@@ -127,16 +134,46 @@ export class ExtensionRuntime {
     }
 
     const startedAt = Date.now();
-    const timeoutMs = clampTimeout(manifest.timeoutMs);
+    // Builtin entrypoints that shell out to real host work (harvest/curate/seed/
+    // deploy) need a large execution budget. When the stored manifest carries no
+    // explicit timeoutMs, fall back to the per-entrypoint long-running budget
+    // instead of the 30s default — otherwise a real Vercel deploy (pnpm install
+    // + two project builds + HTTP probes) is killed mid-flight at 30s.
+    const builtinBudget =
+      manifest.runtime === 'builtin' && (!manifest.timeoutMs || manifest.timeoutMs <= 0)
+        ? BUILTIN_LONG_RUNNING_TIMEOUTS[manifest.entrypoint ?? operationName]
+        : undefined;
+    const timeoutMs = clampTimeout(manifest.timeoutMs || builtinBudget);
     let outcome: ExtensionExecutionOutcome;
 
+    // Run-scoped cancellation: settle immediately with an honest ABORTED
+    // outcome when the run is stopped mid-execution. The sandbox itself stays
+    // bounded by its own timeout, so nothing leaks.
+    const raceAbort = async (work: Promise<ExtensionExecutionOutcome>): Promise<ExtensionExecutionOutcome> => {
+      const signal = args.signal;
+      if (!signal) return work;
+      if (signal.aborted) {
+        work.catch(() => {});
+        throw new Error('__ABORTED__');
+      }
+      return await new Promise<ExtensionExecutionOutcome>((resolve, reject) => {
+        const onAbort = () => reject(new Error('__ABORTED__'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        work.then(
+          (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+          (err) => { signal.removeEventListener('abort', onAbort); reject(err); },
+        );
+      });
+    };
+
     try {
+      if (args.signal?.aborted) throw new Error('__ABORTED__');
       switch (manifest.runtime) {
         case 'builtin':
-          outcome = await withTimeout(
+          outcome = await raceAbort(withTimeout(
             runBuiltin(manifest, operationName, args.input, args.scratchpadSnapshot),
             timeoutMs,
-          );
+          ));
           break;
         case 'node_worker': {
           const source = typeof manifest.source === 'string' ? manifest.source : '';
@@ -150,7 +187,7 @@ export class ExtensionRuntime {
             };
             break;
           }
-          outcome = await runNodeWorkerExtension({
+          outcome = await raceAbort(runNodeWorkerExtension({
             manifest,
             operationName,
             source,
@@ -162,7 +199,8 @@ export class ExtensionRuntime {
               String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
             timeoutMs,
             logger: this.logger,
-          });
+            ...(args.signal ? { signal: args.signal } : {}),
+          }));
           break;
         }
         case 'docker_sandbox':
@@ -186,7 +224,7 @@ export class ExtensionRuntime {
               };
               break;
             }
-            outcome = await runDockerSandboxExtension({
+            outcome = await raceAbort(runDockerSandboxExtension({
               manifest,
               operationName,
               bundleDir,
@@ -195,17 +233,22 @@ export class ExtensionRuntime {
               allowedDomains: Array.isArray(manifest.allowedDomains) ? manifest.allowedDomains : [],
               timeoutMs,
               logger: this.logger,
-            });
+            }));
           }
           break;
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const isTimeout = message === '__TIMEOUT__';
+      const isAborted = message === '__ABORTED__';
       outcome = {
         ok: false,
-        errorCode: isTimeout ? 'EXTENSION_TIMEOUT' : 'EXTENSION_INTERNAL',
-        message: isTimeout ? `Extension timed out after ${timeoutMs}ms` : message,
+        errorCode: isTimeout ? 'EXTENSION_TIMEOUT' : isAborted ? 'EXTENSION_ABORTED' : 'EXTENSION_INTERNAL',
+        message: isTimeout
+          ? `Extension timed out after ${timeoutMs}ms`
+          : isAborted
+            ? 'Extension cancelled (run aborted)'
+            : message,
         durationMs: Date.now() - startedAt,
         operationName,
       };

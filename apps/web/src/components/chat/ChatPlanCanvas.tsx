@@ -1,54 +1,164 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FileText, GitBranch, LocateFixed, Network, PanelRightClose } from 'lucide-react';
 import { Handle, Position, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import clsx from 'clsx';
 import { CanvasEngine } from '../canvas/CanvasEngine';
 import { ChatMarkdown } from './ChatMarkdown';
 
+export type ArchitectureCanvasKind = 'workflow' | 'extension' | 'app' | 'system';
+
+export interface ArchitectureCanvasNode {
+  id: string;
+  title: string;
+  role: string;
+  kind?: string;
+  summary?: string;
+  group?: string;
+}
+
+export interface ArchitectureCanvasEdge {
+  source: string;
+  target: string;
+  label?: string;
+}
+
+export interface ArchitectureCanvasGroup {
+  id: string;
+  title: string;
+}
+
+export interface ArchitectureCanvasPayload {
+  kind: ArchitectureCanvasKind;
+  nodes: ArchitectureCanvasNode[];
+  edges: ArchitectureCanvasEdge[];
+  groups?: ArchitectureCanvasGroup[];
+}
+
 export interface ParsedAgentPlan {
   before: string;
   planText: string;
   after: string;
+  architecture: ArchitectureCanvasPayload | null;
 }
 
-interface PlanSection {
-  id: string;
-  title: string;
-  body: string;
-  bullets: string[];
-}
-
-type AgentPlanNodeData = {
-  title: string;
-  summary: string;
+type ArchitectureNodeData = ArchitectureCanvasNode & Record<string, unknown> & {
   index: number;
 };
 
 const PROPOSED_PLAN_RE = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
+const ARCHITECTURE_CANVAS_RE = /<architecture_canvas>\s*([\s\S]*?)\s*<\/architecture_canvas>/i;
+const ARCHITECTURE_KINDS = new Set<ArchitectureCanvasKind>(['workflow', 'extension', 'app', 'system']);
 
 export function extractAgentPlan(text: string): ParsedAgentPlan | null {
-  const match = text.match(PROPOSED_PLAN_RE);
-  if (!match || match.index === undefined) return null;
-  const planText = (match[1] ?? '').trim();
+  const planMatch = text.match(PROPOSED_PLAN_RE);
+  if (!planMatch || planMatch.index === undefined) return null;
+  const planText = (planMatch[1] ?? '').trim();
   if (!planText) return null;
+
+  const architectureMatch = text.match(ARCHITECTURE_CANVAS_RE);
+  const architecture = parseArchitectureCanvas(architectureMatch?.[1] ?? null);
+  const before = text.slice(0, planMatch.index).replace(ARCHITECTURE_CANVAS_RE, '').trim();
+  const after = text.slice(planMatch.index + planMatch[0].length).replace(ARCHITECTURE_CANVAS_RE, '').trim();
+
   return {
-    before: text.slice(0, match.index).trim(),
+    before,
     planText,
-    after: text.slice(match.index + match[0].length).trim(),
+    after,
+    architecture,
   };
 }
 
-function AgentPlanNode({ data, selected }: NodeProps<Node<AgentPlanNodeData>>) {
+function parseArchitectureCanvas(raw: string | null): ArchitectureCanvasPayload | null {
+  if (!raw?.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    if (!ARCHITECTURE_KINDS.has(record.kind as ArchitectureCanvasKind)) return null;
+    const nodes = normalizeNodes(record.nodes);
+    if (nodes.length === 0) return null;
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    return {
+      kind: record.kind as ArchitectureCanvasKind,
+      nodes,
+      edges: normalizeEdges(record.edges, nodeIds),
+      groups: normalizeGroups(record.groups),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeNodes(value: unknown): ArchitectureCanvasNode[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const nodes: ArchitectureCanvasNode[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const id = stringValue(record.id);
+    const title = stringValue(record.title);
+    const role = stringValue(record.role);
+    if (!id || !title || !role || seen.has(id)) continue;
+    seen.add(id);
+    nodes.push({
+      id,
+      title,
+      role,
+      ...(stringValue(record.kind) ? { kind: stringValue(record.kind) } : {}),
+      ...(stringValue(record.summary) ? { summary: stringValue(record.summary) } : {}),
+      ...(stringValue(record.group) ? { group: stringValue(record.group) } : {}),
+    });
+  }
+  return nodes.slice(0, 18);
+}
+
+function normalizeEdges(value: unknown, nodeIds: Set<string>): ArchitectureCanvasEdge[] {
+  if (!Array.isArray(value)) return [];
+  const edges: ArchitectureCanvasEdge[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const source = stringValue(record.source);
+    const target = stringValue(record.target);
+    if (!source || !target || !nodeIds.has(source) || !nodeIds.has(target)) continue;
+    edges.push({
+      source,
+      target,
+      ...(stringValue(record.label) ? { label: stringValue(record.label) } : {}),
+    });
+  }
+  return edges.slice(0, 32);
+}
+
+function normalizeGroups(value: unknown): ArchitectureCanvasGroup[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const groups = value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const id = stringValue(record.id);
+    const title = stringValue(record.title);
+    return id && title ? [{ id, title }] : [];
+  });
+  return groups.length > 0 ? groups.slice(0, 8) : undefined;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function ArchitectureNode({ data, selected }: NodeProps<Node<ArchitectureNodeData>>) {
   return (
     <div
       className={clsx(
-        'w-[230px] rounded-lg border border-line bg-surface/95 px-3 py-2.5 text-left shadow-[0_18px_45px_-35px_rgba(0,0,0,0.9)]',
+        'w-[250px] rounded-lg border border-line bg-surface/95 px-3 py-2.5 text-left shadow-[0_18px_45px_-35px_rgba(0,0,0,0.9)]',
         selected && 'ring-2 ring-accent/35',
       )}
     >
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-2 !border-surface !bg-text-muted" />
-      <div className="mb-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-accent">
-        Step {data.index + 1}
+      <div className="mb-1 flex min-w-0 items-center gap-1.5">
+        <span className="truncate text-[9px] font-semibold uppercase tracking-[0.14em] text-accent">{data.role}</span>
+        {data.kind && <span className="truncate text-[9px] text-text-muted">{data.kind}</span>}
       </div>
       <div className="text-[12px] font-semibold leading-snug text-text-primary">{data.title}</div>
       {data.summary ? (
@@ -59,119 +169,77 @@ function AgentPlanNode({ data, selected }: NodeProps<Node<AgentPlanNodeData>>) {
   );
 }
 
-const nodeTypes = { agentPlan: AgentPlanNode };
+const nodeTypes = { architecture: ArchitectureNode };
 
-function stripMarkdown(value: string): string {
-  return value
-    .replace(/^#+\s+/gm, '')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[(.*?)\]\([^)]*\)/g, '$1')
-    .trim();
+function architectureLabel(kind: ArchitectureCanvasKind): string {
+  if (kind === 'workflow') return 'Workflow architecture';
+  if (kind === 'extension') return 'Extension architecture';
+  if (kind === 'app') return 'App architecture';
+  return 'System architecture';
 }
 
-function parseSections(planText: string): PlanSection[] {
-  const lines = planText.split(/\r?\n/);
-  const sections: PlanSection[] = [];
-  let current: { title: string; lines: string[] } | null = null;
-
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-    const heading = line.match(/^(#{1,3})\s+(.+)$/) ?? line.match(/^\*\*(.+?)\*\*\s*$/);
-    if (heading) {
-      if (current) sections.push(sectionFrom(current, sections.length));
-      current = { title: stripMarkdown(heading[2] ?? heading[1] ?? 'Plan'), lines: [] };
-      continue;
-    }
-    if (!current && line.trim()) current = { title: stripMarkdown(line), lines: [] };
-    else current?.lines.push(line);
-  }
-  if (current) sections.push(sectionFrom(current, sections.length));
-
-  const useful = sections.filter((section) => section.title && (section.body || section.bullets.length > 0));
-  if (useful.length > 0) return useful.slice(0, 8);
-
-  const bullets = planText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^([-*]\s+|\d+\.\s+)/.test(line))
-    .map((line) => stripMarkdown(line.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '')))
-    .filter(Boolean);
-
-  return (bullets.length ? bullets : [stripMarkdown(planText).slice(0, 120)]).slice(0, 8).map((title, index) => ({
-    id: `section-${index}`,
-    title,
-    body: '',
-    bullets: [],
-  }));
-}
-
-function sectionFrom(current: { title: string; lines: string[] }, index: number): PlanSection {
-  const bullets: string[] = [];
-  const bodyLines: string[] = [];
-  for (const line of current.lines) {
-    const trimmed = line.trim();
-    const bullet = trimmed.match(/^[-*]\s+(.+)$/) ?? trimmed.match(/^\d+\.\s+(.+)$/);
-    if (bullet) bullets.push(stripMarkdown(bullet[1] ?? ''));
-    else if (trimmed) bodyLines.push(trimmed);
-  }
-  return {
-    id: `section-${index}`,
-    title: current.title,
-    body: stripMarkdown(bodyLines.join('\n')),
-    bullets: bullets.filter(Boolean).slice(0, 4),
-  };
-}
-
-export function ChatPlanCanvas({ planText }: { planText: string }) {
-  const [view, setView] = useState<'canvas' | 'text'>('canvas');
+export function ChatPlanCanvas({
+  planText,
+  architecture,
+}: {
+  planText: string;
+  architecture?: ArchitectureCanvasPayload | null;
+}) {
+  const hasArchitecture = Boolean(architecture?.nodes.length);
+  const [view, setView] = useState<'canvas' | 'text'>(() => (hasArchitecture ? 'canvas' : 'text'));
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const sections = useMemo(() => parseSections(planText), [planText]);
-  const selected = sections.find((section) => section.id === selectedId) ?? null;
+  const selected = architecture?.nodes.find((node) => node.id === selectedId) ?? null;
 
-  const nodes = useMemo<Node<AgentPlanNodeData>[]>(() => sections.map((section, index) => ({
-    id: section.id,
-    type: 'agentPlan',
+  useEffect(() => {
+    if (!hasArchitecture) setView('text');
+  }, [hasArchitecture]);
+
+  const nodes = useMemo<Node<ArchitectureNodeData>[]>(() => (architecture?.nodes ?? []).map((node, index) => ({
+    id: node.id,
+    type: 'architecture',
     position: {
-      x: (index % 3) * 280,
+      x: (index % 3) * 300,
       y: Math.floor(index / 3) * 150,
     },
-    data: {
-      title: section.title,
-      summary: section.bullets[0] ?? section.body,
-      index,
-    },
-  })), [sections]);
+    data: { ...node, index },
+  })), [architecture]);
 
-  const edges = useMemo<Edge[]>(() => sections.slice(1).map((section, index) => ({
-    id: `edge-${sections[index]!.id}-${section.id}`,
-    source: sections[index]!.id,
-    target: section.id,
+  const edges = useMemo<Edge[]>(() => (architecture?.edges ?? []).map((edge, index) => ({
+    id: `edge-${edge.source}-${edge.target}-${index}`,
+    source: edge.source,
+    target: edge.target,
+    label: edge.label,
     type: 'smoothstep',
     style: { stroke: 'var(--color-line)', strokeWidth: 1.4 },
-  })), [sections]);
+  })), [architecture]);
+
+  const title = architecture ? architectureLabel(architecture.kind) : 'Agent plan';
 
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-canvas/70 text-text-primary">
       <header className="flex min-h-11 items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-accent/25 bg-accent/10 text-accent">
-            <GitBranch size={14} />
+            {hasArchitecture ? <GitBranch size={14} /> : <FileText size={14} />}
           </span>
           <div className="min-w-0">
-            <div className="text-[11px] font-semibold text-text-primary">Agent plan</div>
-            <div className="truncate text-[9.5px] text-text-muted">{sections.length} mapped section{sections.length === 1 ? '' : 's'}</div>
+            <div className="text-[11px] font-semibold text-text-primary">{title}</div>
+            <div className="truncate text-[9.5px] text-text-muted">
+              {hasArchitecture ? `${architecture!.nodes.length} preview node${architecture!.nodes.length === 1 ? '' : 's'}` : 'Plan text'}
+            </div>
           </div>
         </div>
         <div className="flex rounded-md border border-line bg-surface p-0.5">
-          <button
-            type="button"
-            onClick={() => setView('canvas')}
-            className={clsx('grid h-7 w-7 place-items-center rounded text-text-muted hover:text-text-primary', view === 'canvas' && 'bg-surface-3 text-accent')}
-            aria-label="Show plan canvas"
-          >
-            <Network size={13} />
-          </button>
+          {hasArchitecture && (
+            <button
+              type="button"
+              onClick={() => setView('canvas')}
+              className={clsx('grid h-7 w-7 place-items-center rounded text-text-muted hover:text-text-primary', view === 'canvas' && 'bg-surface-3 text-accent')}
+              aria-label="Show architecture canvas"
+            >
+              <Network size={13} />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setView('text')}
@@ -183,7 +251,7 @@ export function ChatPlanCanvas({ planText }: { planText: string }) {
         </div>
       </header>
 
-      {view === 'canvas' ? (
+      {view === 'canvas' && hasArchitecture ? (
         <div className="relative h-[340px] min-h-[300px]">
           <CanvasEngine
             className="absolute inset-0 h-full w-full"
@@ -211,28 +279,33 @@ export function ChatPlanCanvas({ planText }: { planText: string }) {
             <LocateFixed size={11} />
             Fit
           </div>
+          {architecture?.groups && architecture.groups.length > 0 && (
+            <div className="pointer-events-none absolute left-3 top-3 flex max-w-[70%] flex-wrap gap-1.5">
+              {architecture.groups.map((group) => (
+                <span key={group.id} className="rounded-md border border-line bg-surface/90 px-2 py-1 text-[9.5px] font-medium text-text-muted shadow-card">
+                  {group.title}
+                </span>
+              ))}
+            </div>
+          )}
           {selected && (
             <aside className="absolute bottom-3 right-3 top-12 z-20 w-[300px] overflow-y-auto rounded-lg border border-line bg-surface/95 p-3 shadow-modal backdrop-blur">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-accent">Selected section</div>
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-accent">{selected.role}</div>
                   <h4 className="mt-1 text-[12px] font-semibold text-text-primary">{selected.title}</h4>
                 </div>
                 <button
                   type="button"
                   onClick={() => setSelectedId(null)}
                   className="-m-1 rounded p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-                  aria-label="Close section details"
+                  aria-label="Close architecture details"
                 >
                   <PanelRightClose size={14} />
                 </button>
               </div>
-              {selected.body ? <p className="mt-2 text-[11px] leading-relaxed text-text-secondary">{selected.body}</p> : null}
-              {selected.bullets.length > 0 ? (
-                <ul className="mt-2 space-y-1 text-[10.5px] leading-relaxed text-text-secondary">
-                  {selected.bullets.map((bullet) => <li key={bullet}>{bullet}</li>)}
-                </ul>
-              ) : null}
+              {selected.kind ? <div className="mt-1 text-[10px] text-text-muted">{selected.kind}</div> : null}
+              {selected.summary ? <p className="mt-2 text-[11px] leading-relaxed text-text-secondary">{selected.summary}</p> : null}
             </aside>
           )}
         </div>

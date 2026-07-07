@@ -4,7 +4,7 @@
  * Mutating; gated by the runtime policy engine in production deployments.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import {
@@ -35,13 +35,29 @@ import { evalCondition } from '../../engine/SafeConditionParser.js';
 import { repairGraphExpressions, dryRunGraphExpressions, analyzeInputReachability, analyzeEdgeCouplings } from '../../engine/validateExpressions.js';
 import { deriveIntentManifest, checkIntentIntegrity, type IntentManifest } from '../intentContract.js';
 import { PackagerService } from '../packager.js';
-import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan } from '../creationPipeline.js';
+import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan, type PreflightWarning } from '../creationPipeline.js';
 import { AdapterStructuredCompleter, type StructuredCompleter } from '../structuredCompleter.js';
 import { analyzeWorkflowReadiness } from '../workflowReadiness.js';
 import { preflightWorkflow } from '../workflowPreflight.js';
 import { listIntegrationManifests } from '../integrationRegistry.js';
 import { repairIntegrationOperations } from '../integrationOperationRepair.js';
 import { scheduleFromNaturalLanguage } from '../scheduleFromNaturalLanguage.js';
+import {
+  LOOP_STAGE_LABEL,
+  compassForRun,
+  compassForWorkflow,
+  deriveLoopStage,
+  graphContentHash,
+  readBuildLoop,
+  stampBuildLoop,
+} from '../workflowCompass.js';
+import { deriveSpecDraft, readWorkflowSpec, validateWorkflowSpec, type WorkflowSpec } from '../workflowSpec.js';
+import { unwrapReturnEnvelope } from '../workflowVerdict.js';
+import { deliverWorkflow } from '../workflowDeliveryOrchestrator.js';
+import { generateEdgeCases, readWorkflowTests, type WorkflowTestCase } from '../workflowTestGenerator.js';
+import { connectorCatalog } from '@agentis/integrations';
+import { stringify as yamlStringify } from 'yaml';
+import { WORKFLOW_FILE_API_VERSION, type WorkflowFile } from '@agentis/core';
 
 /**
  * Conversation → last-built workflow id. A build conversation is bound to ONE
@@ -59,6 +75,122 @@ function rememberConversationWorkflow(key: string, workflowId: string): void {
   if (lastWorkflowByConversation.size > CONVERSATION_LATCH_LIMIT) {
     const oldest = lastWorkflowByConversation.keys().next().value;
     if (oldest !== undefined) lastWorkflowByConversation.delete(oldest);
+  }
+}
+
+/** Services a spec's data_probe / allowedServices may reference: runnable
+ *  connectors + mounted MCP server slugs (both plain and `mcp:` forms). */
+async function runnableServicesForSpec(deps: ToolHandlerDeps, workspaceId: string): Promise<string[]> {
+  const services = connectorCatalog().filter((c) => c.readiness === 'runnable').map((c) => c.service);
+  try {
+    const bridged = await deps.mcpBridge?.listTools(workspaceId) ?? [];
+    const slugs = new Set<string>();
+    for (const tool of bridged) {
+      const slug = tool.id.match(/^mcp__(.+?)__/u)?.[1];
+      if (slug) { slugs.add(slug); slugs.add(`mcp:${slug}`); }
+    }
+    return [...new Set([...services, ...slugs])];
+  } catch {
+    return services;
+  }
+}
+
+/**
+ * SWIFT-I — run one suite case through the free dry-run engine and judge it:
+ * preflight not blocked + case assertions + (when a spec exists) its expr
+ * checks and sufficiency floors against the terminal trace output. World
+ * probes/judge are deliberately deferred to the debug run — a suite run must
+ * stay free and side-effect-less.
+ */
+function runSuiteCase(
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+  workflowId: string,
+  graph: WorkflowGraph,
+  testCase: WorkflowTestCase,
+  spec: WorkflowSpec | null,
+): { id: string; name: string; kind: string; gating: boolean; passed: boolean; detail: string } {
+  const base = { id: testCase.id, name: testCase.name, kind: testCase.kind, gating: testCase.origin !== 'generated' };
+  try {
+    const report = preflightWorkflow({ db: deps.db, workspaceId, workflowId, graph, inputs: testCase.inputs, mode: 'canvas' });
+    const failures: string[] = [];
+    const blocking = report.issues.filter((i) => i.severity === 'error');
+
+    // Terminal output = the declared output surface of the dry trace.
+    const outputNodes = graph.nodes.filter((n) => {
+      const cfg = n.config as { kind?: string; isOutput?: boolean };
+      return cfg.kind === 'return_output' || cfg.isOutput === true;
+    });
+    const terminal: Record<string, unknown> = {};
+    const surface = outputNodes.length > 0 ? outputNodes : graph.nodes.slice(-1);
+    for (const n of surface) {
+      const out = report.nodes[n.id]?.output;
+      // return_output wraps data in a viewer envelope — checks target the payload.
+      if (out && typeof out === 'object' && !Array.isArray(out)) Object.assign(terminal, unwrapReturnEnvelope(out as Record<string, unknown>));
+    }
+    const nodesMap = Object.fromEntries(graph.nodes.map((n) => [n.id, report.nodes[n.id]?.output ?? {}]));
+
+    for (const a of testCase.assertions) {
+      const entry = report.nodes[a.nodeId];
+      if (!entry) { failures.push(`assertion node "${a.nodeId}" not in trace`); continue; }
+      try {
+        const passed = evalCondition(a.expr, { input: entry.input ?? {}, inputs: entry.input ?? {}, output: entry.output ?? {}, nodes: nodesMap, trigger: report.scenario.input });
+        if (!passed) failures.push(a.message ?? `assertion failed: ${a.expr}`);
+      } catch (err) {
+        failures.push(`assertion error (${a.expr}): ${(err as Error).message}`);
+      }
+    }
+
+    let dryVerdict: 'accomplished' | 'failed_checks' | 'hollow' = 'accomplished';
+    if (spec) {
+      for (const check of spec.acceptance) {
+        if (check.verify !== 'expr') continue; // probes/judge deferred to the debug run
+        try {
+          if (!evalCondition(check.expr, { output: terminal, trigger: report.scenario.input, nodes: nodesMap, probe: {} })) {
+            dryVerdict = 'failed_checks';
+            failures.push(`acceptance "${check.claim}" failed dry (${check.expr})`);
+          }
+        } catch { /* expr over mocked shapes may legitimately not resolve dry */ }
+      }
+      for (const floor of spec.sufficiency ?? []) {
+        const value = terminal[floor.key];
+        const empty = value === undefined || value === null
+          || (typeof value === 'string' && value.trim() === '')
+          || (Array.isArray(value) && value.length === 0);
+        // A hollow floor is a real, fixable defect — emit the EVIDENCE (which key,
+        // what was required, what the terminal actually produced) instead of the
+        // bare enum "dry verdict hollow" the agent could do nothing with (§F6).
+        if (floor.nonEmpty && empty && dryVerdict === 'accomplished') {
+          dryVerdict = 'hollow';
+          const got = value === undefined ? 'undefined' : value === null ? 'null' : Array.isArray(value) ? 'an empty array' : 'an empty string';
+          failures.push(`sufficiency floor '${floor.key}' must be non-empty but the terminal output produced ${got} — make the node that fills '${floor.key}' return real content.`);
+        }
+        if (floor.minItems !== undefined && Array.isArray(value) && value.length < floor.minItems && dryVerdict === 'accomplished') {
+          dryVerdict = 'hollow';
+          failures.push(`sufficiency floor '${floor.key}' has ${value.length} item(s) but needs at least ${floor.minItems} — the producing node returned too few.`);
+        }
+      }
+    }
+
+    // Expected-outcome comparison: adversarial cases EXPECT graceful failure.
+    if (testCase.expectOutcome?.verdict) {
+      const expectation = testCase.expectOutcome.verdict;
+      const matched = expectation === dryVerdict
+        || (expectation === 'failed_checks' && blocking.length > 0)
+        || (expectation === 'partial'); // not derivable dry — never gate on it
+      if (!matched) {
+        return { ...base, passed: false, detail: `expected ${expectation}, dry outcome was ${blocking.length > 0 ? 'blocked' : dryVerdict}` };
+      }
+      // An expected failure that failed as expected PASSES the case.
+      return { ...base, passed: true, detail: `behaved as expected (${expectation})` };
+    }
+
+    if (blocking.length > 0) return { ...base, passed: false, detail: `blocked: ${blocking[0]!.message}` };
+    if (failures.length > 0) return { ...base, passed: false, detail: failures.slice(0, 3).join('; ') };
+    if (dryVerdict !== 'accomplished') return { ...base, passed: false, detail: `dry verdict ${dryVerdict} — the workflow ran but did not produce sufficient output (see the workflow's sufficiency floors).` };
+    return { ...base, passed: true, detail: 'ok' };
+  } catch (err) {
+    return { ...base, passed: false, detail: `case crashed: ${(err as Error).message}` };
   }
 }
 
@@ -182,7 +314,10 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       definition: {
         id: 'agentis.workflow.create',
         family: 'build',
-        description: 'Create a new workflow from a graph payload.',
+        description:
+          'Create a new workflow from a complete graph payload. Alias of agentis.build_workflow with graphDraft: '
+          + 'the graph passes the SAME gates (structural validation, expression lint, edge couplings, intent manifest, '
+          + 'robustness audit + deterministic repairs) — there is no ungated door. Prefer agentis.build_workflow directly.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -197,37 +332,50 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         mcpExposed: true,
       },
       handler: async (args, ctx) => {
-        const id = randomUUID();
-        const now = new Date().toISOString();
-        const graph = layoutBuiltWorkflowGraph(args.graph as WorkflowGraph, { existingWorkflow: false });
-        deps.db
-          .insert(schema.workflows)
-          .values({
-            id,
-            workspaceId: ctx.workspaceId,
-            ambientId: ctx.ambientId ?? null,
-            userId: ctx.userId,
-            title: String(args.name),
-            description: args.description ? String(args.description) : null,
-            graph,
-            concurrencyOverflow: 'queue',
-            createdAt: now,
-            updatedAt: now,
-          })
-          .run();
-        // Anchor to an App-of-one — Agentis delivers Apps, never bare workflows.
-        const store = new AppStore(deps.db);
-        const wrap = store.create(
-          ctx.workspaceId,
-          ctx.userId,
-          createAppSchema.parse({ name: String(args.name), description: args.description ? String(args.description) : '', entryWorkflowId: id }),
-        );
-        // Birth the App's cast (Phase R) — never unowned/unstaffed. Best-effort.
-        if (deps.specialists) {
-          const staffing = new AppStaffingService({ store, specialists: deps.specialists, logger: deps.logger });
-          await staffing.staffApp({ workspaceId: ctx.workspaceId, userId: ctx.userId, appId: wrap.id, name: wrap.name, description: wrap.description ?? '' });
+        // PAVED-ROAD P0 (one door): this used to insert the graph RAW — no
+        // strict validation, no coupling analysis, no intent manifest — a
+        // contract-bypass sitting beside build_workflow with a plausibler name.
+        // It now delegates to the same gated pipeline; same result contract.
+        const result = await createWorkflowFromDescription(deps, {
+          workspaceId: ctx.workspaceId,
+          ambientId: ctx.ambientId ?? null,
+          userId: ctx.userId,
+          agentId: ctx.agentId,
+          runId: ctx.runId,
+          description: args.description ? String(args.description) : String(args.name),
+          title: String(args.name),
+          workflowId: null,
+          graphDraft: args.graph,
+          stream: false,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+        // Preserve this tool's historical contract: the App is born staffed.
+        if (deps.specialists && result.appId) {
+          try {
+            const store = new AppStore(deps.db);
+            const staffing = new AppStaffingService({ store, specialists: deps.specialists, logger: deps.logger });
+            await staffing.staffApp({
+              workspaceId: ctx.workspaceId,
+              userId: ctx.userId,
+              appId: result.appId,
+              name: result.title,
+              description: args.description ? String(args.description) : '',
+            });
+          } catch {
+            /* staffing is best-effort — never fail the build over it */
+          }
         }
-        return { workflowId: id, appId: wrap.id, title: String(args.name) };
+        return {
+          workflowId: result.workflowId,
+          appId: result.appId,
+          title: result.title,
+          warnings: 'warnings' in result ? result.warnings : [],
+          // SWIFT: surface the auto-derived acceptance so the agent SEES the
+          // workflow is verified-by-default, not merely "built".
+          ...('acceptance' in result && result.acceptance ? { acceptance: result.acceptance } : {}),
+          compass: result.compass,
+          message: result.message,
+        };
       },
     },
     {
@@ -245,6 +393,10 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             runId: { type: 'string' },
             patch: { type: 'object' },
             graph: { type: 'object' },
+            confirmIntentChange: {
+              type: 'boolean',
+              description: 'Acknowledge a DELIBERATE capability change — required when the replacement graph drops load-bearing work (agent workers / fetch steps / integrations / persistence).',
+            },
           },
         },
         mutating: true,
@@ -284,13 +436,53 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         if (!wf || wf.workspaceId !== ctx.workspaceId) {
           throw new Error(`workflow ${args.workflowId} not found`);
         }
+        // PAVED-ROAD P0 (one door): a whole-graph replacement passes the SAME
+        // critical gates as build_workflow — this handler used to save raw,
+        // making every contract organ optional for whoever picked this tool.
+        const priorGraph = wf.graph as WorkflowGraph;
         const graph = layoutBuiltWorkflowGraph(args.graph as WorkflowGraph, { existingWorkflow: false });
+        validateWorkflowGraph(graph);
+        const priorIntent = (wf.settings as { intentManifest?: IntentManifest } | null)?.intentManifest ?? null;
+        const violations = checkIntentIntegrity(graph, priorIntent);
+        const approvalBypass = violations.filter((v) => v.code === 'AUTO_APPROVAL_BYPASS');
+        if (approvalBypass.length > 0) {
+          throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+            `Rejected (approval integrity): ${approvalBypass.map((v) => v.message).slice(0, 2).join(' | ')}`);
+        }
+        const capabilityRemoved = violations.filter((v) => v.code === 'CAPABILITY_REMOVED');
+        if (capabilityRemoved.length > 0 && args.confirmIntentChange !== true) {
+          throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+            `Rejected (this replacement hollows out the workflow): ${capabilityRemoved.map((v) => v.message).slice(0, 2).join(' | ')} `
+            + 'If this intent change is deliberate, retry with confirmIntentChange: true.');
+        }
+        const introduced = introducedRegressions(priorGraph, graph);
+        if (introduced.length > 0) {
+          throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+            `This replacement would REGRESS the workflow (green ratchet): it introduces ${introduced.length} critical issue(s) the prior graph did not have — `
+            + `${introduced.slice(0, 3).join(' | ')}. The workflow was NOT changed; fix the graph and retry.`);
+        }
         deps.db
           .update(schema.workflows)
-          .set({ graph, updatedAt: new Date().toISOString() })
+          .set({
+            graph,
+            settings: {
+              ...((wf.settings as Record<string, unknown>) ?? {}),
+              intentManifest: deriveIntentManifest(graph, wf.description ?? wf.title),
+            },
+            updatedAt: new Date().toISOString(),
+          })
           .where(eq(schema.workflows.id, wf.id))
           .run();
-        return { workflowId: wf.id, patched: true, selfHealInFlight: deps.engine.isSelfHealInFlight(wf.id) };
+        const buildLoop = stampBuildLoop(deps.db, wf.id, {
+          graphHash: graphContentHash(graph),
+          validatedAt: new Date().toISOString(),
+        });
+        return {
+          workflowId: wf.id,
+          patched: true,
+          selfHealInFlight: deps.engine.isSelfHealInFlight(wf.id),
+          compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { buildLoop } }),
+        };
       },
     },
     {
@@ -318,7 +510,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.build_workflow',
         family: 'build',
         description:
-          'Validate, enrich, save, and stream an agent-authored workflow draft, or synthesize with a configured fast model. '
+          '[PAVED ROAD 1/5 — AUTHOR] Validate, enrich, save, and stream an agent-authored workflow draft, or synthesize with a configured fast model. '
+          + 'The result includes compass.next — the exact next call (normally agentis.workflow.dry_run). '
           + 'To refine the workflow you just built in this conversation, call again WITHOUT a workflowId — '
           + 'it updates that same workflow in place. Pass workflowId to target a specific one, or set '
           + 'newWorkflow=true to deliberately create a separate workflow. '
@@ -424,6 +617,11 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         if (!description) throw new Error('plan_workflow requires description');
         const brief = await assembleCreationBrief(deps, ctx.workspaceId, ctx.agentId, description);
         const plan = planWorkflow(description, brief.classification);
+        // SWIFT-S: the scope question is asked FIRST — "how will we KNOW it
+        // worked?" The draft derives worldly acceptance checks (deploy → URL
+        // probe, persist → data probe) so the workflow is verifiable from birth.
+        const services = await runnableServicesForSpec(deps, ctx.workspaceId);
+        const specDraft = deriveSpecDraft({ description, services });
         return {
           archetype: plan.archetype,
           phases: plan.phases,
@@ -431,7 +629,18 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           missingDependencies: plan.missingDependencies,
           requiresConfirmation: plan.requiresConfirmation,
           question: plan.question,
-          message: `Plan: ${plan.phases.length} phase(s), est. ${plan.totalEstimatedCostCents[0]}-${plan.totalEstimatedCostCents[1]}¢/run.`,
+          specDraft: specDraft.spec,
+          ...(specDraft.question ? { specQuestion: specDraft.question } : {}),
+          next: [{
+            tool: 'agentis.build_workflow',
+            args: { description },
+            why: 'Author the graph for the approved plan (add graphDraft or let synthesis run). The result carries the compass for the rest of the loop: dry_run → suite → debug-run → harden.',
+          }, {
+            tool: 'agentis.workflow.scope',
+            args: { workflowId: '<the built workflow id>', spec: specDraft.spec },
+            why: 'After building: persist the acceptance spec so every run is VERIFIED against the world, not just completed.',
+          }],
+          message: `Plan: ${plan.phases.length} phase(s), est. ${plan.totalEstimatedCostCents[0]}-${plan.totalEstimatedCostCents[1]}¢/run. Spec draft: ${specDraft.spec.acceptance.length} acceptance check(s)${specDraft.question ? ' — NEEDS INPUT on verification' : ''}.`,
         };
       },
     },
@@ -493,7 +702,14 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const { validateWorkflowGraph } = await import('../../engine/validateGraph.js');
         try {
           validateWorkflowGraph(args.graph as WorkflowGraph);
-          return { valid: true };
+          return {
+            valid: true,
+            next: [{
+              tool: 'agentis.workflow.dry_run',
+              args: { graph: '<this graph>' },
+              why: 'Static validity is not data-flow proof — the dry-run threads real I/O node-to-node and catches empty/lost payloads before any spend.',
+            }],
+          };
         } catch (err) {
           const message = err instanceof Error ? err.message : 'invalid graph';
           return { valid: false, errorMessage: message };
@@ -505,7 +721,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.workflow.dry_run',
         family: 'build',
         description:
-          'Deterministically DRY-RUN a workflow WITHOUT calling any AI, integration, or agent node: '
+          '[PAVED ROAD 2/5 — DRY-RUN] Deterministically DRY-RUN a workflow WITHOUT calling any AI, integration, or agent node: '
           + 'execute the pure/deterministic nodes for real, MOCK the side-effecting ones, and thread real '
           + 'sample I/O through the whole graph so you can SEE what each node receives and produces before a '
           + 'real run. Pass a `graph` draft OR a `workflowId`, plus optional sample `inputs` (omitted → '
@@ -592,19 +808,473 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           }
         });
         const failedAssertions = assertions.filter((a) => !a.passed);
+        const dryOk = report.status !== 'blocked' && blocking.length === 0 && failedAssertions.length === 0;
+        // PAVED-ROAD P1 — durable evidence: stamp the dry-run outcome at this
+        // graph hash on the workflow row (a later graph change stales it), and
+        // hand back the compass so the agent's next move is explicit.
+        let compass;
+        if (wf) {
+          const buildLoop = stampBuildLoop(deps.db, wf.id, {
+            dryRun: {
+              at: new Date().toISOString(),
+              ok: dryOk,
+              issueCount: blocking.length + failedAssertions.length,
+              graphHash: graphContentHash(graph),
+            },
+          });
+          compass = compassForWorkflow({ workflowId: wf.id, graph, settings: { buildLoop } });
+        } else {
+          compass = {
+            stage: dryOk ? ('dry_run_green' as const) : ('dry_run_red' as const),
+            summary: dryOk
+              ? 'The draft dry-ran green. Save it through the gates, then debug-run it for real.'
+              : 'The draft has blocking issues — fix the named nodes and dry-run again before saving.',
+            next: [
+              dryOk
+                ? {
+                    tool: 'agentis.build_workflow',
+                    args: { description: '<what this workflow does>', graphDraft: '<this graph>' },
+                    why: 'Persist the draft through the same gates; the result returns workflowId + the next step (a debug run).',
+                  }
+                : {
+                    tool: 'agentis.workflow.dry_run',
+                    args: { graph: '<the fixed graph>' },
+                    why: 'Iterate on the draft until ok:true — the issues name the exact node and field to fix.',
+                  },
+            ],
+          };
+        }
         return {
-          ok: report.status !== 'blocked' && blocking.length === 0 && failedAssertions.length === 0,
+          ok: dryOk,
           status: report.status,
           scenario: report.scenario,
           trace,
           issues,
           ...(assertions.length > 0 ? { assertions } : {}),
+          compass,
           summary:
             `Dry-ran ${trace.length} node(s): ${executed} executed for real, ${mocked} mocked (ai/integration/agent), `
             + `${failed} failed. ${blocking.length} blocking issue(s).`
             + (assertions.length > 0 ? (failedAssertions.length > 0 ? ` ${failedAssertions.length}/${assertions.length} assertion(s) FAILED.` : ` All ${assertions.length} assertion(s) passed.`) : '')
-            + ' No AI, integration, or external call was made.',
+            + ' No AI, integration, or external call was made.'
+            + ` NEXT: ${compass.next[0]?.tool ?? ''} — ${compass.next[0]?.why ?? ''}`,
         };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.loop_status',
+        family: 'inspect',
+        description:
+          '[PAVED ROAD — ORIENT] WHERE AM I with this workflow? Returns its Paved Road loop state — authored → dry-run → debug-run → '
+          + 'production — with the durable evidence behind it (what was proven at the CURRENT graph and what went '
+          + 'stale when the graph changed), plus readiness requirements and the exact next call to make. '
+          + 'Call this FIRST when resuming work on any workflow, or whenever you are unsure what to do next.',
+        inputSchema: { type: 'object', properties: { workflowId: { type: 'string' } }, required: ['workflowId'] },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = deps.db
+          .select()
+          .from(schema.workflows)
+          .where(eq(schema.workflows.id, String(args.workflowId)))
+          .get();
+        if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
+        const graph = wf.graph as WorkflowGraph;
+        const state = readBuildLoop(wf.settings);
+        const hash = graphContentHash(graph);
+        const stage = deriveLoopStage(state, hash);
+        const compass = compassForWorkflow({
+          workflowId: wf.id,
+          appId: new AppStore(deps.db).appIdForWorkflow(ctx.workspaceId, wf.id),
+          graph,
+          settings: wf.settings,
+        });
+        let readiness;
+        try {
+          readiness = analyzeWorkflowReadiness(deps.db, ctx.workspaceId, graph);
+        } catch {
+          readiness = undefined;
+        }
+        return {
+          workflowId: wf.id,
+          title: wf.title,
+          nodeCount: graph.nodes.length,
+          edgeCount: graph.edges.length,
+          stage,
+          stageLabel: LOOP_STAGE_LABEL[stage],
+          graphHash: hash,
+          evidence: {
+            validatedAt: state.validatedAt ?? null,
+            dryRun: state.dryRun ? { ...state.dryRun, stale: state.dryRun.graphHash !== hash } : null,
+            debugRun: state.debugRun ? { ...state.debugRun, stale: state.debugRun.graphHash !== hash } : null,
+            productionRun: state.productionRun ? { ...state.productionRun, stale: state.productionRun.graphHash !== hash } : null,
+          },
+          ...(readiness ? { readiness } : {}),
+          compass,
+          summary: `${LOOP_STAGE_LABEL[stage]}. NEXT: ${compass.next[0]?.tool ?? ''} — ${compass.next[0]?.why ?? ''}`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.scope',
+        family: 'build',
+        description:
+          '[SWIFT — SCOPE] Define HOW SUCCESS IS VERIFIED for a workflow: persist its spec — objective, acceptance checks '
+          + '(http_probe / browser_probe / data_probe / expr / judge, each executed against the WORLD at run end, never the '
+          + 'run\'s self-report), sufficiency floors (anti-hollow: nonEmpty/minItems/minLength), and constraints '
+          + '(allowedServices, maxMutatingCalls). Without a spec a run can only ever be "completed", never verified '
+          + 'ACCOMPLISHED — and it can never harden or arm an unattended trigger. Call with just a workflowId to DERIVE a '
+          + 'draft from the workflow\'s description; pass `spec` to set it explicitly.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' },
+            spec: { type: 'object', description: 'Explicit WorkflowSpec { objective, acceptance[], sufficiency?, constraints?, reworkBudget? }. Omit to derive a draft.' },
+          },
+          required: ['workflowId'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = deps.db.select().from(schema.workflows)
+          .where(eq(schema.workflows.id, String(args.workflowId))).get();
+        if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
+        const graph = wf.graph as WorkflowGraph;
+        const hash = graphContentHash(graph);
+        const services = await runnableServicesForSpec(deps, ctx.workspaceId);
+
+        let spec: WorkflowSpec;
+        let question: string | undefined;
+        if (args.spec && typeof args.spec === 'object') {
+          const provided = args.spec as Partial<WorkflowSpec>;
+          spec = {
+            version: 1,
+            objective: String(provided.objective ?? wf.title),
+            acceptance: Array.isArray(provided.acceptance) ? provided.acceptance : [],
+            ...(provided.sufficiency ? { sufficiency: provided.sufficiency } : {}),
+            ...(provided.constraints ? { constraints: provided.constraints } : {}),
+            reworkBudget: provided.reworkBudget ?? 1,
+            ...(provided.verification ? { verification: provided.verification } : {}),
+            createdAt: readWorkflowSpec(wf.settings)?.createdAt ?? new Date().toISOString(),
+            reconciledHash: hash,
+          };
+        } else {
+          const derived = deriveSpecDraft({
+            description: [wf.title, wf.description ?? ''].filter(Boolean).join('. '),
+            services,
+            graph,
+          });
+          spec = { ...derived.spec, reconciledHash: hash };
+          question = derived.question;
+        }
+        const errors = validateWorkflowSpec(spec, { knownServices: services, graph });
+        if (errors.length > 0) {
+          return {
+            ok: false,
+            errors,
+            summary: `Spec rejected: ${errors[0]}`,
+            hint: 'Fix the named checks and call agentis.workflow.scope again. Every expr must parse; every data_probe service must be runnable; probe url templates must reference declared output keys.',
+          };
+        }
+        deps.db.update(schema.workflows)
+          .set({ settings: { ...((wf.settings as Record<string, unknown>) ?? {}), spec }, updatedAt: new Date().toISOString() })
+          .where(eq(schema.workflows.id, wf.id)).run();
+        const worldly = spec.acceptance.filter((c) => c.verify !== 'judge').length;
+        return {
+          ok: true,
+          workflowId: wf.id,
+          spec,
+          worldlyChecks: worldly,
+          ...(question ? { question } : {}),
+          ...(worldly === 0 ? { warning: 'All acceptance checks are judge-only. Hardening requires at least ONE worldly (non-judge) check — add an http_probe, data_probe, or expr check.' } : {}),
+          compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { ...((wf.settings as Record<string, unknown>) ?? {}), spec } }),
+          summary: `Scoped: "${spec.objective}" — ${spec.acceptance.length} acceptance check(s) (${worldly} worldly)${question ? '. NEEDS INPUT: ' + question : ''}`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.test',
+        family: 'build',
+        description:
+          '[SWIFT — ITERATE] The workflow test SUITE. action:"run" executes every pinned case through the free dry-run '
+          + 'engine (pure nodes real, side effects mocked) and evaluates case assertions + the spec\'s expr checks and '
+          + 'sufficiency floors against the terminal trace (world probes/judge run later, on the debug run). '
+          + 'action:"generate" derives edge/adversarial cases mechanically from the input contract (missing/empty/zero '
+          + 'variants) — generated cases report but never gate until you keep them. action:"add"/"remove"/"keep" manage '
+          + 'cases. Suite green (at the current graph) is required to HARDEN.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' },
+            action: { type: 'string', description: 'run | generate | add | remove | keep | list. Default: run.' },
+            case: { type: 'object', description: 'For add: { name, kind: happy|edge|adversarial|regression, inputs, assertions?, expectOutcome? }.' },
+            caseId: { type: 'string', description: 'For remove/keep.' },
+          },
+          required: ['workflowId'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = deps.db.select().from(schema.workflows)
+          .where(eq(schema.workflows.id, String(args.workflowId))).get();
+        if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
+        const graph = wf.graph as WorkflowGraph;
+        const settings = (wf.settings as Record<string, unknown>) ?? {};
+        const action = typeof args.action === 'string' && args.action.trim() ? args.action.trim() : 'run';
+        let suite = readWorkflowTests(settings);
+        const persistSuite = (next: WorkflowTestCase[]) => {
+          deps.db.update(schema.workflows)
+            .set({ settings: { ...settings, workflowTests: next }, updatedAt: new Date().toISOString() })
+            .where(eq(schema.workflows.id, wf.id)).run();
+        };
+
+        if (action === 'list') {
+          return { workflowId: wf.id, cases: suite, summary: `${suite.length} case(s).` };
+        }
+        if (action === 'generate') {
+          const generated = generateEdgeCases(graph);
+          if (generated.length === 0) {
+            return { ok: false, summary: 'No input contract on this graph — nothing to derive. Author cases with action:"add" instead.' };
+          }
+          const existingNames = new Set(suite.map((c) => c.name));
+          const fresh = generated.filter((c) => !existingNames.has(c.name));
+          persistSuite([...suite, ...fresh]);
+          return {
+            ok: true,
+            added: fresh.length,
+            cases: fresh.map((c) => ({ id: c.id, name: c.name, kind: c.kind, origin: c.origin })),
+            summary: `${fresh.length} generated case(s) added (non-gating until kept). Review them, keep the valid ones (action:"keep"), then action:"run".`,
+          };
+        }
+        if (action === 'add') {
+          const raw = (args.case ?? {}) as Record<string, unknown>;
+          const testCase: WorkflowTestCase = {
+            id: randomUUID(),
+            name: String(raw.name ?? `case ${suite.length + 1}`),
+            kind: ['happy', 'edge', 'adversarial', 'regression'].includes(String(raw.kind)) ? String(raw.kind) as WorkflowTestCase['kind'] : 'happy',
+            inputs: raw.inputs && typeof raw.inputs === 'object' ? raw.inputs as Record<string, unknown> : {},
+            assertions: Array.isArray(raw.assertions) ? raw.assertions as WorkflowTestCase['assertions'] : [],
+            ...(raw.expectOutcome && typeof raw.expectOutcome === 'object' ? { expectOutcome: raw.expectOutcome as WorkflowTestCase['expectOutcome'] } : {}),
+            origin: 'authored',
+          };
+          for (const a of testCase.assertions) {
+            try { evalCondition(String(a.expr), { output: {}, input: {}, inputs: {}, nodes: {}, trigger: {} }); }
+            catch { return { ok: false, summary: `assertion "${a.expr}" does not parse — fix it and re-add.` }; }
+          }
+          persistSuite([...suite, testCase]);
+          return { ok: true, caseId: testCase.id, summary: `Case "${testCase.name}" added. Run the suite: action:"run".` };
+        }
+        if (action === 'remove' || action === 'keep') {
+          const caseId = String(args.caseId ?? '');
+          const target = suite.find((c) => c.id === caseId);
+          if (!target) return { ok: false, summary: `case ${caseId} not found.` };
+          const next = action === 'remove'
+            ? suite.filter((c) => c.id !== caseId)
+            : suite.map((c) => (c.id === caseId ? { ...c, origin: 'authored' as const } : c));
+          persistSuite(next);
+          return { ok: true, summary: action === 'remove' ? `Case "${target.name}" removed.` : `Case "${target.name}" kept — it now gates the suite.` };
+        }
+
+        // action:"run" — the suite, through the dry-run engine.
+        suite = readWorkflowTests(settings);
+        if (suite.length === 0) {
+          return {
+            ok: false,
+            summary: 'No test cases pinned. Generate the mechanical battery first (action:"generate") or add a case (action:"add").',
+          };
+        }
+        const spec = readWorkflowSpec(settings);
+        const results = suite.map((testCase) => runSuiteCase(deps, ctx.workspaceId, wf.id, graph, testCase, spec));
+        const gating = results.filter((r) => r.gating);
+        const passedGating = gating.filter((r) => r.passed);
+        const ok = gating.length > 0 && passedGating.length === gating.length;
+        const hash = graphContentHash(graph);
+        const buildLoop = stampBuildLoop(deps.db, wf.id, {
+          suite: { at: new Date().toISOString(), graphHash: hash, total: gating.length, passed: passedGating.length, ok },
+        });
+        return {
+          ok,
+          workflowId: wf.id,
+          total: results.length,
+          gating: gating.length,
+          passed: passedGating.length,
+          results: results.map((r) => ({ id: r.id, name: r.name, kind: r.kind, gating: r.gating, passed: r.passed, detail: r.detail })),
+          compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { ...settings, buildLoop } }),
+          summary: ok
+            ? `Suite GREEN: ${passedGating.length}/${gating.length} gating case(s) passed${results.length > gating.length ? ` (+${results.length - gating.length} generated, non-gating)` : ''}. Next: a debug run.`
+            : `Suite RED: ${passedGating.length}/${gating.length} gating case(s) passed. Fix the failures before any real run.`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.harden',
+        family: 'build',
+        description:
+          '[SWIFT — FORMALIZE] The hardening gate. Checks every SWIFT predicate at the CURRENT graph hash — spec present + '
+          + 'reconciled with ≥1 worldly (non-judge) acceptance check, dry-run green, suite green (≥1 happy + ≥1 non-happy '
+          + 'case), latest debug run verdict ACCOMPLISHED (world-verified, not just COMPLETED), readiness clean — then '
+          + 'freezes a YAML export of the graph as an artifact, and stamps the workflow HARDENED. Hardened is what unlocks '
+          + 'unattended triggers (cron/webhook/listener). Any graph edit honestly demotes it. On failure, returns each '
+          + 'unmet predicate with the exact call that clears it.',
+        inputSchema: { type: 'object', properties: { workflowId: { type: 'string' } }, required: ['workflowId'] },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = deps.db.select().from(schema.workflows)
+          .where(eq(schema.workflows.id, String(args.workflowId))).get();
+        if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
+        const graph = wf.graph as WorkflowGraph;
+        const settings = (wf.settings as Record<string, unknown>) ?? {};
+        const hash = graphContentHash(graph);
+        const loop = readBuildLoop(settings);
+        const spec = readWorkflowSpec(settings);
+        const suiteCases = readWorkflowTests(settings).filter((c) => c.origin !== 'generated');
+
+        const unmet: Array<{ predicate: string; clearWith: { tool: string; args: Record<string, unknown> } }> = [];
+        if (!spec) {
+          unmet.push({ predicate: 'No spec — success is undefined, so accomplishment cannot be verified.', clearWith: { tool: 'agentis.workflow.scope', args: { workflowId: wf.id } } });
+        } else {
+          if (spec.reconciledHash !== hash) unmet.push({ predicate: 'Spec is STALE — the graph changed since it was scoped.', clearWith: { tool: 'agentis.workflow.scope', args: { workflowId: wf.id, spec } } });
+          if (!spec.acceptance.some((c) => c.verify !== 'judge')) unmet.push({ predicate: 'All acceptance checks are judge-only — at least one WORLDLY check (http_probe/data_probe/expr) is required to trust a workflow unattended.', clearWith: { tool: 'agentis.workflow.scope', args: { workflowId: wf.id } } });
+        }
+        if (!(loop.dryRun && loop.dryRun.graphHash === hash && loop.dryRun.ok)) {
+          unmet.push({ predicate: 'Dry-run is not green at this graph.', clearWith: { tool: 'agentis.workflow.dry_run', args: { workflowId: wf.id } } });
+        }
+        if (!(loop.suite && loop.suite.graphHash === hash && loop.suite.ok)) {
+          unmet.push({ predicate: 'Test suite is not green at this graph.', clearWith: { tool: 'agentis.workflow.test', args: { workflowId: wf.id, action: 'run' } } });
+        }
+        if (!suiteCases.some((c) => c.kind === 'happy') || !suiteCases.some((c) => c.kind !== 'happy')) {
+          unmet.push({ predicate: 'Suite must include ≥1 happy AND ≥1 non-happy (edge/adversarial/regression) kept case.', clearWith: { tool: 'agentis.workflow.test', args: { workflowId: wf.id, action: 'generate' } } });
+        }
+        const debug = loop.debugRun && loop.debugRun.graphHash === hash ? loop.debugRun : undefined;
+        if (!debug || !(debug.status === 'COMPLETED' || debug.status === 'COMPLETED_WITH_CONTRACT_VIOLATION')) {
+          unmet.push({ predicate: 'No completed debug run at this graph.', clearWith: { tool: 'agentis.workflow.run', args: { workflowId: wf.id, debugRun: true } } });
+        } else if (debug.verdict !== 'accomplished') {
+          unmet.push({
+            predicate: debug.verdict
+              ? `Debug run verdict is ${debug.verdict.toUpperCase()} — completion is not accomplishment. Fix the deficiencies and re-run.`
+              : 'Debug run was never VERIFIED (it ran before the spec existed). Re-run it so the verdict engine can prove the outcome.',
+            clearWith: { tool: 'agentis.workflow.run', args: { workflowId: wf.id, debugRun: true } },
+          });
+        }
+        let readiness;
+        try { readiness = analyzeWorkflowReadiness(deps.db, ctx.workspaceId, graph); } catch { readiness = undefined; }
+        if (readiness && !readiness.ready) {
+          unmet.push({ predicate: `Readiness: ${readiness.summary}`, clearWith: { tool: 'agentis.workflow.loop_status', args: { workflowId: wf.id } } });
+        }
+
+        if (unmet.length > 0) {
+          return {
+            ok: false,
+            hardened: false,
+            unmet,
+            summary: `NOT hardened — ${unmet.length} unmet predicate(s). Clear them in order; each entry names the exact call.`,
+          };
+        }
+
+        // All gates pass: freeze the proof.
+        const specHash = createHash('sha256').update(JSON.stringify(spec)).digest('hex').slice(0, 16);
+        const doc: WorkflowFile = {
+          apiVersion: WORKFLOW_FILE_API_VERSION,
+          kind: 'Workflow',
+          metadata: { name: wf.title, description: wf.description ?? null },
+          spec: { graph },
+        };
+        const yaml = yamlStringify(doc, { lineWidth: 0 });
+        let exportRef: string | undefined;
+        try {
+          exportRef = randomUUID();
+          const now = new Date().toISOString();
+          deps.db.insert(schema.artifacts).values({
+            id: exportRef,
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            type: 'file',
+            title: `${wf.title} — hardened@${hash} (frozen YAML)`,
+            content: yaml,
+            thumbnailUrl: null,
+            runId: null,
+            workflowId: wf.id,
+            agentId: null,
+            origin: 'workflow',
+            conversationId: null,
+            nodeId: null,
+            metadata: { name: `${wf.title}.workflow.yaml`, savedBy: 'harden-gate', graphHash: hash, specHash },
+            createdAt: now,
+            updatedAt: now,
+          }).run();
+        } catch { exportRef = undefined; }
+        const buildLoop = stampBuildLoop(deps.db, wf.id, {
+          hardened: { at: new Date().toISOString(), graphHash: hash, specHash, ...(exportRef ? { exportRef } : {}) },
+        });
+        recordWorkflowLesson(deps.memory, ctx.workspaceId, {
+          failureMode: `Hardening record: "${wf.title}" (${wf.id})`,
+          fix: `HARDENED at graph ${hash} on ${new Date().toISOString().slice(0, 10)}: objective "${spec!.objective}"; ${spec!.acceptance.length} acceptance check(s); suite ${loop.suite?.passed}/${loop.suite?.total}; frozen export ${exportRef ?? 'n/a'}. Any edit demotes — re-earn through dry-run → suite → accomplished debug run.`,
+        }, ctx.agentId ?? null);
+        return {
+          ok: true,
+          hardened: true,
+          graphHash: hash,
+          specHash,
+          ...(exportRef ? { exportRef } : {}),
+          compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { ...settings, buildLoop } }),
+          summary: `HARDENED at ${hash}. Frozen YAML export saved${exportRef ? ` (artifact ${exportRef})` : ''}. Unattended triggers may now arm; production runs keep being verified, and a deficient one demotes this stamp.`,
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.deliver',
+        family: 'build',
+        description:
+          '[SWIFT — DELIVER IN ONE CALL] Autonomously drive the ENTIRE quality loop and return one honest result. '
+          + 'Given a `goal` it BUILDS an App-of-one (or pass `workflowId` to deliver an existing one), then loops: '
+          + 'dry-run → run it for REAL (self-heal off) → VERIFY the outcome against the world (probes + judge) → '
+          + 'repair the deficient nodes → repeat, bounded. Returns exactly one of: `accomplished` (built + ran + '
+          + 'VERIFIED — real result, not just "completed"), `blocked_on_human` (stopped at an approval / missing '
+          + 'credential / rate-limit only you can clear — with the exact action), `unverifiable` (ran but has no '
+          + 'worldly way to prove success — say how), or `failed` (with the exact deficiencies + the run to diagnose). '
+          + 'Use THIS instead of orchestrating scope→build→dry_run→run→harden by hand — it cannot skip a step, '
+          + 'misread COMPLETED as success, or loop forever.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            goal: { type: 'string', description: 'What the workflow/app must accomplish. Builds a new App-of-one. Omit if passing workflowId.' },
+            workflowId: { type: 'string', description: 'Deliver an EXISTING workflow instead of building a new one.' },
+            inputs: { type: 'object', description: 'Sample trigger inputs threaded through the verification run.' },
+            maxIterations: { type: 'number', description: 'Build→verify→repair attempts before an honest failure (default 3, max 5).' },
+            maxWallMs: { type: 'number', description: 'Total wall-clock budget in ms (default 480000, max 1200000).' },
+          },
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        return deliverWorkflow(
+          deps,
+          {
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId,
+            ambientId: ctx.ambientId ?? null,
+            ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
+            ...(ctx.conversationId ? { conversationId: ctx.conversationId } : {}),
+          },
+          {
+            ...(typeof args.goal === 'string' ? { goal: args.goal } : {}),
+            ...(typeof args.workflowId === 'string' ? { workflowId: args.workflowId } : {}),
+            ...(args.inputs && typeof args.inputs === 'object' && !Array.isArray(args.inputs) ? { inputs: args.inputs as Record<string, unknown> } : {}),
+            ...(typeof args.maxIterations === 'number' ? { maxIterations: args.maxIterations } : {}),
+            ...(typeof args.maxWallMs === 'number' ? { maxWallMs: args.maxWallMs } : {}),
+          },
+        );
       },
     },
     {
@@ -669,7 +1339,13 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           ctx.agentId,
         );
         if (!memoryId) throw new AgentisError('VALIDATION_FAILED', 'workspace memory is not available to store the lesson');
-        return { recorded: true, memoryId };
+        const lessonTitle = failureMode.slice(0, 120);
+        return {
+          recorded: true,
+          memoryId,
+          title: lessonTitle,
+          message: `Lesson saved as "${lessonTitle}" — cite it by its TITLE (searchable in the Brain), never by the raw id. Re-learning the same failure mode updates this lesson in place.`,
+        };
       },
     },
   ]);
@@ -711,6 +1387,26 @@ export interface CreateWorkflowArgs {
  * route: assemble the brief, accept an agent-authored draft/patch or synthesize
  * with a configured fast model, then pre-flight, enrich, persist, and stream.
  */
+/**
+ * Organ-3 green ratchet, shared by build_workflow and workflow.patch (PAVED-ROAD
+ * P0 — one door): the set of CRITICAL defects (shape-mismatch edge couplings,
+ * approval bypasses) keyed for diffing. An edit may not INTRODUCE one the prior
+ * graph lacked; pre-existing red is not a regression.
+ */
+function criticalDefectKeys(g: WorkflowGraph): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const i of analyzeEdgeCouplings(g)) m.set(`couple:${i.nodeId}:${i.identifier ?? i.message}`, `${i.nodeTitle ?? i.nodeId}: ${i.message}`);
+  for (const v of checkIntentIntegrity(g)) if (v.code === 'AUTO_APPROVAL_BYPASS') m.set(`approval:${v.nodeId ?? ''}`, v.message);
+  return m;
+}
+
+function introducedRegressions(prior: WorkflowGraph, next: WorkflowGraph): string[] {
+  const before = criticalDefectKeys(prior);
+  const introduced: string[] = [];
+  for (const [k, msg] of criticalDefectKeys(next)) if (!before.has(k)) introduced.push(msg);
+  return introduced;
+}
+
 export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args: CreateWorkflowArgs) {
   const description = args.description.trim();
   // Resolve the target workflow. An explicit id (or the conversation latch, which
@@ -751,9 +1447,10 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   const workflowId = existingWorkflowId ?? randomUUID();
   if (deduplicatedRequest && existingWorkflow) {
     const graph = existingWorkflow.graph as WorkflowGraph;
+    const dedupAppId = new AppStore(deps.db).appIdForWorkflow(args.workspaceId, workflowId);
     return {
       workflowId,
-      appId: new AppStore(deps.db).appIdForWorkflow(args.workspaceId, workflowId),
+      appId: dedupAppId,
       runId: args.runId ?? `build_${workflowId}`,
       title,
       description: persistedDescription,
@@ -761,6 +1458,8 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       edgeCount: graph.edges.length,
       graph,
       deduplicated: true,
+      warnings: [] as PreflightWarning[],
+      compass: compassForWorkflow({ workflowId, appId: dedupAppId, graph, settings: existingWorkflow.settings }),
       message: `Workflow "${title}" already reflects this request.`,
     };
   }
@@ -1056,15 +1755,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // error, or an approval bypass). The workflow never persists a regression — this
   // kills the whack-a-mole where "fix A" silently breaks B. New workflows are exempt.
   if (existingWorkflow) {
-    const criticalKeys = (g: WorkflowGraph): Map<string, string> => {
-      const m = new Map<string, string>();
-      for (const i of analyzeEdgeCouplings(g)) m.set(`couple:${i.nodeId}:${i.identifier ?? i.message}`, `${i.nodeTitle ?? i.nodeId}: ${i.message}`);
-      for (const v of checkIntentIntegrity(g)) if (v.code === 'AUTO_APPROVAL_BYPASS') m.set(`approval:${v.nodeId ?? ''}`, v.message);
-      return m;
-    };
-    const prior = criticalKeys(existingWorkflow.graph as WorkflowGraph);
-    const introduced: string[] = [];
-    for (const [k, msg] of criticalKeys(graph)) if (!prior.has(k)) introduced.push(msg);
+    const introduced = introducedRegressions(existingWorkflow.graph as WorkflowGraph, graph);
     if (introduced.length > 0) {
       phase('blocked', `Edit rejected — introduced ${introduced.length} regression(s)`);
       throw new AgentisError(
@@ -1261,6 +1952,52 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   const warnSummary = preflight.warnings.length > 0
     ? ` ${preflight.warnings.length} item(s) need attention: ${preflight.warnings.slice(0, 3).map((w) => w.message).join(' ')}`
     : '';
+  // SWIFT — AUTO-SCOPE (enforcement): every workflow is born with acceptance
+  // criteria so it is VERIFIED by default, not just "completed". Without this
+  // the verdict engine only runs when an agent separately calls
+  // agentis.workflow.scope — which the common build→run→"done" path skips, so a
+  // run reports COMPLETED while the world holds nothing. We derive a spec here
+  // (deploy→URL probe, "N products"→floor, persist→data probe, else judge +
+  // the elicitation question) unless the caller already scoped one. Debug runs
+  // get the full verdict (judge included) so the building agent gets an honest
+  // signal while iterating; production defaults to probes_only to bound cost.
+  let autoScoped: WorkflowSpec | undefined;
+  let scopeQuestion: string | undefined;
+  try {
+    const currentRow = deps.db.select({ settings: schema.workflows.settings }).from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get();
+    const currentSettings = (currentRow?.settings as Record<string, unknown> | null) ?? {};
+    if (!readWorkflowSpec(currentSettings)) {
+      const services = await runnableServicesForSpec(deps, args.workspaceId);
+      const derived = deriveSpecDraft({ description, services, graph });
+      const spec: WorkflowSpec = { ...derived.spec, verification: 'probes_only', reconciledHash: graphContentHash(graph) };
+      if (validateWorkflowSpec(spec, { knownServices: services, graph }).length === 0) {
+        deps.db.update(schema.workflows)
+          .set({ settings: { ...currentSettings, spec }, updatedAt: new Date().toISOString() })
+          .where(eq(schema.workflows.id, workflowId))
+          .run();
+        autoScoped = spec;
+        scopeQuestion = derived.question;
+      }
+    }
+  } catch (err) {
+    deps.logger.warn('createWorkflow.autoscope_failed', { workflowId, error: (err as Error).message });
+  }
+
+  // PAVED-ROAD P1 — stamp durable loop-state (authored + gated at this graph
+  // hash; prior dry-run/debug evidence goes stale by hash) and hand back the
+  // compass: the exact next call on the Paved Road. Stamped AFTER the final
+  // settings write above so it is never clobbered.
+  const buildLoop = stampBuildLoop(deps.db, workflowId, {
+    graphHash: graphContentHash(graph),
+    validatedAt: new Date().toISOString(),
+  });
+  const compass = compassForWorkflow({
+    workflowId,
+    appId,
+    graph,
+    settings: { buildLoop },
+    openIssueCount: preflight.warnings.length,
+  });
   return {
     workflowId,
     appId,
@@ -1282,6 +2019,8 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     graph,
     health,
     trace,
+    compass,
+    ...(autoScoped ? { acceptance: { objective: autoScoped.objective, checks: autoScoped.acceptance.map((c) => ({ id: c.id, claim: c.claim, verify: c.verify })), ...(scopeQuestion ? { needsVerificationInput: scopeQuestion } : {}) } } : {}),
     message: `Workflow "${title}" built with ${graph.nodes.length} nodes (${brief.classification.archetype}).`
       + ` Est. ~${Math.max(1, Math.round(estimateDurationMs(graph) / 1000))}s/run`
       + (preflight.estimatedCostCents > 0 ? ` · ~$${(preflight.estimatedCostCents / 100).toFixed(2)}/run.` : '.')
@@ -1290,7 +2029,17 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       + (critiques.length > 0 ? ` Reviewer raised ${critiques.length} note(s).` : '')
       + (deliveryPreview.length > 0 ? ` Delivers to: ${deliveryPreview.map((d) => d.summary).join('; ')}.` : '')
       + (approvalRequired ? ' Requires approval before delivery.' : '')
-      + warnSummary,
+      + warnSummary
+      + (autoScoped ? ` VERIFIED-BY-DEFAULT: this workflow now has ${autoScoped.acceptance.length} acceptance check(s) — a run is only ACCOMPLISHED when they pass against the world, never just COMPLETED.${scopeQuestion ? ` (Needs your input to verify fully: ${scopeQuestion})` : ''}` : '')
+      // RUN-WHAT-YOU-BUILD reflex (SWIFT). Building a workflow is like writing code:
+      // you do not hand it over unrun — you VERIFY it yourself. The compass points
+      // at the next single step, but the standing instruction is to keep going,
+      // autonomously, until the run is ACCOMPLISHED (or a genuine human blocker),
+      // exactly as a coding agent runs and fixes the code it just wrote.
+      + ` NEXT — RUN WHAT YOU BUILT: you authored this, so you verify it, the way a coding agent runs the code it just wrote — do NOT hand an unverified workflow to the operator.`
+      + ` Continue now: call ${compass.next[0]?.tool ?? 'agentis.workflow.dry_run'} (${JSON.stringify(compass.next[0]?.args ?? { workflowId })}) — ${compass.next[0]?.why ?? 'prove the data flow before any real run.'}`
+      + ` — then keep going through the loop (dry_run → debug-run → read the verdict → fix the deficient nodes → repeat) until it is ACCOMPLISHED, or call agentis.workflow.deliver to run that whole build→verify→fix loop in one shot.`
+      + ` Only stop to ask the operator when you hit a real blocker — a missing credential/config or a decision only they can make.`,
   };
 }
 
@@ -2979,7 +3728,7 @@ function renderCreationBrief(brief: CreationBrief): string {
     rb.validates && rb.irreversible ? 'a validation step AFTER the irreversible action (evaluator/router) with a rollback branch on failure (D6)' : '',
     rb.batch ? 'bounded fan-out for the per-item work (loop/parallel with a maxConcurrency cap, joined by merge) (D5)' : '',
     recurring ? 'workflow_store dedup state (a get near the start, a set near the end) so each run only handles what is new (D4)' : '',
-    rb.iterative ? 'a `converge` node for the open-ended iterate-until-done goal: it re-runs a COHORT sub-workflow each pass, carries state across iterations on the blackboard, and stops on goal/stall/budget — do NOT hand-wire a fixed-N evaluator retry edge. Set continuation (deterministic | judge | signal); for code-fixing cooperation set isolation:"worktree" + preserve:"pr" (D7)' : '',
+    rb.iterative ? 'a `pursue` node for the open-ended iterate-until-done goal: it re-runs a COHORT sub-workflow each pass, carries state on the blackboard, measures progress, reflects when stuck, and stops on done/stall/budget — do NOT hand-wire a fixed-N evaluator retry edge. Set doneWhen (deterministic | judge | signal); for code-fixing cooperation set isolation:"worktree" + preserve:"pr" (D7)' : '',
   ].filter(Boolean);
   if (needs.length) {
     lines.push(`ROBUSTNESS REQUIREMENTS (this request needs these — encode each as real nodes, do not ship the happy path only):\n${needs.map((n) => `- ${n}`).join('\n')}`);
@@ -3076,14 +3825,16 @@ export const SYNTHESIS_SYSTEM_PROMPT = [
   '  evaluator:      { kind: "evaluator", targetPath, criteria, passThreshold? }',
   '  guardrails:     { kind: "guardrails", rules: [], onViolation: "block"|"flag" }',
   '  loop:           { kind: "loop", itemsExpression, maxConcurrency, bodyWorkflowId, outputArrayKey, onIterationError }',
-  '  converge:       { kind: "converge", bodyWorkflowId, continuation, maxIterations?, budget?, stallPolicy?, isolation?, preserve? }',
-  '                  The cooperative LOOP-UNTIL-DONE primitive. `bodyWorkflowId` is a cohort sub-workflow (e.g. research→fix→verify)',
-  '                  re-run each iteration until `continuation` says stop. continuation is ONE of:',
+  '  pursue:         { kind: "pursue", bodyWorkflowId, doneWhen, maxIterations?, budget?, stopWhenStalled?, isolation?, preserve?, assess?, maxPivots? }',
+  '                  The cognitive LOOP-UNTIL-DONE primitive (the intelligent loop). `bodyWorkflowId` is a cohort sub-workflow',
+  '                  (e.g. research→fix→verify) re-run each iteration until `doneWhen` says stop. doneWhen is ONE of:',
   '                  { type: "deterministic", expr: "body.openBugCount > 0" } — keep going while true;',
   '                  { type: "judge", targetPath, criteria, passThreshold? } — keep going while the judge FAILS;',
-  '                  { type: "signal", channel? } — agents call converge_signal when done. State carries across iterations via the',
-  '                  blackboard; stops early on stall (stallPolicy.window) or budget. isolation: "auto"|"worktree"|"shared";',
-  '                  preserve: "discard"|"branch"|"pr" turns a coding loop into a reviewable PR. Use for open-ended goals, not fixed-N work.',
+  '                  { type: "signal", channel? } — agents post a done-signal when finished. State carries across iterations on the',
+  '                  blackboard. It MEASURES progress each pass (assess, default on) and, when stuck, REFLECTS — feeds a self-critique',
+  '                  forward and changes tack up to `maxPivots` (default 2) instead of quitting; stops on done / stall / budget.',
+  '                  isolation: "auto"|"worktree"|"shared"; preserve: "discard"|"branch"|"pr" turns a coding loop into a reviewable PR.',
+  '                  Use for open-ended goals, not fixed-N work. (Legacy alias: kind "converge" with `continuation`/`stallPolicy`.)',
   '  parallel:       { kind: "parallel", waitFor, onBranchError, mergeStrategy }',
   '  agent_swarm:    { kind: "agent_swarm", prompt, inputArrayPath, maxParallel, mergeStrategy, capabilityTags, outputKey }',
   '  artifact_collect: { kind: "artifact_collect", collectionName }',

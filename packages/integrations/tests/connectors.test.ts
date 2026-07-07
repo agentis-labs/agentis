@@ -9,6 +9,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { AgentisError } from '@agentis/core';
 import { executeHttpRequest } from '../src/connectors/http.js';
 import { manifestHttpConnector, executeManifestOperation } from '../src/connectors/manifestHttp.js';
+import { SERVICE_TEMPLATES, templatedHttpConnector } from '../src/connectors/templatedConnectors.js';
 import type { IntegrationManifest, IntegrationOperationSpec } from '../src/types.js';
 
 /** Capture the fetch call without hitting the network. */
@@ -207,6 +208,76 @@ describe('executeManifestOperation — templating + auth', () => {
         credential: { botName: 'B' },
       }),
     ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+});
+
+describe('vercel connector — the real (non-git, no-CLI) deploy path the MCP lacks', () => {
+  beforeEach(() => { process.env.AGENTIS_INTEGRATION_HTTP_ALLOW_PRIVATE = 'true'; });
+  const connector = () => templatedHttpConnector('vercel', ['create_deployment', 'get_deployment', 'list_projects'], SERVICE_TEMPLATES.vercel!);
+
+  it('uploads a friendly file map as inline {file,data}, bearer-authed, target=production', async () => {
+    const { calls } = stubFetch({ body: '{"url":"my-store-abc.vercel.app","id":"dpl_1","readyState":"QUEUED"}' });
+    const out = await connector().execute({
+      operation: 'create_deployment',
+      params: {
+        name: 'my-store',
+        teamId: 'team_9',
+        files: { 'index.html': '<!doctype html><h1>Store</h1>', '/style.css': 'body{}' },
+      },
+      credential: { token: 'vc-tok' },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('https://api.vercel.com/v13/deployments?teamId=team_9');
+    expect((calls[0]!.init.headers as Record<string, string>).authorization).toBe('Bearer vc-tok');
+    const body = JSON.parse(calls[0]!.init.body as string);
+    expect(body.name).toBe('my-store');
+    expect(body.target).toBe('production');
+    expect(body.projectSettings).toEqual({ framework: null });
+    // Leading slash stripped; map → API's [{file,data}] shape.
+    expect(body.files).toEqual([
+      { file: 'index.html', data: '<!doctype html><h1>Store</h1>' },
+      { file: 'style.css', data: 'body{}' },
+    ]);
+    // Vercel's response body (the live deployment URL) flows straight back out.
+    expect((out.body as Record<string, unknown>).url).toBe('my-store-abc.vercel.app');
+  });
+
+  it('passes a native files array (with encoding + sha refs) through untouched', async () => {
+    const { calls } = stubFetch();
+    await connector().execute({
+      operation: 'create_deployment',
+      params: {
+        name: 'app',
+        framework: 'nextjs',
+        files: [
+          { file: 'logo.png', data: 'AAAA', encoding: 'base64' },
+          { file: 'cached.js', sha: 'abc123', size: 42 },
+        ],
+      },
+      credential: { token: 't' },
+    });
+    const body = JSON.parse(calls[0]!.init.body as string);
+    expect(body.projectSettings).toEqual({ framework: 'nextjs' });
+    expect(body.files).toEqual([
+      { file: 'logo.png', data: 'AAAA', encoding: 'base64' },
+      { file: 'cached.js', sha: 'abc123', size: 42 },
+    ]);
+  });
+
+  it('rejects a deploy with no files (the advisory-only failure mode, surfaced honestly)', async () => {
+    stubFetch();
+    await expect(connector().execute({
+      operation: 'create_deployment',
+      params: { name: 'x' },
+      credential: { token: 't' },
+    })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('reads deployment status by id (GET, no body)', async () => {
+    const { calls } = stubFetch({ body: '{"readyState":"READY"}' });
+    await connector().execute({ operation: 'get_deployment', params: { idOrUrl: 'dpl_1', teamId: 'team_9' }, credential: { token: 't' } });
+    expect(calls[0]!.url).toBe('https://api.vercel.com/v13/deployments/dpl_1?teamId=team_9');
+    expect(calls[0]!.init.body).toBeUndefined();
   });
 });
 

@@ -367,6 +367,7 @@ function RunModal() {
 
   const run = detail?.run ?? null;
   const failedNode = run?.nodes.find((node) => node.status === 'failed') ?? null;
+  const canCancelRun = run?.status === 'running' || run?.status === 'waiting' || run?.status === 'paused';
 
   return (
     <div
@@ -399,9 +400,9 @@ function RunModal() {
               Open canvas
             </Button>
           )}
-          {run && (run.status === 'running' || run.status === 'waiting') && (
-            <Button variant="secondary" size="sm" iconLeft={<Square size={12} />} onClick={() => void stopRun()}>
-              Stop
+          {canCancelRun && (
+            <Button variant="danger" size="sm" iconLeft={<Square size={12} />} onClick={() => void stopRun()}>
+              Cancel run
             </Button>
           )}
           {run?.status === 'paused' && (
@@ -456,7 +457,12 @@ function RunModal() {
                 <Metric label="Nodes" value={String(run.nodes.length)} />
                 {run.tokenUsage && (
                   <div className="rounded-card border border-line bg-surface-1 px-3 py-2">
-                    <div className="text-[10px] uppercase tracking-wider text-text-muted">Tokens consumed</div>
+                    <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-text-muted">
+                      {(run.status === 'running' || run.status === 'waiting' || run.status === 'paused') && (
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" title="Updating live" />
+                      )}
+                      Tokens consumed
+                    </div>
                     <div className="mt-1 truncate text-[13px] font-semibold text-text-primary">{formatTokens(run.tokenUsage.total)}</div>
                     <div className="mt-1 flex items-center gap-3 text-[10.5px] text-text-secondary">
                       <span className="inline-flex items-center gap-1"><ArrowDownRight size={10} className="text-text-muted" /> {formatTokens(run.tokenUsage.input)} in</span>
@@ -566,13 +572,20 @@ function RunHistoryList({
               </div>
             </div>
             {run.tokenUsage && (
-              <div className="flex flex-col items-end pr-3">
-                <div className="text-[13px] font-semibold text-text-primary">{formatTokens(run.tokenUsage.total)} <span className="text-[10px] font-normal text-text-muted">tokens</span></div>
-                <div className="flex items-center gap-2 text-[10px] text-text-muted mt-0.5">
-                  <span className="inline-flex items-center gap-0.5"><ArrowDownRight size={10} /> {formatTokens(run.tokenUsage.input)}</span>
-                  <span className="inline-flex items-center gap-0.5"><ArrowUpRight size={10} /> {formatTokens(run.tokenUsage.output)}</span>
+              run.tokenUsage.total > 0 ? (
+                <div className="flex flex-col items-end pr-3">
+                  <div className="text-[13px] font-semibold text-text-primary">{formatTokens(run.tokenUsage.total)} <span className="text-[10px] font-normal text-text-muted">tokens</span></div>
+                  <div className="flex items-center gap-2 text-[10px] text-text-muted mt-0.5">
+                    <span className="inline-flex items-center gap-0.5"><ArrowDownRight size={10} /> {formatTokens(run.tokenUsage.input)}</span>
+                    <span className="inline-flex items-center gap-0.5"><ArrowUpRight size={10} /> {formatTokens(run.tokenUsage.output)}</span>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                // A run that made no model calls (deterministic path / skipped
+                // agent branch) — label it so a true zero doesn't read as a
+                // broken counter.
+                <div className="pr-3 text-[11px] italic text-text-muted" title="This run made no model calls — its path used deterministic nodes only.">No model calls</div>
+              )
             )}
             <Button variant="ghost" size="sm" iconRight={<ArrowRight size={12} />} onClick={() => onInspect(run)}>
               Inspect

@@ -147,63 +147,6 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
 
   registry.register(
     {
-      id: 'agentis.ability.create',
-      family: 'build',
-      description:
-        'Create a reusable Agentis ability. Choose an ON-RAMP: describe it (intent), POINT AT EXAMPLES (examples: input/output pairs it should reproduce), or POINT AT MATERIAL (material: a doc/spec/source to distill). The ability is materialized immediately and queued for compilation.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          intent: { type: 'string', description: 'The specialist behavior or reusable capability to create.' },
-          examples: { type: 'array', description: 'Examples on-ramp: [{ inputText, outputText }] pairs the ability should learn to reproduce.', items: { type: 'object' } },
-          material: { type: 'string', description: 'Material on-ramp: a document/spec/source to distill the ability from.' },
-          materialTitle: { type: 'string', description: 'Optional title for the material.' },
-          name: { type: 'string', description: 'Optional ability name.' },
-          domainTag: { type: 'string', description: 'Optional routing domain such as research, monitoring, or email.' },
-        },
-        required: ['intent'],
-      },
-      mutating: true,
-      autoExecute: true,
-      mcpExposed: true,
-    },
-    async (args, ctx) => {
-      if (!deps.abilityCreation) throw new Error('Ability creation service is unavailable');
-      const intent = stringArg(args.intent);
-      if (!intent) throw new Error('intent is required');
-      // Pick the richest on-ramp the caller supplied (material > examples > intent)
-      // so an agent can POINT AT work, not just describe it (P5).
-      const examples = Array.isArray(args.examples)
-        ? (args.examples as Array<Record<string, unknown>>)
-            .map((e) => ({ inputText: String(e?.inputText ?? e?.input ?? ''), outputText: String(e?.outputText ?? e?.output ?? '') }))
-            .filter((e) => e.inputText || e.outputText)
-        : undefined;
-      const material = stringArg(args.material);
-      const hasExamples = Boolean(examples && examples.length > 0);
-      const result = await deps.abilityCreation.draft({
-        workspaceId: ctx.workspaceId,
-        authorId: ctx.userId,
-        from: material ? 'material' : hasExamples ? 'examples' : 'intent',
-        intent,
-        ...(hasExamples ? { examples } : {}),
-        ...(material ? { material } : {}),
-        ...(stringArg(args.materialTitle) ? { materialTitle: stringArg(args.materialTitle)! } : {}),
-        ...(stringArg(args.name) ? { name: stringArg(args.name)! } : {}),
-        ...(stringArg(args.domainTag) ? { domainTag: stringArg(args.domainTag)! } : {}),
-      });
-      return {
-        abilityId: result.ability?.id,
-        name: result.ability?.name,
-        slug: result.ability?.slug,
-        compileStatus: result.ability?.compileStatus,
-        synthesized: result.synthesized,
-        notes: result.notes,
-      };
-    },
-  );
-
-  registry.register(
-    {
       id: 'agentis.extension.create',
       family: 'build',
       description:

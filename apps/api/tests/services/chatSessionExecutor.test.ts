@@ -290,7 +290,7 @@ describe('ChatSessionExecutor', () => {
     }));
 
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
-    // A handful of identical rounds, not 150 — the monitor caught it fast.
+    // A handful of identical rounds, not the absolute round ceiling — the monitor caught it fast.
     expect(adapter.calls.length).toBeLessThan(6);
     const text = deltas
       .filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text')

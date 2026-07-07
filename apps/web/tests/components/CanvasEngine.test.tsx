@@ -24,6 +24,7 @@ vi.mock('@xyflow/react', () => ({
   MiniMap: () => <div data-testid="minimap" />,
   Background: () => null,
   useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
+  SelectionMode: { Partial: 'partial', Full: 'full' },
 }));
 
 import { CanvasEngine } from '../../src/components/canvas/CanvasEngine';

@@ -71,6 +71,23 @@ interface Wrapped<T> {
   data: T;
 }
 
+/** A graded lesson the App's owner agent deposited (Phase M2 visibility). */
+export interface LearnedLesson {
+  id: string;
+  title: string | null;
+  summary: string | null;
+  outcome: string | null;
+  createdAt: string;
+}
+
+/** An ability that graduated out of the App agent's accumulated lessons. */
+/** "What this agent learned" — recent graded lessons. */
+export interface AppLearnings {
+  appId: string;
+  ownerAgentId: string | null;
+  lessons: LearnedLesson[];
+}
+
 export type AppUpdatePayload = Partial<{
   name: AppRecord['name'];
   description: AppRecord['description'];
@@ -185,11 +202,19 @@ export const appsApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }).then((r) => r.data),
+  /** "What this agent learned" (Phase M2): recent graded lessons + graduated abilities. */
+  learnings: (id: string) => api<Wrapped<AppLearnings>>(`/v1/apps/${id}/learnings`).then((r) => r.data),
   /** Workflow control plane (E0): the App's workflows with purpose/order/trigger/last-run. */
   listWorkflows: (id: string) => api<Wrapped<AppWorkflowSummary[]>>(`/v1/apps/${id}/workflows`).then((r) => r.data),
   /** Start one of the App's workflows; returns the new run id (202). */
   runAppWorkflow: (id: string, workflowId: string) =>
     api<Wrapped<{ runId: string }>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/run`, { method: 'POST' }).then((r) => r.data),
+  /** Start every enabled root workflow (no dependsOn) in order; chains cascade. */
+  runAllAppWorkflows: (id: string) =>
+    api<Wrapped<{ results: Array<{ workflowId: string; runId: string | null; skipped?: string }> }>>(
+      `/v1/apps/${id}/workflows/run-all`,
+      { method: 'POST' },
+    ).then((r) => r.data.results),
   /** Update an App→workflow binding (purpose/order/enabled/dependsOn). */
   updateWorkflowBinding: (id: string, workflowId: string, binding: UpdateAppWorkflowBindingInput) =>
     api<Wrapped<AppWorkflowBinding>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/binding`, {
@@ -218,6 +243,20 @@ export const appsApi = {
       `/v1/apps/${id}/collections/${encodeURIComponent(collection)}/query`,
       { method: 'POST', body: JSON.stringify(q) },
     ),
+  insertRecord: (id: string, collection: string, record: Record<string, unknown>) =>
+    api<Wrapped<CollectionRecord>>(`/v1/apps/${id}/collections/${encodeURIComponent(collection)}/records`, {
+      method: 'POST',
+      body: JSON.stringify({ record }),
+    }).then((r) => r.data),
+  updateRecord: (id: string, collection: string, recordId: string, patch: Record<string, unknown>) =>
+    api<Wrapped<CollectionRecord>>(`/v1/apps/${id}/collections/${encodeURIComponent(collection)}/records/${encodeURIComponent(recordId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ patch }),
+    }).then((r) => r.data),
+  deleteRecord: (id: string, collection: string, recordId: string) =>
+    api<Wrapped<{ ok: boolean }>>(`/v1/apps/${id}/collections/${encodeURIComponent(collection)}/records/${encodeURIComponent(recordId)}`, {
+      method: 'DELETE',
+    }).then((r) => r.data),
 
   // Public, unauthed share (AGENTIC-APPS-10X §4.7)
   publicSurface: (token: string) =>

@@ -29,7 +29,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { ChatDelta } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
+import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { extractMarkerToolCalls, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
 import { linkAbortSignal } from './abort.js';
 import { runtimeProgressActivity } from './runtimeProgress.js';
@@ -155,9 +155,12 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   let child: ReturnType<typeof spawn>;
   try {
     const env = withExpandedPath({ ...process.env, ...(cfg.env ?? {}) });
-    const target = resolveSpawnTarget(cfg.binary, cfg.args, cfg.cwd ?? process.cwd(), env);
+    // Self-heal a vanished harness workdir so a present binary can't throw the
+    // misleading `spawn <binary> ENOENT` (Windows reports a missing cwd that way).
+    const cwd = resolveSpawnCwd(cfg.cwd, { create: true });
+    const target = resolveSpawnTarget(cfg.binary, cfg.args, cwd ?? process.cwd(), env);
     child = spawn(target.command, target.args, {
-      cwd: cfg.cwd,
+      cwd,
       env,
       windowsHide: true,
       signal: controller.signal,

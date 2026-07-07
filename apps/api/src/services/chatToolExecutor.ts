@@ -99,6 +99,7 @@ export class ChatToolExecutor {
         executionMode: ctx.executionMode,
         viewport: ctx.viewport ?? null,
         appId: ctx.appId ?? null,
+        artifactPolicy: ctx.artifactPolicy ?? null,
         caller: 'chat',
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       },

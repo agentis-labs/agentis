@@ -1,6 +1,12 @@
 /**
  * ProactiveFollowupService — the App reaches out first (LIVING-APPS-10X Phase 3 / §4.5).
  *
+ * ⚠️ LEGACY NAME / PARALLEL PATH (Agent-Native Platform Plan §3.2). Sweeps due
+ * `app_contacts` and reaches out — a contact-flavored precursor to the general Subject
+ * lifecycle on the Durable Entity spine (a Subject's `wait`/timer + the dispatcher).
+ * New proactive/lifecycle behavior belongs on the spine (`SubjectRuntime`), not here.
+ * Retiring this sweep is gated on the `app_contacts`→Subject fold (post-soak migration).
+ *
  * A resident agent must initiate, not only react. Each contact carries a
  * `nextTouchAt` clock; when it falls due this sweep dispatches a turn into the
  * contact's conversation with a follow-up goal, the agent composes a message,
@@ -73,6 +79,7 @@ export class ProactiveFollowupService {
 
   async #followUp(contact: {
     id: string; workspaceId: string; appId: string | null; channelKind: string | null; handle: string | null; displayName: string | null; goal: string | null;
+    stage?: string | null; dataJson?: unknown;
   }): Promise<boolean> {
     if (!contact.appId || !contact.channelKind || !contact.handle) return false;
     // Resolve the live thread for this contact (DM channels: handle == chat id).
@@ -90,6 +97,15 @@ export class ProactiveFollowupService {
 
     const who = contact.displayName ?? 'this contact';
     const goal = contact.goal ?? 'continue the relationship and move it forward';
+    // §3.1/§3.2 — the follow-up is a judgment call, not a canned nudge. Feed the
+    // agent everything the subject's durable state knows (pipeline stage + learned
+    // facts), so the message it composes is informed rather than generic.
+    const stage = contact.stage && contact.stage !== 'new' ? contact.stage : null;
+    const facts = renderFacts(contact.dataJson);
+    const context = [
+      stage ? `Current stage: ${stage}.` : '',
+      facts ? `What you know about them: ${facts}.` : '',
+    ].filter(Boolean).join(' ');
 
     // Outbound safety envelope (G7): gate the agent-initiated follow-up. The goal
     // text is the proxy for what the agent will say (claim/approval guard); rate
@@ -123,10 +139,20 @@ export class ProactiveFollowupService {
       connectionId: conv.connectionId,
       kind: contact.channelKind,
       chatId: contact.handle,
-      text: `[Scheduled follow-up — you are reaching out first, this is not a reply to a new message] Follow up with ${who} as promised. Goal: ${goal}. Send a brief, warm, on-topic message; if there is nothing useful to say, stay quiet.`,
+      text: `[Scheduled follow-up — you are reaching out first, this is not a reply to a new message] Follow up with ${who} as promised. Goal: ${goal}.${context ? ` ${context}` : ''} Send a brief, warm, on-topic message grounded in what you know about them; if there is nothing useful to say, stay quiet.`,
     });
     // Count this agent-initiated outbound against the App's rolling rate window (G7).
     this.deps.policy?.record(contact.appId, 'agent');
     return true;
   }
+}
+
+/** Compact, bounded rendering of a subject's learned facts for the follow-up prompt. */
+function renderFacts(dataJson: unknown): string {
+  if (!dataJson || typeof dataJson !== 'object' || Array.isArray(dataJson)) return '';
+  const entries = Object.entries(dataJson as Record<string, unknown>)
+    .filter(([, v]) => v != null && (typeof v !== 'object'))
+    .slice(0, 6)
+    .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`);
+  return entries.join('; ');
 }

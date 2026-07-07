@@ -12,11 +12,22 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
+
+type ApprovalRow = typeof schema.approvalRequests.$inferSelect;
+
+export type PresentedApproval = ApprovalRow & {
+  payload: Record<string, unknown>;
+  workflowId: string | null;
+  workflowName: string | null;
+  agentName: string | null;
+  nodeTitle: string | null;
+  nodeType: string | null;
+};
 
 export interface ApprovalCreateArgs {
   workspaceId: string;
@@ -42,9 +53,15 @@ export type CheckpointResumeHandler = (args: {
   approvalId: string;
   source: string;
   targetId: string | null;
-  decision: 'approve' | 'reject';
+  decision: 'approve' | 'reject' | 'revise';
   /** Submitted form values for a `human_input` node (becomes the node output). */
   data?: Record<string, unknown>;
+  /**
+   * Operator's free-text instruction for a `revise` decision — delivered to the
+   * waiting agent (orchestrator/manager) so it can adjust course WITHOUT the run
+   * being torn down. Ignored for approve/reject.
+   */
+  feedback?: string;
 }) => Promise<void>;
 
 /**
@@ -108,22 +125,52 @@ export class ApprovalInboxService {
     return { id, ...args, status: 'pending' as const, createdAt };
   }
 
-  list(workspaceId: string, status: 'pending' | 'all' = 'pending') {
+  list(workspaceId: string, status: 'pending' | 'all' = 'pending'): PresentedApproval[] {
     const rows = this.db
       .select()
       .from(schema.approvalRequests)
       .where(eq(schema.approvalRequests.workspaceId, workspaceId))
       .all();
-    return status === 'all' ? rows : rows.filter((r) => r.status === 'pending');
+    
+    const filteredRows = status === 'all' ? rows : rows.filter((r) => r.status === 'pending');
+    
+    if (filteredRows.length > 0) {
+      const runIds = [...new Set(filteredRows.map(r => r.runId).filter(Boolean))] as string[];
+      if (runIds.length > 0) {
+        const runs = this.db
+          .select({ id: schema.workflowRuns.id, status: schema.workflowRuns.status })
+          .from(schema.workflowRuns)
+          .where(inArray(schema.workflowRuns.id, runIds))
+          .all();
+        
+        const activeStatuses = new Set(['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']);
+        const activeRunIds = new Set(runs.filter(r => activeStatuses.has(r.status)).map(r => r.id));
+        
+        return filteredRows.filter(r => !r.runId || activeRunIds.has(r.runId)).map((row) => this.#present(row));
+      }
+    }
+    
+    return filteredRows.map((row) => this.#present(row));
+  }
+
+  get(workspaceId: string, approvalId: string): PresentedApproval | null {
+    const row = this.db
+      .select()
+      .from(schema.approvalRequests)
+      .where(and(eq(schema.approvalRequests.id, approvalId), eq(schema.approvalRequests.workspaceId, workspaceId)))
+      .get();
+    return row ? this.#present(row) : null;
   }
 
   async resolve(args: {
     workspaceId: string;
     approvalId: string;
-    decision: 'approve' | 'reject';
+    decision: 'approve' | 'reject' | 'revise';
     reason?: string;
     /** Submitted form values for a `human_input` node. */
     data?: Record<string, unknown>;
+    /** Operator instruction for a `revise` decision (see CheckpointResumeHandler). */
+    feedback?: string;
   }) {
     const row = this.db
       .select()
@@ -139,13 +186,19 @@ export class ApprovalInboxService {
     if (row.status !== 'pending') {
       throw new AgentisError('RESOURCE_CONFLICT', `Approval already ${row.status}`);
     }
-    const next = args.decision === 'approve' ? 'approved' : 'rejected';
+    // `revise` is a non-destructive third decision: the operator sends a new
+    // instruction back to the waiting agent instead of approving or cancelling
+    // (which would tear down the run). The original request is retired as
+    // `revised`; the agent decides what to do next and may re-request approval.
+    const next = args.decision === 'approve' ? 'approved' : args.decision === 'revise' ? 'revised' : 'rejected';
+    // The instruction rides in `feedback` for revise, or `reason` for approve/reject.
+    const resolutionReason = args.decision === 'revise' ? (args.feedback ?? args.reason ?? null) : (args.reason ?? null);
     const resolvedAt = new Date().toISOString();
     this.db
       .update(schema.approvalRequests)
       .set({
         status: next,
-        resolutionReason: args.reason ?? null,
+        resolutionReason,
         resolvedAt,
       })
       .where(eq(schema.approvalRequests.id, row.id))
@@ -163,19 +216,146 @@ export class ApprovalInboxService {
         targetId: row.targetId ?? row.taskId ?? null,
         decision: args.decision,
         ...(args.data ? { data: args.data } : {}),
+        ...(args.decision === 'revise' && resolutionReason ? { feedback: resolutionReason } : {}),
       });
-    } else if (row.source === 'outbound' && this.#onOutboundResolved) {
+    } else if (row.source === 'outbound' && this.#onOutboundResolved && args.decision !== 'revise') {
       // App outbound approval (G7): deliver the held message on approve, drop on reject.
+      // `revise` has no meaning for a held one-shot outbound message, so it is a no-op here.
       await this.#onOutboundResolved({
         approvalId: row.id,
         decision: args.decision,
         payload: (row.payload ?? {}) as Record<string, unknown>,
       });
     }
-    return { ...row, status: next, resolvedAt, resolutionReason: args.reason ?? null };
+    return { ...row, status: next, resolvedAt, resolutionReason };
+  }
+
+  #present(row: ApprovalRow): PresentedApproval {
+    const context = this.#approvalContext(row);
+    return {
+      ...row,
+      payload: redactForApprovalReview(asRecord(row.payload)) as Record<string, unknown>,
+      workflowId: context.workflowId,
+      workflowName: context.workflowName,
+      agentName: context.agentName,
+      nodeTitle: context.nodeTitle,
+      nodeType: context.nodeType,
+    };
+  }
+
+  #approvalContext(row: ApprovalRow): {
+    workflowId: string | null;
+    workflowName: string | null;
+    agentName: string | null;
+    nodeTitle: string | null;
+    nodeType: string | null;
+  } {
+    let workflowId: string | null = null;
+    let workflowName: string | null = null;
+    let graph: unknown = null;
+    let taskNodeId: string | null = null;
+    let taskExecutorRef: string | null = null;
+    let taskExecutorType: string | null = null;
+
+    if (row.runId) {
+      const run = this.db
+        .select({
+          workflowId: schema.workflowRuns.workflowId,
+          graphSnapshot: schema.workflowRuns.graphSnapshot,
+        })
+        .from(schema.workflowRuns)
+        .where(eq(schema.workflowRuns.id, row.runId))
+        .get();
+      workflowId = run?.workflowId ?? null;
+      graph = run?.graphSnapshot ?? null;
+    }
+
+    if (row.taskId) {
+      const task = this.db
+        .select({
+          workflowId: schema.tasks.workflowId,
+          nodeId: schema.tasks.nodeId,
+          executorType: schema.tasks.executorType,
+          executorRef: schema.tasks.executorRef,
+          title: schema.tasks.title,
+        })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, row.taskId))
+        .get();
+      workflowId = workflowId ?? task?.workflowId ?? null;
+      taskNodeId = task?.nodeId ?? null;
+      taskExecutorRef = task?.executorRef ?? null;
+      taskExecutorType = task?.executorType ?? null;
+    }
+
+    if (workflowId) {
+      const workflow = this.db
+        .select({ title: schema.workflows.title, graph: schema.workflows.graph, ownerAgentId: schema.workflows.ownerAgentId })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.id, workflowId))
+        .get();
+      workflowName = workflow?.title ?? null;
+      graph = graph ?? workflow?.graph ?? null;
+      if (!taskExecutorRef && workflow?.ownerAgentId) {
+        taskExecutorType = 'agent';
+        taskExecutorRef = workflow.ownerAgentId;
+      }
+    }
+
+    const nodeId = row.targetId ?? taskNodeId;
+    const node = nodeId ? findWorkflowGraphNode(graph, nodeId) : null;
+    const agentId = taskExecutorType === 'agent'
+      ? taskExecutorRef
+      : node ? agentRefFromNode(node) : null;
+    const agent = agentId
+      ? this.db
+        .select({ name: schema.agents.name })
+        .from(schema.agents)
+        .where(eq(schema.agents.id, agentId))
+        .get()
+      : null;
+
+    return {
+      workflowId,
+      workflowName,
+      agentName: agent?.name ?? null,
+      nodeTitle: node ? String((node as Record<string, unknown>).title ?? nodeId) : null,
+      nodeType: node ? String((node as Record<string, unknown>).type ?? ((node as Record<string, unknown>).config as { kind?: unknown } | undefined)?.kind ?? '') || null : null,
+    };
   }
 }
 
 function isRunResumingApproval(source: string): boolean {
   return source === 'checkpoint' || source === 'phase_gate' || source === 'self_heal';
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function findWorkflowGraphNode(graph: unknown, nodeId: string): Record<string, unknown> | null {
+  const nodes = graph && typeof graph === 'object' ? (graph as { nodes?: unknown }).nodes : undefined;
+  if (!Array.isArray(nodes)) return null;
+  return (nodes.find((node) => (
+    node && typeof node === 'object' && String((node as { id?: unknown }).id ?? '') === nodeId
+  )) as Record<string, unknown> | undefined) ?? null;
+}
+
+function agentRefFromNode(node: Record<string, unknown>): string | null {
+  const config = node.config && typeof node.config === 'object' ? node.config as Record<string, unknown> : {};
+  const candidate = config.agentId ?? config.agent_id ?? config.assigneeAgentId ?? config.executorRef;
+  return typeof candidate === 'string' && candidate.trim() ? candidate : null;
+}
+
+const SECRET_KEY = /(password|secret|token|api[-_ ]?key|service[-_ ]?role|credential|authorization|bearer|private[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret)/i;
+
+function redactForApprovalReview(value: unknown, depth = 0): unknown {
+  if (depth > 8) return '[Truncated]';
+  if (Array.isArray(value)) return value.slice(0, 200).map((item) => redactForApprovalReview(item, depth + 1));
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = SECRET_KEY.test(key) ? '[Redacted]' : redactForApprovalReview(nested, depth + 1);
+  }
+  return out;
 }

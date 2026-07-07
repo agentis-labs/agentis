@@ -18,6 +18,7 @@ import { schema } from '@agentis/db/sqlite';
 import { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import { buildInitialRunState } from '../../src/engine/initialRunState.js';
 import { LedgerService } from '../../src/services/ledger.js';
+import { AuditTrailService } from '../../src/services/auditTrail.js';
 import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
@@ -121,6 +122,7 @@ describe('WorkflowEngine evaluator agent fallback', () => {
       scratchpad: new ScratchpadService(ctx.bus, ctx.logger),
       activity: new ActivityFeedService(ctx.db, ctx.bus),
       approvals: new ApprovalInboxService(ctx.db, ctx.bus),
+      audit: new AuditTrailService(ctx.db, ctx.logger),
       extensions: {} as unknown as ExtensionRuntime,
       adapters,
     });
@@ -251,5 +253,18 @@ describe('WorkflowEngine evaluator agent fallback', () => {
     expect(adapter.chatOptions[0]?.preferredModel).toBe('gpt-5.3-codex');
     expect(adapter.chatPrompts[0]?.map((message) => message.content).join('\n'))
       .toContain('A concise, sourced AI news digest.');
+
+    // Attribution gap closed: the evaluator ran on the agent's model, so its
+    // `node.completed` audit entry must METER the spend AND stamp the agent id —
+    // no evaluator/router spend reads as anonymous "engine" anymore.
+    const evalAudit = ctx.db
+      .select()
+      .from(schema.auditEntries)
+      .where(eq(schema.auditEntries.runId, runId))
+      .all()
+      .find((entry) => entry.nodeId === 'evaluate-digest' && entry.action === 'node.completed');
+    expect(evalAudit).toBeTruthy();
+    expect(evalAudit?.agentId).toBe(agentId);
+    expect((evalAudit?.tokensIn ?? 0) + (evalAudit?.tokensOut ?? 0)).toBeGreaterThan(0);
   });
 });

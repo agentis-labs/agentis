@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BookOpen, ChevronDown, Crown, Download, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, Users, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
-import { AgentAbilitiesPanel } from '../agents/AgentAbilitiesPanel';
 import { harnessOf } from '../agents/harnessMeta';
 import { importAgents, checkImportUpdates, type ImportUpdate } from '../../lib/agentImport';
 import { Button } from '../shared/Button';
@@ -57,7 +56,7 @@ export function AgentBrainPanel() {
   const [imports, setImports] = useState<ImportUpdate[]>([]);
   const [pulling, setPulling] = useState(false);
   const [content, setContent] = useState('');
-  const [view, setView] = useState<'map' | 'memory' | 'knowledge' | 'abilities'>('map');
+  const [view, setView] = useState<'map' | 'memory' | 'knowledge'>('map');
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const loadAgents = useCallback(async () => {
@@ -218,14 +217,8 @@ export function AgentBrainPanel() {
               </section>
             </div>
           </div>
-        ) : view === 'knowledge' ? (
-          agentId ? <KnowledgeTab scopeId={agentId} scopeName={current?.name} /> : null
         ) : (
-          <div className="h-full overflow-y-auto px-6 py-5">
-            <div className="mx-auto max-w-4xl">
-              <AgentAbilitiesPanel agentId={agentId} />
-            </div>
-          </div>
+          agentId ? <KnowledgeTab scopeId={agentId} scopeName={current?.name} /> : null
         )}
       </div>
       {pickerOpen && (
@@ -449,15 +442,14 @@ function ScopeToggle({
   view,
   onChange,
 }: {
-  view: 'map' | 'memory' | 'knowledge' | 'abilities';
-  onChange: (value: 'map' | 'memory' | 'knowledge' | 'abilities') => void;
+  view: 'map' | 'memory' | 'knowledge';
+  onChange: (value: 'map' | 'memory' | 'knowledge') => void;
 }) {
   return (
     <div className="flex items-center gap-1.5 text-[12px]">
       <button type="button" onClick={() => onChange('map')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'map' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Network size={12} /> Map</button>
       <button type="button" onClick={() => onChange('memory')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'memory' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><NotebookPen size={12} /> Memory</button>
       <button type="button" onClick={() => onChange('knowledge')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'knowledge' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><BookOpen size={12} /> Knowledge</button>
-      <button type="button" onClick={() => onChange('abilities')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'abilities' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Sparkles size={12} /> Abilities</button>
     </div>
   );
 }

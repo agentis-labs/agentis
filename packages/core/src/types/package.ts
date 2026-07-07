@@ -4,8 +4,22 @@ import { appManifestSchema } from './manifest.js';
 import { upsertSurfaceSchema } from './view.js';
 import { collectionSchemaSchema } from './datastore.js';
 
-export const packageKindSchema = z.enum(['agent', 'workflow', 'extension', 'agentis', 'integration']);
+export const packageKindSchema = z.enum(['agent', 'workflow', 'extension', 'agentis', 'integration', 'skill']);
 export type PackageKind = z.infer<typeof packageKindSchema>;
+
+/**
+ * A portable Skill (a standard `SKILL.md`): frontmatter name/description + a
+ * markdown body (the procedure). Installing it materializes the SKILL.md to disk
+ * and creates a Brain `skill` atom at the chosen scope. See Living Skills.
+ */
+export const skillContentsSchema = z.object({
+  name: z.string().min(1).max(160),
+  slug: z.string().min(1).max(120),
+  description: z.string().max(2000).default(''),
+  /** The SKILL.md body (markdown procedure). */
+  body: z.string().default(''),
+});
+export type SkillContents = z.infer<typeof skillContentsSchema>;
 
 export const agentContentsSchema = z.object({
   name: z.string().min(1),
@@ -17,57 +31,8 @@ export const agentContentsSchema = z.object({
   runtimeModel: z.string().nullable().optional(),
   role: z.string().nullable().optional(),
   monthlyBudgetCents: z.number().int().nonnegative().nullable().optional(),
-  /**
-   * Slugs of abilities to pin to this agent after install (docs/brain/ABILITIES.md §3).
-   * Matched against ability slugs from `agentisPackageContentsSchema.abilities`.
-   * Unknown slugs are skipped with a warning rather than failing the install.
-   */
-  pinnedAbilitySlugs: z.array(z.string().min(1)).optional(),
 });
 export type AgentContents = z.infer<typeof agentContentsSchema>;
-
-/**
- * Bundled ability shape (subset of AbilityPackage from `ability.ts`) — packed
- * inside an `.agentiswf` bundle so install spins up agent + workflows + abilities
- * + pins in a single operation.
- *
- * The embedding arrays are intentionally optional and float[] — when the source
- * workspace embeds at a different dimension than the target, the packager drops
- * them and queues a recompile. Compiled persona + structured rules carry over
- * unconditionally so the ability is usable immediately.
- */
-export const abilityPackageContentsSchema = z.object({
-  name: z.string().min(1),
-  slug: z.string().min(1),
-  version: z.string().min(1).default('1.0.0'),
-  domain_tag: z.string().min(1),
-  icon_emoji: z.string().optional(),
-  description: z.string().optional(),
-  compiled_prompt: z.string().default(''),
-  specs: z.record(z.string().or(z.undefined())).default({}),
-  rules_always: z.array(z.string()).default([]),
-  rules_never: z.array(z.string()).default([]),
-  tool_hints: z.array(z.string()).default([]),
-  examples: z.array(z.object({
-    input_text: z.string(),
-    output_text: z.string(),
-    input_media_url: z.string().nullable().optional(),
-    media_description: z.string().nullable().optional(),
-    quality_score: z.number().min(0).max(1).default(0.8),
-    source: z.enum(['user_curated', 'synthetic', 'promoted_from_run', 'imported']).default('user_curated'),
-    embedding: z.array(z.number()).nullable().optional(),
-  })).default([]),
-  knowledge: z.array(z.object({
-    title: z.string().nullable().optional(),
-    content: z.string(),
-    context_prefix: z.string().nullable().optional(),
-    embedding: z.array(z.number()).nullable().optional(),
-    source_type: z.enum(['document', 'image', 'audio', 'url', 'manual']).default('document'),
-    source_url: z.string().nullable().optional(),
-    importance_score: z.number().min(0).max(1).default(0.5),
-  })).default([]),
-});
-export type AbilityPackageContents = z.infer<typeof abilityPackageContentsSchema>;
 
 export const workflowContentsSchema = z.object({
   slug: z.string().min(1).optional(),
@@ -163,8 +128,6 @@ export const agentisPackageContentsSchema = z.object({
   extensions: z.array(extensionContentsSchema).default([]),
   workflows: z.array(workflowContentsSchema).default([]),
   integrations: z.array(integrationContentsSchema).default([]),
-  /** Abilities (compiled behavioural specialisation units) — see ability.ts. */
-  abilities: z.array(abilityPackageContentsSchema).default([]),
   credentialSlots: z.array(credentialSlotSchema).default([]),
   knowledgeSeeds: z
     .array(
@@ -220,12 +183,18 @@ const integrationPackageContentsSchema = z.object({
   integration: integrationContentsSchema,
 });
 
+const skillPackageContentsSchema = z.object({
+  kind: z.literal('skill'),
+  skill: skillContentsSchema,
+});
+
 export const packageContentsSchema = z.discriminatedUnion('kind', [
   agentPackageContentsSchema,
   workflowPackageContentsSchema,
   extensionPackageContentsSchema,
   agentisPackageContentsSchema,
   integrationPackageContentsSchema,
+  skillPackageContentsSchema,
 ]);
 export type PackageContents = z.infer<typeof packageContentsSchema>;
 
@@ -285,8 +254,6 @@ export const workspaceBundleManifestSchema = z.object({
   workflows: z.array(workflowContentsSchema).default([]),
   /** Connector/integration definitions (no credential values). */
   integrations: z.array(integrationContentsSchema).default([]),
-  /** Compiled behavioural abilities; embeddings dropped for share/sell (recompiled on install). */
-  abilities: z.array(abilityPackageContentsSchema).default([]),
   /** Self-contained Agentic Apps (identity + policy + surfaces + collections + their workflows). */
   apps: z.array(appManifestSchema).default([]),
   /** Knowledge documents that travel as seeds (embeddings dropped for share/sell). */
@@ -342,7 +309,6 @@ export const workspaceBundlePreviewSchema = z.object({
     apps: z.number().int().nonnegative(),
     workflows: z.number().int().nonnegative(),
     extensions: z.number().int().nonnegative(),
-    abilities: z.number().int().nonnegative(),
     integrations: z.number().int().nonnegative(),
     knowledgeSeeds: z.number().int().nonnegative(),
     credentialSlots: z.number().int().nonnegative(),
