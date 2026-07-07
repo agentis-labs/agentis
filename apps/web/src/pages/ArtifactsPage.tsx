@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { api } from '../lib/api';
+import { api, apiCached, peekCached } from '../lib/api';
 import { useAssetUrl } from '../lib/useAssetUrl';
 import { useRealtime } from '../lib/realtime';
 import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
@@ -71,16 +71,18 @@ const ORIGIN_ORDER: ArtifactOrigin[] = ['agent', 'app', 'workflow', 'channel', '
 
 export function ArtifactsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const ARTIFACTS_PATH = '/v1/artifacts?limit=200';
+  const [artifacts, setArtifacts] = useState<Artifact[]>(() => peekCached<{ artifacts: Artifact[] }>(ARTIFACTS_PATH)?.artifacts ?? []);
   const [typeFilter, setTypeFilter] = useState<'all' | ArtifactType>('all');
   const [originFilter, setOriginFilter] = useState<'all' | ArtifactOrigin>('all');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Artifact | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => peekCached(ARTIFACTS_PATH) === undefined);
 
   async function refresh() {
+    if (peekCached(ARTIFACTS_PATH) === undefined) setLoading(true);
     try {
-      const res = await api<{ artifacts: Artifact[] }>('/v1/artifacts?limit=200');
+      const res = await apiCached<{ artifacts: Artifact[] }>(ARTIFACTS_PATH);
       setArtifacts(res.artifacts ?? []);
     } finally {
       setLoading(false);

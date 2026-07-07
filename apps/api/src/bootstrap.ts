@@ -212,7 +212,6 @@ import { AuditTrailService } from './services/auditTrail.js';
 import { InstinctEngine } from './services/instinctEngine.js';
 import { buildAuditRoutes } from './routes/audit.js';
 import { buildAnalyticsRoutes } from './routes/analytics.js';
-import { buildMissionControlRoutes } from './routes/missionControl.js';
 import { buildMcpRoutes } from './routes/mcp.js';
 import { buildMcpServerRoutes } from './routes/mcpServers.js';
 import { buildA2aRoutes } from './routes/a2a.js';
@@ -1701,7 +1700,6 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     triggerRuntime,
   }));
   app.route('/v1/workflows', buildAnalyticsRoutes({ db: sqlite, auth }));
-  app.route('/v1/mission', buildMissionControlRoutes({ db: sqlite, auth, durableEntities, experiments, connectionGrants }));
   app.route('/v1/workflows', buildWorkflowIoRoutes({ db: sqlite, auth }));
   app.route('/v1/mcp', buildMcpRoutes({ db: sqlite, auth, engine, toolRegistry }));
   app.route('/v1/mcp-servers', buildMcpServerRoutes({

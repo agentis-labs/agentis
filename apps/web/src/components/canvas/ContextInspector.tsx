@@ -3,6 +3,9 @@ import { Check, Code2, LayoutTemplate, Search, Settings2 } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { ExtensionCombobox } from './ExtensionCombobox';
+import { SpecialistCombobox } from './SpecialistCombobox';
+import { SchemaDrivenFields } from './genericSchemaForm';
+import { schemas } from '@agentis/core';
 import { ModelChooser } from '../agents/ModelChooser';
 import type { InstalledExtensionOption } from './ExtensionCombobox';
 import { describeCron, nextFires, CRON_PRESETS } from '../../lib/cronPreview';
@@ -522,6 +525,8 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <SubflowForm data={data} update={update} workflows={workflows} />;
     case 'knowledge':
       return <KnowledgeNodeForm data={data} update={update} knowledgeBases={knowledgeBases} />;
+    case 'knowledge_ingest':
+      return <KnowledgeIngestForm data={data} update={update} knowledgeBases={knowledgeBases} upstream={upstream} />;
     case 'webhook':
       return <WebhookForm data={data} update={update} />;
     case 'wait':
@@ -549,6 +554,10 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <GuardrailsForm data={data} update={update} />;
     case 'loop':
       return <LoopForm data={data} update={update} workflows={workflows} />;
+    case 'converge':
+      return <ConvergeForm data={data} update={update} workflows={workflows} upstream={upstream} />;
+    case 'pursue':
+      return <PursueForm data={data} update={update} workflows={workflows} upstream={upstream} />;
     case 'parallel':
       return <ParallelForm data={data} update={update} />;
     case 'dynamic_swarm':
@@ -564,8 +573,10 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
     case 'browser':
       return <BrowserForm data={data} update={update} upstream={upstream} />;
     default:
-      // Fallback: render generic key/value editors for unknown kinds.
-      return <GenericForm data={data} update={update} />;
+      // Fallback: schema-driven for the n8n-style utility/data-primitive kinds
+      // that have no bespoke form (see genericFormNodeConfigSchemas); raw
+      // key/value editor for anything with neither a form nor a schema.
+      return <GenericForm kind={kind} data={data} update={update} />;
   }
 }
 
@@ -725,8 +736,6 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
   );
 }
 
-const SPECIALIST_ROLES = ['planner', 'researcher', 'coder', 'reviewer', 'analyst', 'writer', 'monitor', 'architect', 'debugger', 'deployer'] as const;
-
 function AgentTaskForm({ data, update, agents, upstream, session = false, onAgentsChange }: { data: Record<string, unknown>; update: NodeFormProps['update']; agents: AgentRow[]; upstream?: UpstreamNode[]; session?: boolean; onAgentsChange?: () => void }) {
   const agentId = asStr(data.agentId);
   const agentRole = asStr(data.agentRole);
@@ -736,12 +745,11 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
   return (
     <>
       {/* ORCHESTRATOR-CREATION §4: a node configured with a specialist role is valid —
-          show it as a badge so the inspector doesn't look empty/broken. */}
-      <Field label="Specialist role" hint={agentRole ? 'Resolved to a workspace specialist at run time. Bind a specific agent below to override.' : 'Optional. Pick a specialist role, or bind a specific agent below.'}>
-        <select className={selectCls} value={agentRole} onChange={(e) => update({ agentRole: e.target.value || undefined })}>
-          <option value="">— No role —</option>
-          {SPECIALIST_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-        </select>
+          show it as a badge so the inspector doesn't look empty/broken. Roles are an
+          OPEN vocabulary (packages/core/src/types/specialist.ts): pick a live/draft
+          specialist or author a brand-new role on the spot. */}
+      <Field label="Specialist" hint={agentRole ? 'Resolved to a workspace specialist at run time. Bind a specific agent below to override.' : 'Optional. Pick a specialist, or bind a specific agent below.'}>
+        <SpecialistCombobox value={agentRole} onChange={(role) => update({ agentRole: role || undefined })} />
         {agentRole && castingReason && (
           <p className="mt-1 text-[10px] italic text-text-muted">{castingReason}</p>
         )}
@@ -1228,6 +1236,118 @@ function KnowledgeNodeForm({ data, update, knowledgeBases }: { data: Record<stri
           ))}
         </div>
       )}
+    </>
+  );
+}
+
+// knowledge_ingest — write-side twin of `knowledge` (WorkflowEngine.ts
+// #executeKnowledgeIngest). `contentPath`/`documentNamePath` win over their
+// static `content`/`documentName` siblings when both are set; an unset
+// `knowledgeBaseId` creates (or reuses) a base named `knowledgeBaseName`.
+function KnowledgeIngestForm({ data, update, knowledgeBases, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; knowledgeBases: KnowledgeBaseRow[]; upstream?: UpstreamNode[] }) {
+  const knowledgeBaseId = asStr(data.knowledgeBaseId);
+  const contentSource = asStr(data.contentPath) ? 'dynamic' : 'static';
+  const nameSource = asStr(data.documentNamePath) ? 'dynamic' : 'static';
+  return (
+    <>
+      <Field label="Knowledge base" hint="Leave unset to create (or reuse) a base named below.">
+        <select
+          className={selectCls}
+          value={knowledgeBaseId}
+          onChange={(e) => update({ knowledgeBaseId: e.target.value || undefined })}
+        >
+          <option value="">— Create new —</option>
+          {knowledgeBases.map((base) => <option key={base.id} value={base.id}>{base.name}</option>)}
+        </select>
+      </Field>
+      {!knowledgeBaseId && (
+        <Field label="New knowledge base name" hint="Defaults to the workflow's title when left blank.">
+          <input
+            type="text"
+            className={inputCls}
+            placeholder="Workflow Knowledge"
+            value={asStr(data.knowledgeBaseName)}
+            onChange={(e) => update({ knowledgeBaseName: e.target.value || undefined })}
+          />
+        </Field>
+      )}
+      <Field label="Content source">
+        <select
+          className={selectCls}
+          value={contentSource}
+          onChange={(e) => {
+            if (e.target.value === 'static') update({ contentPath: undefined });
+            else update({ content: undefined });
+          }}
+        >
+          <option value="static">Static text</option>
+          <option value="dynamic">From previous node output (path)</option>
+        </select>
+      </Field>
+      {contentSource === 'static' ? (
+        <Field label="Content" hint="The document text to ingest. Empty uses the whole node input.">
+          <TemplatedTextField
+            value={asStr(data.content)}
+            onChange={(next) => update({ content: next || undefined })}
+            multiline
+            rows={5}
+            upstream={upstream}
+            placeholder="Paste or template the document content…"
+          />
+        </Field>
+      ) : (
+        <Field label="Content path" hint="Dot path into the node input resolving to the document text.">
+          <input
+            type="text"
+            className={inputCls}
+            placeholder="$.report.body"
+            value={asStr(data.contentPath)}
+            onChange={(e) => update({ contentPath: e.target.value || undefined })}
+          />
+        </Field>
+      )}
+      <Field label="Document name source">
+        <select
+          className={selectCls}
+          value={nameSource}
+          onChange={(e) => {
+            if (e.target.value === 'static') update({ documentNamePath: undefined });
+            else update({ documentName: undefined });
+          }}
+        >
+          <option value="static">Static text</option>
+          <option value="dynamic">From previous node output (path)</option>
+        </select>
+      </Field>
+      {nameSource === 'static' ? (
+        <Field label="Document name" hint="Defaults to a timestamped name when left blank.">
+          <TemplatedTextField
+            value={asStr(data.documentName)}
+            onChange={(next) => update({ documentName: next || undefined })}
+            upstream={upstream}
+            placeholder="Weekly report — {{trigger.date}}"
+          />
+        </Field>
+      ) : (
+        <Field label="Document name path">
+          <input
+            type="text"
+            className={inputCls}
+            placeholder="$.report.title"
+            value={asStr(data.documentNamePath)}
+            onChange={(e) => update({ documentNamePath: e.target.value || undefined })}
+          />
+        </Field>
+      )}
+      <Field label="MIME type (optional)">
+        <input
+          type="text"
+          className={inputCls}
+          placeholder="text/plain"
+          value={asStr(data.mimeType)}
+          onChange={(e) => update({ mimeType: e.target.value || undefined })}
+        />
+      </Field>
     </>
   );
 }
@@ -2260,6 +2380,217 @@ function ParallelForm({ data, update }: { data: Record<string, unknown>; update:
   );
 }
 
+// ─── Convergence loop (converge / pursue) — COGNITIVE-LOOPING-RFC ──────────
+// `pursue` is a forward-reading rename of `converge` ("pursue an Objective
+// until done"); the engine normalizes a `pursue` config into the `converge`
+// shape at dispatch (pursueConfigToConverge in WorkflowEngine.ts) so both
+// share one loop/worktree/resume machine. Field names differ only cosmetically
+// (continuation↔doneWhen, stallPolicy↔stopWhenStalled, carryStrategy↔carry).
+
+type ContinuationType = 'deterministic' | 'judge' | 'signal' | 'objective';
+
+/** Shared editor for the `continuation` (converge) / `doneWhen` (pursue) union. */
+function DoneConditionField({
+  label,
+  value,
+  onChange,
+  upstream,
+}: {
+  label: string;
+  value: Record<string, unknown> | undefined;
+  onChange: (next: Record<string, unknown>) => void;
+  upstream?: UpstreamNode[];
+}) {
+  const type = (asStr(value?.type) || 'deterministic') as ContinuationType;
+  return (
+    <>
+      <Field label={label} hint="How the loop knows it is finished.">
+        <select className={selectCls} value={type} onChange={(e) => onChange({ type: e.target.value })}>
+          <option value="deterministic">Deterministic — a JS expression over the body output</option>
+          <option value="judge">LLM judge — score the body output against criteria</option>
+          <option value="signal">Signal — an agent posts a done-signal to the blackboard</option>
+          <option value="objective">Objective — the workflow's own acceptance checks (SWIFT verdict)</option>
+        </select>
+      </Field>
+      {type === 'deterministic' && (
+        <Field label="Continue-while expression" hint="Safe expression, e.g. `body.openBugCount > 0`. Loop continues while true.">
+          <TemplatedTextField
+            value={asStr(value?.expr)}
+            onChange={(next) => onChange({ type, expr: next })}
+            upstream={upstream}
+            placeholder="body.openBugCount > 0"
+          />
+        </Field>
+      )}
+      {type === 'judge' && (
+        <>
+          <Field label="Target path" hint="Dot path into the body output to evaluate.">
+            <input
+              type="text"
+              className={inputCls}
+              placeholder="body.draft"
+              value={asStr(value?.targetPath)}
+              onChange={(e) => onChange({ ...value, type, targetPath: e.target.value })}
+            />
+          </Field>
+          <Field label="Criteria">
+            <textarea
+              rows={3}
+              className={textareaCls}
+              placeholder="The draft is publication-ready: accurate, concise, no TODOs."
+              value={asStr(value?.criteria)}
+              onChange={(e) => onChange({ ...value, type, criteria: e.target.value })}
+            />
+          </Field>
+          <Field label="Pass threshold" hint="Minimum score (0–10) that counts as converged. Default 7.">
+            <input
+              type="number"
+              min={0}
+              max={10}
+              className={inputCls}
+              value={typeof value?.passThreshold === 'number' ? value.passThreshold : ''}
+              placeholder="7"
+              onChange={(e) => onChange({ ...value, type, passThreshold: e.target.value === '' ? undefined : Number(e.target.value) })}
+            />
+          </Field>
+        </>
+      )}
+      {type === 'signal' && (
+        <Field label="Blackboard channel" hint="Defaults to 'converge'.">
+          <input
+            type="text"
+            className={inputCls}
+            placeholder="converge"
+            value={asStr(value?.channel)}
+            onChange={(e) => onChange({ type, channel: e.target.value || undefined })}
+          />
+        </Field>
+      )}
+      {type === 'objective' && (
+        <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] leading-relaxed text-text-secondary">
+          Done when this workflow's own <code className="rounded bg-canvas px-1">WorkflowSpec</code> acceptance checks all pass — run against the world (http/data/file/expr/judge) by the SWIFT verdict engine. Progress is the fraction of checks passing, so distance-to-goal is real.
+        </div>
+      )}
+    </>
+  );
+}
+
+function ConvergeForm({ data, update, workflows, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; workflows: WorkflowRow[]; upstream?: UpstreamNode[] }) {
+  const continuation = data.continuation as Record<string, unknown> | undefined;
+  const stallPolicy = (data.stallPolicy as Record<string, unknown> | undefined) ?? {};
+  return (
+    <>
+      <Field label="Body workflow" hint="The cohort sub-graph, invoked once per iteration.">
+        <select className={selectCls} value={asStr(data.bodyWorkflowId)} onChange={(e) => update({ bodyWorkflowId: e.target.value })}>
+          <option value="">— Select workflow —</option>
+          {workflows.map((wf) => <option key={wf.id} value={wf.id}>{wf.title ?? wf.name ?? wf.id}</option>)}
+        </select>
+      </Field>
+      <DoneConditionField label="Continuation" value={continuation} onChange={(next) => update({ continuation: next })} upstream={upstream} />
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Max iterations" hint="Hard ceiling. Default 8.">
+          <input type="number" min={1} className={inputCls} placeholder="8" value={typeof data.maxIterations === 'number' ? data.maxIterations : ''} onChange={(e) => update({ maxIterations: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })} />
+        </Field>
+        <Field label="Max pivots" hint="Reflective pivots before settling stalled. 0 = stop-on-stall.">
+          <input type="number" min={0} className={inputCls} placeholder="0" value={typeof data.maxPivots === 'number' ? data.maxPivots : ''} onChange={(e) => update({ maxPivots: e.target.value === '' ? undefined : Math.max(0, Number(e.target.value)) })} />
+        </Field>
+      </div>
+      <Field label="Assess progress" hint="Measure distance-to-goal each iteration so a stall is a plateau, not just a repeat.">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input type="checkbox" checked={Boolean(data.assess)} onChange={(e) => update({ assess: e.target.checked || undefined })} className="rounded border-line bg-surface-2 accent-accent" />
+          <span className="text-[12px] text-text-primary">{data.assess ? 'on' : 'off'}</span>
+        </label>
+      </Field>
+      <Field label="Stall window" hint="Consecutive no-change iterations that trip a stall. Default 2.">
+        <input type="number" min={1} className={inputCls} placeholder="2" value={typeof stallPolicy.window === 'number' ? stallPolicy.window : ''} onChange={(e) => update({ stallPolicy: { ...stallPolicy, window: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) } })} />
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Isolation">
+          <select className={selectCls} value={asStr(data.isolation) || 'auto'} onChange={(e) => update({ isolation: e.target.value })}>
+            <option value="auto">Auto</option>
+            <option value="shared">Shared</option>
+            <option value="worktree">Worktree</option>
+            <option value="tempdir">Tempdir</option>
+          </select>
+        </Field>
+        <Field label="Preserve" hint="What to do with an isolated worktree when the loop settles.">
+          <select className={selectCls} value={asStr(data.preserve) || 'discard'} onChange={(e) => update({ preserve: e.target.value })}>
+            <option value="discard">Discard</option>
+            <option value="branch">Branch</option>
+            <option value="pr">Pull request</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="State key" hint="Blackboard namespace carried across iterations. Defaults to the node id.">
+        <input type="text" className={inputCls} value={asStr(data.stateKey)} onChange={(e) => update({ stateKey: e.target.value || undefined })} />
+      </Field>
+    </>
+  );
+}
+
+function PursueForm({ data, update, workflows, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; workflows: WorkflowRow[]; upstream?: UpstreamNode[] }) {
+  const doneWhen = data.doneWhen as Record<string, unknown> | undefined;
+  const stopWhenStalled = (data.stopWhenStalled as Record<string, unknown> | undefined) ?? {};
+  return (
+    <>
+      <div className="mb-3 rounded-md border border-accent/25 bg-accent-soft px-2.5 py-2 text-[11px] leading-4 text-text-secondary">
+        Pursue an Objective: run the body workflow repeatedly, ASSESS progress each iteration, and REFLECT (pivot) on a stall instead of giving up — until <code className="rounded bg-canvas px-1">doneWhen</code> is met or the iteration ceiling is hit.
+      </div>
+      <Field label="Body workflow" hint="The cohort sub-graph, invoked once per iteration.">
+        <select className={selectCls} value={asStr(data.bodyWorkflowId)} onChange={(e) => update({ bodyWorkflowId: e.target.value })}>
+          <option value="">— Select workflow —</option>
+          {workflows.map((wf) => <option key={wf.id} value={wf.id}>{wf.title ?? wf.name ?? wf.id}</option>)}
+        </select>
+      </Field>
+      <DoneConditionField label="Done when" value={doneWhen} onChange={(next) => update({ doneWhen: next })} upstream={upstream} />
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Max iterations" hint="Hard ceiling. Default 8.">
+          <input type="number" min={1} className={inputCls} placeholder="8" value={typeof data.maxIterations === 'number' ? data.maxIterations : ''} onChange={(e) => update({ maxIterations: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })} />
+        </Field>
+        <Field label="Max pivots" hint="Reflective pivots before settling stalled. Default 2.">
+          <input type="number" min={0} className={inputCls} placeholder="2" value={typeof data.maxPivots === 'number' ? data.maxPivots : ''} onChange={(e) => update({ maxPivots: e.target.value === '' ? undefined : Math.max(0, Number(e.target.value)) })} />
+        </Field>
+      </div>
+      <Field label="Assess progress" hint="Default on for a Pursuit — measures distance-to-goal each iteration.">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input type="checkbox" checked={data.assess !== false} onChange={(e) => update({ assess: e.target.checked })} className="rounded border-line bg-surface-2 accent-accent" />
+          <span className="text-[12px] text-text-primary">{data.assess !== false ? 'on' : 'off'}</span>
+        </label>
+      </Field>
+      <Field label="Stop-when-stalled after" hint="Consecutive no-change iterations that trip a stall. Default 2.">
+        <input type="number" min={1} className={inputCls} placeholder="2" value={typeof stopWhenStalled.after === 'number' ? stopWhenStalled.after : ''} onChange={(e) => update({ stopWhenStalled: { ...stopWhenStalled, after: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) } })} />
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Isolation">
+          <select className={selectCls} value={asStr(data.isolation) || 'auto'} onChange={(e) => update({ isolation: e.target.value })}>
+            <option value="auto">Auto</option>
+            <option value="shared">Shared</option>
+            <option value="worktree">Worktree</option>
+            <option value="tempdir">Tempdir</option>
+          </select>
+        </Field>
+        <Field label="Preserve" hint="What to do with an isolated worktree when the Pursuit settles.">
+          <select className={selectCls} value={asStr(data.preserve) || 'discard'} onChange={(e) => update({ preserve: e.target.value })}>
+            <option value="discard">Discard</option>
+            <option value="branch">Branch</option>
+            <option value="pr">Pull request</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Carry" hint="How iteration N sees N-1's output. Default 'keep'.">
+        <select className={selectCls} value={asStr(data.carry) || 'keep'} onChange={(e) => update({ carry: e.target.value })}>
+          <option value="keep">Keep</option>
+          <option value="latest">Latest</option>
+          <option value="delta">Delta</option>
+        </select>
+      </Field>
+      <Field label="State key" hint="Blackboard namespace carried across iterations. Defaults to the node id.">
+        <input type="text" className={inputCls} value={asStr(data.stateKey)} onChange={(e) => update({ stateKey: e.target.value || undefined })} />
+      </Field>
+    </>
+  );
+}
+
 // ─── Agent Swarm & Artifact Collect (engine handlers already shipped) ───────
 
 function AgentSwarmForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
@@ -2644,7 +2975,23 @@ function VariablesForm({ data, update }: { data: Record<string, unknown>; update
   );
 }
 
-function GenericForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+// Kinds with a real zod schema (packages/core) but no bespoke `XxxForm` —
+// n8n-style utility/data primitives. `SchemaDrivenFields` introspects the
+// schema's shape so every supported field renders as a typed input from the
+// moment the node is dropped on the canvas, not only once it already has data.
+const GENERIC_SCHEMA_KINDS = new Set(Object.keys(schemas.genericFormNodeConfigSchemas));
+
+function GenericForm({ kind, data, update }: { kind: string; data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  if (GENERIC_SCHEMA_KINDS.has(kind)) {
+    const schema = schemas.genericFormNodeConfigSchemas[kind as keyof typeof schemas.genericFormNodeConfigSchemas];
+    return <SchemaDrivenFields schema={schema} data={data} update={update} />;
+  }
+  return <RawGenericForm data={data} update={update} />;
+}
+
+/** Last-resort fallback for kinds with no dedicated form AND no known schema:
+ *  raw key/value editors over whatever config keys the node already carries. */
+function RawGenericForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const entries = useMemo(() => Object.entries(data).filter(([k]) => k !== 'kind' && k !== 'isOutput'), [data]);
   if (entries.length === 0) {
     return (

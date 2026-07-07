@@ -2,150 +2,28 @@ import { useEffect, useMemo, useState } from 'react';
 import { FileText, GitBranch, LocateFixed, Network, PanelRightClose } from 'lucide-react';
 import { Handle, Position, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import clsx from 'clsx';
+import {
+  extractAgentPlan,
+  type ArchitectureCanvasKind,
+  type ArchitectureCanvasNode,
+  type ArchitectureCanvasPayload,
+} from '@agentis/core';
 import { CanvasEngine } from '../canvas/CanvasEngine';
 import { ChatMarkdown } from './ChatMarkdown';
 
-export type ArchitectureCanvasKind = 'workflow' | 'extension' | 'app' | 'system';
-
-export interface ArchitectureCanvasNode {
-  id: string;
-  title: string;
-  role: string;
-  kind?: string;
-  summary?: string;
-  group?: string;
-}
-
-export interface ArchitectureCanvasEdge {
-  source: string;
-  target: string;
-  label?: string;
-}
-
-export interface ArchitectureCanvasGroup {
-  id: string;
-  title: string;
-}
-
-export interface ArchitectureCanvasPayload {
-  kind: ArchitectureCanvasKind;
-  nodes: ArchitectureCanvasNode[];
-  edges: ArchitectureCanvasEdge[];
-  groups?: ArchitectureCanvasGroup[];
-}
-
-export interface ParsedAgentPlan {
-  before: string;
-  planText: string;
-  after: string;
-  architecture: ArchitectureCanvasPayload | null;
-}
+export { extractAgentPlan };
+export type {
+  ArchitectureCanvasKind,
+  ArchitectureCanvasNode,
+  ArchitectureCanvasEdge,
+  ArchitectureCanvasGroup,
+  ArchitectureCanvasPayload,
+  ParsedAgentPlan,
+} from '@agentis/core';
 
 type ArchitectureNodeData = ArchitectureCanvasNode & Record<string, unknown> & {
   index: number;
 };
-
-const PROPOSED_PLAN_RE = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
-const ARCHITECTURE_CANVAS_RE = /<architecture_canvas>\s*([\s\S]*?)\s*<\/architecture_canvas>/i;
-const ARCHITECTURE_KINDS = new Set<ArchitectureCanvasKind>(['workflow', 'extension', 'app', 'system']);
-
-export function extractAgentPlan(text: string): ParsedAgentPlan | null {
-  const planMatch = text.match(PROPOSED_PLAN_RE);
-  if (!planMatch || planMatch.index === undefined) return null;
-  const planText = (planMatch[1] ?? '').trim();
-  if (!planText) return null;
-
-  const architectureMatch = text.match(ARCHITECTURE_CANVAS_RE);
-  const architecture = parseArchitectureCanvas(architectureMatch?.[1] ?? null);
-  const before = text.slice(0, planMatch.index).replace(ARCHITECTURE_CANVAS_RE, '').trim();
-  const after = text.slice(planMatch.index + planMatch[0].length).replace(ARCHITECTURE_CANVAS_RE, '').trim();
-
-  return {
-    before,
-    planText,
-    after,
-    architecture,
-  };
-}
-
-function parseArchitectureCanvas(raw: string | null): ArchitectureCanvasPayload | null {
-  if (!raw?.trim()) return null;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const record = parsed as Record<string, unknown>;
-    if (!ARCHITECTURE_KINDS.has(record.kind as ArchitectureCanvasKind)) return null;
-    const nodes = normalizeNodes(record.nodes);
-    if (nodes.length === 0) return null;
-    const nodeIds = new Set(nodes.map((node) => node.id));
-    return {
-      kind: record.kind as ArchitectureCanvasKind,
-      nodes,
-      edges: normalizeEdges(record.edges, nodeIds),
-      groups: normalizeGroups(record.groups),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function normalizeNodes(value: unknown): ArchitectureCanvasNode[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const nodes: ArchitectureCanvasNode[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-    const record = item as Record<string, unknown>;
-    const id = stringValue(record.id);
-    const title = stringValue(record.title);
-    const role = stringValue(record.role);
-    if (!id || !title || !role || seen.has(id)) continue;
-    seen.add(id);
-    nodes.push({
-      id,
-      title,
-      role,
-      ...(stringValue(record.kind) ? { kind: stringValue(record.kind) } : {}),
-      ...(stringValue(record.summary) ? { summary: stringValue(record.summary) } : {}),
-      ...(stringValue(record.group) ? { group: stringValue(record.group) } : {}),
-    });
-  }
-  return nodes.slice(0, 18);
-}
-
-function normalizeEdges(value: unknown, nodeIds: Set<string>): ArchitectureCanvasEdge[] {
-  if (!Array.isArray(value)) return [];
-  const edges: ArchitectureCanvasEdge[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-    const record = item as Record<string, unknown>;
-    const source = stringValue(record.source);
-    const target = stringValue(record.target);
-    if (!source || !target || !nodeIds.has(source) || !nodeIds.has(target)) continue;
-    edges.push({
-      source,
-      target,
-      ...(stringValue(record.label) ? { label: stringValue(record.label) } : {}),
-    });
-  }
-  return edges.slice(0, 32);
-}
-
-function normalizeGroups(value: unknown): ArchitectureCanvasGroup[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const groups = value.flatMap((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
-    const record = item as Record<string, unknown>;
-    const id = stringValue(record.id);
-    const title = stringValue(record.title);
-    return id && title ? [{ id, title }] : [];
-  });
-  return groups.length > 0 ? groups.slice(0, 8) : undefined;
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
 
 function ArchitectureNode({ data, selected }: NodeProps<Node<ArchitectureNodeData>>) {
   return (

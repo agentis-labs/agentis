@@ -38,7 +38,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { AppRecord, AppManifestEnvelope, WorkspaceBundleEnvelope } from '@agentis/core';
-import { api, apiErrorMessage } from '../lib/api';
+import { api, apiCached, peekCached, apiErrorMessage } from '../lib/api';
 import { appsApi } from '../lib/appsApi';
 import { isWorkspaceBundle } from '../lib/workspaceBundle';
 import { WorkspaceBundleModal } from '../components/packages/WorkspaceBundleModal';
@@ -210,10 +210,12 @@ export function PackagesPage() {
   const nav = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
-  const [workflows, setWorkflows] = useState<WorkflowPackage[]>([]);
-  const [extensions, setExtensions] = useState<WorkspaceExtension[]>([]);
-  const [apps, setApps] = useState<AppRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [workflows, setWorkflows] = useState<WorkflowPackage[]>(() =>
+    (peekCached<{ packages: WorkflowPackage[] }>('/v1/packages')?.packages ?? [])
+      .filter((pkg) => !pkg.isTemplate && (pkg.kind === 'workflow' || pkg.kind === 'agent')));
+  const [extensions, setExtensions] = useState<WorkspaceExtension[]>(() => peekCached<{ extensions: WorkspaceExtension[] }>('/v1/extensions')?.extensions ?? []);
+  const [apps, setApps] = useState<AppRecord[]>(() => peekCached<{ data: AppRecord[] }>('/v1/apps')?.data ?? []);
+  const [loading, setLoading] = useState(() => peekCached('/v1/packages') === undefined);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<LibraryFilter>('all');
   const [openWorkflow, setOpenWorkflow] = useState<WorkflowPackage | null>(null);
@@ -223,11 +225,11 @@ export function PackagesPage() {
   const [importBundle, setImportBundle] = useState<WorkspaceBundleEnvelope | null>(null);
 
   async function refresh() {
-    setLoading(true);
+    if (peekCached('/v1/packages') === undefined) setLoading(true);
     try {
       const [packageRes, extensionRes, appRes] = await Promise.allSettled([
-        api<{ packages: WorkflowPackage[] }>('/v1/packages'),
-        api<{ extensions: WorkspaceExtension[] }>('/v1/extensions'),
+        apiCached<{ packages: WorkflowPackage[] }>('/v1/packages'),
+        apiCached<{ extensions: WorkspaceExtension[] }>('/v1/extensions'),
         appsApi.list(),
       ]);
       setWorkflows(

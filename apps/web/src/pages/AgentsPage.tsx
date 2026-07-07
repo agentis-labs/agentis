@@ -13,7 +13,7 @@ import { ImportAgentsWizard } from '../components/agents/ImportAgentsWizard';
 import { harnessOf } from '../components/agents/harnessMeta';
 import { checkImportUpdates, type ImportUpdate } from '../lib/agentImport';
 import clsx from 'clsx';
-import { api, workspace as wsStore } from '../lib/api';
+import { api, apiCached, peekCached, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { Button } from '../components/shared/Button';
 import { DomainToolbar } from '../components/shared/DomainToolbar';
@@ -104,9 +104,11 @@ function passesFilter(a: AgentRow, f: FilterValue): boolean {
 
 export function AgentsPage() {
   const nav = useNavigate();
-  const [agents, setAgents] = useState<AgentRow[]>([]);
-  const [spaces, setSpaces] = useState<Space[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [agents, setAgents] = useState<AgentRow[]>(() => peekCached<{ agents: AgentRow[] }>('/v1/agents')?.agents ?? []);
+  const [spaces, setSpaces] = useState<Space[]>(() => peekCached<{ data: Space[] }>('/v1/domains')?.data ?? []);
+  // Only block on a spinner when nothing is cached; a revisit paints instantly
+  // and revalidates silently in the background.
+  const [loading, setLoading] = useState(() => peekCached('/v1/agents') === undefined);
   const [view, setView] = useState<View>(() => {
     try {
       // Legacy value 'canvas' migrates to 'fleet' (AGENTS-PAGE-REDESIGN.md §1.1).
@@ -152,11 +154,12 @@ export function AgentsPage() {
   }, [agents]);
 
   async function refresh() {
-    setLoading(true);
+    // Silent revalidation when we already have cached data on screen.
+    if (peekCached('/v1/agents') === undefined) setLoading(true);
     try {
       const [aRes, sRes] = await Promise.allSettled([
-        api<{ agents: AgentRow[] }>('/v1/agents'),
-        api<{ data: Space[] }>('/v1/domains'),
+        apiCached<{ agents: AgentRow[] }>('/v1/agents'),
+        apiCached<{ data: Space[] }>('/v1/domains'),
       ]);
       if (aRes.status === 'fulfilled') setAgents(aRes.value.agents ?? []);
       if (sRes.status === 'fulfilled') setSpaces(sRes.value.data ?? []);

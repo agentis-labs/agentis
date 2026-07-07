@@ -49,8 +49,6 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ defa
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
-const IssuesPage = lazy(() => import('./pages/IssuesPage').then((m) => ({ default: m.IssuesPage })));
-const MissionControlPage = lazy(() => import('./pages/MissionControlPage').then((m) => ({ default: m.MissionControlPage })));
 
 interface Workspace {
   id: string;
@@ -239,7 +237,6 @@ export function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/home" replace />} />
               <Route path="/home" element={<HomePage />} />
-              <Route path="/mission" element={<MissionControlPage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agents/:id" element={<AgentDetailPage />} />
 
@@ -259,7 +256,6 @@ export function App() {
               <Route path="/abilities" element={<Navigate to="/agents" replace />} />
               <Route path="/abilities/:id" element={<Navigate to="/brain" replace />} />
               <Route path="/packages" element={<PackagesPage />} />
-              <Route path="/issues" element={<IssuesPage />} />
               <Route path="/history" element={<HistoryPage />} />
               {/* Approvals no longer have a page — they open in a global review modal
                   (ApprovalModalProvider). Legacy links redirect home. */}

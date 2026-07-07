@@ -186,6 +186,10 @@ export const REALTIME_EVENTS = {
   CONVERSATION_SESSION_DISCOVERED: 'conversation.session.discovered',
   CONVERSATION_SESSION_SYNCED: 'conversation.session.synced',
   CONVERSATION_SESSION_STALE: 'conversation.session.stale',
+  // Queue-then-auto-continue composer: a message queued/discarded while a turn
+  // was streaming, or dispatched into a fresh turn once the prior one ended.
+  // Payload: { conversationId, agentId, item, action: 'added'|'dispatched'|'discarded' }.
+  CONVERSATION_QUEUE_UPDATED: 'conversation.queue.updated',
 
   // Channel bridge (Batch 4 / V1-SPEC §0.3 #24, §11)
   CHANNEL_MESSAGE_RECEIVED: 'channel.message.received',

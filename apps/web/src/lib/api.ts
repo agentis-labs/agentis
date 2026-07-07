@@ -131,6 +131,53 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
   return (await res.json()) as T;
 }
 
+/**
+ * Stale-while-revalidate cache for GET responses.
+ *
+ * Agentis GETs are still `no-store` and still revalidate on every page mount —
+ * operational state must never be served stale. This cache only removes the
+ * blank-spinner flash on *revisits*: a page seeds its initial render from the
+ * last-known value (via `peekCached`) so navigation feels immediate, then the
+ * background `apiCached` refetch swaps in fresh data (and realtime keeps it
+ * live). The cache is keyed per workspace; a workspace switch hard-reloads the
+ * app, so cross-workspace bleed is impossible.
+ */
+interface CacheEntry { data: unknown; ts: number }
+const responseCache = new Map<string, CacheEntry>();
+
+function cacheKey(path: string): string {
+  return `${workspace.get() ?? ''}|${path}`;
+}
+
+/** Synchronous read of the last cached response for a GET path, if any. */
+export function peekCached<T = unknown>(path: string): T | undefined {
+  return responseCache.get(cacheKey(path))?.data as T | undefined;
+}
+
+/** How long ago (ms) the cached value for `path` was stored, or Infinity. */
+export function cachedAge(path: string): number {
+  const entry = responseCache.get(cacheKey(path));
+  return entry ? Date.now() - entry.ts : Infinity;
+}
+
+/** Drop cached responses (all, or those whose path includes `match`). */
+export function invalidateCache(match?: string): void {
+  if (!match) { responseCache.clear(); return; }
+  for (const key of responseCache.keys()) {
+    if (key.includes(match)) responseCache.delete(key);
+  }
+}
+
+/**
+ * `api()` plus SWR caching: on success the response is stored so the next mount
+ * can paint it instantly via `peekCached`. Use for GETs that back a page view.
+ */
+export async function apiCached<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+  const data = await api<T>(path, init);
+  responseCache.set(cacheKey(path), { data, ts: Date.now() });
+  return data;
+}
+
 /** Fetch a non-JSON API response while preserving the normal auth/refresh flow. */
 export async function apiText(path: string, init: RequestInit = {}): Promise<string> {
   const res = await rawFetch(path, init);
@@ -207,6 +254,7 @@ export function logout() {
   tokens.clear();
   workspace.clear();
   ambient.clear();
+  invalidateCache();
 }
 
 function emitSseEvent(raw: string, onEvent?: (event: string, data: unknown) => void): void {

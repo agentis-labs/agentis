@@ -2994,3 +2994,35 @@ export const appEnvironments = sqliteTable(
     byApp: index('idx_app_environments_app').on(table.workspaceId, table.appId, table.kind),
   }),
 );
+
+/**
+ * Queue-then-auto-continue mid-turn composer (migration v110). While a
+ * conversation's turn is streaming, further sends are not dropped or
+ * steered into the live model call — they are durably queued here (so a
+ * page reload never silently loses them) and auto-dispatched, oldest
+ * first, the moment the in-flight turn's SSE stream ends. Mirrored in
+ * src/sqlite/migrations.ts (conversation_message_queue).
+ */
+export const conversationMessageQueue = sqliteTable(
+  'conversation_message_queue',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    /** Reserved for future composer attachments; unused today (nullable JSON). */
+    attachments: text('attachments', { mode: 'json' }),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    /** Monotonic per-conversation ordering bucket (oldest dispatches first). */
+    position: integer('position').notNull().default(0),
+    /** pending | sent | discarded. */
+    status: text('status').notNull().default('pending'),
+  },
+  (table) => ({
+    byConversation: index('idx_conversation_message_queue_conversation').on(table.conversationId, table.status, table.position),
+  }),
+);

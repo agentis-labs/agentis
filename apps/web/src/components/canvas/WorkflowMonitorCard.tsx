@@ -124,9 +124,6 @@ export function WorkflowMonitorCard({
   const [analytics, setAnalytics] = useState<WorkflowAnalytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
-  // Live token consumption for the tracked run — refreshed on every run event so
-  // operators watch spend accrue in real time (our core "no token slavery" promise).
-  const [runTokens, setRunTokens] = useState<{ input: number; output: number; total: number } | null>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const previousRunId = useRef<string | null>(activeRunId);
@@ -184,17 +181,6 @@ export function WorkflowMonitorCard({
       setAnalyticsLoading(false);
     }
   }, [analytics, analyticsLoading, workflowId]);
-
-  // Live token usage for the tracked run — cheap read of the run detail's rolled-up
-  // tokenUsage. Called on run change and on every matched realtime event.
-  const loadRunTokens = useCallback(async (runId: string) => {
-    try {
-      const detail = await api<{ run?: { tokenUsage?: { input: number; output: number; total: number } } }>(`/v1/runs/${runId}`);
-      setRunTokens(detail.run?.tokenUsage ?? null);
-    } catch {
-      /* transient — keep the last known value */
-    }
-  }, []);
 
   useEffect(() => {
     if (!activeRunId) {
@@ -273,21 +259,11 @@ export function WorkflowMonitorCard({
     upsertActivity(setFeed, activity);
     updateMonitorStatus(env, setStatus, setTerminalKind);
     if (activity.runId) setTrackedRunId(activity.runId);
-    // Refresh live token spend as the run progresses; on terminal events refresh
-    // the cumulative workflow analytics too.
-    const tokenRunId = activity.runId ?? monitorRunId;
-    if (tokenRunId) void loadRunTokens(tokenRunId);
+    // On terminal events refresh the cumulative workflow analytics.
     if (env.event === REALTIME_EVENTS.RUN_COMPLETED || env.event === REALTIME_EVENTS.RUN_FAILED) {
       void loadAnalytics(true);
     }
   });
-
-  // Seed the live token counter for the tracked run + the cumulative workflow
-  // total, so the pill has numbers before any realtime event arrives.
-  useEffect(() => {
-    if (monitorRunId) void loadRunTokens(monitorRunId);
-    else setRunTokens(null);
-  }, [monitorRunId, loadRunTokens]);
 
   useEffect(() => {
     void loadAnalytics(false);
@@ -583,11 +559,6 @@ export function WorkflowMonitorCard({
   }
 
   const headerLabel = statusLabel(status, workflowTitle, terminalKind);
-  // Token pill — show the live run spend while a run is tracked, otherwise the
-  // cumulative workflow total. `live` drives the pulsing dot.
-  const runLive = status === 'running' || status === 'waiting' || status === 'paused';
-  const pillTokens = runTokens?.total ?? analytics?.totalTokens ?? null;
-  const pillIsLive = runLive && runTokens != null;
   const canPauseRun = (status === 'running' || status === 'waiting')
     && Boolean(activeRunId)
     && terminalKind !== 'build';
@@ -623,21 +594,6 @@ export function WorkflowMonitorCard({
             <div className="truncate text-[10px] leading-3 text-text-muted">{headerLabel}</div>
           )}
         </div>
-        {pillTokens != null && (
-          <span
-            className={clsx(
-              'inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
-              pillIsLive ? 'border-accent/30 bg-accent/10 text-accent' : 'border-white/10 bg-surface/60 text-text-secondary',
-            )}
-            title={pillIsLive
-              ? `${pillTokens.toLocaleString()} tokens this run (live)`
-              : `${pillTokens.toLocaleString()} tokens across recent runs`}
-          >
-            {pillIsLive && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
-            {formatTokens(pillTokens)}
-            <span className="text-[8px] font-normal uppercase tracking-wide opacity-70">tok</span>
-          </span>
-        )}
         {mode === 'expanded' && (
           <button
             type="button"

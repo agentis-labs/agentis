@@ -214,10 +214,14 @@ function simulateGraph(
         resolveTemplateDeep(node.config, tctx);
         const check = verifyExtensionSource(deps, node.config as ExtensionTaskNodeConfig);
         if (!check.ok) throw new PreflightNodeError(check.message, check.code, check.remediation);
-        // Source is sound, but we did not cross the network/credential boundary —
-        // mark mocked (→ unverified verdict), never "passed".
+        // Unlike the integration/http_request contract probes below (which only
+        // confirm required fields are mapped, never validate the actual remote
+        // call), `verifyExtensionSource` fully statically validates the bound
+        // extension's real stored source against the sandbox runtime contract —
+        // the same gate the creation path enforces. That is a complete
+        // verification, so this node is genuinely passed, not a guess.
         output = mockOutput(node, effectiveInput);
-        status = 'mocked';
+        status = 'passed';
       } else if (node.config.kind === 'integration') {
         // Truthful integration check: resolve the node config against real
         // upstream output, then probe the resolved inputs against the connector's

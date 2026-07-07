@@ -59,7 +59,7 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
       .orderBy(desc(schema.artifacts.createdAt))
       .limit(limit)
       .all();
-    return c.json({ artifacts: rows });
+    return c.json({ artifacts: rows.map(stripHeavyListContent) });
   });
 
   app.post('/', async (c) => {
@@ -164,6 +164,26 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
 
 function isArtifactOrigin(value: string | undefined): value is typeof ARTIFACT_ORIGINS[number] {
   return ARTIFACT_ORIGINS.includes(value as typeof ARTIFACT_ORIGINS[number]);
+}
+
+/**
+ * The Assets list can carry dozens of images whose `content` is a multi-MB
+ * inline `data:` base64 URI — shipping them all makes the list response tens of
+ * MB (slow to transfer AND parse). The grid renders thumbnails via
+ * `/:id/thumbnail` and the detail panel resolves full bytes via `/:id/content`
+ * (which decodes the DB's inline `data:`), so the list never needs the inline
+ * blob. Drop it for binary media types; leave text/document/code content inline
+ * (small, and rendered directly from the list item). `contentOmitted` signals to
+ * clients that the blob lives behind the content endpoint.
+ */
+const HEAVY_MEDIA_TYPES = new Set(['image', 'video', 'audio']);
+function stripHeavyListContent<T extends { type: string; content: string | null }>(
+  row: T,
+): T & { contentOmitted?: boolean } {
+  if (HEAVY_MEDIA_TYPES.has(row.type) && typeof row.content === 'string' && row.content.startsWith('data:')) {
+    return { ...row, content: '', contentOmitted: true };
+  }
+  return row;
 }
 
 function loadArtifact(db: AgentisSqliteDb, workspaceId: string, id: string) {

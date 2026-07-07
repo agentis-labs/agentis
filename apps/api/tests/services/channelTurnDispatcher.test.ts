@@ -139,6 +139,134 @@ describe('ChannelTurnDispatcher', () => {
     expect(workSteps.some((event) => event.conversationId === conv.id && /agentis.lookup completed/.test(event.description ?? ''))).toBe(true);
   });
 
+  it('narrates progress on a long, multi-tool-call turn — throttled, deduped, distinct from the final reply', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: string[] = [];
+    const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args.body); },
+      fallbackAdapter: () => chatStub('unused'),
+      // A tiny throttle so the test exercises real elapsed-time gating without
+      // multi-second waits (production default is PROGRESS_NARRATION_THROTTLE_MS).
+      progressNarrationThrottleMs: 30,
+      runTurn: async function* () {
+        // t≈0: activity fires immediately at turn start — inside the throttle
+        // window (nothing sent yet), so this one is silently skipped.
+        yield { type: 'activity', id: 'a1', phase: 'tool', status: 'running', label: 'Run Tool: web_search' } as ChatDelta;
+        await wait(50);
+        // t≈50: same label repeated (tool still running) — throttle has
+        // elapsed, but the label is identical to what would be sent, so this
+        // is where the FIRST real narration line goes out ("Using web_search").
+        yield { type: 'activity', id: 'a1', phase: 'tool', status: 'running', label: 'Run Tool: web_search' } as ChatDelta;
+        // Rapid-fire immediately after — same instant, well under the throttle
+        // window — must NOT produce a second message (no spamming).
+        yield { type: 'activity', id: 'a1', phase: 'tool', status: 'running', label: 'Run Tool: web_search' } as ChatDelta;
+        await wait(50);
+        // t≈100: throttle elapsed again AND a genuinely new tool started —
+        // second narration line goes out ("Using fetch_page").
+        yield { type: 'activity', id: 'a2', phase: 'tool', status: 'running', label: 'Run Tool: fetch_page' } as ChatDelta;
+        // Immediately after, a third tool starts — distinct label, but the
+        // throttle window has NOT elapsed since the last send → skipped.
+        yield { type: 'activity', id: 'a3', phase: 'tool', status: 'running', label: 'Run Tool: another_tool' } as ChatDelta;
+        // The wrap-up phase is never narrated (the final reply covers it).
+        yield { type: 'activity', id: 'a3', phase: 'complete', status: 'success', label: 'Response ready' } as ChatDelta;
+        yield { type: 'text', delta: 'final answer' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    const result = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+      conversationId: conv.id,
+      connectionId: 'conn-1',
+      kind: 'telegram',
+      chatId: '999',
+      text: 'do a lot of work',
+    });
+
+    expect(result.replied).toBe(true);
+    // Exactly two throttled/deduped progress lines, then the real final reply —
+    // never more (no spam) and never fewer (a long turn does narrate).
+    expect(delivered).toEqual(['Using web_search', 'Using fetch_page', 'final answer']);
+
+    // Progress lines are persisted as real channel messages (visible to the
+    // human)…
+    const messages = conversations.messages(conv.id, 50);
+    const progressRows = messages.filter((m) => (m.metadata as { channelProgress?: boolean } | null)?.channelProgress);
+    expect(progressRows.map((m) => m.body)).toEqual(['Using web_search', 'Using fetch_page']);
+    expect(progressRows.every((m) => m.authorType === 'agent' && m.deliveryStatus === 'delivered')).toBe(true);
+
+    // …but excluded from what a later turn's history feeds back to the model —
+    // synthesized narration is not something the agent actually said.
+    let capturedHistory: ChatMessage[] = [];
+    const dispatcher2 = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      runTurn: async function* (_a, history) {
+        capturedHistory = history;
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+    await dispatcher2.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'conn-1', kind: 'telegram', chatId: '999', text: 'follow up',
+    });
+    expect(capturedHistory.some((m) => m.content === 'Using web_search' || m.content === 'Using fetch_page')).toBe(false);
+    expect(capturedHistory).toContainEqual({ role: 'assistant', content: 'final answer' });
+  });
+
+  it('stays silent on a fast turn that never crosses the progress-narration throttle window', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: string[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args.body); },
+      fallbackAdapter: () => chatStub('unused'),
+      // Production-sized throttle (default) — a quick synchronous turn with
+      // one tool call must never cross it, so no progress line is sent.
+      runTurn: async function* () {
+        yield { type: 'activity', id: 'a1', phase: 'tool', status: 'running', label: 'Run Tool: quick_lookup' } as ChatDelta;
+        yield { type: 'activity', id: 'a1', phase: 'tool', status: 'success', label: 'Used quick_lookup' } as ChatDelta;
+        yield { type: 'text', delta: 'quick answer' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+      conversationId: conv.id,
+      connectionId: 'conn-1',
+      kind: 'telegram',
+      chatId: '999',
+      text: 'quick question',
+    });
+
+    expect(delivered).toEqual(['quick answer']);
+  });
+
   it('persists and delivers a credit/quota failure notice instead of going silent', async () => {
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
     const agentId = seedAgent(ctx);

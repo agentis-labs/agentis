@@ -2994,6 +2994,7 @@ export class WorkflowEngine {
 
     this.deps.bus.publish(REALTIME_ROOMS.run(runId), REALTIME_EVENTS.WORKFLOW_GRAPH_PATCHED, {
       runId,
+      workflowId: run.workflowId ?? null,
       patchId: patch.patchId,
       reason: patch.reason,
       newRevision,

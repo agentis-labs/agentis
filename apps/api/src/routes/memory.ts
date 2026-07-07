@@ -82,6 +82,8 @@ export function buildMemoryRoutes(deps: {
     const episodes = deps.episodes.list({
       workspaceId: ws.workspaceId,
       ...(c.req.query('scopeId') ? { scopeId: c.req.query('scopeId')! } : {}),
+      ...(c.req.query('workflowId') ? { workflowId: c.req.query('workflowId')! } : {}),
+      ...(c.req.query('agentId') ? { agentId: c.req.query('agentId')! } : {}),
       limit: numberQuery(c.req.query('limit'), 80, 500),
     }).filter((ep) => !ep.tags.includes('plane:workspace_memory'));
     return c.json({ episodes });

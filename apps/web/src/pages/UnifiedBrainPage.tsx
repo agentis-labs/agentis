@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Settings } from 'lucide-react';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { api } from '../lib/api';
+import { apiCached, peekCached } from '../lib/api';
 import { useRealtime } from '../lib/realtime';
 import { BrainView } from '../components/brain/BrainView';
 import { ConfigDrawer } from '../components/brain/ConfigDrawer';
@@ -47,10 +47,12 @@ export function UnifiedBrainPage() {
   const [tab, setTab] = useState<BrainTab>(resolved.tab);
   const [scope, setScope] = useState<BrainScope>('workspace');
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
-  const [intelligence, setIntelligence] = useState<IntelligenceStatus | null>(null);
+  const [intelligence, setIntelligence] = useState<IntelligenceStatus | null>(
+    () => peekCached<IntelligenceStatus>('/v1/workspace/intelligence') ?? null,
+  );
 
   const loadIntelligence = useCallback(() => {
-    void api<IntelligenceStatus>('/v1/workspace/intelligence')
+    void apiCached<IntelligenceStatus>('/v1/workspace/intelligence')
       .then(setIntelligence)
       .catch(() => {});
   }, []);

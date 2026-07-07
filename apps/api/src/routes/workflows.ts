@@ -696,8 +696,17 @@ function loadLatestRunsByWorkflow(
   workflowIds: string[],
 ): Map<string, WorkflowRunRow> {
   if (workflowIds.length === 0) return new Map();
-  const rows = db
-    .select()
+  // Runs carry very large `runState`/`graphSnapshot` JSON blobs (multi-MB each).
+  // Selecting full rows for EVERY run of every workflow — just to keep the latest
+  // per workflow — reads hundreds of MB per request (seconds of latency on a big
+  // workspace). Instead: a slim scan (id/workflowId/createdAt only) picks the
+  // latest run id per workflow, then we hydrate full rows for just those (~one
+  // per workflow), so blob reads scale with #workflows, not #runs.
+  const slim = db
+    .select({
+      id: schema.workflowRuns.id,
+      workflowId: schema.workflowRuns.workflowId,
+    })
     .from(schema.workflowRuns)
     .where(
       and(
@@ -707,9 +716,21 @@ function loadLatestRunsByWorkflow(
     )
     .orderBy(desc(schema.workflowRuns.createdAt))
     .all();
+  const latestIdByWorkflow = new Map<string, string>();
+  for (const row of slim) {
+    if (!row.workflowId || latestIdByWorkflow.has(row.workflowId)) continue;
+    latestIdByWorkflow.set(row.workflowId, row.id);
+  }
+  const latestIds = [...latestIdByWorkflow.values()];
+  if (latestIds.length === 0) return new Map();
+  const fullRows = db
+    .select()
+    .from(schema.workflowRuns)
+    .where(inArray(schema.workflowRuns.id, latestIds))
+    .all();
   const latest = new Map<string, WorkflowRunRow>();
-  for (const row of rows) {
-    if (!row.workflowId || latest.has(row.workflowId)) continue;
+  for (const row of fullRows) {
+    if (!row.workflowId) continue;
     latest.set(row.workflowId, row);
   }
   return latest;

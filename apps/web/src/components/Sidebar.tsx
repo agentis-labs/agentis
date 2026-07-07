@@ -2,7 +2,9 @@
  * Sidebar — primary navigation rail.
  *
  * Home / Apps / Agents / Brain / Assets.
- * (Packages lives in the header profile menu.)
+ * (Packages lives in the header profile menu; Extensions open as a modal from
+ * the Apps hub header and each workflow canvas toolbar — they're a
+ * workflow-building block, not a top-level destination.)
  * Live badges on Agents (live count).
  * Auto-collapse when ChatPanel is docked.
  */
@@ -12,12 +14,10 @@ import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
   Home as HomeIcon,
-  Radar as MissionIcon,
   Bot,
   Brain as BrainIcon,
   LayoutGrid as AppsIcon,
   Library as AssetsIcon,
-  ListChecks as IssuesIcon,
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react';
@@ -34,11 +34,9 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/home', label: 'Home', icon: HomeIcon },
-  { to: '/mission', label: 'Mission', icon: MissionIcon },
   { to: '/apps', label: 'Apps', icon: AppsIcon },
   { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
   { to: '/brain', label: 'Brain', icon: BrainIcon },
-  { to: '/issues', label: 'Issues', icon: IssuesIcon },
   { to: '/assets', label: 'Assets', icon: AssetsIcon },
 ];
 

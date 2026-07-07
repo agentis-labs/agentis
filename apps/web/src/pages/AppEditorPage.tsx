@@ -192,8 +192,16 @@ export function AppEditorPage() {
   // this App owns, select it and switch to the Workflow facet so the operator
   // watches it stream node-by-node; on completion, refresh so a brand-new
   // workflow appears in the switcher with its final graph.
+  //
+  // WORKFLOW_BUILD_PHASE fires ('analyzing'/'drafting'/'repairing'/'reviewing')
+  // well before the workflow row is inserted (build.ts persists it right before
+  // the node-placement loop). Selecting the canvas that early 404s the embedded
+  // WorkflowCanvasPage's fetch and it never recovers — so only reveal on
+  // CANVAS_NODE_PLACED/CANVAS_BUILD_COMPLETE, which are only ever published
+  // after the row exists.
   const revealedBuildRef = useRef<string | null>(null);
   useRealtime(BUILD_REVEAL_EVENTS, (env: RealtimeEnvelope) => {
+    if (env.event === REALTIME_EVENTS.WORKFLOW_BUILD_PHASE) return;
     const payload = (env.payload ?? {}) as { workflowId?: string; appId?: string };
     const wfId = payload.workflowId;
     if (!wfId) return;

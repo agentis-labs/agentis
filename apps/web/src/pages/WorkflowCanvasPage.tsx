@@ -305,6 +305,20 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       lastSavedFingerprintRef.current = graphFingerprint(d.workflow.graph, d.workflow.title);
       // Let id-only surfaces resolve this workflow's real name.
       useAgentisStore.getState().registerResourceName('workflow', d.workflow.id, d.workflow.title);
+    }).catch(() => {
+      // A brand-new build can mount this page a beat before its workflow row
+      // is committed (e.g. a caller that reveals the canvas on the first build
+      // phase rather than the first placed node). Retry once instead of
+      // leaving `wf` null forever, which pins the page on "Loading workflow…"
+      // with an unhandled rejection and no way to recover without a refresh.
+      window.setTimeout(() => {
+        void api<{ workflow: WorkflowDetail }>(`/v1/workflows/${id}`).then((d) => {
+          setWf(d.workflow);
+          setTitleDraft(d.workflow.title);
+          lastSavedFingerprintRef.current = graphFingerprint(d.workflow.graph, d.workflow.title);
+          useAgentisStore.getState().registerResourceName('workflow', d.workflow.id, d.workflow.title);
+        }).catch(() => {});
+      }, 800);
     });
     void api<{ extensions: ExtensionRow[] }>('/v1/extensions').then((d) => {
       setExtensions(d.extensions);
@@ -710,6 +724,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       REALTIME_EVENTS.CANVAS_NODE_PLACED,
       REALTIME_EVENTS.CANVAS_EDGE_CONNECTED,
       REALTIME_EVENTS.CANVAS_BUILD_COMPLETE,
+      REALTIME_EVENTS.WORKFLOW_GRAPH_PATCHED,
     ],
     [],
   );
@@ -721,6 +736,34 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       edge?: { id?: string; source?: string; target?: string };
       phase?: Pick<WorkflowPhase, 'id' | 'name' | 'color' | 'nodeIds'>;
     };
+    if (env.event === REALTIME_EVENTS.WORKFLOW_GRAPH_PATCHED) {
+      // Mid-run self-evolution (evolve_plan / evolveGraph) merges nodes straight
+      // into the persisted graph with no per-node stream — refetch and briefly
+      // halo whatever node IDs weren't there before, so the operator sees the
+      // patch land instead of the canvas silently going stale.
+      if (!id || payload.workflowId !== id) return;
+      const previousNodeIds = new Set((wfRef.current?.graph.nodes ?? []).map((n) => n.id));
+      void api<{ workflow: WorkflowDetail }>(`/v1/workflows/${id}`).then((d) => {
+        const addedIds = d.workflow.graph.nodes.map((n) => n.id).filter((nid) => !previousNodeIds.has(nid));
+        hydratedIdRef.current = null;
+        wfRef.current = d.workflow;
+        setWf(d.workflow);
+        setTitleDraft(d.workflow.title);
+        lastSavedFingerprintRef.current = graphFingerprint(d.workflow.graph, d.workflow.title);
+        if (addedIds.length === 0) return;
+        window.setTimeout(() => {
+          setFlowNodes((nodes) => nodes.map((node) =>
+            addedIds.includes(node.id) ? { ...node, data: { ...(node.data ?? {}), liveStatus: 'running' } } : node,
+          ));
+        }, 50);
+        window.setTimeout(() => {
+          setFlowNodes((nodes) => nodes.map((node) =>
+            addedIds.includes(node.id) ? { ...node, data: { ...(node.data ?? {}), liveStatus: undefined } } : node,
+          ));
+        }, 2500);
+      });
+      return;
+    }
     if (!id || payload.workflowId !== id) return;
     setTab('canvas');
     if (payload.runId) setActiveRunId(payload.runId);
@@ -757,8 +800,17 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         });
       }
       setFlowNodes((prev) => {
-        if (prev.some((existing) => existing.id === node.id)) return prev;
         const kind = node.data?.kind ?? node.type ?? 'transform';
+        if (prev.some((existing) => existing.id === node.id)) {
+          // A rebuild that edits an existing node (not just adds a new one)
+          // republishes CANVAS_NODE_PLACED for it too — re-halo it instead of
+          // silently no-op'ing, otherwise "touch/edit" never shows a reveal.
+          return prev.map((existing) =>
+            existing.id === node.id
+              ? { ...existing, data: { ...(existing.data ?? {}), liveStatus: 'running' } }
+              : existing,
+          );
+        }
         return [
           ...prev,
           {
@@ -2394,7 +2446,12 @@ export function WorkflowBrainTab({
         ) : view === 'knowledge' ? (
           <KnowledgeTab scopeId={workflow.id} scopeName={workflow.title} />
         ) : (
-          <InsightsTab scopeId={workflow.id} />
+          // Episodes are written scoped to the owning App's id (kind='app', where
+          // workflow.id IS the app id — scopeId already matches). A plain workflow's
+          // runs are written scoped to the executing agent instead, but every episode
+          // still records its own workflowId column — filter on that instead of the
+          // (never-matching) scopeId so this tab isn't structurally always empty.
+          <InsightsTab scopeId={workflow.id} episodeWorkflowId={kind === 'workflow' ? workflow.id : undefined} />
         )}
       </div>
     </div>

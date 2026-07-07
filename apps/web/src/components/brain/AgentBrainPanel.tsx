@@ -70,12 +70,16 @@ export function AgentBrainPanel() {
 
   const loadMemory = useCallback(async (id: string) => {
     if (!id) { setEntries([]); setEpisodes([]); return; }
-    // The agent's real Brain content lives in the episodic substrate (scopeId =
-    // agentId) — imported harness memory + lessons learned. The agent_memories
-    // notes are operator-authored. Both are shown, each with a provenance badge.
+    // The agent's real Brain content lives in the episodic substrate — imported
+    // harness memory + lessons learned. Filter by the episode's `agentId` column
+    // (the agent that actually executed the run), not `scopeId`: scopeId is the
+    // App id for App-owned runs, so a scopeId-only filter would silently miss
+    // every episode formed while this agent worked inside an App. The
+    // agent_memories notes are operator-authored. Both are shown, each with a
+    // provenance badge.
     const [mem, eps] = await Promise.all([
       api<{ entries: MemoryEntry[] }>(`/v1/brain/agents/${id}/memory`).catch(() => ({ entries: [] as MemoryEntry[] })),
-      api<{ episodes: EpisodeRow[] }>(`/v1/memory/episodes?scopeId=${encodeURIComponent(id)}&limit=200`).catch(() => ({ episodes: [] as EpisodeRow[] })),
+      api<{ episodes: EpisodeRow[] }>(`/v1/memory/episodes?agentId=${encodeURIComponent(id)}&limit=200`).catch(() => ({ episodes: [] as EpisodeRow[] })),
     ]);
     setEntries(mem.entries);
     setEpisodes(eps.episodes);

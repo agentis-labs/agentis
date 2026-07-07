@@ -15,6 +15,7 @@ import {
   LayoutGrid,
   Loader2,
   Plus,
+  Puzzle,
   Search,
   Settings,
   Upload,
@@ -25,8 +26,9 @@ import {
 import type { AppInstallPreview, AppManifestEnvelope, AppRecord, AppSurface } from '@agentis/core';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
 import { APP_TEMPLATES } from '../lib/appTemplates';
-import { api, apiErrorMessage } from '../lib/api';
+import { api, apiCached, peekCached, apiErrorMessage } from '../lib/api';
 import { AppEngineModal, type AppEngineAgent, type AppEngineDomain } from '../components/apps/AppEngineModal';
+import { ExtensionsModal } from '../components/extensions/ExtensionsModal';
 import { DomainToolbar, type DomainToolbarSelection } from '../components/shared/DomainToolbar';
 
 interface WorkflowRow {
@@ -59,11 +61,12 @@ type AppIndexItem =
 
 export function AppsPage() {
   const navigate = useNavigate();
-  const [apps, setApps] = useState<AppRecord[]>([]);
-  const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
-  const [domains, setDomains] = useState<DomainRow[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [apps, setApps] = useState<AppRecord[]>(() => peekCached<{ data: AppRecord[] }>('/v1/apps')?.data ?? []);
+  const [workflows, setWorkflows] = useState<WorkflowRow[]>(() => peekCached<{ workflows: WorkflowRow[] }>('/v1/workflows')?.workflows ?? []);
+  const [domains, setDomains] = useState<DomainRow[]>(() => peekCached<{ data: DomainRow[] }>('/v1/domains')?.data ?? []);
+  const [agents, setAgents] = useState<AgentRow[]>(() => peekCached<{ agents: AgentRow[] }>('/v1/agents')?.agents ?? []);
+  // Revisits paint from cache instantly; only a cold load shows the spinner.
+  const [loading, setLoading] = useState(() => peekCached('/v1/apps') === undefined);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -74,6 +77,10 @@ export function AppsPage() {
   const [domainFilter, setDomainFilter] = useState<DomainToolbarSelection>('all');
   const [engineAppId, setEngineAppId] = useState<string | null>(null);
   const [engineSurfaces, setEngineSurfaces] = useState<AppSurface[]>([]);
+  // Extensions are a shared workflow-building block, not a top-level destination,
+  // so they open as a modal from here (the apps/workflows hub) and from each
+  // workflow canvas toolbar — never a standalone sidebar page.
+  const [extensionsOpen, setExtensionsOpen] = useState(false);
 
   const [importOpen, setImportOpen] = useState(false);
   const [importEnvelope, setImportEnvelope] = useState<AppManifestEnvelope | null>(null);
@@ -84,7 +91,8 @@ export function AppsPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function refresh() {
-    setLoading(true);
+    // Silent revalidation when cached data is already on screen.
+    if (peekCached('/v1/apps') === undefined) setLoading(true);
     setError(null);
     try {
       // Apps + workflows are the index itself; domains + agents are auxiliary
@@ -92,11 +100,11 @@ export function AppsPage() {
       // the page — it just degrades to an ungrouped list.
       const [appRows, workflowRows] = await Promise.all([
         appsApi.list(),
-        api<{ workflows: WorkflowRow[] }>('/v1/workflows').then((r) => r.workflows ?? []),
+        apiCached<{ workflows: WorkflowRow[] }>('/v1/workflows').then((r) => r.workflows ?? []),
       ]);
       const [domainRows, agentRows] = await Promise.all([
-        api<{ data: DomainRow[] }>('/v1/domains').then((r) => r.data ?? []).catch(() => [] as DomainRow[]),
-        api<{ agents: AgentRow[] }>('/v1/agents').then((r) => r.agents ?? []).catch(() => [] as AgentRow[]),
+        apiCached<{ data: DomainRow[] }>('/v1/domains').then((r) => r.data ?? []).catch(() => [] as DomainRow[]),
+        apiCached<{ agents: AgentRow[] }>('/v1/agents').then((r) => r.agents ?? []).catch(() => [] as AgentRow[]),
       ]);
       setApps(appRows);
       setWorkflows(workflowRows);
@@ -284,6 +292,14 @@ export function AppsPage() {
         />
         <button
           type="button"
+          onClick={() => setExtensionsOpen(true)}
+          className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-canvas px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          title="Manage the code extensions your workflows can call"
+        >
+          <Puzzle size={13} /> Extensions
+        </button>
+        <button
+          type="button"
           onClick={() => fileInputRef.current?.click()}
           className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-canvas px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary"
         >
@@ -391,6 +407,7 @@ export function AppsPage() {
         onClose={() => setEngineAppId(null)}
         onSave={saveAppSettings}
       />
+      {extensionsOpen && <ExtensionsModal onClose={() => setExtensionsOpen(false)} />}
     </div>
   );
 }

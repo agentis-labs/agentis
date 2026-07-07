@@ -24,12 +24,22 @@ interface HealthSnapshot {
   intelligence: { degraded: boolean };
 }
 
-export function InsightsTab({ onOpenConfig, scopeId }: { onOpenConfig?: () => void; scopeId?: string }) {
+/**
+ * `scopeId` drives workspace memory + Brain health (§B4 typed workspace memory
+ * scoping — unrelated to episode scoping, left as-is). `episodeWorkflowId`/
+ * `episodeAgentId` are separate, optional filters passed straight through to
+ * the Episodes/Promoted-learning panel, since episodes are recorded against
+ * their own workflowId/agentId columns which don't always equal `scopeId`
+ * (e.g. an App-owned workflow's episodes are scoped to the App, not the
+ * workflow or the agent that ran it).
+ */
+export function InsightsTab({ onOpenConfig, scopeId, episodeWorkflowId, episodeAgentId }: { onOpenConfig?: () => void; scopeId?: string; episodeWorkflowId?: string; episodeAgentId?: string }) {
   const [snapshot, setSnapshot] = useState<HealthSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const toast = useToast();
   const isScoped = Boolean(scopeId);
+  const isEpisodeScoped = Boolean(scopeId || episodeWorkflowId || episodeAgentId);
   const healthPath = scopeId ? `/v1/brain/health?scopeId=${encodeURIComponent(scopeId)}` : '/v1/brain/health';
 
   const load = useCallback(async (showLoader = false) => {
@@ -102,9 +112,13 @@ export function InsightsTab({ onOpenConfig, scopeId }: { onOpenConfig?: () => vo
         <InsightSection
           eyebrow="Episodes"
           title="Promoted learning"
-          description={isScoped ? "Lessons distilled from this workflow's outcomes." : 'Lessons distilled automatically from workflow outcomes.'}
+          description={isEpisodeScoped ? "Lessons distilled from this scope's outcomes." : 'Lessons distilled automatically from workflow outcomes.'}
         >
-          <EpisodesTab scopeId={scopeId} />
+          <EpisodesTab
+            scopeId={episodeWorkflowId || episodeAgentId ? undefined : scopeId}
+            workflowId={episodeWorkflowId}
+            agentId={episodeAgentId}
+          />
         </InsightSection>
 
         {!isScoped && (

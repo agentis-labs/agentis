@@ -1967,7 +1967,6 @@ function LiveWorkspacePanel({
               agents={agents}
               defaultOpen={panelFullscreen}
               onRefresh={onRefresh}
-              onNavigate={onNavigate}
               onOpenRun={(runId) => openRunModal({ runId, source: 'live-workspace-issue' })}
             />
           </div>
@@ -2621,7 +2620,6 @@ function BacklogScheduleSection({
   agents,
   defaultOpen,
   onRefresh,
-  onNavigate,
   onOpenRun,
 }: {
   issues: WorkspaceIssue[];
@@ -2629,7 +2627,6 @@ function BacklogScheduleSection({
   agents: WorkspaceAgent[];
   defaultOpen: boolean;
   onRefresh: () => void;
-  onNavigate: (route: string) => void;
   onOpenRun: (runId: string) => void;
 }) {
   const [showHistory, setShowHistory] = useState(false);
@@ -2650,7 +2647,7 @@ function BacklogScheduleSection({
         />
       ))}
       {issues.length > visible.length && (
-        <button type="button" onClick={() => onNavigate('/issues')} className="flex h-7 w-full items-center justify-center rounded-md border border-line/70 bg-canvas/35 text-[10px] text-text-muted hover:bg-surface-2 hover:text-text-primary">+{issues.length - visible.length} more in backlog</button>
+        <div className="flex h-7 w-full items-center justify-center rounded-md border border-line/70 bg-canvas/35 text-[10px] text-text-muted">+{issues.length - visible.length} more queued</div>
       )}
       <ScheduleTaskForm agents={agents} onCreated={onRefresh} />
       {doneIssues.length > 0 && (
@@ -2668,7 +2665,6 @@ function BacklogScheduleSection({
                   <span className="shrink-0 font-mono text-text-muted">{formatAge(issue.updatedAt)}</span>
                 </div>
               ))}
-              <button type="button" onClick={() => onNavigate('/issues')} className="mt-0.5 w-full text-center text-[9.5px] text-text-muted hover:text-text-secondary">View all in Issues →</button>
             </div>
           )}
         </div>

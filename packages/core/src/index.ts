@@ -1,3 +1,5 @@
+export * from './activityLabel.js';
+export * from './architectureCanvas.js';
 export * from './constants.js';
 export * from './errors.js';
 export * from './events.js';

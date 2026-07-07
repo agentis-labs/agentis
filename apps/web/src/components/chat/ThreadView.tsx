@@ -50,6 +50,16 @@ type AgentMsg = {
   deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
 };
 
+/** A message sent while a turn was already streaming — durably queued
+ * server-side and auto-dispatched, oldest first, once the turn ends. */
+type QueuedItem = {
+  id: string;
+  conversationId?: string;
+  text: string;
+  createdAt: string;
+  position: number;
+};
+
 type AgentConversation = {
   id: string;
   executionMode?: 'chat' | 'plan';
@@ -304,6 +314,11 @@ export function ThreadView({
   onConversationReset,
 }: ThreadViewProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Queue-then-auto-continue composer: messages sent while a turn was already
+  // streaming. Persisted server-side (survives a reload) and rendered as
+  // dimmed "queued" bubbles until they're auto-dispatched into a real turn.
+  const [pendingQueue, setPendingQueue] = useState<QueuedItem[]>([]);
+  const dispatchedQueueIdsRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -642,6 +657,45 @@ export function ThreadView({
     void loadInitial();
   }, [kind, id, conversationId]);
 
+  /** Refetch the still-pending queued messages for this conversation. */
+  async function loadQueue() {
+    if (kind !== 'agent') { setPendingQueue([]); return; }
+    try {
+      const res = await api<{ items: QueuedItem[] }>(`/v1/conversations/${id}/queue${querySuffix}`);
+      setPendingQueue(res.items ?? []);
+    } catch {
+      setPendingQueue([]);
+    }
+  }
+
+  /** Remove a queued item locally + start the real turn for it exactly once
+   * (guards against the direct /queue/resume response and the realtime echo
+   * of the same dispatch both trying to fire it). */
+  function handleQueueDispatch(item: QueuedItem) {
+    if (dispatchedQueueIdsRef.current.has(item.id)) return;
+    dispatchedQueueIdsRef.current.add(item.id);
+    setPendingQueue((prev) => prev.filter((q) => q.id !== item.id));
+    void handleSend(item.text);
+  }
+
+  useEffect(() => {
+    if (kind !== 'agent') { setPendingQueue([]); return; }
+    let cancelled = false;
+    void loadQueue();
+    // Reload recovery: if the tab (re)loaded mid-queue with no turn actively
+    // streaming, atomically claim the oldest still-pending message so it
+    // keeps going as a fresh turn — a reload must never silently strand a
+    // queued send. The backend only hands it back if no turn is in flight.
+    (async () => {
+      try {
+        const res = await api<{ item: QueuedItem | null }>(`/v1/conversations/${id}/queue/resume${querySuffix}`, { method: 'POST' });
+        if (!cancelled && res.item) handleQueueDispatch(res.item);
+      } catch { /* best-effort recovery */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, id, conversationId]);
+
   // Resolve the backing room id for Global Chat so live agent replies (posted
   // under the real id) can be matched to this workspace-wide view.
   useEffect(() => {
@@ -768,6 +822,29 @@ export function ThreadView({
     }
   });
 
+  // Queue-then-auto-continue composer: a message was queued/discarded while a
+  // turn streamed, or the oldest queued message was just popped and needs to
+  // become a real turn now that the prior one ended.
+  useRealtime([REALTIME_EVENTS.CONVERSATION_QUEUE_UPDATED], (env) => {
+    if (kind !== 'agent' || readOnly) return;
+    const payload = env.payload as {
+      agentId?: string;
+      conversationId?: string | null;
+      item?: QueuedItem;
+      action?: 'added' | 'dispatched' | 'discarded';
+    };
+    if (payload.agentId !== id || !payload.item) return;
+    const expectedConversationId = loadedConversationId ?? conversationId ?? null;
+    if (!payload.conversationId || !expectedConversationId || payload.conversationId !== expectedConversationId) return;
+    if (payload.action === 'added') {
+      setPendingQueue((prev) => (prev.some((q) => q.id === payload.item!.id) ? prev : [...prev, payload.item!]));
+    } else if (payload.action === 'discarded') {
+      setPendingQueue((prev) => prev.filter((q) => q.id !== payload.item!.id));
+    } else if (payload.action === 'dispatched') {
+      handleQueueDispatch(payload.item);
+    }
+  });
+
   // Global Chat (__broadcast__) is a virtual view over a real backing room, so a
   // posted agent reply only renders through the primary room-message handler if
   // the backing room id has resolved AND matches — a fragile, race-prone path that
@@ -837,6 +914,25 @@ export function ThreadView({
       deliveryStatus: 'delivered',
     };
     setMessages((current) => mergeMessage(current, message));
+  });
+
+  // Open the canvas as soon as the FIRST node streams in, not only once the
+  // build finishes — otherwise a bare chat thread never shows the node-by-node
+  // build reveal (it only ever saw the graph after it was already complete).
+  // CANVAS_NODE_PLACED only ever fires once the workflow row is persisted, so
+  // the canvas mount below can always fetch it successfully.
+  useRealtime([REALTIME_EVENTS.CANVAS_NODE_PLACED], (env) => {
+    if (kind !== 'agent') return;
+    const payload = env.payload as { agentId?: string | null; workflowId?: string; appId?: string | null; runId?: string } | undefined;
+    const workflowId = payload?.workflowId;
+    if (!workflowId) return;
+    if (payload?.agentId && payload.agentId !== id) return;
+    if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
+    openedCanvasWorkflowIdsRef.current.add(workflowId);
+    const appId = payload?.appId ?? null;
+    window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, appId, runId: payload?.runId ?? null } }));
+    navigate(appId ? `/apps/${appId}` : `/apps/workflows/${workflowId}`);
+    toast.success(appId ? 'App opened' : 'Logic opened on canvas');
   });
 
   useRealtime([REALTIME_EVENTS.CANVAS_BUILD_COMPLETE], (env) => {
@@ -955,6 +1051,37 @@ export function ThreadView({
     }));
   }
 
+  /** Durably queue a message sent while this conversation's turn is already
+   * streaming (§ChatComposerQueue). The backend re-checks the in-flight-turn
+   * guard itself, so this is correct even if `streamingAgentActive` is a beat
+   * stale. */
+  async function enqueueMessage(text: string) {
+    try {
+      const res = await api<{ queued: boolean; item?: QueuedItem }>(sendEndpoint, {
+        method: 'POST',
+        body: JSON.stringify({ body: text, clientTurnId: createClientTurnId(), useViewportContext: true, permissionMode }),
+      });
+      if (res.queued && res.item) {
+        const item = res.item;
+        setPendingQueue((prev) => (prev.some((q) => q.id === item.id) ? prev : [...prev, item]));
+      }
+    } catch (error) {
+      toast.error('Failed to queue message', apiErrorMessage(error));
+      throw error;
+    }
+  }
+
+  /** Cancel a still-pending queued message before it dispatches. */
+  async function cancelQueuedMessage(itemId: string) {
+    setPendingQueue((prev) => prev.filter((q) => q.id !== itemId));
+    try {
+      await api(`/v1/conversations/${id}/queue/${itemId}${querySuffix}`, { method: 'DELETE' });
+    } catch (error) {
+      toast.error('Failed to remove queued message', apiErrorMessage(error));
+      void loadQueue();
+    }
+  }
+
   async function handleSend(text: string, options?: { useViewportContext?: boolean }) {
     if (readOnly) {
       toast.warn('Past conversation', 'Use the + button in the header to start a fresh conversation.');
@@ -962,6 +1089,15 @@ export function ThreadView({
     }
     const value = text.trim();
     if (!value) return;
+    // ChatGPT/Gemini-style queue-then-auto-continue: a turn is already
+    // streaming in this thread, so don't race a second live turn — queue this
+    // send. `streamConversationTurnReply` auto-dispatches it, oldest first,
+    // once the in-flight turn ends (see the CONVERSATION_QUEUE_UPDATED
+    // realtime subscription above).
+    if (kind === 'agent' && streamingAgentActive) {
+      await enqueueMessage(value);
+      return;
+    }
     if (kind === 'room') {
       try {
         const res = await api<{ message?: RoomMsg }>(sendEndpoint, {
@@ -1456,7 +1592,7 @@ export function ThreadView({
             <Skeleton height={48} width="80%" />
             <Skeleton height={36} />
           </div>
-        ) : messages.length === 0 ? (
+        ) : messages.length === 0 && pendingQueue.length === 0 ? (
           <div className="px-2 py-8 text-center text-[13px] text-text-muted">
             {emptyBody ?? `Send a message to start a conversation with ${name}.`}
           </div>
@@ -1491,6 +1627,13 @@ export function ThreadView({
                 onCancelEdit={() => setEditingId(null)}
                 onConfirmAction={(confirmation, approved) => void handleConfirmationAction(message.id, confirmation, approved)}
                 onCancelRun={handleCancelRun}
+              />
+            ))}
+            {kind === 'agent' && pendingQueue.map((item) => (
+              <QueuedMessageBubble
+                key={item.id}
+                item={item}
+                onCancel={readOnly ? undefined : () => void cancelQueuedMessage(item.id)}
               />
             ))}
           </ul>
@@ -1570,6 +1713,36 @@ export function ThreadView({
         />
       )}
     </div>
+  );
+}
+
+/** Queue-then-auto-continue composer: a message sent while the turn was
+ * already streaming, rendered like a real outbound bubble but dimmed with a
+ * "Queued" label — and cancelable before it dispatches. */
+function QueuedMessageBubble({ item, onCancel }: { item: QueuedItem; onCancel?: () => void }) {
+  return (
+    <li className="group flex min-w-0 max-w-full flex-col items-end gap-0.5">
+      <div className="flex min-w-0 max-w-full items-start gap-1.5">
+        <div className="min-w-0 max-w-[85%] overflow-hidden rounded-card border border-dashed border-line bg-accent-soft/40 px-3 py-2 text-[13px] leading-relaxed text-text-primary opacity-60">
+          <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">
+            <Clock3 size={10} />
+            <span>Queued</span>
+          </div>
+          <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{item.text}</div>
+        </div>
+        {onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label="Cancel queued message"
+            title="Remove from queue"
+            className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-text-muted opacity-0 transition-opacity hover:bg-surface-2 hover:text-danger group-hover:opacity-100"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+    </li>
   );
 }
 

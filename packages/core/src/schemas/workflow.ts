@@ -37,10 +37,13 @@ const triggerConfigSchema = z.object({
   listenerConfig: listenerConfigSchema.optional(),
 }).passthrough();
 
-const agentRoleSchema = z.enum([
-  'planner', 'researcher', 'coder', 'reviewer', 'analyst',
-  'writer', 'monitor', 'architect', 'debugger', 'deployer',
-]);
+// Roles are an OPEN vocabulary (packages/core/src/types/specialist.ts —
+// `AgentRole = PlatformRole | (string & {})`): any non-empty string is a legal
+// specialist role, resolved on-demand via the workspace specialist system
+// (POST /v1/specialists authors a brand-new specialist for an unknown role at
+// dispatch time). This used to be a closed enum of the 10 legacy platform
+// roles, which contradicted that design and rejected every custom role.
+const agentRoleSchema = z.string().trim().min(1).max(64);
 
 const agentRequirementsSchema = z.object({
   browser: z.boolean().optional(),
@@ -221,6 +224,195 @@ const browserConfigSchema = z.object({
   artifactName: z.string().optional(),
 });
 
+// ────────────────────────────────────────────────────────────
+// n8n-inspired utility & data primitives (WORKFLOW-UPDATE). These kinds have
+// no dedicated inspector form on the canvas (they render through a generic
+// schema-driven form — see ContextInspector.tsx's GenericForm), so the shapes
+// here double as the introspection source for that renderer: field name,
+// optionality, and (for enums) the option list all come straight from these
+// schemas. Field sets mirror the authoritative TS configs in
+// packages/core/src/types/workflow.ts one-for-one.
+// ────────────────────────────────────────────────────────────
+
+const dataQueryConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('data_query'),
+  appId: z.string().min(1),
+  collection: z.string().min(1),
+  mode: z.enum(['query', 'aggregate']).optional(),
+  filter: z.record(z.string(), z.unknown()).optional(),
+  sort: z.array(z.object({ field: z.string(), dir: z.enum(['asc', 'desc']) })).optional(),
+  limit: z.number().int().positive().optional(),
+  cursor: z.string().optional(),
+  op: z.enum(['count', 'sum', 'avg', 'min', 'max']).optional(),
+  field: z.string().optional(),
+  groupBy: z.string().optional(),
+  paginate: z.boolean().optional(),
+  maxRows: z.number().int().positive().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const dataMutateConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('data_mutate'),
+  appId: z.string().min(1),
+  collection: z.string().min(1),
+  operation: z.enum(['insert', 'update', 'upsert', 'delete']),
+  record: z.record(z.string(), z.unknown()).optional(),
+  recordId: z.string().optional(),
+  match: z.record(z.string(), z.unknown()).optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const aggregateWindowConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('aggregate_window'),
+  key: z.string().optional(),
+  maxCount: z.number().int().positive().optional(),
+  windowMs: z.number().int().positive().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const errorTriggerConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('error_trigger'),
+  targetWorkflowId: z.string().optional(),
+  onStatus: z.array(z.enum(['FAILED', 'CANCELLED'])).default([]),
+}).passthrough();
+
+const stopErrorConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('stop_error'),
+  errorMessage: z.string().min(1),
+  errorCode: z.string().optional(),
+}).passthrough();
+
+const codeConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('code'),
+  language: z.enum(['javascript', 'python']),
+  code: z.string().min(1),
+  inputKeys: z.array(z.string()).default([]),
+  outputKey: z.string().optional(),
+  timeoutMs: z.number().int().positive().optional(),
+}).passthrough();
+
+const dateTimeConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('datetime'),
+  operation: z.enum(['parse', 'format', 'diff', 'add', 'subtract', 'now']),
+  inputPath: z.string().optional(),
+  inputFormat: z.string().optional(),
+  outputFormat: z.string().optional(),
+  timezone: z.string().optional(),
+  diffUnit: z.enum(['seconds', 'minutes', 'hours', 'days', 'months', 'years']).optional(),
+  comparePath: z.string().optional(),
+  amount: z.number().optional(),
+  unit: z.enum(['seconds', 'minutes', 'hours', 'days', 'months', 'years']).optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const cryptoUtilConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('crypto_util'),
+  operation: z.enum(['hash', 'hmac', 'base64_encode', 'base64_decode', 'uuid']),
+  algorithm: z.enum(['sha256', 'sha512', 'md5']).optional(),
+  inputPath: z.string().optional(),
+  secretPath: z.string().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const xmlParseConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('xml_parse'),
+  operation: z.enum(['parse', 'build']),
+  inputPath: z.string().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const markdownConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('markdown'),
+  operation: z.enum(['to_html', 'from_html']),
+  inputPath: z.string().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const jsonSchemaValidateConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('json_schema_validate'),
+  schema: z.string().min(1),
+  inputPath: z.string().optional(),
+  onViolation: z.enum(['block', 'flag']),
+}).passthrough();
+
+const stickyNoteConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('sticky_note'),
+  content: z.string().default(''),
+  color: z.string().optional(),
+  fontSize: z.number().optional(),
+}).passthrough();
+
+const spreadsheetConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('spreadsheet'),
+  operation: z.enum(['parse', 'build']),
+  format: z.enum(['csv', 'xlsx']),
+  inputPath: z.string().optional(),
+  sheet: z.string().optional(),
+  hasHeaders: z.boolean().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const htmlExtractConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('html_extract'),
+  inputPath: z.string().optional(),
+  selector: z.string().min(1),
+  extractAs: z.enum(['text', 'html', 'attribute']),
+  attribute: z.string().optional(),
+  multiple: z.boolean().optional(),
+  outputKey: z.string().optional(),
+}).passthrough();
+
+const graphqlConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('graphql'),
+  endpoint: z.string().min(1),
+  query: z.string().min(1),
+  variables: z.record(z.string(), z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  credentialId: z.string().optional(),
+  outputKey: z.string().optional(),
+  timeoutMs: z.number().int().positive().optional(),
+}).passthrough();
+
+/**
+ * Kind → schema map for the ~15 utility/data-primitive kinds that share the
+ * canvas's generic schema-driven inspector form (no bespoke `XxxForm`
+ * component). Exported so the web app can introspect field name/type/options
+ * straight from the same zod object the API validates against, instead of a
+ * hand-duplicated field list that can drift.
+ */
+export const genericFormNodeConfigSchemas = {
+  data_query: dataQueryConfigSchema,
+  data_mutate: dataMutateConfigSchema,
+  aggregate_window: aggregateWindowConfigSchema,
+  error_trigger: errorTriggerConfigSchema,
+  stop_error: stopErrorConfigSchema,
+  code: codeConfigSchema,
+  datetime: dateTimeConfigSchema,
+  crypto_util: cryptoUtilConfigSchema,
+  xml_parse: xmlParseConfigSchema,
+  markdown: markdownConfigSchema,
+  json_schema_validate: jsonSchemaValidateConfigSchema,
+  sticky_note: stickyNoteConfigSchema,
+  spreadsheet: spreadsheetConfigSchema,
+  html_extract: htmlExtractConfigSchema,
+  graphql: graphqlConfigSchema,
+} as const;
+
 // Permissive config: accepts any object with a `kind` string. Concrete kinds
 // (triggerConfigSchema, etc.) are validated by the engine when a node actually
 // runs — at edit-time we don't want to reject draft workflows that still have
@@ -246,6 +438,21 @@ export const workflowNodeConfigSchema = z.union([
   returnOutputConfigSchema,
   artifactSaveConfigSchema,
   browserConfigSchema,
+  dataQueryConfigSchema,
+  dataMutateConfigSchema,
+  aggregateWindowConfigSchema,
+  errorTriggerConfigSchema,
+  stopErrorConfigSchema,
+  codeConfigSchema,
+  dateTimeConfigSchema,
+  cryptoUtilConfigSchema,
+  xmlParseConfigSchema,
+  markdownConfigSchema,
+  jsonSchemaValidateConfigSchema,
+  stickyNoteConfigSchema,
+  spreadsheetConfigSchema,
+  htmlExtractConfigSchema,
+  graphqlConfigSchema,
   fallbackConfigSchema,
 ]);
 

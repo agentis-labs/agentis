@@ -2544,4 +2544,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS experiment_assignments_uq ON experiment_assign
 CREATE INDEX IF NOT EXISTS experiment_assignments_variant_idx ON experiment_assignments(experiment_id, variant);
 `,
   },
+  {
+    version: 110,
+    name: 'conversation_message_queue',
+    sql: `
+-- Queue-then-auto-continue mid-turn composer. While a conversation's turn is
+-- streaming, further sends are not dropped or steered into the live model
+-- call — they are durably queued here (so a page reload never silently loses
+-- them) and auto-dispatched, oldest first, the moment the in-flight turn's
+-- SSE stream ends. New table → inline FKs are fine (conversations/workspaces
+-- exist by v110). Mirrored in src/sqlite/schema.ts (conversationMessageQueue).
+CREATE TABLE IF NOT EXISTS conversation_message_queue (
+  id               TEXT PRIMARY KEY,
+  conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  text             TEXT NOT NULL,
+  attachments      TEXT,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  position         INTEGER NOT NULL DEFAULT 0,
+  status           TEXT NOT NULL DEFAULT 'pending'
+);
+-- Poller/consumer scan: pending rows for one conversation, oldest position first.
+CREATE INDEX IF NOT EXISTS idx_conversation_message_queue_conversation ON conversation_message_queue(conversation_id, status, position);
+`,
+  },
 ];

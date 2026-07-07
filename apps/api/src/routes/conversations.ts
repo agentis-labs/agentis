@@ -35,7 +35,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { ConversationStore } from '../services/conversationStore.js';
-import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from '../services/chatPermissionMode.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from '../services/chatPermissionMode.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
 import { ChatSessionExecutor } from '../services/chatSessionExecutor.js';
@@ -146,6 +146,34 @@ function serializeConversationMessage(message: ConversationMessageRow) {
     createdAt: message.createdAt,
   };
 }
+
+type QueueRow = typeof schema.conversationMessageQueue.$inferSelect;
+
+function serializeQueueItem(item: QueueRow) {
+  return {
+    id: item.id,
+    conversationId: item.conversationId,
+    workspaceId: item.workspaceId,
+    text: item.text,
+    attachments: item.attachments ?? null,
+    createdAt: item.createdAt,
+    position: item.position,
+    status: item.status,
+  };
+}
+
+/**
+ * Queue-then-auto-continue mid-turn composer — module-level guard tracking
+ * which conversations currently have a turn actively streaming
+ * (ChatSessionExecutor.turn in flight via `streamConversationTurnReply`). A
+ * `sendConversationMessage` call that lands while its conversationId is in
+ * this set is durably queued (conversation_message_queue) instead of racing
+ * a second live turn; `streamConversationTurnReply` releases the guard and
+ * auto-dispatches the oldest queued message once its own stream ends. Mirrors
+ * the in-repo shape of `ChatSessionExecutor#pendingConfirmations` (a static
+ * Map keyed by an id, cleared explicitly on completion).
+ */
+const activeConversationTurns = new Set<string>();
 
 export function buildConversationRoutes(deps: ConversationRouteDeps) {
   const app = new Hono();
@@ -293,6 +321,83 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
     if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
     return sendConversationMessage(c, deps, ws, agentId);
+  });
+
+  // Queue-then-auto-continue composer: still-pending messages queued while a
+  // turn was streaming. Fetched on load so a page reload never silently drops
+  // them (they keep dispatching once the in-flight turn ends).
+  app.get('/:agentId/queue', (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+    if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    const items = deps.conversations.listQueue(ws.workspaceId, conversation.id).map(serializeQueueItem);
+    return c.json({ items, conversationId: conversation.id });
+  });
+
+  // Cancel a still-pending queued message before it dispatches.
+  app.delete('/:agentId/queue/:queueId', (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const queueId = c.req.param('queueId');
+    const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+    if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    const item = deps.conversations.discardQueuedMessage({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+      queueId,
+    });
+    return c.json({ ok: true, item: serializeQueueItem(item) });
+  });
+
+  // Reload recovery: a tab that (re)loaded mid-queue has no way to know a
+  // turn ended while it was gone (the in-flight guard is in-memory and the
+  // "turn ended" dispatch only fires for tabs that were connected at the
+  // time). If no turn is currently active for this conversation, atomically
+  // claim the oldest pending message so the client can continue it as a
+  // fresh turn — a reload must never silently strand a queued send. Returns
+  // { item: null } when a turn is already active (nothing to claim) or the
+  // queue is empty.
+  app.post('/:agentId/queue/resume', (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+    if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    if (activeConversationTurns.has(conversation.id)) {
+      return c.json({ item: null });
+    }
+    const item = deps.conversations.dispatchNextQueued({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+    });
+    return c.json({ item: item ? serializeQueueItem(item) : null });
   });
 
   app.post('/:agentId/confirm', async (c) => {
@@ -665,6 +770,46 @@ function streamConversationTurnReply(
 ) {
   const reg = deps.adapters.get(args.agentId);
   return streamSSE(c, async (stream) => {
+    activeConversationTurns.add(args.conversation.id);
+    try {
+      await runConversationTurn(stream, c, deps, ws, args, reg);
+    } finally {
+      activeConversationTurns.delete(args.conversation.id);
+      // Queue-then-auto-continue: this turn just ended — if a message was
+      // queued while it streamed, pop the oldest and announce it on the
+      // realtime bus so the client auto-continues with a fresh turn.
+      try {
+        deps.conversations.dispatchNextQueued({
+          workspaceId: ws.workspaceId,
+          conversationId: args.conversation.id,
+        });
+      } catch (err) {
+        deps.logger.warn('conversations.queue_dispatch_failed', {
+          conversationId: args.conversation.id,
+          err: (err as Error).message,
+        });
+      }
+    }
+  });
+}
+
+async function runConversationTurn(
+  stream: ChatSseStream,
+  c: Context,
+  deps: ConversationRouteDeps,
+  ws: ReturnType<typeof getWorkspace>,
+  args: {
+    agentId: string;
+    conversation: ConversationRow;
+    clientTurnId: string;
+    currentMessageId: string | null;
+    userMessage: string;
+    useViewportContext: boolean;
+    viewportOverride?: ViewportContext | null;
+  },
+  reg: ReturnType<AdapterManager['get']>,
+) {
+  {
     const turnStartedAtMs = Date.now();
     const turnStartedAt = new Date(turnStartedAtMs).toISOString();
     let finalText = '';
@@ -780,6 +925,13 @@ function streamConversationTurnReply(
       }
     }
 
+    // Backstop: a plan-mode turn that wrote a plan but skipped/malformed the
+    // architecture_canvas on a design-shaped request gets one cheap repair
+    // completion so ChatPlanCanvas still renders the visual graph, not just text.
+    if (permissionMode === 'plan' && finishReason !== 'error' && reg?.adapter) {
+      finalText = await repairArchitectureCanvas(reg.adapter, finalText, runtimeUserMessage, c.req.raw.signal).catch(() => finalText);
+    }
+
     const turnCompletedAt = new Date().toISOString();
     const durationMs = Math.max(0, Date.now() - turnStartedAtMs);
     finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
@@ -892,7 +1044,7 @@ function streamConversationTurnReply(
       streamedMetadata,
     );
     await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
-  });
+  }
 }
 
 async function sendConversationMessage(
@@ -926,6 +1078,22 @@ async function sendConversationMessage(
       .run();
     conversation.permissionMode = body.permissionMode;
   }
+
+  // Queue-then-auto-continue: a turn is already streaming for this
+  // conversation (chat, channel dispatcher, or another tab). Rather than race
+  // a second live turn, durably queue this send — `streamConversationTurnReply`
+  // auto-dispatches it, oldest first, the moment the in-flight turn ends. This
+  // check is independent of the request's Accept header: the frontend calls
+  // this same endpoint without opening an SSE stream while a turn is active.
+  if (activeConversationTurns.has(conversation.id)) {
+    const item = deps.conversations.enqueueMessage({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+      text: body.body,
+    });
+    return c.json({ queued: true, item: serializeQueueItem(item), conversationId: conversation.id, agentId }, 202);
+  }
+
   const message = deps.conversations.appendOutbound({
     workspaceId: ws.workspaceId,
     conversationId: conversation.id,

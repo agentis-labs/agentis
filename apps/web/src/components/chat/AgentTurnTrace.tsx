@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import * as Collapsible from '@radix-ui/react-collapsible';
-import type { ChatDelta, ChatTurnTrace } from '@agentis/core';
+import { compactActivityLabel, type ChatDelta, type ChatTurnTrace } from '@agentis/core';
 import type { ToolCallData } from './toolCalls';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 
@@ -44,16 +44,6 @@ interface Thought {
 /** How many live thought lines stay on screen while streaming. */
 const VISIBLE_WHILE_STREAMING = 4;
 
-function compactThoughtLabel(activity: ChatActivity): string | null {
-  const label = activity.label.trim();
-  if (!label) return null;
-  if (/response ready|request received/i.test(label)) return null;
-  if (/loading workspace context|collecting viewport|memory|instructions/i.test(label)) return 'Reading context';
-  if (/invoking agent runtime/i.test(label)) return 'Starting up';
-  if (/streaming the turn/i.test(label)) return 'Writing the reply';
-  return label.replace(/^Run Tool:\s*/i, 'Using ');
-}
-
 /**
  * Framework-setup narration (boot, context load, reply streaming) — real, worth
  * showing live, but not "work" on its own. A turn that only did these is a plain
@@ -65,7 +55,7 @@ function isSetupThought(text: string): boolean {
 
 function buildThoughts(activities: ChatActivity[], streaming: boolean): Thought[] {
   const meaningful = activities
-    .map((activity) => ({ activity, label: compactThoughtLabel(activity) }))
+    .map((activity) => ({ activity, label: compactActivityLabel(activity) }))
     .filter((entry): entry is { activity: ChatActivity; label: string } => Boolean(entry.label))
     // Collapse immediate repeats so a re-emitted phase doesn't double a line.
     .filter((entry, index, entries) => index === 0 || entries[index - 1]?.label !== entry.label);

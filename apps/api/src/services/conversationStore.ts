@@ -555,6 +555,118 @@ export class ConversationStore {
       .run();
   }
 
+  /**
+   * Queue-then-auto-continue composer (§ChatComposerQueue). List the still-
+   * pending messages queued while a turn was streaming, oldest first —
+   * surfaced on load so a page reload never silently drops them.
+   */
+  listQueue(workspaceId: string, conversationId: string) {
+    return this.deps.db
+      .select()
+      .from(schema.conversationMessageQueue)
+      .where(and(
+        eq(schema.conversationMessageQueue.workspaceId, workspaceId),
+        eq(schema.conversationMessageQueue.conversationId, conversationId),
+        eq(schema.conversationMessageQueue.status, 'pending'),
+      ))
+      .orderBy(schema.conversationMessageQueue.position, schema.conversationMessageQueue.createdAt)
+      .all();
+  }
+
+  /** Durably queue a message sent while the conversation's turn is still streaming. */
+  enqueueMessage(args: {
+    workspaceId: string;
+    conversationId: string;
+    text: string;
+    attachments?: unknown;
+  }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const last = this.deps.db
+      .select()
+      .from(schema.conversationMessageQueue)
+      .where(eq(schema.conversationMessageQueue.conversationId, args.conversationId))
+      .orderBy(desc(schema.conversationMessageQueue.position))
+      .limit(1)
+      .get();
+    const row = {
+      id: randomUUID(),
+      conversationId: args.conversationId,
+      workspaceId: args.workspaceId,
+      text: args.text,
+      attachments: args.attachments ?? null,
+      createdAt: new Date().toISOString(),
+      position: (last?.position ?? -1) + 1,
+      status: 'pending' as const,
+    };
+    this.deps.db.insert(schema.conversationMessageQueue).values(row).run();
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_QUEUE_UPDATED,
+      { conversationId: args.conversationId, agentId: conversation.agentId, item: row, action: 'added' },
+    );
+    return row;
+  }
+
+  /** Cancel a still-pending queued message before it dispatches. */
+  discardQueuedMessage(args: { workspaceId: string; conversationId: string; queueId: string }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const existing = this.deps.db
+      .select()
+      .from(schema.conversationMessageQueue)
+      .where(and(
+        eq(schema.conversationMessageQueue.id, args.queueId),
+        eq(schema.conversationMessageQueue.conversationId, args.conversationId),
+        eq(schema.conversationMessageQueue.workspaceId, args.workspaceId),
+      ))
+      .get();
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `queued message ${args.queueId} not found`);
+    if (existing.status !== 'pending') return existing;
+    this.deps.db
+      .update(schema.conversationMessageQueue)
+      .set({ status: 'discarded' })
+      .where(eq(schema.conversationMessageQueue.id, args.queueId))
+      .run();
+    const row = { ...existing, status: 'discarded' as const };
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_QUEUE_UPDATED,
+      { conversationId: args.conversationId, agentId: conversation.agentId, item: row, action: 'discarded' },
+    );
+    return row;
+  }
+
+  /**
+   * Pop the oldest pending queued message (marking it `sent`) and announce it
+   * on the realtime bus so the client auto-continues with a fresh turn. Called
+   * once a turn's SSE stream ends. Returns null when the queue is empty.
+   */
+  dispatchNextQueued(args: { workspaceId: string; conversationId: string }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const next = this.deps.db
+      .select()
+      .from(schema.conversationMessageQueue)
+      .where(and(
+        eq(schema.conversationMessageQueue.workspaceId, args.workspaceId),
+        eq(schema.conversationMessageQueue.conversationId, args.conversationId),
+        eq(schema.conversationMessageQueue.status, 'pending'),
+      ))
+      .orderBy(schema.conversationMessageQueue.position, schema.conversationMessageQueue.createdAt)
+      .limit(1)
+      .get();
+    if (!next) return null;
+    this.deps.db
+      .update(schema.conversationMessageQueue)
+      .set({ status: 'sent' })
+      .where(eq(schema.conversationMessageQueue.id, next.id))
+      .run();
+    const row = { ...next, status: 'sent' as const };
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_QUEUE_UPDATED,
+      { conversationId: args.conversationId, agentId: conversation.agentId, item: row, action: 'dispatched' },
+    );
+    return row;
+  }
 
   #loadConversation(workspaceId: string, conversationId: string) {
     const conversation = this.deps.db

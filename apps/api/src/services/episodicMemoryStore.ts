@@ -358,6 +358,7 @@ export class EpisodicMemoryStore {
     scopeId?: string;
     types?: RuntimeEpisodeType[];
     workflowId?: string;
+    agentId?: string;
     runId?: string;
     includeArchived?: boolean;
     limit?: number;
@@ -366,6 +367,7 @@ export class EpisodicMemoryStore {
     const conds = [eq(schema.memoryEpisodes.workspaceId, args.workspaceId)];
     if (args.scopeId) conds.push(eq(schema.memoryEpisodes.scopeId, args.scopeId));
     if (args.workflowId) conds.push(eq(schema.memoryEpisodes.workflowId, args.workflowId));
+    if (args.agentId) conds.push(eq(schema.memoryEpisodes.agentId, args.agentId));
     if (args.runId) conds.push(eq(schema.memoryEpisodes.runId, args.runId));
     if (!args.includeArchived) conds.push(isNull(schema.memoryEpisodes.archivedAt));
     const rows = this.db.select().from(schema.memoryEpisodes).where(and(...conds))

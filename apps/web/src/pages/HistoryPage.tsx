@@ -11,7 +11,7 @@ import {
   Clock, SearchX, Eye, RotateCcw, ArrowRight, AlertTriangle, Check, X, Bot,
 } from 'lucide-react';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { api, apiErrorMessage, workspace as wsStore } from '../lib/api';
+import { api, apiCached, peekCached, apiErrorMessage, workspace as wsStore } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
 import { useToast } from '../components/shared/Toast';
 import { Tabs } from '../components/shared/Tabs';
@@ -70,15 +70,17 @@ export function HistoryPage() {
   const toast = useToast();
   const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<EventType>((searchParams.get('tab') as EventType) || 'all');
-  const [events, setEvents] = useState<HistoryEvent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const historyPath = (t: EventType) => `/v1/history?type=${t}&limit=200`;
+  const [events, setEvents] = useState<HistoryEvent[]>(() => peekCached<{ events: HistoryEvent[] }>(historyPath(tab))?.events ?? []);
+  const [loading, setLoading] = useState(() => peekCached(historyPath(tab)) === undefined);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<HistoryEvent | null>(null);
 
   async function refresh() {
-    setLoading(true);
+    // Silent revalidation when this tab is already cached on screen.
+    if (peekCached(historyPath(tab)) === undefined) setLoading(true);
     try {
-      const data = await api<{ events: HistoryEvent[] }>(`/v1/history?type=${tab}&limit=200`);
+      const data = await apiCached<{ events: HistoryEvent[] }>(historyPath(tab));
       setEvents(data.events ?? []);
     } catch {
       // Fallback: synthesize from /v1/runs

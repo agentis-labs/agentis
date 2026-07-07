@@ -18,7 +18,7 @@ import type {
   SurfaceAction,
   ViewNode,
 } from '@agentis/core';
-import { api } from './api';
+import { api, apiCached } from './api';
 
 /** Result of agent-assisted surface generation (`POST /:id/surfaces/generate`). */
 export interface GeneratedSurface {
@@ -104,7 +104,7 @@ export type AppUpdatePayload = Partial<{
 }>;
 
 export const appsApi = {
-  list: () => api<Wrapped<AppRecord[]>>('/v1/apps').then((r) => r.data),
+  list: () => apiCached<Wrapped<AppRecord[]>>('/v1/apps').then((r) => r.data),
   get: (id: string) => api<Wrapped<AppRecord>>(`/v1/apps/${id}`).then((r) => r.data),
   create: (body: {
     name: string;

@@ -211,6 +211,8 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     typeof window !== 'undefined' &&
     ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
 
+  const hasComposedInput = text.trim().length > 0 || attachments.length > 0;
+
   const toggleRecording = useCallback(() => {
     if (recording) {
       recognitionRef.current?.stop();
@@ -366,7 +368,9 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
   }
 
   async function send() {
-    if (isRunning) return;
+    // ChatGPT/Gemini-style queue-then-auto-continue: while a turn is running,
+    // sending is NOT a no-op — the caller (ThreadView.handleSend) durably
+    // queues the message and auto-dispatches it once the current turn ends.
     const value = text.trim();
     if (!value && attachments.length === 0) return;
     if (value.startsWith('/')) {
@@ -625,24 +629,29 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
             <button
               type="button"
               onClick={() => {
-                if (isRunning) {
+                // While running with nothing typed, the button stops the
+                // active turn. Once the operator starts typing, it becomes a
+                // Send button again — pressing it queues the message instead
+                // of interrupting the in-flight turn (queue-then-auto-continue).
+                if (isRunning && !hasComposedInput) {
                   onStop?.();
                   return;
                 }
                 void send();
               }}
-              disabled={isRunning ? !onStop : ((!text.trim() && attachments.length === 0) || attachments.some(a => a.loading))}
-              aria-label={isRunning ? 'Stop agent response' : 'Send message'}
+              disabled={isRunning && !hasComposedInput ? !onStop : (!hasComposedInput || attachments.some(a => a.loading))}
+              aria-label={isRunning && !hasComposedInput ? 'Stop agent response' : isRunning ? 'Queue message' : 'Send message'}
+              title={isRunning && hasComposedInput ? 'Queue this message — it will send once the current reply finishes' : undefined}
               className={clsx(
                 "grid h-7 w-7 shrink-0 place-items-center rounded-md",
-                isRunning
+                isRunning && !hasComposedInput
                   ? "bg-danger/12 text-danger ring-1 ring-danger/25 hover:bg-danger/18 active:scale-[0.97]"
-                  : (!text.trim() && attachments.length === 0) || attachments.some(a => a.loading)
+                  : !hasComposedInput || attachments.some(a => a.loading)
                   ? "bg-surface-3 text-text-muted opacity-40 cursor-not-allowed"
                   : "bg-accent text-canvas active:scale-[0.97]"
               )}
             >
-              {isRunning ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
+              {isRunning && !hasComposedInput ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
             </button>
           </div>
         </div>

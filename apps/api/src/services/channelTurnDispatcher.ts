@@ -22,11 +22,11 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { AgentAdapter, ChatDelta, ChatMessage, ChatPermissionMode, ChatTurnContext } from '@agentis/core';
+import { compactActivityLabel, type AgentAdapter, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext } from '@agentis/core';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from './chatSessionExecutor.js';
-import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from './chatPermissionMode.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from './chatPermissionMode.js';
 import { resolveChannelAccess, buildAccessAddendum, UNKNOWN_SENDER_DECLINE, type AccessDecision, type ChannelAccess } from './channelAccess.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
 import type { AppContactService } from './appContacts.js';
@@ -129,6 +129,13 @@ export interface ChannelTurnDispatcherDeps {
    * turn (OMNICHANNEL §3.3). 0 (default) runs each message immediately.
    */
   debounceMs?: number;
+  /**
+   * Override the channel progress-narration throttle (ms) — the minimum gap
+   * between two "here's what I'm doing" lines sent to a channel while a turn
+   * is running. Defaults to `PROGRESS_NARRATION_THROTTLE_MS` (7s); tests set
+   * this small to exercise throttling/dedup without real multi-second waits.
+   */
+  progressNarrationThrottleMs?: number;
 }
 
 /** The durable-queue sink. `enqueue` returns the queue id, or null on failure. */
@@ -147,6 +154,18 @@ interface PendingBatch {
   texts: string[];
   ids: Set<string>;
   timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Per-turn throttle state for channel progress narration — scoped to a
+ * single `#executeTurn` call (never shared across turns/chats). `lastSentAt`
+ * seeds at the turn's start time (not 0), so a fast turn that never crosses
+ * the throttle window sends no narration at all — only a turn that's
+ * genuinely taking a while starts talking.
+ */
+interface ProgressNarratorState {
+  lastSentAt: number;
+  lastLabel: string | null;
 }
 
 const CONFIRM_TTL_MS = 5 * 60 * 1000;
@@ -182,6 +201,15 @@ export interface ChannelTurnInput {
 const HISTORY_LIMIT = 20;
 /** How many turn-windows of history the summary maintainer reads (G4). */
 const SUMMARY_LOOKBACK_WINDOWS = 8;
+/**
+ * Progress narration throttle for a long channel turn (§ below, "channel
+ * progress narration"). A Telegram/WhatsApp/Slack thread otherwise shows only
+ * a native typing indicator + one final reply for a slow, multi-tool-call
+ * turn — this sends real, persisted "here's what I'm doing" lines while it
+ * works, at most one every this-many ms, so a chatty tool loop doesn't spam
+ * the thread with a message per delta.
+ */
+const PROGRESS_NARRATION_THROTTLE_MS = 7_000;
 const NOT_CONNECTED =
   'This agent is not connected to an interactive runtime yet, so it cannot reply over this channel. ' +
   'Connect a chat-capable harness (or configure the orchestrator runtime) and try again.';
@@ -475,12 +503,29 @@ export class ChannelTurnDispatcher {
       let finishReason = 'stop';
       let runtimeError: string | null = null;
       let confirmation: Extract<import('@agentis/core').ChatDelta, { type: 'confirmation_required' }> | null = null;
+      // Channel progress narration (deterministic, zero extra model calls):
+      // seeded at "now" so a quick turn that never crosses the throttle window
+      // sends nothing — only a turn that's genuinely taking a while narrates.
+      const progress: ProgressNarratorState = { lastSentAt: Date.now(), lastLabel: null };
       for await (const delta of stream) {
         this.#publishDelta(input, clientTurnId, delta);
         if (delta.type === 'text') finalText += delta.delta;
         else if (delta.type === 'confirmation_required') confirmation = delta;
         else if (delta.type === 'tool_result' && delta.error) runtimeError = delta.error;
         else if (delta.type === 'done') finishReason = delta.finishReason;
+        else if (delta.type === 'activity') {
+          // Awaited in-line (not fire-and-forget): guarantees a progress line
+          // is either fully sent or skipped before the loop can move on to the
+          // final reply, so narration can never race or land after "the" reply.
+          await this.#maybeNarrateProgress(input, delta, progress);
+        }
+      }
+
+      // Backstop: a plan-mode turn that wrote a plan but skipped/malformed the
+      // architecture_canvas on a design-shaped request gets one cheap repair
+      // completion, same as the web chat path, so the plan renders visually there too.
+      if (permissionMode === 'plan' && finishReason !== 'error' && !confirmation && adapter) {
+        finalText = await repairArchitectureCanvas(adapter, finalText, runtimeText).catch(() => finalText);
       }
 
       // A tool needs confirmation: register it and ask the channel to reply yes/no.
@@ -735,11 +780,19 @@ export class ChannelTurnDispatcher {
       .run();
   }
 
-  /** Persist a reply as an agent message and deliver it to the channel. */
+  /**
+   * Persist a reply as an agent message and deliver it to the channel.
+   * `progress: true` marks an intermediate "here's what I'm doing" narration
+   * line rather than the turn's real reply — it's still a normal delivered
+   * message in the channel (real text the human sees), but is tagged so
+   * `#buildHistory`/`#updateAndRenderSummary` can exclude it from what the
+   * model sees on later turns (it never said that as an assistant turn; it's
+   * synthesized narration, not conversation content).
+   */
   async #persistAndDeliver(
     input: ChannelTurnInput,
     body: string,
-    options: { deliveryStatus?: 'delivered' | 'failed' | 'mirrored' } = {},
+    options: { deliveryStatus?: 'delivered' | 'failed' | 'mirrored'; progress?: boolean } = {},
   ): Promise<void> {
     this.deps.conversations.appendMirrored({
       workspaceId: input.workspaceId,
@@ -754,9 +807,49 @@ export class ChannelTurnDispatcher {
         channelReply: true,
         channelChatId: input.chatId,
         ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(options.progress ? { channelProgress: true } : {}),
       },
     });
     await this.#safeDeliver(input, body);
+  }
+
+  /**
+   * Throttled progress narration for a long channel turn (deterministic — no
+   * extra model call, synthesized straight from the delta's own metadata via
+   * the shared `compactActivityLabel`, the SAME label vocabulary the web
+   * chat's `AgentTurnTrace` narrates live in-app). Fires on `activity` deltas
+   * that represent new, distinct work — a tool call starting, a phase change
+   * — throttled to at most one message per `PROGRESS_NARRATION_THROTTLE_MS`
+   * AND only when the label actually changed, so a long-running single tool
+   * call doesn't repeat itself and a fast turn stays silent. Never called for
+   * the turn's final `text`/`done` delta (those aren't `activity` deltas —
+   * the existing final `#persistAndDeliver(input, body)` after the loop
+   * covers the real reply) and never overlaps it: the caller `await`s this
+   * inside the delta loop, so by the time the loop exits and the final reply
+   * is sent, any in-flight narration has already completed. Non-throwing.
+   */
+  async #maybeNarrateProgress(
+    input: ChannelTurnInput,
+    activity: Extract<ChatDelta, { type: 'activity' }>,
+    state: ProgressNarratorState,
+  ): Promise<void> {
+    // The wrap-up phases are covered by the real final reply — never narrate them.
+    if (activity.phase === 'complete' || activity.phase === 'error') return;
+    const label = compactActivityLabel(activity);
+    if (!label || label === state.lastLabel) return;
+    const now = Date.now();
+    const throttleMs = this.deps.progressNarrationThrottleMs ?? PROGRESS_NARRATION_THROTTLE_MS;
+    if (now - state.lastSentAt < throttleMs) return;
+    state.lastSentAt = now;
+    state.lastLabel = label;
+    try {
+      await this.#persistAndDeliver(input, label, { progress: true });
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.progress_narration_failed', {
+        conversationId: input.conversationId,
+        err: (err as Error).message,
+      });
+    }
   }
 
   /**
@@ -868,7 +961,11 @@ export class ChannelTurnDispatcher {
     return rows
       .filter((row) => !excluded.has(row.id))
       .filter((row) => {
-        const meta = (row.metadata ?? {}) as { channelInbound?: boolean; threadId?: string };
+        const meta = (row.metadata ?? {}) as { channelInbound?: boolean; threadId?: string; channelProgress?: boolean };
+        // Progress narration ("Using web_search") is real channel text but not
+        // something the agent actually said as a reply — never replay it back
+        // into the model's own context as a prior assistant turn.
+        if (meta.channelProgress) return false;
         // Keep operator/agent turns and channel-inbound human turns; drop bare
         // platform system notices so they don't pollute the model's context.
         if (row.authorType === 'system' && meta.channelInbound !== true) return false;
@@ -901,8 +998,10 @@ export class ChannelTurnDispatcher {
       const rows = this.deps.conversations.messages(input.conversationId, HISTORY_LIMIT * SUMMARY_LOOKBACK_WINDOWS);
       const messages = rows
         .filter((row) => {
-          const meta = (row.metadata ?? {}) as { channelInbound?: boolean };
-          // Same shaping as #buildHistory: drop bare platform system notices.
+          const meta = (row.metadata ?? {}) as { channelInbound?: boolean; channelProgress?: boolean };
+          // Same shaping as #buildHistory: drop bare platform system notices and
+          // synthesized progress narration (never real conversation content).
+          if (meta.channelProgress) return false;
           return !(row.authorType === 'system' && meta.channelInbound !== true);
         })
         .map((row) => {
